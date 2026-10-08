@@ -315,3 +315,14 @@ test('serverClockError surfaces a synctime ErrorMessage and nothing on success (
         assert.equal(serverClockError({ ErrorNumber: 1035, ErrorMessage: 42 }), 'Server clock error 1035');
     });
 });
+
+test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () => {
+    const { deviceStatus } = require('../../web/format.js');
+    assert.strictEqual(deviceStatus({ Connected: true }).state, 'connected');
+    assert.strictEqual(deviceStatus({ Connected: false }).state, 'idle');
+    assert.strictEqual(deviceStatus({}).state, 'error');
+    assert.strictEqual(deviceStatus({ Connected: true, LastConnectError: 'port busy' }).text, 'Error: port busy');
+    const both = deviceStatus({ LoadError: true, LastConnectError: 'x' });
+    assert.strictEqual(both.state, 'error');
+    assert.match(both.text, /failed to load.*x/);
+});

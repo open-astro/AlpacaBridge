@@ -353,7 +353,12 @@ public:
     std::string get_driver_info() const override { return "fake driver"; }
     std::string get_driver_version() const override { return "0.0.1"; }
     int get_interface_version() const override { return 1; }
-    bool get_connected() const override { return true; }
+    bool get_connected() const override {
+        if (connected_throws) {
+            throw alpacacore::AlpacaException("link probe failed", alpacacore::AlpacaError::DriverException);
+        }
+        return connected;
+    }
     void set_connected(bool) override {}
     std::vector<std::string> get_supported_actions() const override { return {}; }
     std::string action(std::string_view, std::string_view) override { return ""; }
@@ -361,6 +366,9 @@ public:
     std::string command_blind(std::string_view, bool) override { return ""; }
     bool command_bool(std::string_view, bool) override { return false; }
     std::string command_string(std::string_view, bool) override { return ""; }
+
+    bool connected = true;
+    bool connected_throws = false;
 
     std::optional<std::string> get_device_firmware() const override { return firmware_; }
     std::optional<std::string> get_device_sdk_version() const override { return sdk_version_; }
@@ -4695,6 +4703,42 @@ int main() {
             }
             EXPECT(warnings_ok);
         }
+    }
+
+    // case: configureddevices Connected field
+    // configureddevices carries Connected from get_connected() (web UI status
+    // dot); it is omitted when the call throws.
+    {
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto up = std::make_shared<FirmwareStubDriver>(9511, std::nullopt);
+        auto down = std::make_shared<FirmwareStubDriver>(9512, std::nullopt);
+        down->connected = false;
+        auto broken = std::make_shared<FirmwareStubDriver>(9513, std::nullopt);
+        broken->connected_throws = true;
+        EXPECT(registry.register_device(up));
+        EXPECT(registry.register_device(down));
+        EXPECT(registry.register_device(broken));
+
+        const auto json =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/configureddevices").body());
+        int seen = 0;
+        for (const auto& entry : json["Value"]) {
+            if (entry.value("DeviceType", "") != "CoverCalibrator") {
+                continue;
+            }
+            const int number = entry.value("DeviceNumber", -1);
+            if (number == 9511) {
+                EXPECT(entry.contains("Connected") && entry["Connected"].get<bool>() == true);
+                ++seen;
+            } else if (number == 9512) {
+                EXPECT(entry.contains("Connected") && entry["Connected"].get<bool>() == false);
+                ++seen;
+            } else if (number == 9513) {
+                EXPECT(!entry.contains("Connected"));
+                ++seen;
+            }
+        }
+        EXPECT(seen == 3);
     }
 
     // configureddevices surfaces Firmware and SdkVersion independently, each only

@@ -2494,6 +2494,13 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             // disconnected). Firmware and SdkVersion are distinct: Firmware is
             // the device's own firmware, SdkVersion is the vendor library version.
             if (auto driver = registry.get_device(cap.type, cap.device_number)) {
+                // Connected feeds the web UI status dot (green/yellow). Omitted
+                // when the call throws, so the UI shows "unknown" (red).
+                try {
+                    device["Connected"] = driver->get_connected();
+                } catch (const std::exception& e) {
+                    util::log_warning("Connected query failed for " + cap.name + ": " + e.what());
+                }
                 try {
                     if (auto firmware = driver->get_device_firmware(); firmware.has_value()) {
                         device["Firmware"] = *firmware;
