@@ -89,9 +89,11 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
-                    QHYSDK& sdk, QHYWorkerStartHook on_worker_start = {})
+                    QHYSDK& sdk, QHYWorkerStartHook on_worker_start = {},
+                    std::chrono::seconds watchdog_margin = std::chrono::seconds(60))
         : AsyncConnectable("QHY"),
           sdk_(sdk),
+          watchdog_margin_(watchdog_margin),
           on_worker_start_(std::move(on_worker_start)),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
@@ -323,6 +325,7 @@ private:
             cached_gain_.reset();
             cached_offset_.reset();
             telemetry_temp_valid_ = false;
+            telemetry_temp_unsupported_ = false;
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
             connected_.store(false);
@@ -529,6 +532,24 @@ public:
         set_bin_locked(bin_y, bin_y);
     }
 
+    // Watchdog (SVBONY/ToupTek shape): if GetQHYCCDSingleFrame hangs past the
+    // exposure duration + margin, mark the exposure Failed instead of reporting
+    // Exposing forever. Every getter a client may poll (CameraState, ImageReady,
+    // ImageArray) runs it so none of them keeps answering "not ready". Caller
+    // holds mutex_. Returns true when it just expired the exposure.
+    bool expire_overdue_exposure_locked() const {
+        if (exposure_status_ != QHYExposureStatus::Working || !exposure_deadline_valid_ ||
+            std::chrono::steady_clock::now() < exposure_deadline_) {
+            return false;
+        }
+        ALPACA_LOG_WARN("QHY", "Exposure deadline exceeded; marking exposure failed.");
+        exposure_status_ = QHYExposureStatus::Failed;
+        exposure_failure_ = "Exposure timed out: the camera did not deliver the frame in time";
+        image_ready_ = false;
+        exposure_deadline_valid_ = false;
+        return true;
+    }
+
     CameraState get_camera_state() const override {
         if (!connected_.load()) {
             return CameraState::Idle;
@@ -536,22 +557,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         switch (exposure_status_) {
         case QHYExposureStatus::Working:
-            // Watchdog (SVBONY/ToupTek shape): if GetQHYCCDSingleFrame hangs
-            // past the exposure duration + margin, mark the exposure Failed
-            // instead of reporting Exposing forever. Failed maps to Idle below
-            // on the next poll; ImageArray throws for this exposure.
-            if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN("QHY", "Exposure deadline exceeded; marking exposure failed.");
-                exposure_status_ = QHYExposureStatus::Failed;
-                image_ready_ = false;
-                exposure_deadline_valid_ = false;
+            if (expire_overdue_exposure_locked()) {
                 return CameraState::Idle;
             }
             return CameraState::Exposing;
         case QHYExposureStatus::Failed:
             // A failed exposure leaves the camera fully ready for the next
-            // one — the failure surfaces through ImageReady staying false and
-            // ImageArray throwing. A sticky Error state poisons every
+            // one — the failure is raised by ImageReady and ImageArray until the
+            // next StartExposure. A sticky Error state poisons every
             // subsequent operation (same class ConformU exposed on the ZWO
             // camera: one transient failure cascaded into 18 issues).
             return CameraState::Idle;
@@ -606,7 +619,11 @@ public:
     }
 
     bool get_can_stop_exposure() const override {
-        return true;
+        // StopExposure would have to hand back the frame acquired so far, but
+        // the QHY single-frame mode only delivers a frame after the full
+        // integration, so cancelling discards it. AbortExposure is the
+        // supported way to end an exposure early.
+        return false;
     }
 
     double get_ccd_temperature() const override {
@@ -615,20 +632,21 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
             ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (no cooler)");
-            return 0.0;
+            throw AlpacaException("This QHY camera has no readable CCD temperature sensor",
+                                  AlpacaError::PropertyNotImplemented);
         }
-        // Prefer the last good value from the telemetry thread when available.
+        // The value comes from the telemetry thread's last good CURTEMP read.
+        // Never substitute the setpoint or a fixed number for a missing reading.
         if (telemetry_temp_valid_) {
             ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (telemetry)");
             return telemetry_ccd_temp_c_;
         }
-        // Fallback: approximate from setpoint / ambient rather than blocking.
-        if (cooler_on_) {
-            ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (fallback target)");
-            return target_temp_;
+        if (telemetry_temp_unsupported_) {
+            throw AlpacaException("This QHY camera does not report a CCD temperature",
+                                  AlpacaError::PropertyNotImplemented);
         }
-        ALPACA_LOG_TRACE("QHY", "get_ccd_temperature exit (fallback 20)");
-        return 20.0;
+        throw AlpacaException("The CCD temperature has not been read from the camera yet",
+                              AlpacaError::InvalidOperation);
     }
 
     bool get_cooler_on() const override {
@@ -771,8 +789,9 @@ public:
     }
 
     double get_electrons_per_adu() const override {
-        // TODO: QHY SDK does not expose e-/ADU directly; return 1.0 as placeholder
-        return 1.0;
+        ensure_connected();
+        // The QHY SDK does not expose e-/ADU, so there is no honest value.
+        throw AlpacaException("ElectronsPerADU is not available for QHY cameras", AlpacaError::PropertyNotImplemented);
     }
 
     double get_exposure_max() const override {
@@ -807,8 +826,9 @@ public:
     }
 
     double get_full_well_capacity() const override {
+        ensure_connected();
         // TODO: QHY SDK exposes this via CAM_CurveFullWell on supported cameras
-        return 0.0;
+        throw AlpacaException("FullWellCapacity is not available for QHY cameras", AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain() const override {
@@ -870,37 +890,30 @@ public:
     }
 
     double get_heat_sink_temperature() const override {
-        ALPACA_LOG_TRACE("QHY", "get_heat_sink_temperature entry");
-        double t = get_ccd_temperature();
-        ALPACA_LOG_TRACE("QHY", "get_heat_sink_temperature exit");
-        return t;
+        ensure_connected();
+        // No heat-sink sensor is read; the CCD temperature is not a substitute.
+        throw AlpacaException("HeatSinkTemperature is not available for QHY cameras",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     ImageArray get_image_array() const override {
         ensure_connected();
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!last_exposure_valid_) {
-                throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
-            }
+        std::lock_guard<std::mutex> lock(mutex_);
+        expire_overdue_exposure_locked();
+        if (!last_exposure_valid_) {
+            throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
         }
-
-        // Wait until exposure thread completes (poll with short sleep)
-        for (int i = 0; i < 600; ++i) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (exposure_status_ == QHYExposureStatus::Success) {
-                    return build_image_array_locked();
-                }
-                if (exposure_status_ == QHYExposureStatus::Failed) {
-                    throw AlpacaException("Exposure failed", AlpacaError::DriverException);
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (exposure_status_ == QHYExposureStatus::Success) {
+            return build_image_array_locked();
         }
-
-        throw AlpacaException("Timeout waiting for image data", AlpacaError::DriverException);
+        if (exposure_status_ == QHYExposureStatus::Failed) {
+            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        }
+        // Still exposing (or idle): there is no image to return, and waiting
+        // would hold the HTTP request for the whole exposure.
+        throw AlpacaException("No image is ready; poll ImageReady until the exposure completes",
+                              AlpacaError::InvalidOperation);
     }
 
     std::string get_image_array_variant() const override {
@@ -911,9 +924,15 @@ public:
         ALPACA_LOG_TRACE("QHY", "get_image_ready entry");
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
             ALPACA_LOG_TRACE("QHY", "get_image_ready exit (no exposure)");
             return false;
+        }
+        // A failure after the exposure started is reported by raising here,
+        // until the next StartExposure.
+        if (exposure_status_ == QHYExposureStatus::Failed) {
+            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
         }
         bool v = (exposure_status_ == QHYExposureStatus::Success);
         ALPACA_LOG_TRACE("QHY", "get_image_ready exit");
@@ -1221,9 +1240,7 @@ public:
         throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
-    void abort_exposure() override {
-        stop_exposure();
-    }
+    void abort_exposure() override { cancel_running_exposure(); }
 
     void pulse_guide(int direction, int duration) override {
         ensure_connected();
@@ -1385,6 +1402,12 @@ public:
             }
         }
 
+        // After the reap above: get_exposure_max() queries the SDK, which a
+        // detached stuck download could otherwise block.
+        if (duration > get_exposure_max()) {
+            throw AlpacaException("Exposure duration exceeds ExposureMax", AlpacaError::InvalidValue);
+        }
+
         // Apply exposure time (microseconds)
         double exposure_us = duration * 1'000'000.0;
         sdk_.set_param(id, control::EXPOSURE, exposure_us);
@@ -1435,10 +1458,10 @@ public:
             last_exposure_start_ = std::chrono::system_clock::now();
             last_exposure_valid_ = true;
             image_ready_ = false;
+            exposure_failure_.clear();
             exposure_status_ = QHYExposureStatus::Working;
             exposure_deadline_ = std::chrono::steady_clock::now() +
-                                 std::chrono::microseconds(static_cast<long long>(exposure_us)) +
-                                 std::chrono::seconds(60);
+                                 std::chrono::microseconds(static_cast<long long>(exposure_us)) + watchdog_margin_;
             exposure_deadline_valid_ = true;
             exposure_buffer_.clear();
             exposure_width_ = 0;
@@ -1529,6 +1552,7 @@ public:
                     return;
                 }
                 exposure_status_ = QHYExposureStatus::Failed;
+                exposure_failure_ = "The camera could not start the exposure";
                 image_ready_ = false;
                 exposure_deadline_valid_ = false;
                 return;
@@ -1593,6 +1617,7 @@ public:
                     return;
                 }
                 exposure_status_ = QHYExposureStatus::Failed;
+                exposure_failure_ = "The camera reported no frame buffer for the exposure";
                 image_ready_ = false;
                 exposure_deadline_valid_ = false;
                 return;
@@ -1705,6 +1730,12 @@ public:
             if (exposure_superseded->load()) {
                 return;
             }
+            // The watchdog may have already marked this exposure Failed: that
+            // failure stands until the next StartExposure, so a late frame
+            // (or a late error) must not overwrite it.
+            if (exposure_status_ != QHYExposureStatus::Working) {
+                return;
+            }
             if (ok) {
                 exposure_buffer_ = std::move(local_buf);
                 exposure_width_    = w;
@@ -1715,6 +1746,7 @@ public:
                 image_ready_       = true;
             } else {
                 exposure_status_ = QHYExposureStatus::Failed;
+                exposure_failure_ = "The camera failed to deliver the frame";
                 image_ready_     = false;
             }
             exposure_deadline_valid_ = false;
@@ -1722,6 +1754,15 @@ public:
     }
 
     void stop_exposure() override {
+        ensure_connected();
+        throw AlpacaException("StopExposure is not supported (CanStopExposure is false); use AbortExposure",
+                              AlpacaError::MethodNotImplemented);
+    }
+
+private:
+    // Ends a running exposure and discards it. Returns at once when the
+    // exposure already finished, so a completed frame survives an abort.
+    void cancel_running_exposure() {
         ensure_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1747,7 +1788,6 @@ public:
         last_exposure_valid_ = false;
     }
 
-private:
     // ── Members ──────────────────────────────────────────────────────────────
 
     // The SDK seam (issue #321). Every background worker below that can be
@@ -1766,6 +1806,7 @@ private:
     // and that is UB either way. Bound these workers' lifetimes; do not read
     // the raw-pointer rule as making detachment safe.
     QHYSDK& sdk_;
+    const std::chrono::seconds watchdog_margin_;
     // Test-only (issue #510): see QHYWorkerStartHook in the header. Empty in
     // production, and never reassigned after construction.
     const QHYWorkerStartHook on_worker_start_;
@@ -1928,6 +1969,11 @@ private:
     double telemetry_ccd_temp_c_{0.0};
     double telemetry_cooler_power_{0.0}; // percentage 0.0–100.0
     bool telemetry_temp_valid_{false};
+    // CURTEMP was probed and the SDK says the camera has no such control.
+    bool telemetry_temp_unsupported_{false};
+    // Why the last exposure failed; reported by ImageReady/ImageArray until the
+    // next StartExposure. Guarded by mutex_.
+    mutable std::string exposure_failure_;
     bool telemetry_power_valid_{false};
 
     // Pulse guide. shared_ptr so the detached flag-clear thread can co-own the
@@ -2032,6 +2078,7 @@ private:
         pulse_guiding_->store(false);
         pulse_guiding_end_ = {};
         exposure_status_   = QHYExposureStatus::Idle;
+        exposure_failure_.clear();
         exposure_deadline_valid_ = false;
         image_ready_       = false;
         last_exposure_duration_ = 0.0;
@@ -2329,6 +2376,7 @@ private:
                     std::lock_guard<std::mutex> lk(mutex_);
                     if (!connected || !camera_info_valid_ || !camera_info_.has_cooler) {
                         telemetry_temp_valid_ = false;
+                        telemetry_temp_unsupported_ = false;
                         telemetry_power_valid_ = false;
                     }
                 }
@@ -2357,12 +2405,17 @@ private:
                 }
 
                 bool have_temp = false;
+                bool probed = false;
+                bool unsupported = false;
                 double temp_c = 0.0;
                 try {
                     if (sdk.is_control_available(id, control::CURTEMP)) {
                         temp_c = sdk.get_param(id, control::CURTEMP);
                         have_temp = true;
+                    } else {
+                        unsupported = true;
                     }
+                    probed = true;
                 } catch (const std::exception& e) {
                     ALPACA_LOG_DEBUG("QHY", "Telemetry CURTEMP read failed: " + std::string(e.what()));
                 }
@@ -2377,10 +2430,20 @@ private:
                 if (stop_flag->stopped()) {
                     break;
                 }
-                if (have_temp) {
+                {
                     std::lock_guard<std::mutex> lk(mutex_);
-                    telemetry_ccd_temp_c_ = temp_c;
-                    telemetry_temp_valid_ = true;
+                    if (have_temp) {
+                        telemetry_ccd_temp_c_ = temp_c;
+                        telemetry_temp_valid_ = true;
+                        telemetry_temp_unsupported_ = false;
+                    } else {
+                        // A read that failed or a control that is absent must
+                        // not leave an old reading looking current.
+                        telemetry_temp_valid_ = false;
+                        if (probed) {
+                            telemetry_temp_unsupported_ = unsupported;
+                        }
+                    }
                 }
 
                 stop_flag->wait_for(std::chrono::seconds(1));
@@ -2645,8 +2708,10 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
 }
 
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
-                                                QHYWorkerStartHook on_worker_start) {
-    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start));
+                                                QHYWorkerStartHook on_worker_start,
+                                                std::chrono::seconds watchdog_margin) {
+    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start),
+                                             watchdog_margin);
 }
 
 } // namespace alpacacore::vendor::qhy
