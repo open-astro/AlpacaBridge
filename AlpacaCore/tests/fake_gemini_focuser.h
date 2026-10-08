@@ -116,6 +116,10 @@ public:
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
 
+    /// Put `bytes` in the driver's receive queue as an unsolicited reply, the
+    /// way a late answer to a timed-out command lands.
+    void push_unsolicited(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
+
 private:
     void run() {
         std::string pending;

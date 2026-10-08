@@ -98,6 +98,10 @@ public:
     int brightness() const { return brightness_.load(); }
     int cover() const { return cover_.load(); }  // 1 = closed, 2 = open (FlatPanelCoverState)
 
+    /// Put `bytes` in the driver's receive queue as an unsolicited reply, the
+    /// way a late answer to a timed-out command lands.
+    void push_unsolicited(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
+
 private:
     void run() {
         std::string pending;

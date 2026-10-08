@@ -276,4 +276,23 @@ TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemi
     driver->set_connected(false);
 }
 
+TEST_CASE("Gemini protocol wrapper - a late reply to the previous command is discarded",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    REQUIRE(wrapper.connect(config) > 0);
+
+    // A reply that missed its command's read window is still in the tty buffer.
+    fake.push_unsolicited("P999#");
+    CHECK(wrapper.get_position() == fake.position());
+
+    // A stale byte queued before a blind write must not shift the next read.
+    fake.push_unsolicited("P888#");
+    wrapper.move_to(2000);
+    CHECK(wrapper.get_position() == 2000);
+    wrapper.disconnect();
+}
+
 #endif  // _WIN32
