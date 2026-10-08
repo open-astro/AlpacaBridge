@@ -279,6 +279,23 @@ public:
             static_cast<int64_t>(kHome) - a.frame_shift + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
     }
 
+    /// While @p on, ":f" reports @p axis running whatever its motion (the
+    /// physical axis is untouched): a board that never reports a goto landed,
+    /// or an axis that never reports at rest. The driver's slew-complete,
+    /// homing and stop-confirm deadlines are what end the wait.
+    void hold_running(int axis, bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).hold_running = on;
+    }
+
+    /// While @p on, ":f" reports @p axis NOT running whatever its motion: a
+    /// board whose goto start the driver never sees, which only the
+    /// slew-complete wait's start grace covers.
+    void hide_running(int axis, bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).hide_running = on;
+    }
+
     /// Simulate deceleration: ":K" keeps the axis running (at its current
     /// rate) for this long before it reports stopped — the window in which
     /// the driver's stop-waits poll (issue #212 coverage).
@@ -401,6 +418,8 @@ private:
         double rate_counts = 0.0;  // signed counts/sec while running
         double count_frac = 0.0;   // sub-count remainder carried between advance() calls
         bool running = false;
+        bool hide_running = false;  // ':f' reports at rest regardless (test knob)
+        bool hold_running = false;  // ':f' reports running regardless (test knob)
         bool speed_mode = true;
         bool fast = false;
         char dir = '0';
@@ -590,7 +609,7 @@ private:
             case 'f': {
                 static const char* hex = "0123456789ABCDEF";
                 uint32_t n0 = (a.speed_mode ? 1u : 0u) | (a.dir == '1' ? 2u : 0u) | (a.fast ? 4u : 0u);
-                uint32_t n1 = a.running ? 1u : 0u;
+                uint32_t n1 = !a.hide_running && (a.running || a.hold_running) ? 1u : 0u;
                 uint32_t n2 = a.init_done ? 1u : 0u;
                 std::string out = "=";
                 out += hex[n0];
