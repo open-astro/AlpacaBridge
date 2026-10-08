@@ -1571,3 +1571,188 @@ TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep]
     config.set("siteLongitude", -180.0);
     CHECK_FALSE(catalog.normalize(kOnStepKey, config, Source::Api).rejection.has_value());
 }
+
+// ---------------------------------------------------------------------------
+// Celestron telescope. Serial, network and auto; the auto-detect factory
+// constructs without a scan (#659), so no port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kCelestronKey{"celestron", DeviceType::Telescope};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the Celestron telescope in every build",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kCelestronKey);
+    REQUIRE(v != nullptr);
+    CHECK(v->display_name == "Celestron");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_CELESTRON");
+    CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+
+    const std::vector<std::string_view> expected_keys{
+        "connectionType", "mountIndex",        "portPath",         "baudRate",     "host",
+        "tcpPort",        "responseTimeoutMs", "alignmentMode",    "siteLatitude", "siteLongitude",
+        "siteElevation",  "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+    REQUIRE(v->fields.size() == expected_keys.size());
+    for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+        CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+    }
+    const FieldRef* type = find_field(v->fields, "connectionType");
+    REQUIRE(type != nullptr);
+    CHECK(type->allowed_values.empty());  // normalize owns the rule (#380)
+    const FieldRef* tcp = find_field(v->fields, "tcpPort");
+    REQUIRE(tcp != nullptr);
+    CHECK(same_scalar(tcp->default_value, std::int64_t{2000}));
+    REQUIRE(tcp->applies_when.has_value());
+    CHECK(std::string_view(tcp->applies_when->value) == "network");
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the Celestron telescope available only when built",
+          "[catalog][celestron][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kCelestronKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_CELESTRON
+    CHECK(v->available);
+    // Auto-detect is lazy: constructing it scans nothing and succeeds with no mount.
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    config.set("alignmentMode", std::string{"equatorial"});
+    auto driver = catalog.create(kCelestronKey, config, 4);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Telescope);
+    CHECK(driver->get_device_number() == 4);
+    CHECK_FALSE(driver->get_connected());
+
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/ttyUSB-no-such-celestron"});
+    auto serial_driver = catalog.create(kCelestronKey, serial, 5);
+    REQUIRE(serial_driver != nullptr);
+    CHECK(serial_driver->get_device_number() == 5);
+
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(kCelestronKey, network, 6);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_device_number() == 6);
+#else
+    CHECK_FALSE(v->available);
+    try {
+        (void)catalog.create(kCelestronKey, DeviceConfig{}, 0);
+        FAIL("create() must throw when Celestron is not built");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_CELESTRON") != std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("Builtin catalog - Celestron normalize accepts '', auto, serial and network, refuses others from the API",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* type : {"", "auto", "serial", "network"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        config.set("host", std::string{"192.0.2.1"});
+        const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        const auto persisted = catalog.normalize(kCelestronKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(persisted.warnings.empty());
+    }
+
+    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Invalid connection type. Use 'auto', 'serial', or 'network'");
+
+        // #380: a saved one is read as serial, never auto.
+        const auto persisted = catalog.normalize(kCelestronKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0].find(std::string("has connectionType \"") + type + "\"") != std::string::npos);
+    }
+}
+
+TEST_CASE("Builtin catalog - Celestron normalize requires the endpoint from the API only",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        const char* type;
+        const char* message;
+    };
+    for (const Case& c :
+         {Case{"serial", "Serial port path is required"}, Case{"network", "Host IP address is required"}}) {
+        INFO(c.type);
+        DeviceConfig config;
+        config.set("connectionType", std::string{c.type});
+        const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == c.message);
+        const auto persisted = catalog.normalize(kCelestronKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == c.message);
+    }
+
+    // Auto never needs an endpoint, and no site is required.
+    DeviceConfig automatic;
+    automatic.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kCelestronKey, automatic, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - Celestron alignmentMode keeps a known value and drops an unknown one (#860)",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    for (const char* mode : {"auto", "altaz", "equatorial"}) {
+        INFO(mode);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set("alignmentMode", std::string{mode});
+        for (Source source : {Source::Api, Source::Persisted}) {
+            const auto r = catalog.normalize(kCelestronKey, config, source);
+            CHECK_FALSE(r.rejection.has_value());
+            CHECK(string_at(r.config, "alignmentMode") == mode);
+        }
+    }
+    DeviceConfig unknown;
+    unknown.set("connectionType", std::string{"auto"});
+    unknown.set("alignmentMode", std::string{"wedge"});
+    for (Source source : {Source::Api, Source::Persisted}) {
+        const auto r = catalog.normalize(kCelestronKey, unknown, source);
+        CHECK_FALSE(r.rejection.has_value());
+        CHECK(r.config.find_value("alignmentMode") == nullptr);
+    }
+}
+
+TEST_CASE("Builtin catalog - Celestron site range is per-field", "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    config.set("siteLongitude", 181.0);
+    const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "siteLongitude is out of range (min -180) (max 180)");
+    config.set("siteLongitude", 180.0);
+    CHECK_FALSE(catalog.normalize(kCelestronKey, config, Source::Api).rejection.has_value());
+}
