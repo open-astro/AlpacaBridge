@@ -117,6 +117,8 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'M':  // cancel goto
                 st->goto_seen.store(false);
                 return "#";
+            case 't':  // tracking mode read: sidereal tracking on (open-astro#775 slew gate)
+                return std::string(1, '\x01') + "#";
             case 'T':
             case 'P':  // tracking mode write / passthrough
                 return "#";

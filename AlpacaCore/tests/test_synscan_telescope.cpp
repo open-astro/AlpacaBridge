@@ -526,6 +526,18 @@ TEST_CASE("SynScan Telescope Driver - slews need Tracking and PulseGuide is refu
         driver->set_tracking(false);
         require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
     }
+    SECTION("SlewToCoordinates with Tracking false") {
+        driver->set_tracking(false);
+        REQUIRE_FALSE(driver->get_tracking());
+        require_alpaca_error([&]() { driver->slew_to_coordinates(5.5, 20.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    }
+    SECTION("SlewToTarget with Tracking false") {
+        driver->set_target_right_ascension(5.5);
+        driver->set_target_declination(20.0);
+        driver->set_tracking(false);
+        require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    }
     SECTION("PulseGuide while a slew is in flight") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
         REQUIRE(driver->get_slewing());

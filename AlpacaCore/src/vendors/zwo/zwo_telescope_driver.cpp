@@ -1425,12 +1425,23 @@ public:
             // affect the other axis. Send only this axis's directional stops (the
             // active direction is not tracked, so both are sent; a stop for a
             // direction that is not moving is a no-op on the mount).
+            bool other_axis_jogging = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                other_axis_jogging = manual_axis_slewing_[1 - axis];
+            }
             if (axis == 0) {
                 protocol.stop_move_east();
                 protocol.stop_move_west();
             } else {
                 protocol.stop_move_north();
                 protocol.stop_move_south();
+            }
+            if (!other_axis_jogging) {
+                // No rig evidence that the directional stops alone halt a jog on
+                // this firmware (the original driver also sent ":Q"). With the
+                // other axis idle, the generic stop affects nothing else.
+                protocol.abort_motion();
             }
 
             std::optional<bool> restore_tracking;

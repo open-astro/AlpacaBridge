@@ -1406,6 +1406,10 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinates");
             validate_ra_dec(ra, dec, "SlewToCoordinates");
+            // open-astro#775: same Tracking precondition as the async forms.
+            if (!get_tracking_locked()) {
+                throw AlpacaException("SlewToCoordinates requires Tracking to be true", AlpacaError::InvalidOperation);
+            }
         }
         reap_slew_task();
         reap_pulse_tasks();

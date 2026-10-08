@@ -505,7 +505,8 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
 
         driver->move_axis(1 - stopped_axis, 0.0);
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
-        CHECK(counts->stop_all.load() == 0);
+        // The other axis is idle now, so the generic stop is sent.
+        CHECK(counts->stop_all.load() > 0);
         CHECK(alpacacore::test::settle_connected(*driver, false));
     }
 }
