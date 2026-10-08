@@ -360,7 +360,27 @@ public:
         return connected_ && protocol_->link_alive();
     }
 
-    std::string get_link_fault() const override { return protocol_->link_fault(); }
+    // Reads only state published outside mutex_, so the management listing
+    // never waits on a connect. Three faults, most specific first: the
+    // exchange latch, a board that restarted under a recovered link (every
+    // read fails until a reconnect), and a link lost while a client still
+    // holds the session (a pulled adapter, which drops Connected).
+    std::string get_link_fault() const override {
+        std::string fault = protocol_->link_fault();
+        if (!fault.empty()) {
+            return fault;
+        }
+        {
+            std::lock_guard<std::mutex> lock(link_fault_mutex_);
+            if (!published_board_reset_fault_.empty()) {
+                return published_board_reset_fault_;
+            }
+        }
+        if (session_open_.load() && !protocol_->link_alive()) {
+            return "serial link to the motor controller lost; reconnect";
+        }
+        return {};
+    }
 
     void connect() override { start_connection_task(true); }
     void disconnect() override { start_connection_task(false); }
@@ -395,6 +415,7 @@ public:
             // Settle the dead session first, then run the gates as for any
             // disconnected device.
             ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
+            session_open_.store(false);
             protocol.disconnect();
             connected_ = false;
             reset_runtime_state_locked();
@@ -443,6 +464,7 @@ public:
                 "SkyWatcher");
             connected_ = true;
             reset_runtime_state_locked();
+            session_open_.store(true);
 
             try {
                 MotorBoardInfo board = protocol.get_motor_board_info();
@@ -519,6 +541,7 @@ public:
                 // stopped nor reported.
                 adopt_surviving_motion_locked(lock, entry_status);
             } catch (...) {
+                session_open_.store(false);
                 protocol.disconnect();
                 connected_ = false;
                 reset_runtime_state_locked();
@@ -540,6 +563,7 @@ public:
             } catch (...) {  // NOLINT(bugprone-empty-catch)
                 // Best effort; status polling still reports the true state.
             }
+            session_open_.store(false);
             protocol.disconnect();
             connected_ = false;
             // Identity (model/firmware) is left as last known-good: a clean
@@ -2748,7 +2772,7 @@ private:
         // what clears the board-reset condition, so the fault must not survive
         // into the new session. Re-seed the epoch so the connect's own reads
         // are not mistaken for a recovery that needs validating.
-        board_reset_fault_.clear();
+        set_board_reset_fault_locked({});
         seen_recovery_epoch_ = protocol_->link_recovery_epoch();
         pointing_branch_ = 1;  // open-astro#459: the a2 >= 0 branch, the pre-#459 answer at home
         // open-astro#458: a board that will not answer ":e" is an unmeasured
@@ -3151,6 +3175,12 @@ private:
     // Terminal until reconnect, so it is checked BEFORE any hardware attempt —
     // unlike a link fault, which must not short-circuit the read that would
     // clear it.
+    void set_board_reset_fault_locked(const std::string& fault) const {
+        board_reset_fault_ = fault;
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        published_board_reset_fault_ = fault;
+    }
+
     void throw_if_board_reset_locked() const {
         if (!board_reset_fault_.empty()) {
             throw_comms_compromised_locked(board_reset_fault_);
@@ -3187,9 +3217,9 @@ private:
                 ALPACA_LOG_INFO("SkyWatcher", "Link recovered with the board's session intact");
                 return;
             }
-            board_reset_fault_ =
+            set_board_reset_fault_locked(
                 "the motor controller restarted while the link was down (initialization cleared), so its "
-                "position registers no longer describe where the mount is pointing; reconnect to re-initialise";
+                "position registers no longer describe where the mount is pointing; reconnect to re-initialise");
             position_cache_valid_ = false;
             ALPACA_LOG_ERROR("SkyWatcher", "Link recovered but the board had restarted: RA init_done=" +
                                                std::string(ra.init_done ? "true" : "false") +
@@ -5054,6 +5084,14 @@ private:
     // Terminal for the session — only a reconnect re-sends ":F" — and mutable
     // because it is latched from the read path. Empty means no such fault.
     mutable std::string board_reset_fault_;
+    // Copy of board_reset_fault_ for get_link_fault(), under its own leaf
+    // mutex so the listing never waits on mutex_.
+    mutable std::mutex link_fault_mutex_;
+    mutable std::string published_board_reset_fault_;
+    // True from a successful connect until a deliberate or failed disconnect.
+    // Unlike connected_ it survives a lost link, and it is atomic so
+    // get_link_fault() reads it without mutex_.
+    std::atomic<bool> session_open_{false};
     // Last protocol-side recovery epoch this driver has validated.
     mutable std::uint64_t seen_recovery_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_position_update_{};

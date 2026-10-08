@@ -453,15 +453,20 @@ TEST_CASE("SkyWatcher serial - Connected drops when the adapter is pulled, with 
 
     board.sever_link();
     CHECK_FALSE(driver->get_connected());
+    // A link lost under a connected client is a fault, not an idle device: the
+    // Devices dot must not read like a mount nobody opened.
+    CHECK(driver->get_link_fault().find("lost") != std::string::npos);
     // The stale descriptor is what kept the kernel from handing the returning
     // adapter its old name (/dev/ttyUSB0 -> ttyUSB1); noticing the loss
     // releases it, and the port's registry claim with it.
     CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
     require_not_connected_error([&] { driver->get_right_ascension(); });
 
-    // An explicit disconnect of the dead link still completes cleanly.
+    // An explicit disconnect of the dead link still completes cleanly, and
+    // the client's own disconnect settles the fault.
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
 }
 
 TEST_CASE("SkyWatcher serial - an operation that hits a dead link fails NotConnected and drops Connected",
@@ -801,11 +806,15 @@ TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is
     // nothing else would ever raise this again.
     require_driver_error([&] { driver->get_right_ascension(); }, "restarted");
     CHECK(driver->get_connected());
+    // The link latch cleared on the good reply, but every read still fails:
+    // the management listing must keep reporting a fault.
+    CHECK(driver->get_link_fault().find("restarted") != std::string::npos);
 
     // A reconnect re-runs the ":F" init, which is what actually fixes it.
     driver->set_connected(false);
     driver->set_connected(true);
     CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 
