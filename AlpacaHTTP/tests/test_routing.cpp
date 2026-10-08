@@ -4482,7 +4482,7 @@ int main() {
         mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, false});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
         mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, false});
@@ -4513,8 +4513,9 @@ int main() {
             // keeps the raw "Network".
             pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
-                m.catalog ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
-                          : obj({R"("connectionType":"Network")", site}),
+                // OnStep has no host field, so the catalog drops it as sanitize did.
+                (m.catalog && vendor != "onstep") ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
+                                                  : obj({R"("connectionType":"Network")", site}),
                 {"has connectionType \"Network\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 1 (the six mount arms that go through
@@ -6732,8 +6733,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, gphoto, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the "zzz"
-    // test descriptor, schema only, so its `available` is false.
+    // and the Bisque, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors plus the
+    // "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -6743,7 +6744,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 10);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 11);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -6765,6 +6766,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "gphoto") {
 #ifdef ALPACACORE_ENABLE_GPHOTO
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "onstep") {
+#ifdef ALPACACORE_ENABLE_ONSTEP
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -7739,6 +7747,21 @@ int main() {
         EXPECT(off.message == "Bisque support not enabled. Rebuild with -DALPACACORE_ENABLE_BISQUE=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Telescope", 9268).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_ONSTEP
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: OnStep vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json{{"vendor", "onstep"}, {"deviceType", "telescope"}, {"deviceNumber", 9271}},
+            "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "OnStep support not enabled. Rebuild with -DALPACACORE_ENABLE_ONSTEP=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Telescope", 9271).is_null());
     }
 #endif
 

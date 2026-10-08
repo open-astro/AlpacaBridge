@@ -38,6 +38,26 @@
     ]
   },
   {
+    "vendor": "onstep",
+    "deviceType": "telescope",
+    "displayName": "OnStep",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_ONSTEP",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "mountIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "baudRate", "type": "int", "default": 9600, "required": false, "secret": false, "role": "Plain", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "responseTimeoutMs", "type": "int", "default": 5000, "required": false, "secret": false, "role": "Plain"},
+      {"key": "siteLatitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -90.0, "max": 90.0}},
+      {"key": "siteLongitude", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -180.0, "max": 180.0}},
+      {"key": "siteElevation", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "syncTimeOnConnect", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"},
+      {"key": "apertureDiameter", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
+      {"key": "focalLength", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
     "vendor": "playerone",
     "deviceType": "camera",
     "displayName": "Player One Camera",

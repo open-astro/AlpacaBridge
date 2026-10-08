@@ -69,9 +69,6 @@
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_ONSTEP
-#include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
@@ -8706,85 +8703,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "onstep" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_ONSTEP
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-        std::optional<bool> sync_time_on_connect;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-        if (config_has(config, "syncTimeOnConnect")) {
-            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        // OnStep is USB-serial only in this project — no "network" branch.
-        // (The protocol wrapper's ConnectionType::Network exists purely as an
-        // internal test seam; see AlpacaCore/tests/test_onstep_concurrency_stress.cpp.)
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::onstep::create_onstep_telescope_auto(
-                device_number, mount_index, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
-        } else if (conn_type == "serial") {
-            alpacacore::vendor::onstep::ConnectionInfo conn_info;
-            conn_info.type = alpacacore::vendor::onstep::ConnectionType::Serial;
-            conn_info.port_path = config_get(config, "portPath", "");
-            conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-            if (conn_info.port_path.empty() && reject_invalid_config(source, "Serial port path is required", vendor,
-                                                                     device_type_str, device_number, error_message)) {
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::onstep::create_onstep_telescope_with_site(
-                device_number, conn_info, site_latitude, site_longitude, site_elevation, sync_time_on_connect);
-        } else {
-            error_message = "Invalid connection type. Use 'auto' or 'serial'";
-            return false;
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered OnStep telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "OnStep support not enabled. Rebuild with -DALPACACORE_ENABLE_ONSTEP=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "celestron" && device_type_str == "telescope") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -10018,17 +9936,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         } else if (connection_type == "network") {
             copy_if_present("host");
             copy_if_present("tcpPort");
-        }
-    } else if (vendor == "onstep") {
-        // OnStep is USB-serial only — no "network" branch (see the
-        // registration handler above for why the wrapper still carries one
-        // internally).
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
         }
     } else if (vendor == "zwo") {
         if (device_type == "telescope") {
