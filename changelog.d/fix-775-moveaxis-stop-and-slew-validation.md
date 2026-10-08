@@ -1,0 +1,4 @@
+### Fixed
+- **ZWO `MoveAxis(axis, 0)` no longer stops the other axis** (issue #775, ZWO telescope): the stop sends only that axis's directional stops (`:Qe`/`:Qw` or `:Qn`/`:Qs`) instead of `:Q`, so `Slewing` stays true until both axes are stopped (`test_zwo_telescope.cpp`, "MoveAxis stop on one axis leaves the other axis moving").
+- **SynScan refuses `SlewToCoordinatesAsync`/`SlewToTargetAsync` with `Tracking` false and `PulseGuide` during a slew** (issue #775, SynScan): both raise `InvalidOperation` (0x40B); invalid coordinates still raise `InvalidValue` first.
+- **Bisque guide rates are range-checked** (issue #775, Bisque): `GuideRateRightAscension`/`GuideRateDeclination` outside 0 to 1x sidereal raise `InvalidValue` and leave the stored rate unchanged; before, any finite value was stored.

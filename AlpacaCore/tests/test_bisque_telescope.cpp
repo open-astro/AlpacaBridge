@@ -812,3 +812,30 @@ TEST_CASE("Bisque PulseGuide - a short pulse keeps the configured response timeo
     CHECK(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
     driver->set_connected(false);
 }
+
+TEST_CASE("Bisque Telescope Driver - out-of-range guide rates are InvalidValue and leave the rate unchanged (#775)",
+          "[bisque][telescope][unit][guiderate]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+
+    constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
+    const auto before = driver->get_guide_rate();
+
+    SECTION("negative or above one sidereal rate, either axis") {
+        require_alpaca_error([&]() { driver->set_guide_rate({-5.0, 0.002}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate({0.002, 99999.0}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate({0.002, -0.001}); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_guide_rate({kSiderealDegPerSec * 1.01, 0.002}); },
+                             alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_guide_rate().ra == before.ra);
+        CHECK(driver->get_guide_rate().dec == before.dec);
+    }
+    SECTION("the boundaries 0 and 1x sidereal are accepted") {
+        REQUIRE_NOTHROW(driver->set_guide_rate({0.0, kSiderealDegPerSec}));
+        CHECK(driver->get_guide_rate().ra == 0.0);
+        CHECK(driver->get_guide_rate().dec == kSiderealDegPerSec);
+    }
+}

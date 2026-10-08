@@ -1421,9 +1421,17 @@ public:
         auto& protocol = ZWOMountProtocolWrapper::instance();
 
         if (std::abs(rate) < 1e-9) {
-            // :Q stops all motion; individual :Qe/:Qw/:Qn/:Qs are redundant and add
-            // round-trip latency that pushes Wi-Fi response times past the STANDARD target.
-            protocol.abort_motion();
+            // open-astro#775: ":Q" stops every axis, but MoveAxis(axis, 0) must not
+            // affect the other axis. Send only this axis's directional stops (the
+            // active direction is not tracked, so both are sent; a stop for a
+            // direction that is not moving is a no-op on the mount).
+            if (axis == 0) {
+                protocol.stop_move_east();
+                protocol.stop_move_west();
+            } else {
+                protocol.stop_move_north();
+                protocol.stop_move_south();
+            }
 
             std::optional<bool> restore_tracking;
             {
@@ -1431,8 +1439,18 @@ public:
                 manual_axis_slewing_[axis] = false;
                 restore_tracking = manual_axis_tracking_restore_[axis];
                 manual_axis_tracking_restore_[axis] = std::nullopt;
-                park_command_active_ = false;
-                park_motion_seen_ = false;
+                const int other = 1 - axis;
+                if (manual_axis_slewing_[other]) {
+                    // The other axis is still jogging: hand the saved tracking
+                    // state to it so it is restored when that axis stops.
+                    if (restore_tracking.has_value() && !manual_axis_tracking_restore_[other].has_value()) {
+                        manual_axis_tracking_restore_[other] = restore_tracking;
+                    }
+                    restore_tracking = std::nullopt;
+                } else {
+                    park_command_active_ = false;
+                    park_motion_seen_ = false;
+                }
             }
 
             if (restore_tracking.has_value()) {

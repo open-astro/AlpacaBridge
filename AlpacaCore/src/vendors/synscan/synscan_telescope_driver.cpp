@@ -1263,6 +1263,12 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("PulseGuide");
+            // open-astro#775: ITelescopeV4 raises InvalidOperation for a
+            // PulseGuide while a slew is in progress.
+            if (get_slewing_locked()) {
+                throw AlpacaException("PulseGuide is not allowed while the mount is slewing",
+                                      AlpacaError::InvalidOperation);
+            }
         }
         reap_pulse_task(axis);
         {
@@ -1429,6 +1435,14 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
+            // Argument validation precedes the state check (ASCOM contract).
+            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            // open-astro#775: ITelescopeV4 raises InvalidOperation when a slew
+            // is requested with Tracking false.
+            if (!get_tracking_locked()) {
+                throw AlpacaException("SlewToCoordinatesAsync requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;

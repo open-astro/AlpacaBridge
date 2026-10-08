@@ -465,4 +465,75 @@ TEST_CASE("SynScan Telescope Driver - non-finite slew and sync coordinates are r
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan Telescope Driver - slews need Tracking and PulseGuide is refused mid-slew (#775)",
+          "[synscan][telescope][unit][preconditions]") {
+    std::atomic<int> tracking_mode{1};
+    std::atomic<bool> goto_running{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.empty()) {
+            return "0#";
+        }
+        switch (chunk[0]) {
+            case 'K':
+                return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+            case 'e':
+            case 'E':
+            case 'z':
+            case 'Z':
+                return "12AB0500,20000500#";
+            case 'r':
+            case 'R':
+            case 'b':
+            case 'B':
+                goto_running = true;
+                return "#";
+            case 'L':
+                return goto_running ? "1#" : "0#";
+            case 't':
+                return std::string(1, static_cast<char>(tracking_mode.load())) + "#";
+            case 'T':
+                if (chunk.size() > 1) {
+                    tracking_mode = chunk[1];
+                }
+                return "#";
+            case 'm':
+                return std::string(1, static_cast<char>(50)) + "#";
+            case 'w':
+                return std::string(8, '\0') + "#";
+            default:
+                return "#";
+        }
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 500;
+    auto driver =
+        alpacacore::vendor::synscan::create_synscan_telescope(0, conn, alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    SECTION("SlewToCoordinatesAsync with Tracking false") {
+        driver->set_tracking(false);
+        REQUIRE_FALSE(driver->get_tracking());
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(5.5, 20.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+    }
+    SECTION("SlewToTargetAsync with Tracking false") {
+        driver->set_target_right_ascension(5.5);
+        driver->set_target_declination(20.0);
+        driver->set_tracking(false);
+        require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+    SECTION("PulseGuide while a slew is in flight") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE(driver->get_slewing());
+        require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::InvalidOperation);
+    }
+
+    driver->abort_slew();
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

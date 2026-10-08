@@ -107,6 +107,8 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(50)) + "#";
+            case 't':  // tracking mode read: sidereal tracking on
+                return std::string(1, '\x01') + "#";
             case 'w':
                 return std::string(8, '\0') + "#";
             case 'W':

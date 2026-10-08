@@ -119,6 +119,8 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(st->model_id.load())) + "#";
+            case 't':  // tracking mode read: sidereal tracking on
+                return std::string(1, '\x01') + "#";
             case 'w':
                 return std::string(8, '\0') + "#";
             case 'W':

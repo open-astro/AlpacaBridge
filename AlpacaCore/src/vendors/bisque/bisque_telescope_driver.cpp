@@ -451,6 +451,11 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
+        // open-astro#775: 0..1x sidereal, the range the SynScan driver enforces.
+        constexpr double kMaxGuideRateDegPerSec = kSiderealRateArcsecPerSec / 3600.0;
+        if (rate.ra < 0.0 || rate.ra > kMaxGuideRateDegPerSec || rate.dec < 0.0 || rate.dec > kMaxGuideRateDegPerSec) {
+            throw AlpacaException("Guide rate must be between 0 and 1x sidereal", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
     }
