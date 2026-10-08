@@ -141,10 +141,9 @@ public:
      * @brief Mark that a request addressed to this device is being handled
      * right now, for as long as it takes (issue #547 review finding).
      *
-     * note_client_activity() only stamps once, at intake, but a synchronous
-     * call the router dispatches after it -- SlewToCoordinates chief among
-     * them -- can block the HTTP worker for the length of a whole goto,
-     * well past the watchdog interval, while the client is actively
+     * note_client_activity() only stamps once, at intake, but a
+     * call the router dispatches after it can block the HTTP worker for
+     * a long time, well past the watchdog interval, while the client is actively
      * waiting on its own response. Pair with end_client_request() around
      * the dispatch (RAII at the call site), so stop_motion_if_client_silent()
      * can tell "nobody has addressed this device" apart from "a request to
@@ -210,8 +209,8 @@ public:
             return false;
         }
         if (in_flight_requests_.load() > 0) {
-            // A request for this device (e.g. a synchronous
-            // SlewToCoordinates) is being handled right now -- that IS
+            // A request for this device (one that
+            // blocks for a long time) is being handled right now -- that IS
             // client activity for as long as it runs, however long the call
             // takes. note_client_activity() only stamped once, at intake,
             // so without this the interval can elapse while the client is
@@ -795,7 +794,7 @@ private:
     // #547 review finding). Incremented/decremented by the router's
     // begin_client_request()/end_client_request() RAII guard around
     // dispatch_device_method(), so a synchronous call that blocks past the
-    // watchdog interval (e.g. SlewToCoordinates) is never mistaken for
+    // watchdog interval is never mistaken for
     // silence while the client is actively waiting on it.
     std::atomic<int> in_flight_requests_{0};
 };
