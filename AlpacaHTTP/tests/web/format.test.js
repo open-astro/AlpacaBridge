@@ -329,6 +329,6 @@ test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () 
     assert.strictEqual(faulted.state, 'error');
     assert.match(faulted.text, /Link fault: no status frame/);
     assert.strictEqual(deviceStatus({ Connected: false, LastConnectError: '' }).state, 'idle');
-    // A stale fault on a device that is not connected is not a red reason.
-    assert.strictEqual(deviceStatus({ Connected: false, LinkFault: 'late read' }).state, 'idle');
+    // Any fault is red, connected or not.
+    assert.strictEqual(deviceStatus({ Connected: false, LinkFault: 'late read' }).state, 'error');
 });
