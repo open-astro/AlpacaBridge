@@ -36,6 +36,9 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
     result.config = in;
     const bool from_api = source == Source::Api;
 
+    // The router already drops a wrong-typed or unknown alignmentMode before the
+    // typed read (without_unknown_alignment_mode); this check stays so the schema
+    // keeps the #860 rule for every caller that does not go through that helper.
     if (in.find(kCelestronAlignmentMode)) {
         const std::string mode = in.get(kCelestronAlignmentMode);
         if (mode != "auto" && mode != "altaz" && mode != "equatorial") {
