@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_caa_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
@@ -78,13 +79,7 @@ public:
 
     std::string get_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!serial_number_.empty()) {
-            return "ZWO_CAA_SN_" + serial_number_;
-        }
-        if (rotator_id_.has_value()) {
-            return "ZWO_CAA_ID_" + std::to_string(rotator_id_.value());
-        }
-        return "ZWO_CAA_" + std::to_string(device_number_);
+        return unique_id_locked();
     }
 
     std::string get_description() const override {
@@ -158,7 +153,8 @@ public:
                     ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
                     rotator_type_.clear();
                 }
-                sync_offset_ = 0.0;
+                // Persisted Sync offset, keyed by the serial resolved just above.
+                sync_offset_ = util::RotatorSyncOffsetStore::load(unique_id_locked());
                 target_position_ = 0.0;
                 has_target_position_ = false;
             } catch (...) {
@@ -325,9 +321,22 @@ public:
         sync_offset_ = normalize_angle(target - mechanical);
         target_position_ = target;
         has_target_position_ = true;
+        // Best effort: a storage failure logs a WARNING and never fails Sync.
+        util::RotatorSyncOffsetStore::save(unique_id_locked(), sync_offset_);
     }
 
 private:
+    // Caller holds mutex_.
+    std::string unique_id_locked() const {
+        if (!serial_number_.empty()) {
+            return "ZWO_CAA_SN_" + serial_number_;
+        }
+        if (rotator_id_.has_value()) {
+            return "ZWO_CAA_ID_" + std::to_string(rotator_id_.value());
+        }
+        return "ZWO_CAA_" + std::to_string(device_number_);
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
