@@ -31,12 +31,14 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -1045,6 +1047,134 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, kStubNumber);
         registry.unregister_device(alpacacore::DeviceType::Camera, kStubNumber);
     }
+
+    {
+        // case: ImageBytes preserves metadata, ordering, and element bytes
+        constexpr int kCameraNumber = 8980;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        EXPECT(registry.register_device(camera));
+
+        auto request_image = [&](const std::string& accept) {
+            alpacahttp::Request request;
+            std::string raw = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                              "/imagearray?ClientTransactionID=77 HTTP/1.1\r\nHost: localhost\r\n";
+            if (!accept.empty()) {
+                raw += "Accept: " + accept + "\r\n";
+            }
+            raw += "\r\n";
+            EXPECT(request.parse(raw));
+            return router.route(request, 1);
+        };
+        auto check_imagebytes = [&](alpacacore::ImageArray image, std::uint32_t transmission_type, std::uint32_t rank,
+                                    std::uint32_t width, std::uint32_t height, const std::string& pixels) {
+            camera->set_image_array(image);
+            const auto response = request_image("application/imagebytes");
+            const auto& body = response.body();
+            EXPECT(response.get_header("Content-Type") == "application/imagebytes");
+            EXPECT(response.get_header("Content-Length") == std::to_string(body.size()));
+            EXPECT(body.size() == 44 + pixels.size());
+            auto read_u32 = [&](std::size_t offset) {
+                return static_cast<std::uint32_t>(static_cast<unsigned char>(body[offset])) |
+                       (static_cast<std::uint32_t>(static_cast<unsigned char>(body[offset + 1])) << 8) |
+                       (static_cast<std::uint32_t>(static_cast<unsigned char>(body[offset + 2])) << 16) |
+                       (static_cast<std::uint32_t>(static_cast<unsigned char>(body[offset + 3])) << 24);
+            };
+            EXPECT(read_u32(0) == 1);
+            EXPECT(read_u32(4) == 0);
+            EXPECT(read_u32(8) == 77);
+            EXPECT(read_u32(12) == 1);
+            EXPECT(read_u32(16) == 44);
+            EXPECT(read_u32(20) == 2);
+            EXPECT(read_u32(24) == transmission_type);
+            EXPECT(read_u32(28) == rank);
+            EXPECT(read_u32(32) == width);
+            EXPECT(read_u32(36) == height);
+            EXPECT(read_u32(40) == (rank == 3 ? 3 : 0));
+            EXPECT(body.substr(44) == pixels);
+        };
+        auto append_u16 = [](std::string& bytes, std::uint16_t value) {
+            bytes.push_back(static_cast<char>(value & 0xff));
+            bytes.push_back(static_cast<char>(value >> 8));
+        };
+        auto append_i32 = [](std::string& bytes, std::int32_t value) {
+            const auto bits = static_cast<std::uint32_t>(value);
+            for (unsigned shift = 0; shift < 32; shift += 8) {
+                bytes.push_back(static_cast<char>((bits >> shift) & 0xff));
+            }
+        };
+        auto bytes = [](std::initializer_list<std::uint8_t> values) {
+            std::string result;
+            for (const auto value : values) {
+                result.push_back(static_cast<char>(value));
+            }
+            return result;
+        };
+
+        check_imagebytes({{0, 1, 2, 3, 4, 5}, 3, 2, 2}, 6, 2, 3, 2, bytes({0, 3, 1, 4, 2, 5}));
+        check_imagebytes({{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, 2, 2, 3}, 6, 3, 2, 2,
+                         bytes({1, 2, 3, 7, 8, 9, 4, 5, 6, 10, 11, 12}));
+
+        std::string uint16_pixels;
+        for (std::uint16_t value : {0, 256, 65535}) {
+            append_u16(uint16_pixels, value);
+        }
+        check_imagebytes({{0, 256, 65535}, 3, 1, 2}, 8, 2, 3, 1, uint16_pixels);
+
+        std::string int16_pixels;
+        for (std::int16_t value : {-32768, 0, -1, 1, 32767, 2}) {
+            append_u16(int16_pixels, static_cast<std::uint16_t>(value));
+        }
+        check_imagebytes({{-32768, -1, 32767, 0, 1, 2}, 3, 2, 2}, 1, 2, 3, 2, int16_pixels);
+
+        std::string int32_pixels;
+        append_i32(int32_pixels, std::numeric_limits<std::int32_t>::min());
+        append_i32(int32_pixels, std::numeric_limits<std::int32_t>::max());
+        check_imagebytes(
+            {{std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()}, 2, 1, 2}, 2, 2, 2, 1,
+            int32_pixels);
+
+        alpacacore::ImageArray edge_image;
+        edge_image.width = 65;
+        edge_image.height = 67;
+        edge_image.rank = 2;
+        for (std::int32_t i = 0; i < edge_image.width * edge_image.height; ++i) {
+            edge_image.data.push_back(i - 2177);
+        }
+        std::string edge_pixels;
+        for (int x = 0; x < edge_image.width; ++x) {
+            for (int y = 0; y < edge_image.height; ++y) {
+                auto source = edge_image.data[static_cast<std::size_t>(y) * edge_image.width + x];
+                append_u16(edge_pixels, static_cast<std::uint16_t>(static_cast<std::int16_t>(source)));
+            }
+        }
+        check_imagebytes(edge_image, 1, 2, 65, 67, edge_pixels);
+
+        camera->set_image_array({{0, 1, 2, 3, 4, 5}, 3, 2, 2});
+        const auto json_response = request_image("");
+        EXPECT(json_response.get_header("Content-Type") == "application/json");
+        const auto json = nlohmann::json::parse(json_response.body());
+        EXPECT(json["Value"] == nlohmann::json::array({nlohmann::json::array({0, 3}), nlohmann::json::array({1, 4}),
+                                                       nlohmann::json::array({2, 5})}));
+
+        auto expect_invalid_image = [&](alpacacore::ImageArray image) {
+            camera->set_image_array(std::move(image));
+            for (const std::string& accept : {std::string{}, std::string{"application/imagebytes"}}) {
+                const auto response = request_image(accept);
+                EXPECT(response.get_header("Content-Type") == "application/json");
+                const auto error = nlohmann::json::parse(response.body());
+                EXPECT(error.value("ErrorNumber", 0) == alpacacore::AlpacaError::DriverException);
+                EXPECT(error.value("ErrorMessage", "").find("Camera returned invalid image data") != std::string::npos);
+            }
+        };
+        expect_invalid_image({{1}, 2, 1, 2});
+        expect_invalid_image({{1}, 0, 1, 2});
+        expect_invalid_image({{1}, 1, 1, 0});
+        expect_invalid_image({{}, std::numeric_limits<int>::max(), std::numeric_limits<int>::max(), 3});
+
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
     alpacahttp::Request request;
 
     // Test management endpoint parsing

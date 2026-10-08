@@ -56,10 +56,12 @@ public:
     void set_content_length(std::size_t length);
 
     // Set body
-    void set_body(const std::string& body);
+    void set_body(std::string body);
     void set_body(const AlpacaResponse& alpaca_response);
 
     // Get formatted HTTP response
+    // Serialize the status line and headers, including the terminating blank line.
+    std::string to_header_string() const;
     std::string to_string() const;
 
     // Getters
@@ -75,5 +77,4 @@ private:
     static std::string status_to_reason_phrase(std::uint16_t code);
 };
 
-} // namespace alpacahttp
-
+}  // namespace alpacahttp
