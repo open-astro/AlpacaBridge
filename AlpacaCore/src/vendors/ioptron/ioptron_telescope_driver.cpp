@@ -183,9 +183,11 @@ public:
         return connected_;
     }
 
+    // Reads only the published copy under its own narrow mutex, never the coarse
+    // mutex_ that set_connected() holds across the connect.
     std::string get_link_fault() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_ && device_faulted_ ? last_device_error_ : std::string{};
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        return link_fault_text_;
     }
 
     // Base always spawns (the old spawn-skip `if (connect == get_connected())`
@@ -270,6 +272,7 @@ public:
                 device_faulted_ = false;
                 device_fault_count_ = 0;
                 last_device_error_.clear();
+                publish_link_fault_locked();
                 dec_guide_calibration_attempted_ = false;
                 dec_guide_calibrated_ = false;
                 dec_guide_inverted_ = true;
@@ -343,6 +346,7 @@ public:
             device_faulted_ = false;
             device_fault_count_ = 0;
             last_device_error_.clear();
+            publish_link_fault_locked();
             dec_guide_calibration_attempted_ = false;
             dec_guide_calibrated_ = false;
             dec_guide_inverted_ = true;
@@ -1829,12 +1833,21 @@ private:
             ALPACA_LOG_WARN("iOptron", "Device fault (transient, " + std::to_string(device_fault_count_) + "/" +
                                            std::to_string(kDeviceFaultThreshold) + ") - " + last_device_error_);
         }
+        publish_link_fault_locked();
     }
 
     void clear_device_fault_locked() const {
         device_fault_count_ = 0;
         device_faulted_ = false;
         last_device_error_.clear();
+        publish_link_fault_locked();
+    }
+
+    // Copies the latched fault text to the narrow-mutex copy get_link_fault() reads.
+    // Call under mutex_ after every change to device_faulted_ or last_device_error_.
+    void publish_link_fault_locked() const {
+        std::lock_guard<std::mutex> lock(link_fault_mutex_);
+        link_fault_text_ = device_faulted_ ? last_device_error_ : std::string{};
     }
 
     // open-astro#728: a successful read ends the run of failures, so only
@@ -2809,6 +2822,8 @@ private:
     mutable bool device_faulted_ = false;
     mutable int device_fault_count_ = 0;
     mutable std::string last_device_error_;
+    mutable std::mutex link_fault_mutex_;
+    mutable std::string link_fault_text_;
     mutable bool utc_query_supported_;
     mutable std::chrono::steady_clock::time_point fast_cache_until_{};
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};

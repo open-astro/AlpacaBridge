@@ -530,6 +530,7 @@ TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames res
     };
     CHECK(wait_until(value_read_throws, std::chrono::milliseconds(12000)));
     CHECK(driver->get_connected());  // the client decides whether to reconnect
+    CHECK_FALSE(driver->get_link_fault().empty());
     require_alpaca_error([&]() { (void)driver->get_switch_value(19); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_switch(0); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_switch_value(0, 0.0); }, alpacacore::AlpacaError::DriverException);
@@ -549,6 +550,7 @@ TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames res
     CHECK(wait_until([&] { return !value_read_throws(); }, std::chrono::milliseconds(6000)));
     CHECK(driver->get_switch_value(15) == 12.4);
     CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
 }
 
 TEST_CASE("Gemini PDH Switch Driver - Dead serial link (EIO) faults the link instead of serving stale status",

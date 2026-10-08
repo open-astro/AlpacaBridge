@@ -1306,12 +1306,16 @@ function startEditDevice(device) {
 // is shown and the page is visible.
 const DEVICE_STATUS_POLL_MS = 5000;
 let deviceStatusPollTimer = null;
+let deviceStatusPollInFlight = false;
 
 async function pollDeviceStatus() {
     const tab = document.getElementById('devices-tab');
     if (document.hidden || !tab || !tab.classList.contains('active')) {
         return;
     }
+    // A listing can stall behind a driver mutex during a connect; never queue a second request.
+    if (deviceStatusPollInFlight) return;
+    deviceStatusPollInFlight = true;
     try {
         const response = await fetch(API_BASE + '/management/v1/configureddevices?ts=' + Date.now(), { cache: 'no-store' });
         if (!response.ok) return;
@@ -1330,6 +1334,8 @@ async function pollDeviceStatus() {
         }
     } catch (e) {
         // Next tick retries; the dots keep their last state.
+    } finally {
+        deviceStatusPollInFlight = false;
     }
 }
 

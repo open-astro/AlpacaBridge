@@ -450,7 +450,7 @@ function deviceStatus(device) {
     const reasons = [];
     if (d.LoadError === true) reasons.push('Driver failed to load');
     if (d.LastConnectError) reasons.push(String(d.LastConnectError));
-    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
+    if (d.Connected === true && d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
     if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
     if (d.Connected === true) return { state: 'connected', text: 'Connected' };
     if (d.Connected === false) return { state: 'idle', text: 'Not connected' };

@@ -400,6 +400,33 @@ TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the driver mutex",
+          "[synscan][telescope][link]") {
+    // The echo passes, then the handset goes silent: every later handshake query burns its
+    // response timeout while set_connected(true) holds the coarse mutex_. The management
+    // listing polls get_link_fault() and must not queue behind that.
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (!chunk.empty() && chunk[0] == 'K') {
+            return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+        }
+        return "";
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    driver->connect();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // inside the handshake
+    REQUIRE(driver->get_connecting());
+    const auto t0 = std::chrono::steady_clock::now();
+    std::string fault;
+    std::thread reader([&] { fault = driver->get_link_fault(); });
+    reader.join();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    CHECK(ms < 200);
+    CHECK(fault.empty());
+    REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30000));
+}
+
 TEST_CASE("SynScan position - stale cache faults after repeated failed polls and recovers",
           "[synscan][telescope][link]") {
     auto st = std::make_shared<FakeSynScanState>();
