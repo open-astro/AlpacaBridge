@@ -1,0 +1,2 @@
+### Changed
+- **ZWO CAA rotator driver reaches the SDK through an injectable interface** (AlpacaCore, issue #777): `ZWOCAASDK` (`zwo_caa_sdk.h`) is implemented by the existing `ZWOCAASDKWrapper` singleton, and `create_zwo_caa_rotator*` gain overloads taking it. Production factories still pass the real wrapper, so runtime behaviour is unchanged. New fake-SDK cases in `test_zwo_rotator.cpp` cover the Sync offset surviving a reconnect and a new driver instance, reverse, move and a failed connect.

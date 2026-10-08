@@ -12,52 +12,43 @@
 
 #pragma once
 
+#include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
 
-struct ZWOCAARotatorInfo {
-    int rotator_id{};
-    std::string name;
-    double max_degree{};
-};
-
-struct ZWOCAAMotionStatus {
-    bool is_moving{};
-    bool hand_control{};
-};
-
-class ZWOCAASDKWrapper {
+class ZWOCAASDKWrapper final : public ZWOCAASDK {
 public:
     static ZWOCAASDKWrapper& instance();
 
     std::vector<ZWOCAARotatorInfo> enumerate_rotators();
-    bool get_rotator_info_by_id(int rotator_id, ZWOCAARotatorInfo& info);
-    bool get_rotator_info_by_index(int rotator_index, ZWOCAARotatorInfo& info);
+    bool get_rotator_info_by_id(int rotator_id, ZWOCAARotatorInfo& info) override;
+    bool get_rotator_info_by_index(int rotator_index, ZWOCAARotatorInfo& info) override;
 
-    void open_rotator(int rotator_id);
-    void close_rotator(int rotator_id);
+    void open_rotator(int rotator_id) override;
+    void close_rotator(int rotator_id) override;
 
-    ZWOCAAMotionStatus get_motion_status(int rotator_id);
-    double get_degree(int rotator_id);
-    void move_relative(int rotator_id, double angle);
-    void move_absolute(int rotator_id, double angle);
-    void move_mechanical(int rotator_id, double angle);
-    void stop(int rotator_id);
-    void sync_degree(int rotator_id, double angle);
+    ZWOCAAMotionStatus get_motion_status(int rotator_id) override;
+    double get_degree(int rotator_id) override;
+    void move_relative(int rotator_id, double angle) override;
+    void move_absolute(int rotator_id, double angle) override;
+    void move_mechanical(int rotator_id, double angle) override;
+    void stop(int rotator_id) override;
+    void sync_degree(int rotator_id, double angle) override;
 
-    double get_max_degree(int rotator_id);
-    double get_temperature(int rotator_id);
+    double get_max_degree(int rotator_id) override;
+    double get_temperature(int rotator_id) override;
 
-    bool get_reverse(int rotator_id);
-    void set_reverse(int rotator_id, bool reverse);
+    bool get_reverse(int rotator_id) override;
+    void set_reverse(int rotator_id, bool reverse) override;
 
-    std::string get_serial_number(int rotator_id);
-    std::string get_firmware_version(int rotator_id);
-    std::string get_rotator_type(int rotator_id);
-    std::string get_sdk_version();
+    std::string get_serial_number(int rotator_id) override;
+    std::string get_firmware_version(int rotator_id) override;
+    std::string get_rotator_type(int rotator_id) override;
+    std::string get_sdk_version() override;
 
 private:
     class Impl;
