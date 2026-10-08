@@ -421,7 +421,8 @@ TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the drive
     std::string fault;
     std::thread reader([&] { fault = driver->get_link_fault(); });
     reader.join();
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+    const auto ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     CHECK(ms < 200);
     CHECK(fault.empty());
     REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30000));
