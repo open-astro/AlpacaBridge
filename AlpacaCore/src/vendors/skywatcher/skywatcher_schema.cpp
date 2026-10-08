@@ -43,6 +43,19 @@ NormalizeResult normalize_skywatcher(const DeviceConfig& in, Source source) {
         return result;
     }
 
+    if (in.find(kSkyWatcherDecAxisSense)) {
+        const std::string sense = in.get(kSkyWatcherDecAxisSense);
+        if (sense != "auto" && sense != "normal" && sense != "reversed") {
+            if (from_api) {
+                result.rejection = "Invalid dec axis sense. Use 'auto', 'normal', or 'reversed'";
+                return result;
+            }
+            result.warnings.push_back("saved config has decAxisSense \"" + sense +
+                                      "\", which is not one this driver knows; reading it as \"auto\" (#582)");
+            result.config.erase(kSkyWatcherDecAxisSense.key);
+        }
+    }
+
     std::string type = in.get(kSkyWatcherConnectionType);
     if (type != "" && type != "auto" && type != "serial" && type != "network") {
         if (from_api) {

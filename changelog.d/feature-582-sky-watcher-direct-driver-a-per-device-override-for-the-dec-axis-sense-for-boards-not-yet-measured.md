@@ -1,0 +1,3 @@
+### Added
+
+- **Sky-Watcher direct: per-device Dec axis sense override**, Sky-Watcher telescope, issue #582: the new `decAxisSense` setting (`auto` default, `normal`, `reversed`) sets the dec-axis sense `eps` on connect in place of the measured-board table, also when the board does not identify itself, for boards that are not measured yet. It changes only the home term (dec rate and guide signs are untouched). The connect log names where `eps` came from, an override that disagrees with a measured board logs a WARN, and the web UI shows the override in the device name. Covered by the `decAxisSense` cases in `AlpacaCore/tests/test_skywatcher_pointing.cpp`; `docs/troubleshooting.md` maps the reading to the setting.

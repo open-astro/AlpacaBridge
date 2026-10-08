@@ -102,18 +102,23 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
 
+/// open-astro#582: the per-device dec-axis sense. Auto uses the measured-board
+/// table (else the unmeasured default); Normal and Reversed set eps = +1 / -1
+/// on connect, whatever the table says, and also when the board will not
+/// identify itself. It sets eps, never the hemisphere term k = s * eps.
+enum class DecAxisSenseSetting { Auto, Normal, Reversed };
+
 // `motion_limits` (open-astro#436): per-device altitude floor and meridian
 // limit, both off by default; see <alpacacore/util/motion_limits.h>.
 /// `clock` is the TaskClock the driver's task waits and deadlines run on
 /// (open-astro#743, decision 0005): real by default, a FakeTaskClock in tests.
 /// It must outlive the driver. Pointing time stays on the host clock.
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
-                                                             std::optional<double> site_latitude_deg = std::nullopt,
-                                                             std::optional<double> site_longitude_deg = std::nullopt,
-                                                             std::optional<double> site_elevation_m = std::nullopt,
-                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
-                                                             util::MotionLimits motion_limits = {},
-                                                             util::TaskClock& clock = util::default_task_clock());
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg = std::nullopt,
+    std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
+    std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {}, util::MotionLimits motion_limits = {},
+    util::TaskClock& clock = util::default_task_clock(),
+    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -121,7 +126,8 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
-    util::MotionLimits motion_limits = {}, util::TaskClock& clock = util::default_task_clock());
+    util::MotionLimits motion_limits = {}, util::TaskClock& clock = util::default_task_clock(),
+    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
 
 /// The scan behind create_skywatcher_telescope_auto(): serial ports first, then
 /// Wi-Fi discovery (UDP 11880); throws when nothing answers.
@@ -132,6 +138,6 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index);
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
     int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
-    util::MotionLimits motion_limits = {});
+    util::MotionLimits motion_limits = {}, DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
 
 }  // namespace alpacacore::vendor::skywatcher
