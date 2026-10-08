@@ -253,7 +253,8 @@ public:
 
     double get_step_size() const override {
         // The CAA SDK exposes no step size; ASCOM says PropertyNotImplemented
-        // rather than a made-up 0.
+        // rather than a made-up 0. Connection check first (open-astro#309).
+        ensure_connected();
         throw AlpacaException("StepSize is not available from the ZWO CAA SDK", AlpacaError::PropertyNotImplemented);
     }
 

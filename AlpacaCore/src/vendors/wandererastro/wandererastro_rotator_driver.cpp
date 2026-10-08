@@ -191,7 +191,7 @@ public:
             // start, so neither "moving" nor "arrived" is true. Say so.
             throw AlpacaException(
                 "WandererRotator sent no move completion report; check the DC power supply. Position is the "
-                "last confirmed angle until the next move, Halt or Sync",
+                "last confirmed angle until the next move, Halt, Sync or reconnect",
                 AlpacaError::DriverException);
         }
         return state.moving;
