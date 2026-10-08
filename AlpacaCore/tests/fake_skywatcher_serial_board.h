@@ -200,6 +200,16 @@ public:
         answer_baud_ = baud;
     }
 
+    /// open-astro#912: another process reprograms the shared tty. Sets the
+    /// speed on the keep-alive slave fd, which every fd of the slave sees.
+    void set_line_baud(int baud) {
+        struct termios tty {};
+        if (pty_.keepalive_fd() < 0 || tcgetattr(pty_.keepalive_fd(), &tty) != 0) return;
+        cfsetispeed(&tty, baud == 115200 ? B115200 : B9600);
+        cfsetospeed(&tty, baud == 115200 ? B115200 : B9600);
+        tcsetattr(pty_.keepalive_fd(), TCSANOW, &tty);
+    }
+
     /// Refuse ":i" with "!0" (Unknown command), as a board without the
     /// step-period readback does.
     void set_no_readback(bool no_readback) {

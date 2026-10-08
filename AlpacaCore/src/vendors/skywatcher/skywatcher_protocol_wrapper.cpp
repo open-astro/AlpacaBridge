@@ -28,6 +28,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <termios.h>
@@ -830,6 +831,15 @@ public:
                     note_exchange_ok();
                 } else if (exchange_timed_out_) {
                     note_exchange_failed(e.what());
+#ifndef _WIN32
+                    // open-astro#912: line settings belong to the tty, not the
+                    // fd, so another process's open can leave it at the wrong
+                    // rate while this fd keeps talking. Re-apply ours on every
+                    // silent timeout so the next exchange can clear the latch.
+                    if (serial_fd_ >= 0 && info_.type == ConnectionType::Serial) {
+                        (void)tcsetattr(serial_fd_, TCSANOW, &serial_termios_);
+                    }
+#endif
                 }
             }
             throw;
@@ -926,6 +936,10 @@ private:
     void disconnect_locked() {
 #ifndef _WIN32
         if (serial_fd_ >= 0) {
+            // open-astro#912: the exclusive flag lives on the tty and survives
+            // our close while anything else still holds it open, so drop it
+            // explicitly or a reconnect would fail EBUSY.
+            (void)ioctl(serial_fd_, TIOCNXCL);
             close(serial_fd_);
             serial_fd_ = -1;
         }
@@ -997,6 +1011,12 @@ private:
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
+        // open-astro#912: claim the tty so no other non-root process can open
+        // it (an outside open reprograms the shared line settings and a
+        // reconnect then fails EBUSY). Released by close() in
+        // disconnect_locked(). Ignored on failure: pty back ends may not
+        // support it, and a mount that works without it keeps working.
+        (void)ioctl(serial_fd_, TIOCEXCL);
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
             close(serial_fd_);
@@ -1027,6 +1047,7 @@ private:
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
+        serial_termios_ = tty;
         // Keep the fd NON-blocking (it was opened O_NONBLOCK) and drive every
         // read through poll() (see poll_serial_readable / exchange_serial /
         // settle_serial). Some USB CDC-ACM virtual COM ports do NOT honour
@@ -1615,6 +1636,7 @@ private:
     std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
 #ifndef _WIN32
     int serial_fd_ = -1;
+    struct termios serial_termios_ {};  // line settings applied at connect, re-applied on silence (#912)
     int socket_fd_ = -1;
     std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // open-astro#445: the configured path and the node it reached at connect.
