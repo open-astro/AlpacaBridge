@@ -43,6 +43,19 @@ alpacacore::vendor::synscan::ConnectionInfo synscan_endpoint(int port) {
     return info;
 }
 
+// default_responder() answers "0#" to `t`, i.e. Tracking false, and the slew
+// initiators refuse that with InvalidOperation before the dispatch thread
+// starts (open-astro#775). Answer tracking on so the slew threads really run.
+alpacacore::test::FakeMountServer::Responder tracking_on_responder() {
+    auto base = alpacacore::test::FakeMountServer::default_responder();
+    return [base](const std::string& chunk) {
+        if (!chunk.empty() && chunk[0] == 't') {
+            return std::string("\x01#");
+        }
+        return base(chunk);
+    };
+}
+
 void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& scope = static_cast<alpacacore::TelescopeDriver&>(d);
     guard([&] { scope.set_target_right_ascension(5.0); });
@@ -67,7 +80,7 @@ void telescope_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
 }  // namespace
 
 TEST_CASE("SynScan telescope - concurrent connect/disconnect/slew/pulse stress", "[synscan][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
+    alpacacore::test::FakeMountServer server(tracking_on_responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
         0, synscan_endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
@@ -133,7 +146,7 @@ TEST_CASE("SynScan telescope - destruction races an in-flight connect", "[synsca
 }
 
 TEST_CASE("SynScan telescope - destruction mid-operation (slew/pulse threads live)", "[synscan][telescope][stress]") {
-    alpacacore::test::FakeMountServer server;
+    alpacacore::test::FakeMountServer server(tracking_on_responder());
     REQUIRE(server.ok());
 
     for (int i = 0; i < 10; ++i) {
