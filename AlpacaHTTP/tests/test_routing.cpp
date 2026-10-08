@@ -4705,10 +4705,10 @@ int main() {
         }
     }
 
-    // case: configureddevices Connected field
     // configureddevices carries Connected from get_connected() (web UI status
     // dot); it is omitted when the call throws.
     {
+        // case: configureddevices Connected field
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto up = std::make_shared<FirmwareStubDriver>(9511, std::nullopt);
         auto down = std::make_shared<FirmwareStubDriver>(9512, std::nullopt);
