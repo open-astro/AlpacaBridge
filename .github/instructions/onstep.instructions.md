@@ -171,9 +171,10 @@ it is never reachable through `router.cpp` or the web UI.
   straddling a tight tolerance will intermittently cross it. Do not attempt to "fix" this by
   loosening tolerances or by re-adding rate-compensation toggling.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
-  telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAz`/
-  `SlewToAltAzAsync` are still supported via a local Alt/Az→RA/Dec coordinate transform followed
-  by an ordinary equatorial slew — this works regardless of the physical mount's mechanical
+  telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
+  is supported via a local Alt/Az→RA/Dec coordinate transform followed
+  by an ordinary equatorial slew (the router refuses synchronous `SlewToAltAz` with
+  `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
 - `CanSetGuideRates=false` (guide rate is not queryable/settable over this protocol — the
