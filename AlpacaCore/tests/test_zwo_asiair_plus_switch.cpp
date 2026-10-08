@@ -13,10 +13,87 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #include <alpacacore/version.h>
+#include <dlfcn.h>
+#include <stdarg.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "catch2_compat.h"
+
+// ---------------------------------------------------------------------------
+// ioctl stub. This binary defines ioctl(), so the wrapper's PWM_GPIO_SET_LEVEL
+// writes land here when the fd is the stub device file; every other call is
+// forwarded to the real ioctl (found with RTLD_NEXT).
+// ---------------------------------------------------------------------------
+namespace {
+
+constexpr unsigned long kSetLevel = 0x40084302UL;  // PWM_GPIO_SET_LEVEL
+constexpr unsigned long kSetMode = 0x40084307UL;   // PWM_GPIO_SET_MODE
+constexpr unsigned long kEnable = 0x40044306UL;    // PWM_GPIO_ENABLE
+
+struct IoctlStub {
+    std::mutex m;
+    std::condition_variable cv;
+    std::string path;                  // stub device file; empty = inactive
+    std::vector<std::int32_t> levels;  // raw level of each SET_LEVEL, in order
+    int off_writes = 0;                // raw level 1 == logical OFF
+};
+
+IoctlStub& ioctl_stub() {
+    static IoctlStub s;
+    return s;
+}
+
+bool fd_is_stub(int fd) {
+    auto& st = ioctl_stub();
+    std::lock_guard<std::mutex> lock(st.m);
+    if (st.path.empty()) {
+        return false;
+    }
+    char buf[256];
+    const std::string link = "/proc/self/fd/" + std::to_string(fd);
+    const ssize_t n = ::readlink(link.c_str(), buf, sizeof(buf) - 1);
+    return n > 0 && st.path == std::string(buf, static_cast<std::size_t>(n));
+}
+
+}  // namespace
+
+extern "C" int ioctl(int fd, unsigned long request, ...) {
+    va_list ap;
+    va_start(ap, request);
+    void* arg = va_arg(ap, void*);
+    va_end(ap);
+    if ((request == kSetLevel || request == kSetMode || request == kEnable) && fd_is_stub(fd)) {
+        if (request == kSetLevel) {
+            const auto level = static_cast<const std::int32_t*>(arg)[1];
+            auto& st = ioctl_stub();
+            std::lock_guard<std::mutex> lock(st.m);
+            st.levels.push_back(level);
+            if (level == 1) {
+                ++st.off_writes;
+            }
+            st.cv.notify_all();
+        }
+        return 0;
+    }
+    using Fn = int (*)(int, unsigned long, void*);
+    static const auto real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "ioctl"));
+    if (real == nullptr) {
+        errno = ENOSYS;
+        return -1;
+    }
+    return real(fd, request, arg);
+}
 
 namespace {
 
@@ -226,4 +303,56 @@ TEST_CASE("ZWO ASIAIR Plus Switch Driver - Constructor rejects invalid configs",
     require_alpaca_error(
         [&]() { alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, huge_freq); },
         alpacacore::AlpacaError::InvalidValue);
+}
+
+// A PWM worker stops wherever it is in the cycle; close() must leave the port at
+// the steady level of its duty. Raw SET_LEVEL polarity is inverted: 0 = ON.
+TEST_CASE("ZWO ASIAIR Plus Switch Driver - close settles a partial-duty PWM port ON",
+          "[zwo][switch][asiair-plus][unit]") {
+    char tmpl[] = "/tmp/asiair-plus-stub-XXXXXX";
+    const int tfd = ::mkstemp(tmpl);
+    REQUIRE(tfd >= 0);
+    ::close(tfd);
+    auto& st = ioctl_stub();
+    // Clear the stub and remove the temp file even when a REQUIRE below throws.
+    struct Cleanup {
+        const char* path;
+        IoctlStub& stub;
+        ~Cleanup() {
+            {
+                std::lock_guard<std::mutex> lock(stub.m);
+                stub.path.clear();
+            }
+            ::unlink(path);
+        }
+    } cleanup{tmpl, st};
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        st.path = tmpl;
+        st.levels.clear();
+        st.off_writes = 0;
+    }
+
+    auto cfg = alpacacore::vendor::zwo::default_asiair_plus_rk3568_config();
+    cfg.device_path = tmpl;
+    cfg.ports[3].pwm_enabled = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_asiair_plus_switch(0, cfg);
+    driver->set_connected(true);
+    driver->set_switch_value(3, 50.0);
+
+    // Close right after an OFF write: the worker is in the off half of its
+    // cycle and exits at the top of the loop without another write.
+    {
+        std::unique_lock<std::mutex> lock(st.m);
+        REQUIRE(st.cv.wait_for(lock, std::chrono::seconds(5), [&] { return st.off_writes >= 1; }));
+    }
+    driver->set_connected(false);
+
+    std::vector<std::int32_t> levels;
+    {
+        std::lock_guard<std::mutex> lock(st.m);
+        levels = st.levels;
+    }
+    REQUIRE_FALSE(levels.empty());
+    CHECK(levels.back() == 0);  // duty 50 settles logically ON (raw 0)
 }

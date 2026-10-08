@@ -41,9 +41,10 @@ struct AsiairPlusPortConfig {
 // the kernel module's master-enable semantics are non-obvious and any
 // init-time write also collides with whatever state the previous client
 // (or stock ZWO daemon) left behind. The accepted policy is therefore:
-// open() observes nothing, writes nothing; close() leaves each port in
-// its last-set state — same disconnect policy as the Pi 4 ASIAIR Pro
-// driver, but with a strict read-only connect contract on top.
+// open() observes nothing, writes nothing; close() leaves each boolean
+// port in its last-set state and sets each PWM port to the steady level of
+// its duty (on above 0, off at 0) — same disconnect policy as the Pi 4
+// ASIAIR Pro driver, but with a strict read-only connect contract on top.
 class AsiairPlusProtocolWrapper {
 public:
     AsiairPlusProtocolWrapper(std::string device_path,
