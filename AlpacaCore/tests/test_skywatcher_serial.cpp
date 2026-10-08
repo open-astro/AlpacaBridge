@@ -759,12 +759,14 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     require_driver_error([&] { driver->get_right_ascension(); }, "communications compromised");
     require_driver_error([&] { driver->get_declination(); }, "communications compromised");
     CHECK(driver->get_connected());  // DriverException, not NotConnected
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
 
     board.set_muted(false);
     // Recovery is automatic: no reconnect, no client action.
     const double ra_after = driver->get_right_ascension();
     CHECK(std::abs(ra_after - ra_before) < 0.01);
     CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 

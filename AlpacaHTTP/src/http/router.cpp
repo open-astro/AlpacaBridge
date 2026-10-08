@@ -2501,6 +2501,15 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
                 } catch (const std::exception& e) {
                     util::log_warning("Connected query failed for " + cap.name + ": " + e.what());
                 }
+                // LinkFault: the latched link-health text of a driver that keeps
+                // one. Connected stays true while it stands. Only when non-empty.
+                try {
+                    if (auto link_fault = driver->get_link_fault(); !link_fault.empty()) {
+                        device["LinkFault"] = std::move(link_fault);
+                    }
+                } catch (const std::exception& e) {
+                    util::log_warning("LinkFault query failed for " + cap.name + ": " + e.what());
+                }
                 try {
                     if (auto firmware = driver->get_device_firmware(); firmware.has_value()) {
                         device["Firmware"] = *firmware;

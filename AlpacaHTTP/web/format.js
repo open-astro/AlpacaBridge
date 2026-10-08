@@ -441,13 +441,16 @@ function normalizeAlignmentMode(value) {
 }
 
 // Status dot for a configureddevices row: green = driver loaded and Connected,
-// yellow = loaded, not connected, red = LoadError, LastConnectError, or
-// Connected missing/non-boolean (unknown). The red text joins both errors.
+// yellow = loaded, not connected, red = LoadError, LastConnectError, a
+// LinkFault on a connected device, or Connected missing/non-boolean (unknown).
+// Green means a client is connected AND the device still replies, so a latched
+// LinkFault turns a Connected device red. The red text joins every reason.
 function deviceStatus(device) {
     const d = device || {};
     const reasons = [];
     if (d.LoadError === true) reasons.push('Driver failed to load');
     if (d.LastConnectError) reasons.push(String(d.LastConnectError));
+    if (d.LinkFault) reasons.push('Link fault: ' + String(d.LinkFault));
     if (reasons.length > 0) return { state: 'error', text: 'Error: ' + reasons.join('; ') };
     if (d.Connected === true) return { state: 'connected', text: 'Connected' };
     if (d.Connected === false) return { state: 'idle', text: 'Not connected' };

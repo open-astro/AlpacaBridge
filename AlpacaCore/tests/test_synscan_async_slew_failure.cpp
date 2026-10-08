@@ -424,6 +424,7 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
     }
     CHECK(driver->get_connected());
     CHECK(last_error.find("communications compromised") != std::string::npos);
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
 
     // The faulted cache is not served for Alt/Az either; a good request clears the latch.
     try {
@@ -434,6 +435,7 @@ TEST_CASE("SynScan position - stale cache faults after repeated failed polls and
     }
     st->mute.store(false);
     CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+    CHECK(driver->get_link_fault().empty());
 
     st->mute.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the recovered position cache

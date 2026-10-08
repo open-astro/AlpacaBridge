@@ -428,6 +428,7 @@ TEST_CASE("Celestron position - stale cache faults after repeated failed polls a
     }
     CHECK(driver->get_connected());
     CHECK(last_error.find("communications compromised") != std::string::npos);
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
 
     try {
         (void)driver->get_altitude();
@@ -437,6 +438,7 @@ TEST_CASE("Celestron position - stale cache faults after repeated failed polls a
     }
     st->mute.store(false);
     CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+    CHECK(driver->get_link_fault().empty());
 
     st->mute.store(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(2100));  // expire the recovered position cache

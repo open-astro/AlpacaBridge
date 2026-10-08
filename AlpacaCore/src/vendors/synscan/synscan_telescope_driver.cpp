@@ -287,6 +287,11 @@ public:
     // every new driver invalidates it silently (open-astro#381).
     bool get_connected() const override { return connected_.load(); }
 
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return position_link_health_.fault();
+    }
+
     void connect() override {
         start_connection_task(true);
     }

@@ -544,7 +544,7 @@ async function loadDevices() {
             return `
             <div class="device-card collapsed${hasLoadError ? ' device-error' : ''}">
                 <div class="device-card-header">
-                    <h3>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}<span class="status-dot status-${status.state}" role="img" data-device-type="${escapeHtml(device.DeviceType)}" data-device-number="${escapeHtml(String(device.DeviceNumber))}" title="${escapeHtml(status.text)}" aria-label="${escapeHtml(status.text)}"></span></h3>
+                    <h3><span class="status-dot status-${status.state}" role="img" data-device-type="${escapeHtml(device.DeviceType)}" data-device-number="${escapeHtml(String(device.DeviceNumber))}" title="${escapeHtml(status.text)}" aria-label="${escapeHtml(status.text)}"></span>${hasLoadError ? '&#x26a0; ' : ''}${escapeHtml(deviceName)}</h3>
                     <button class="device-toggle" type="button" aria-expanded="false" data-device-index="${index}">
                         <span class="device-toggle-icon" aria-hidden="true"></span>
                         <span class="device-toggle-label">Details</span>

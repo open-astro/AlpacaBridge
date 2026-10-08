@@ -325,4 +325,8 @@ test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () 
     const both = deviceStatus({ LoadError: true, LastConnectError: 'x' });
     assert.strictEqual(both.state, 'error');
     assert.match(both.text, /failed to load.*x/);
+    const faulted = deviceStatus({ Connected: true, LinkFault: 'no status frame for 12 s' });
+    assert.strictEqual(faulted.state, 'error');
+    assert.match(faulted.text, /Link fault: no status frame/);
+    assert.strictEqual(deviceStatus({ Connected: false, LastConnectError: '' }).state, 'idle');
 });

@@ -229,6 +229,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
     CHECK(driver->get_cover_state() == CoverState::Unknown);
     CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().find("no status frame") != std::string::npos);  // surfaced to the management listing
     CHECK_FALSE(driver->get_cover_moving());
     // The panel is unreachable: its commanded state is no longer known to hold.
     CHECK(driver->get_calibrator_state() == CalibratorState::Unknown);
@@ -245,5 +246,6 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
                            std::chrono::milliseconds(3000)));
     CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
     CHECK(driver->get_brightness() == 100);
+    CHECK(driver->get_link_fault().empty());
     CHECK_NOTHROW(driver->set_connected(false));
 }

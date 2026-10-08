@@ -236,6 +236,11 @@ public:
         return connected_;
     }
 
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return position_link_health_.fault();
+    }
+
     void connect() override {
         start_connection_task(true);
     }

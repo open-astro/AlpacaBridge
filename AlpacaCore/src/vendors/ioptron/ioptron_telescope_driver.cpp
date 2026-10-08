@@ -183,6 +183,11 @@ public:
         return connected_;
     }
 
+    std::string get_link_fault() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_ && device_faulted_ ? last_device_error_ : std::string{};
+    }
+
     // Base always spawns (the old spawn-skip `if (connect == get_connected())`
     // is gone — it masked the no-op-connect flag-consumption bug, PR #115
     // round 4). A connect() on an already-connected mount costs one short
