@@ -250,6 +250,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
     CHECK(value_read_throws());
     CHECK(driver->get_connected());  // the client decides whether to reconnect
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_switch_value(14); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { (void)driver->get_switch(7); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_switch(7, false); }, alpacacore::AlpacaError::DriverException);
@@ -267,6 +268,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     CHECK(wait_until_box([&] { return !value_read_throws(); }, std::chrono::milliseconds(3000)));
     CHECK(driver->get_switch_value(14) == 13.1);
     CHECK(driver->get_connected());
+    CHECK(driver->get_link_fault().empty());
 
     // A dead fd (EIO) is silence too, and the reason names the read error.
     box.sever_link();

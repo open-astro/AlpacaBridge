@@ -256,6 +256,7 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
     REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(1)));
     CHECK(position_throws());
     CHECK(driver->get_connected());
+    CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
     require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
     require_alpaca_error([&]() { driver->set_position(5); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(wheel.received("6"));  // no move went on the wire while faulted
@@ -265,5 +266,6 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
     wheel.set_muted(false);
     CHECK(wait_until_sfw([&] { return !position_throws(); }, std::chrono::milliseconds(3000)));
     CHECK(driver->get_position() == 2);
+    CHECK(driver->get_link_fault().empty());
     CHECK_NOTHROW(driver->set_connected(false));
 }
