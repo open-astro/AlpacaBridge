@@ -201,6 +201,10 @@ h2 {
 }
 
 .device-card h3 {
+    /* Flex so the status dot centers on the name's line box instead of
+       sitting on the text baseline. */
+    display: flex;
+    align-items: center;
     color: var(--text);
     font-size: 14px;
     font-weight: 600;
@@ -216,7 +220,6 @@ h2 {
     margin-right: 0.5em;
     border-radius: 50%;
     background: var(--status-dot-color);
-    vertical-align: middle;
     flex: none;
 }
 
