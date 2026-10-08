@@ -15,6 +15,7 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -91,6 +92,7 @@ enum class QHYWorker : std::uint8_t { Telemetry, TempControl };
 using QHYWorkerStartHook = std::function<void(QHYWorker)>;
 
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
-                                                QHYWorkerStartHook on_worker_start);
+                                                QHYWorkerStartHook on_worker_start,
+                                                std::chrono::seconds watchdog_margin = std::chrono::seconds(60));
 
 } // namespace alpacacore::vendor::qhy
