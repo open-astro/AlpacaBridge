@@ -360,8 +360,10 @@ public:
         return connected_ && protocol_->link_alive();
     }
 
-    // Reads only state published outside mutex_, so the management listing
-    // never waits on a connect. Three faults, most specific first: the
+    // Takes no mutex_, so the management listing never waits on a connect.
+    // Not free of side effects: link_alive() closes the stale fd once the
+    // adapter is gone (as get_connected() does), so a listing poll can be the
+    // call that tears down a pulled link. Three faults, most specific first: the
     // exchange latch, a board that restarted under a recovered link (every
     // read fails until a reconnect), and a link lost while a client still
     // holds the session (a pulled adapter, which drops Connected).

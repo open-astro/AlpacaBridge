@@ -423,7 +423,9 @@ TEST_CASE("SynScan - get_link_fault does not wait on a connect holding the drive
     reader.join();
     const auto ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-    CHECK(ms < 200);
+    // Well under the multi-second handshake timeout a lock wait would cost,
+    // with headroom for the sanitizer builds on a loaded runner.
+    CHECK(ms < 1000);
     CHECK(fault.empty());
     REQUIRE(wait_until([&] { return !driver->get_connecting(); }, 30000));
 }
