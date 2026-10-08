@@ -66,6 +66,10 @@ struct RotatorState {
     double backlash = 0.0;          // on-device backlash compensation (degrees, 0-3)
     bool reverse = false;           // hardware reverse flag
     bool moving = false;            // a move is in flight
+    // The last move's completion report never arrived inside the budget (the
+    // classic cause is missing DC power). mechanical_angle then stays at the
+    // move start. Cleared by the next move, Halt, Sync or reconnect.
+    bool completion_missing = false;
 };
 
 /**
@@ -139,6 +143,9 @@ public:
 
     /** @brief Halt an in-flight move. Command "Stop". No-op when idle. */
     void halt();
+
+    /// Clear the completion_missing fault (the driver's Sync does this).
+    void clear_completion_missing();
 
     /** @brief Set hardware direction reversal. Commands "1700001"/"1700000". */
     void set_reverse(bool reverse);

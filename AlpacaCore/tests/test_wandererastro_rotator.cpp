@@ -14,10 +14,18 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 #include <alpacacore/version.h>
+#include <poll.h>
+#include <unistd.h>
 
+#include <atomic>
+#include <chrono>
+#include <cmath>
 #include <functional>
+#include <string>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_pty_write.h"
 
 namespace {
 
@@ -29,6 +37,50 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
         REQUIRE(ex.error_code() == expected_code);
     }
 }
+
+// Plays a WandererRotator Mini with no DC power: it answers the "1500001"
+// handshake and then stays silent for every move (MCU alive, motor dead).
+class SilentMotorRotator {
+public:
+    SilentMotorRotator() : pty_("SilentMotorRotator") {
+        th_ = std::thread([this] { run(); });
+    }
+    ~SilentMotorRotator() {
+        stop_ = true;
+        th_.join();
+    }
+    std::string slave_path() const { return pty_.slave_path(); }
+
+private:
+    void run() {
+        std::string acc;
+        while (!stop_) {
+            pollfd p{pty_.master_fd(), POLLIN, 0};
+            if (::poll(&p, 1, 20) <= 0) {
+                continue;
+            }
+            char buf[64];
+            const ssize_t n = ::read(pty_.master_fd(), buf, sizeof(buf));
+            for (ssize_t i = 0; i < n; ++i) {
+                acc += buf[i];
+            }
+            while (acc.size() >= 7) {
+                const std::string cmd = acc.substr(0, 7);
+                acc.erase(0, 7);
+                if (!acc.empty() && acc[0] == '\n') {
+                    acc.erase(0, 1);
+                }
+                if (cmd == "1500001") {
+                    const std::string reply = "WandererRotatorMiniA20250101A0A0A0A";
+                    alpacacore::test::pty_write_bounded(pty_.master_fd(), reply.data(), reply.size(), stop_);
+                }  // any move command: no reply
+            }
+        }
+    }
+    alpacacore::test::PtyPair pty_;
+    std::thread th_;
+    std::atomic<bool> stop_{false};
+};
 
 }  // namespace
 
@@ -153,4 +205,44 @@ TEST_CASE("WandererAstro Rotator Protocol Wrapper - Disconnected behavior", "[wa
     config.serial_timeout_s = 1;
     require_alpaca_error([&]() { wrapper.connect(config); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(wrapper.is_connected() == false);
+}
+
+// Falsified by: wandererastro_rotator_protocol_wrapper.cpp no-report branch
+// setting mechanical_angle = move_start_angle_ + move_delta_ and clearing
+// completion_missing (the old behaviour) makes Position read the target.
+TEST_CASE("WandererAstro Rotator Driver - No completion report keeps Position and faults IsMoving",
+          "[wandererastro][rotator][unit]") {
+    SilentMotorRotator fake;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const double start = driver->get_position();
+
+    // One step: the monitor budget is the 5 s floor, the shortest the driver allows.
+    driver->move_absolute(0.001);
+    REQUIRE(driver->get_is_moving());
+    // Poll rather than sleep: the monitor exits between 5 s and about 6 s
+    // depending on read-window rounding, so wait up to 10 s for the fault.
+    bool faulted = false;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        try {
+            (void)driver->get_is_moving();
+        } catch (const alpacacore::AlpacaException& e) {
+            REQUIRE(e.error_code() == alpacacore::AlpacaError::DriverException);
+            faulted = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    // No report: IsMoving names the fault instead of claiming an arrival.
+    REQUIRE(faulted);
+    require_alpaca_error([&]() { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::DriverException);
+    // Position stays at the last confirmed angle (the move start).
+    CHECK(std::abs(driver->get_position() - start) < 1e-9);
+
+    // Halt acknowledges the fault.
+    driver->halt();
+    CHECK_FALSE(driver->get_is_moving());
+    driver->set_connected(false);
 }
