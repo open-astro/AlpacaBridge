@@ -328,18 +328,20 @@ public:
     void park() override {}
     void pulse_guide(int, int) override {}
     void set_park() override {}
-    // open-astro#547 review finding: a synchronous SlewToCoordinates can
+    // open-astro#547 review finding: a slow SlewToCoordinatesAsync initiator can
     // block the HTTP worker for as long as the goto takes. slew_sleep_ms
     // lets a test hold this call in flight past the watchdog interval, to
     // prove the client's own request never gets aborted out from under it.
     std::atomic<int> slew_sleep_ms{0};
-    void slew_to_coordinates(double, double) override {
+    // The router refuses the synchronous forms (#775), so the stub holds the
+    // async initiator in flight instead; the guard under test is the same.
+    void slew_to_coordinates(double, double) override {}
+    void slew_to_coordinates_async(double, double) override {
         const int ms = slew_sleep_ms.load();
         if (ms > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         }
     }
-    void slew_to_coordinates_async(double, double) override {}
     void slew_to_target() override {}
     void slew_to_target_async() override {}
     void sync_to_coordinates(double, double) override {}
@@ -1355,7 +1357,7 @@ int main() {
 
     // --- Watchdog must not trip on the client's OWN in-flight synchronous
     // request (open-astro#547 review finding) -------------------------------
-    // A synchronous SlewToCoordinates blocks the HTTP worker for the length
+    // A slow SlewToCoordinatesAsync initiator blocks the HTTP worker for the length
     // of the goto. note_client_activity() only stamps once, at intake, so
     // without begin_client_request()/end_client_request() bracketing the
     // dispatch, the timer thread finds the interval elapsed while the
@@ -1384,14 +1386,14 @@ int main() {
                 }
                 std::string carry;
                 send_all(fd,
-                         "PUT /api/v1/telescope/9548/slewtocoordinates?RightAscension=5&Declination=10"
+                         "PUT /api/v1/telescope/9548/slewtocoordinatesasync?RightAscension=5&Declination=10"
                          " HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n");
                 const std::string resp = read_one_response(fd, carry);
                 EXPECT(resp.rfind("HTTP/1.1 200 ", 0) == 0);
                 ::close(fd);
             });
 
-            // The request is now blocking inside slew_to_coordinates() for
+            // The request is now blocking inside slew_to_coordinates_async() for
             // 3 s. Give the 1 s-interval timer thread two full ticks to find
             // it "silent" if the in-flight guard is missing.
             std::this_thread::sleep_for(std::chrono::milliseconds(2200));

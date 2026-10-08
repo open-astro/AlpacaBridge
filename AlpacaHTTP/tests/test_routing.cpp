@@ -433,10 +433,10 @@ public:
     bool get_can_set_pier_side() const override { return false; }
     bool get_can_set_right_ascension_rate() const override { return false; }
     bool get_can_set_tracking() const override { return false; }
-    bool get_can_slew_alt_az() const override { return false; }
+    bool get_can_slew_alt_az() const override { return can_slew_flags; }
     bool get_can_slew_alt_az_async() const override { return false; }
     bool get_can_sync_alt_az() const override { return false; }
-    bool get_can_slew() const override { return false; }
+    bool get_can_slew() const override { return can_slew_flags; }
     bool get_can_slew_async() const override { return false; }
     bool get_can_sync() const override { return false; }
     bool get_can_unpark() const override { return false; }
@@ -471,9 +471,9 @@ public:
     void set_site_longitude(double) override {}
     bool get_slewing() const override { return false; }
     double get_target_declination() const override { return 0.0; }
-    void set_target_declination(double) override {}
+    void set_target_declination(double) override { ++sync_slew_calls; }
     double get_target_right_ascension() const override { return 0.0; }
-    void set_target_right_ascension(double) override {}
+    void set_target_right_ascension(double) override { ++sync_slew_calls; }
     int get_tracking_rate() const override { return 0; }
     void set_tracking_rate(int) override {}
     std::vector<int> get_tracking_rates() const override { return {}; }
@@ -481,9 +481,13 @@ public:
     void park() override {}
     void pulse_guide(int, int) override {}
     void set_park() override {}
-    void slew_to_coordinates(double, double) override {}
+    // #775: the driver says it can slew synchronously; the router must not
+    // let a client reach these three.
+    bool can_slew_flags = false;
+    int sync_slew_calls = 0;
+    void slew_to_coordinates(double, double) override { ++sync_slew_calls; }
     void slew_to_coordinates_async(double, double) override {}
-    void slew_to_target() override {}
+    void slew_to_target() override { ++sync_slew_calls; }
     void slew_to_target_async() override {}
     void sync_to_coordinates(double, double) override {}
     void sync_to_target() override {}
@@ -492,7 +496,7 @@ public:
     void move_axis(int, double) override {}
     std::pair<double, double> get_axis_rate_range(int) const override { return {0.0, 0.0}; }
     void abort_slew() override {}
-    void slew_to_alt_az(double, double) override {}
+    void slew_to_alt_az(double, double) override { ++sync_slew_calls; }
     void slew_to_alt_az_async(double, double) override {}
     void sync_to_alt_az(double, double) override {}
 
@@ -1075,6 +1079,39 @@ int main() {
         EXPECT(resp.status_code() == 400);
         const auto json = nlohmann::json::parse(resp.body());
         EXPECT(json.value("ErrorNumber", 0) != 0);
+    }
+
+    {
+        // case: telescope synchronous slews are MethodNotImplemented (#775)
+        // ASCOM's slew FAQ: a synchronous slew blocks past the client's
+        // timeout, so CanSlew and CanSlewAltAz read false for every telescope
+        // and the three synchronous slew calls raise 0x400 before any
+        // parameter parse, target write or driver call. Async forms stay.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9775);
+        scope->can_slew_flags = true;
+        EXPECT(registry.register_device(scope));
+        const std::string base = "/api/v1/telescope/9775";
+        for (const char* getter : {"/canslew", "/canslewaltaz"}) {
+            const auto resp = route_request(router, "GET", base + getter);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+            EXPECT(json.contains("Value") && json["Value"].is_boolean() && json["Value"].get<bool>() == false);
+        }
+        for (const char* path : {"/slewtocoordinates?RightAscension=5&Declination=10", "/slewtotarget",
+                                 "/slewtoaltaz?Altitude=45&Azimuth=90", "/slewtocoordinates"}) {
+            const auto resp = route_request(router, "PUT", base + path);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x400);
+        }
+        EXPECT(scope->sync_slew_calls == 0);
+        for (const char* path : {"/slewtocoordinatesasync?RightAscension=5&Declination=10", "/slewtotargetasync",
+                                 "/slewtoaltazasync?Altitude=45&Azimuth=90"}) {
+            const auto resp = route_request(router, "PUT", base + path);
+            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", -1) == 0);
+        }
+        registry.unregister_device(alpacacore::DeviceType::Telescope, 9775);
     }
 
     {
