@@ -6947,7 +6947,8 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
 // config without the key when its value is not one of the three known strings,
 // so a wrong-typed or unknown value drops like the deleted arm's did instead
 // of failing the typed read. Other configs come back unchanged. Keyed on the
-// field name, not the vendor, so SynScan reuses it: do not add a second copy.
+// field name, not the vendor, so SynScan picks it up when it moves to the
+// catalog: do not add a second copy.
 nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
                                               std::span<const alpacacore::catalog::FieldRef> fields) {
     const bool declared = std::any_of(fields.begin(), fields.end(), [](const alpacacore::catalog::FieldRef& f) {
