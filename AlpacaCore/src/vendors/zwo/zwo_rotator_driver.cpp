@@ -32,8 +32,10 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOCAARotatorDriver(int device_number, std::optional<int> rotator_id, std::optional<int> rotator_index)
+    ZWOCAARotatorDriver(int device_number, std::optional<int> rotator_id, std::optional<int> rotator_index,
+                        ZWOCAASDK& sdk)
         : AsyncConnectable("ZWO"),
+          sdk_(sdk),
           device_number_(device_number),
           rotator_id_(rotator_id),
           rotator_index_(rotator_index),
@@ -95,7 +97,7 @@ public:
     // Vendor SDK (library) version, surfaced in the web UI only (never in
     // DriverInfo). CAAGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = ZWOCAASDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         if (version.empty() || version == "unknown") {
             return std::nullopt;
         }
@@ -134,7 +136,7 @@ public:
             return;
         }
 
-        auto& sdk = ZWOCAASDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             int resolved_id = resolve_rotator_id_locked();
             sdk.open_rotator(resolved_id);
@@ -213,26 +215,26 @@ public:
 
     bool get_reverse() const override {
         ensure_connected();
-        return ZWOCAASDKWrapper::instance().get_reverse(rotator_id_value());
+        return sdk_.get_reverse(rotator_id_value());
     }
 
     void set_reverse(bool reverse) override {
         ensure_connected();
-        ZWOCAASDKWrapper::instance().set_reverse(rotator_id_value(), reverse);
+        sdk_.set_reverse(rotator_id_value(), reverse);
     }
 
     bool get_is_moving() const override {
         ensure_connected();
-        return ZWOCAASDKWrapper::instance().get_motion_status(rotator_id_value()).is_moving;
+        return sdk_.get_motion_status(rotator_id_value()).is_moving;
     }
 
     double get_mechanical_position() const override {
         ensure_connected();
-        double degree = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
+        double degree = sdk_.get_degree(rotator_id_value());
         // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
         // enabled, the hardware inverts the angle: logical = 360 - physical. We must
         // un-apply that inversion to return the true mechanical (physical) position.
-        if (ZWOCAASDKWrapper::instance().get_reverse(rotator_id_value())) {
+        if (sdk_.get_reverse(rotator_id_value())) {
             return normalize_angle(360.0 - degree);
         }
         return normalize_angle(degree);
@@ -240,7 +242,7 @@ public:
 
     double get_position() const override {
         ensure_connected();
-        double mechanical = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
+        double mechanical = sdk_.get_degree(rotator_id_value());
         // sync_offset_ is mutex_-guarded (written by sync()/connect); an
         // unlocked read here is torn against a concurrent sync (M12).
         std::lock_guard<std::mutex> lock(mutex_);
@@ -270,7 +272,7 @@ public:
 
     void halt() override {
         ensure_connected();
-        ZWOCAASDKWrapper::instance().stop(rotator_id_value());
+        sdk_.stop(rotator_id_value());
     }
 
     void move(double position) override {
@@ -279,7 +281,7 @@ public:
         double current = get_position();
         double target = normalize_angle(current + position);
         double mechanical_target = to_mechanical_angle(target);
-        ZWOCAASDKWrapper::instance().move_absolute(rotator_id_value(), mechanical_target);
+        sdk_.move_absolute(rotator_id_value(), mechanical_target);
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = target;
         has_target_position_ = true;
@@ -290,7 +292,7 @@ public:
         ensure_connected();
         double target = normalize_angle(position);
         double mechanical_target = to_mechanical_angle(target);
-        ZWOCAASDKWrapper::instance().move_absolute(rotator_id_value(), mechanical_target);
+        sdk_.move_absolute(rotator_id_value(), mechanical_target);
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = target;
         has_target_position_ = true;
@@ -300,10 +302,10 @@ public:
         validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
         double mechanical_target = normalize_angle(position);
-        ZWOCAASDKWrapper::instance().move_mechanical(rotator_id_value(), mechanical_target);
+        sdk_.move_mechanical(rotator_id_value(), mechanical_target);
         // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
         // enabled, the logical angle for a given mechanical angle is 360 - mechanical.
-        bool is_reversed = ZWOCAASDKWrapper::instance().get_reverse(rotator_id_value());
+        bool is_reversed = sdk_.get_reverse(rotator_id_value());
         std::lock_guard<std::mutex> lock(mutex_);
         double logical = is_reversed ? normalize_angle(360.0 - mechanical_target) : mechanical_target;
         target_position_ = normalize_angle(logical + sync_offset_);
@@ -313,7 +315,7 @@ public:
     void sync(double position) override {
         validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
         ensure_connected();
-        double mechanical = ZWOCAASDKWrapper::instance().get_degree(rotator_id_value());
+        double mechanical = sdk_.get_degree(rotator_id_value());
         double target = normalize_angle(position);
         // Write sync_offset_ under the same mutex_ that every reader takes —
         // the pre-lock write raced get_position()/to_mechanical_angle (M12).
@@ -345,7 +347,7 @@ private:
 
     int resolve_rotator_id_locked() {
         if (rotator_index_.has_value()) {
-            auto rotators = ZWOCAASDKWrapper::instance().enumerate_rotators();
+            auto rotators = sdk_.enumerate_rotators();
             if (rotators.empty()) {
                 ALPACA_LOG_WARN("ZWO", "No ZWO CAA rotators detected by SDK");
                 throw AlpacaException("No ZWO CAA rotators detected", AlpacaError::NotConnected);
@@ -372,7 +374,7 @@ private:
 
     void refresh_rotator_info_locked(int rotator_id) {
         ZWOCAARotatorInfo info;
-        if (ZWOCAASDKWrapper::instance().get_rotator_info_by_id(rotator_id, info)) {
+        if (sdk_.get_rotator_info_by_id(rotator_id, info)) {
             rotator_info_ = info;
             rotator_info_valid_ = true;
             if (info.max_degree > 0.0) {
@@ -386,7 +388,7 @@ private:
     void refresh_limits_locked(int rotator_id) {
         min_degree_ = 0.0;
         try {
-            double max_degree = ZWOCAASDKWrapper::instance().get_max_degree(rotator_id);
+            double max_degree = sdk_.get_max_degree(rotator_id);
             if (max_degree > 0.0) {
                 max_degree_ = max_degree;
             }
@@ -429,6 +431,7 @@ private:
         return rotator_id_.value();
     }
 
+    ZWOCAASDK& sdk_;
     int device_number_;
     std::optional<int> rotator_id_;
     std::optional<int> rotator_index_;
@@ -445,12 +448,20 @@ private:
     mutable std::mutex mutex_;
 };
 
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk) {
+    return std::make_unique<ZWOCAARotatorDriver>(device_number, rotator_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk) {
+    return std::make_unique<ZWOCAARotatorDriver>(device_number, std::nullopt, rotator_index, sdk);
+}
+
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id) {
-    return std::make_unique<ZWOCAARotatorDriver>(device_number, rotator_id, std::nullopt);
+    return create_zwo_caa_rotator(device_number, rotator_id, ZWOCAASDKWrapper::instance());
 }
 
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index) {
-    return std::make_unique<ZWOCAARotatorDriver>(device_number, std::nullopt, rotator_index);
+    return create_zwo_caa_rotator_by_index(device_number, rotator_index, ZWOCAASDKWrapper::instance());
 }
 
 } // namespace alpacacore::vendor::zwo

@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/rotator_driver.h>
+#include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::zwo {
@@ -34,5 +36,19 @@ std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rot
  * @return Unique pointer to rotator driver
  */
 std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index);
+
+/**
+ * @brief Test seam: as create_zwo_caa_rotator(), over an injected CAA SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator(int device_number, int rotator_id, ZWOCAASDK& sdk);
+
+/**
+ * @brief Test seam: as create_zwo_caa_rotator_by_index(), over an injected CAA SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<RotatorDriver> create_zwo_caa_rotator_by_index(int device_number, int rotator_index, ZWOCAASDK& sdk);
 
 } // namespace alpacacore::vendor::zwo
