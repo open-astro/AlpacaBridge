@@ -126,7 +126,12 @@ datagrams before each send so replies cannot get off-by-one.
   classic Synta boards (EQ6, HEQ5, AZ-EQ6, EQ5 Pro) are all still unmeasured (#579).
   The Wave 150i and the EQ-AL55i Pro south of the equator follow from geometry and have
   not been measured; a board measured only in the north constrains nothing there, because
-  `s * eps = +1` in the north is also the unmeasured default. Pier side is
+  `s * eps = +1` in the north is also the unmeasured default. A per-device
+  `decAxisSense` setting (`auto` default, `normal` = eps +1, `reversed` = eps -1;
+  open-astro#582) overrides the table on connect and when `:e` fails; it sets eps,
+  never k, and the connect log names the source (measured table / user override /
+  unmeasured default / identify failed). The device name carries
+  `dec axis sense: normal|reversed` when set. Pier side is
   `k * branch > 0` -> pierEast, the same reader, since the goto picks the side from the
   sky hour angle; the Dec rate and guide signs read `branch` alone, because dec does not
   involve `eps`.
