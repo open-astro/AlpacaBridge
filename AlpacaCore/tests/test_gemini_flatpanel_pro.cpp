@@ -371,3 +371,19 @@ TEST_CASE("Gemini Flat Panel Pro Driver - A CalibratorOff overlapping an inline 
     CHECK(panel.index_of(">D#") > panel.index_of(">B200#"));
     CHECK(panel.index_of(">B0#") == panel.index_of(">D#") + 1);
 }
+
+TEST_CASE("Gemini flat panel wrapper - a late reply to the previous command is discarded",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    config.model = alpacacore::vendor::gemini::FlatPanelModel::Pro;
+    wrapper.connect(config);
+    wrapper.set_brightness(77);
+
+    // A reply that missed its command's read window is still in the tty buffer.
+    panel.push_unsolicited("*J5#");
+    CHECK(wrapper.get_brightness() == 77);
+    wrapper.disconnect();
+}

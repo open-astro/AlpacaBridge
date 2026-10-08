@@ -840,8 +840,19 @@ private:
         return response;
     }
 
+    // Drop input already queued: a reply that landed after its own command's
+    // read timed out would otherwise be read as the next command's reply.
+    void discard_stale_input_locked() {
+#ifdef _WIN32
+        PurgeComm(serial_handle_, PURGE_RXCLEAR);
+#else
+        tcflush(serial_fd_, TCIFLUSH);
+#endif
+    }
+
     std::string send_command_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("Gemini", "Flat panel command: " + cmd);
+        discard_stale_input_locked();
         write_data(cmd);
         // The Pro firmware answers >S# in ~27 ms wire-to-wire (measured on a
         // Pi, 18-char reply), and its CoverState must land inside ConformU's
