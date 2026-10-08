@@ -4754,7 +4754,8 @@ int main() {
                 ++seen;
             } else if (number == 9514) {
                 EXPECT(entry["Connected"].get<bool>() == true);
-                EXPECT(entry.contains("LinkFault") && entry["LinkFault"].get<std::string>() == "no status frame for 12 s");
+                EXPECT(entry.contains("LinkFault") &&
+                       entry["LinkFault"].get<std::string>() == "no status frame for 12 s");
                 ++seen;
             } else if (number == 9515) {
                 EXPECT(entry["Connected"].get<bool>() == true);
