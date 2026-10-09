@@ -106,7 +106,7 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 /// table (else the unmeasured default); Normal and Reversed set eps = +1 / -1
 /// on connect, whatever the table says, and also when the board will not
 /// identify itself. It sets eps, never the hemisphere term k = s * eps.
-enum class DecAxisSenseSetting { Auto, Normal, Reversed };
+enum class DecAxisSenseSetting : std::uint8_t { Auto, Normal, Reversed };
 
 // `motion_limits` (open-astro#436): per-device altitude floor and meridian
 // limit, both off by default; see <alpacacore/util/motion_limits.h>.

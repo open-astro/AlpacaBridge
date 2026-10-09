@@ -5275,7 +5275,7 @@ private:
     mutable std::mutex firmware_mutex_;
     std::string model_cache_;  // guarded by firmware_mutex_
     // open-astro#582: where eps came from, shown in get_name(). Guarded by firmware_mutex_.
-    enum class EpsSource { None, Measured, Override, Unmeasured, IdentifyFailed };
+    enum class EpsSource : std::uint8_t { None, Measured, Override, Unmeasured, IdentifyFailed };
     EpsSource eps_source_ = EpsSource::None;
     std::string firmware_cache_;
 
