@@ -158,6 +158,15 @@ where that is too aggressive:
 CTEST_PARALLEL=4 ./run_all_tests.sh
 ```
 
+`run_all_tests.sh` also guards against a shrunken suite. `ctest --no-tests=error` fails only a
+run that finds zero tests, so a vendor target that silently stops configuring would still pass
+with most of its cases gone. After each build the script counts the tests with `ctest -N` and
+fails, naming the configuration, the count found and the floor, when AlpacaCore or AlpacaHTTP
+finds fewer than its floor. The floors sit at the top of `run_all_tests.sh`, keyed by
+`ALPACACORE_ENABLE_ALL_VENDORS` (`OFF` or `ON`), about 10% below the counts at the time they
+were set; any other value has no floor and fails. When tests are removed on purpose, lower the
+floor in the same PR; when the suite grows a lot, raise it so the guard stays tight.
+
 Or manually:
 
 ```sh
