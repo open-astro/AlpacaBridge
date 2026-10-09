@@ -4445,10 +4445,10 @@ int main() {
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         add("synscan", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB5","baudRate":9600,"synscanVersion":"v4","mountIndex":2,"host":"h"})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB5","baudRate":9600,"synscanVersion":"v4","mountIndex":2})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB5","baudRate":9600,"synscanVersion":"v4","mountIndex":2,"host":"h"})");
         add("synscan", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3","portPath":"/dev/x"})",
-            R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3"})");
+            R"({"connectionType":"network","host":"192.168.1.5","tcpPort":11880,"synscanVersion":"v3","portPath":"/dev/x"})");
         add("synscan", "telescope", "Telescope", "auto",
             R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})",
             R"({"connectionType":"auto","synscanVersion":"v4","mountIndex":1})");  // #659
@@ -4688,7 +4688,7 @@ int main() {
         mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true, false});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true, false});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true, true});
@@ -4777,7 +4777,7 @@ int main() {
         // same config from the API and warns (but registers) from a saved one.
         pin("network with empty host (#508 item 4 contrast)", "synscan", "telescope", "Telescope",
             R"({"connectionType":"network","host":""})", "Host IP address is required", "{}", true,
-            R"({"connectionType":"network","host":""})", {"will refuse to connect: Host IP address is required"},
+            R"({"connectionType":"network","host":""})", {"config normalized: Host IP address is required"},
             {"Skipping persisted device"});
 #endif
 
@@ -7000,8 +7000,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY and WeeWX descriptors
-    // plus the "zzz" test descriptor, schema only, so its `available` is false.
+    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY, SynScan and WeeWX
+    // descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7011,7 +7011,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 12);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 13);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build

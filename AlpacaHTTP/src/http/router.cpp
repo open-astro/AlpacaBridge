@@ -66,9 +66,6 @@
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-#include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
@@ -6943,12 +6940,12 @@ std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
     return std::nullopt;
 }
 
-// #860 for a catalog descriptor with an `alignmentMode` field (Celestron): the
+// #860 for a catalog descriptor with an `alignmentMode` field (Celestron,
+// SynScan): the
 // config without the key when its value is not one of the three known strings,
 // so a wrong-typed or unknown value drops like the deleted arm's did instead
 // of failing the typed read. Other configs come back unchanged. Keyed on the
-// field name, not the vendor, so SynScan picks it up when it moves to the
-// catalog: do not add a second copy.
+// field name, not the vendor: do not add a second copy.
 nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
                                               std::span<const alpacacore::catalog::FieldRef> fields) {
     const bool declared = std::any_of(fields.begin(), fields.end(), [](const alpacacore::catalog::FieldRef& f) {
@@ -8642,114 +8639,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "synscan" && device_type_str == "telescope") {
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // Issue #380: an unrecognised connectionType on a persisted config is
-        // normalised to "serial" rather than dropping the device, so it stays
-        // listed and editable in the web UI and its connect fails on the port
-        // path instead of auto-probing and attaching to whatever answers. The
-        // else below still rejects the value when it came from the API.
-        conn_type = normalize_persisted_connection_type(source, conn_type, {"", "auto", "serial", "network"}, vendor,
-                                                        device_type_str, device_number);
-
-        std::string version_value = config_get(config, "synscanVersion", "auto");
-        std::string version_normalized = to_lower_copy(version_value);
-        alpacacore::vendor::synscan::SynScanVersion version = alpacacore::vendor::synscan::SynScanVersion::Auto;
-        if (version_normalized == "v3" || version_normalized == "3") {
-            version = alpacacore::vendor::synscan::SynScanVersion::V3;
-        } else if (version_normalized == "v4" || version_normalized == "4") {
-            version = alpacacore::vendor::synscan::SynScanVersion::V4;
-        }
-        const std::string alignment_mode = known_alignment_mode(config).value_or("auto");
-        alpacacore::vendor::synscan::SynScanAlignmentSetting alignment =
-            alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto;
-        if (alignment_mode == "altaz") {
-            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::AltAz;
-        } else if (alignment_mode == "equatorial") {
-            alignment = alpacacore::vendor::synscan::SynScanAlignmentSetting::Equatorial;
-        }
-
-        std::optional<double> site_latitude;
-        std::optional<double> site_longitude;
-        std::optional<double> site_elevation;
-        std::optional<bool> sync_time_on_connect;
-
-        if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
-            return false;
-        }
-        if (config_has(config, "siteElevation")) {
-            site_elevation = config_get(config, "siteElevation", 0.0);
-        }
-        if (config_has(config, "syncTimeOnConnect")) {
-            sync_time_on_connect = config_get(config, "syncTimeOnConnect", false);
-        }
-
-        std::unique_ptr<alpacacore::TelescopeDriver> telescope;
-
-        if (conn_type == "auto" || conn_type.empty()) {
-            int mount_index = config_get(config, "mountIndex", 0);
-            telescope = alpacacore::vendor::synscan::create_synscan_telescope_auto(
-                device_number, mount_index, version, site_latitude, site_longitude, site_elevation,
-                sync_time_on_connect, alignment);
-        } else {
-            alpacacore::vendor::synscan::ConnectionInfo conn_info;
-
-            if (conn_type == "serial") {
-                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Serial;
-                conn_info.port_path = config_get(config, "portPath", "");
-                conn_info.baud_rate = config_get(config, "baudRate", 9600);
-
-                if (conn_info.port_path.empty() &&
-                    reject_invalid_config(source, "Serial port path is required", vendor, device_type_str,
-                                          device_number, error_message)) {
-                    return false;
-                }
-            } else if (conn_type == "network") {
-                conn_info.type = alpacacore::vendor::synscan::ConnectionType::Network;
-                conn_info.host = config_get(config, "host", "");
-                conn_info.tcp_port = config_get(config, "tcpPort", conn_info.tcp_port);
-
-                if (conn_info.host.empty() && reject_invalid_config(source, "Host IP address is required", vendor,
-                                                                    device_type_str, device_number, error_message)) {
-                    return false;
-                }
-            } else {
-                error_message = "Invalid connection type. Use 'auto', 'serial', or 'network'";
-                return false;
-            }
-
-            conn_info.response_timeout_ms = config_get(config, "responseTimeoutMs", conn_info.response_timeout_ms);
-
-            telescope = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
-                device_number, conn_info, version, site_latitude, site_longitude, site_elevation, sync_time_on_connect,
-                alignment);
-        }
-
-        if (double aperture = config_get(config, "apertureDiameter", 0.0); aperture > 0.0) {
-            telescope->set_aperture_diameter(aperture);
-        }
-        if (double focal = config_get(config, "focalLength", 0.0); focal > 0.0) {
-            telescope->set_focal_length(focal);
-        }
-        if (site_elevation.has_value()) {
-            telescope->set_site_elevation(site_elevation.value());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(telescope)))) {
-            util::log_info("Registered SynScan telescope");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "zwo" && device_type_str == "camera") {
 #ifdef ALPACACORE_ENABLE_ZWO
         int camera_id = config_get(config, "cameraId", -1);
@@ -9869,21 +9758,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
                 copy_if_present("host");
                 copy_if_present("tcpPort");
             }
-        }
-    } else if (vendor == "synscan") {
-        copy_if_present("synscanVersion");
-        if (const auto alignment_mode = known_alignment_mode(config)) {
-            sanitized["alignmentMode"] = *alignment_mode;  // #860; an unknown value drops
-        }
-        copy_if_present("connectionType");
-        copy_if_present("mountIndex");  // same issue-#102 gap as ioptron above
-        std::string connection_type = config_get(config, "connectionType", "");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        } else if (connection_type == "network") {
-            copy_if_present("host");
-            copy_if_present("tcpPort");
         }
     } else if (vendor == "zwo") {
         if (device_type == "telescope") {
