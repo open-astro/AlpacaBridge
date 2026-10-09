@@ -4379,20 +4379,22 @@ int main() {
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
         // touptek camera, focuser and filterwheel had no roundtrip_config() case before #647.
+        // The catalog sanitize keeps the declared fields of each type (ADR 0004): the camera no longer
+        // keeps the focuser keys and the focuser no longer keeps cameraIndex.
         add("touptek", "camera", "Camera", "", R"({"cameraIndex":1,"focuserIndex":5,"focuserId":"z"})",
-            R"({"cameraIndex":1,"focuserIndex":5,"focuserId":"z"})");
+            R"({"cameraIndex":1})");
         add("touptek", "focuser", "Focuser", "", R"({"focuserIndex":2,"focuserId":"AAF-1","cameraIndex":3})",
-            R"({"cameraIndex":3,"focuserIndex":2,"focuserId":"AAF-1"})");
+            R"({"focuserIndex":2,"focuserId":"AAF-1"})");
         add("touptek", "filterwheel", "FilterWheel", "",
             R"({"filterwheelIndex":1,"filterwheelId":"AFW-1","filterNames":["L","R","G","B","Ha"],"cameraIndex":3})",
             R"({"filterwheelIndex":1,"filterwheelId":"AFW-1","filterNames":["L","R","G","B","Ha"]})");
         add("touptek", "switch", "Switch", "thermal", R"({"switchType":"thermal","cameraIndex":2,"gpioChip":"/dev/x"})",
-            R"({"switchType":"thermal","cameraIndex":2})");
+            R"({"switchType":"thermal","cameraIndex":2,"gpioChip":"/dev/x"})");
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
         add("touptek", "switch", "Switch", "stellavita",
             R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"cameraIndex":2,)"
             R"("ports":[{"name":"Flat Panel","pwm":true},{"name":"Camera","pwm":false}]})",
-            R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,)"
+            R"({"switchType":"stellavita","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":100,"cameraIndex":2,)"
             R"("ports":[{"name":"Flat Panel","pwm":true},{"name":"Camera","pwm":false}]})");
 #endif
 #endif
@@ -7001,8 +7003,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan and
-    // WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
+    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
+    // ToupTek and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7012,7 +7014,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 16);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 20);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7083,6 +7085,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "svbony") {
 #ifdef ALPACACORE_ENABLE_SVBONY
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "touptek") {
+#ifdef ALPACACORE_ENABLE_TOUPTEK
                 entry["available"] = true;
 #else
                 entry["available"] = false;

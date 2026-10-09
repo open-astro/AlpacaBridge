@@ -598,7 +598,7 @@ inline ContractEntry contract_entry_touptek_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-// Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
+// Second backend behind the same (touptek, switch) catalog pair; needs no libgpiod.
 inline ContractEntry contract_entry_touptek_switch_thermal() {
     return with_switch_caps(
         make_entry(
