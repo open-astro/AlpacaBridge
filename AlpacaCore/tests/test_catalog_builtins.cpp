@@ -2456,6 +2456,22 @@ TEST_CASE("Builtin catalog - ToupTek stellavita gpioChip must be the board chip"
     other.set("switchType", std::string{"thermal"});
     CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, other, Source::Api).rejection.has_value());
 }
+
+TEST_CASE("Builtin catalog - ToupTek stellavita factory refuses a foreign gpioChip", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    register_builtin_factories(catalog);
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    DeviceConfig cfg;
+    cfg.set("gpioChip", std::string{"/dev/gpiochip1"});
+    try {
+        (void)catalog.create(kTouptekSwitchKey, cfg, 9);
+        FAIL("a foreign gpioChip must be refused on the persisted path");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+    }
+#endif
+}
 #endif
 
 TEST_CASE("Builtin catalog - ToupTek sanitize keeps the declared fields per device type", "[catalog][touptek][unit]") {
