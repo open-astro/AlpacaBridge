@@ -582,6 +582,30 @@ TEST_CASE("GPhoto camera fake - Canon B mode (only bulb in the shutter list) use
     driver->set_connected(false);
 }
 
+TEST_CASE("GPhoto camera fake - Canon B mode does not write the X
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
+    fake.refuse_choice_writes = {"shutterspeed2"};
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    driver->start_exposure(5.0, true);
+    wait_for_exposure_to_finish(*driver);
+
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full");
+    CHECK(fake.remote_release_history.back() == "Release Full");
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - bulb widget camera ignores eosremoterelease", "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;

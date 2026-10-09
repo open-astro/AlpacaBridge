@@ -181,7 +181,7 @@ SDK cleanup checklist does not apply here).
   choices were found; a Canon body missing either choice stays at its longest native shutter speed.
   **B mode:** with the mode dial on B the shutter-speed list holds only `bulb`, so there is no
   native speed to use and every duration, short ones too, takes the bulb path instead of failing
-  with "No shutter speed control exposed by this camera". Bench evidence is in #640 (EOS 250D on M
+  with "No shutter speed control exposed by this camera". The shutter-speed widget is not written there: the body owns the shutter and refuses the write ("I/O in progress", EOS 70D), so the press/release pair alone drives the exposure. Bench evidence is in #640 (EOS 250D on M
   with shutter Bulb, EOS 70D on B: 5 s and 35 s frames by hand); the EOS 4000D is not verified and
   other Canon bodies need their own check. Written from libgphoto2's documented behaviour only
   (INDI is LGPL; copy nothing from it).

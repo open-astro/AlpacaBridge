@@ -992,6 +992,11 @@ public:
             use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
                                      duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
+            // In B mode the body owns the shutter and refuses a shutterspeed write ("I/O in progress");
+            // the press/release pair alone drives the exposure.
+            if (native_shutter_choices_.empty() && !remote_press_choice_.empty()) {
+                shutter_choice.clear();
+            }
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
