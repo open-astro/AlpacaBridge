@@ -45,6 +45,10 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 struct FakeCelestronState {
+    // The GOTO timer reads this clock. A case that steps the driver on a
+    // FakeTaskClock points it there, so the slew runs in virtual time too.
+    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
+    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<bool> shifted_position{false};
     std::atomic<bool> mute{false};
@@ -77,13 +81,13 @@ struct FakeCelestronState {
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return Clock::now() - started < kGotoDuration;
+        return now() - started < kGotoDuration;
     }
     std::string goto_reply() {
         if (reject_goto.load()) {
             return "";  // no reply at all: the response timeout fires inside the slew task
         }
-        goto_started.store(Clock::now().time_since_epoch().count());
+        goto_started.store(now().time_since_epoch().count());
         goto_count.fetch_add(1);
         return "#";
     }
@@ -167,6 +171,20 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
         if (pred()) return true;
         // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return pred();
+}
+
+// Steps the fake clock one `step` at a time, once a driver task is parked on
+// it, until `pred` holds or `max_steps` steps pass. Each step waits for the
+// woken task to settle, so no step lands between two of its waits.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
+                   std::chrono::milliseconds step = std::chrono::milliseconds(250), int max_steps = 200) {
+    for (int i = 0; i < max_steps; ++i) {
+        if (pred()) return true;
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(step);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
     return pred();
 }
@@ -275,10 +293,14 @@ TEST_CASE("Celestron AbortSlew - a stop failure still reaps the cancelled slew t
 
 TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async slew",
           "[celestron][telescope][async][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_tracking(true);
 
@@ -287,8 +309,9 @@ TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async sle
     REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
     driver->move_axis(0, 0.5);
     const int tracking_writes_after_move = st->command_count('T');
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1700));
+    // Virtual time past the superseded slew task's longest wait; a stray tracking write would show.
+    clock.advance(std::chrono::milliseconds(1700));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
 
     CHECK(st->command_count('T') == tracking_writes_after_move);
     driver->set_connected(false);
@@ -296,10 +319,14 @@ TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async sle
 
 TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
           "[celestron][telescope][async][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     driver->set_tracking(true);
     const int tracking_writes_before = st->command_count('T');
@@ -307,10 +334,18 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
     const int before = st->goto_count.load();
     driver->slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
-    driver->slew_to_coordinates(6.0, 22.0);
+    std::atomic<bool> sync_done{false};
+    std::thread syncer([&] {
+        driver->slew_to_coordinates(6.0, 22.0);
+        sync_done.store(true);
+    });
+    const bool finished = advance_until(clock, [&] { return sync_done.load(); });
+    syncer.join();
+    REQUIRE(finished);
     const int tracking_writes_after_sync = st->command_count('T');
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Virtual time past any stray tail of the reaped task.
+    clock.advance(std::chrono::milliseconds(200));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
 
     CHECK(tracking_writes_after_sync == tracking_writes_before + 1);
     CHECK(st->command_count('T') == tracking_writes_after_sync);
@@ -319,10 +354,14 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
 
 TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains",
           "[celestron][telescope][pulseguiding][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE(driver->get_can_pulse_guide());
 
@@ -333,10 +372,11 @@ TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains
     driver->pulse_guide(2, 8000);  // East: RA chain continues beyond the 2.55 s hardware limit.
     driver->pulse_guide(0, 3500);  // North: must not cancel RA's remaining chunks.
 
-    REQUIRE(wait_until([&] { return st->guide_command_count(0) >= ra_before + 2; }, 4500));
+    REQUIRE(advance_until(
+        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250), 18));
     REQUIRE(st->guide_command_count(1) >= dec_before + 1);
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    clock.advance(std::chrono::milliseconds(2500));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
     CHECK(driver->get_is_pulse_guiding());  // DEC expired; the longer RA pulse is still active.
     CHECK(std::abs(driver->get_right_ascension() - (ra_start + ra_delta)) < 1e-5);
     driver->set_connected(false);
@@ -344,10 +384,14 @@ TEST_CASE("Celestron PulseGuide - overlapping axes keep independent pulse chains
 
 TEST_CASE("Celestron MoveAxis - a jog on one axis preserves the other axis pulse chain",
           "[celestron][telescope][pulseguiding][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE(driver->get_can_pulse_guide());
 
@@ -355,7 +399,8 @@ TEST_CASE("Celestron MoveAxis - a jog on one axis preserves the other axis pulse
     driver->pulse_guide(2, 6000);  // RA pulse is still chaining after its first hardware chunk.
     driver->move_axis(1, 0.0);     // A Dec-axis stop must not cancel the RA pulse.
 
-    CHECK(wait_until([&] { return st->guide_command_count(0) >= ra_before + 2; }, 4500));
+    CHECK(advance_until(
+        clock, [&] { return st->guide_command_count(0) >= ra_before + 2; }, std::chrono::milliseconds(250), 18));
     driver->set_connected(false);
 }
 

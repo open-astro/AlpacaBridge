@@ -53,6 +53,10 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 }
 
 struct FakeSynScanState {
+    // The GOTO timer reads this clock. A case that steps the driver on a
+    // FakeTaskClock points it there, so the slew runs in virtual time too.
+    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
+    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> reject_goto{false};  // true: swallow the GOTO -> the wrapper times out and throws
     std::atomic<bool> mute{false};
     std::atomic<unsigned char> model_id{50};
@@ -79,7 +83,7 @@ struct FakeSynScanState {
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return !goto_stopped.load() && Clock::now() - started < kGotoDuration;
+        return !goto_stopped.load() && now() - started < kGotoDuration;
     }
 };
 
@@ -105,7 +109,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 if (st->reject_goto.load()) {
                     return "";  // no reply at all: the response timeout fires inside the slew task
                 }
-                st->goto_started.store(Clock::now().time_since_epoch().count());
+                st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_stopped.store(false);
                 st->goto_count.fetch_add(1);
                 return "#";
@@ -147,6 +151,20 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
         if (pred()) return true;
         // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return pred();
+}
+
+// Steps the fake clock one `step` at a time, once a driver task is parked on
+// it, until `pred` holds or `max_steps` steps pass. Each step waits for the
+// woken task to settle, so no step lands between two of its waits.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
+                   std::chrono::milliseconds step = std::chrono::milliseconds(250), int max_steps = 200) {
+    for (int i = 0; i < max_steps; ++i) {
+        if (pred()) return true;
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(step);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
     return pred();
 }
@@ -276,17 +294,21 @@ TEST_CASE("SynScan AbortSlew - a stop failure still reaps the cancelled slew tas
 }
 
 TEST_CASE("SynScan async - MoveAxis supersedes a pending async slew", "[synscan][telescope][async][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->slew_to_coordinates_async(5.5, 20.0);
     driver->move_axis(0, 0.0);
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Virtual time for the superseded slew task to wind down.
+    clock.advance(std::chrono::milliseconds(100));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
     const auto settled = st->command_snapshot();
     const int goto_index = last_goto_index(settled);
     const int stop_index = [&] {
@@ -304,22 +326,33 @@ TEST_CASE("SynScan async - MoveAxis supersedes a pending async slew", "[synscan]
 }
 
 TEST_CASE("SynScan async - blocking slew replaces a pending async target", "[synscan][telescope][async][ownership]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->slew_to_coordinates_async(5.5, 20.0);
-    driver->slew_to_coordinates(6.0, 22.0);
+    std::atomic<bool> sync_done{false};
+    std::thread syncer([&] {
+        driver->slew_to_coordinates(6.0, 22.0);
+        sync_done.store(true);
+    });
+    const bool finished = advance_until(clock, [&] { return sync_done.load(); });
+    syncer.join();
+    REQUIRE(finished);
     auto commands = st->command_snapshot();
     int final_goto = last_goto_index(commands);
     REQUIRE(final_goto >= 0);
     const std::string replacement = commands[static_cast<std::size_t>(final_goto)];
     CHECK(replacement.find(',') != std::string::npos);
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Virtual time for any stray tail of the replaced task.
+    clock.advance(std::chrono::milliseconds(100));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
     commands = st->command_snapshot();
     final_goto = last_goto_index(commands);
     REQUIRE(final_goto >= 0);
@@ -546,17 +579,21 @@ TEST_CASE("SynScan tracking - mode follows mount geometry and site hemisphere", 
 
 TEST_CASE("SynScan PulseGuide - a same-axis replacement runs for its requested duration",
           "[synscan][telescope][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->pulse_guide(0, 2000);
     driver->pulse_guide(0, 2000);
-    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // Virtual time for the replaced pulse task to wind down; the 2 s pulse is still running.
+    clock.advance(std::chrono::milliseconds(300));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
 
     const auto commands = st->command_snapshot();
     int last_dec = -1;
