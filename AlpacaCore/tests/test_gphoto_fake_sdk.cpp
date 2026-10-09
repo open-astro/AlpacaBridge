@@ -627,6 +627,53 @@ TEST_CASE("GPhoto camera fake - bulb widget camera ignores eosremoterelease", "[
     driver->set_connected(false);
 }
 
+TEST_CASE("GPhoto camera fake - Canon bulb entry wins over other unparseable shutter entries",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    const std::vector<std::vector<std::string>> lists = {{"bulb", "1/50", "auto"}, {"auto", "1/50", "bulb"}};
+    for (const auto& list : lists) {
+        reset_gphoto_sensor_cache();
+        FakeGPhotoSDK fake;
+        auto cam = make_canon_camera();
+        cam.choices["shutterspeed2"] = list;
+        cam.choice_value["shutterspeed2"] = "1/50";
+        fake.cameras.push_back(cam);
+        FakeRawDecoder decoder;
+
+        auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+        driver->set_connected(true);
+        CHECK(driver->get_exposure_max() == 3600.0);
+
+        driver->start_exposure(0.05, true);
+        wait_for_exposure_to_finish(*driver);
+
+        CHECK(fake.cameras[0].choice_value["shutterspeed2"] == "bulb");
+        CHECK(fake.remote_release_history.size() == 2);
+
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("GPhoto camera fake - bulb widget camera keeps the first of several unparseable shutter entries",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_bulb_camera();
+    cam.choices["shutterspeed2"] = {"1/200", "1/50", "auto", "Unknown value"};
+    cam.choice_value["shutterspeed2"] = "1/200";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    driver->start_exposure(0.5, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(fake.cameras[0].choice_value["shutterspeed2"] == "auto");
+    CHECK(fake.bulb_toggle_history.size() == 2);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - Canon shutter list with only auto does not enable bulb",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
