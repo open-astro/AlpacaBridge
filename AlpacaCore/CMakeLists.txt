@@ -138,6 +138,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/celestron/celestron_schema.cpp
     src/vendors/synscan/synscan_schema.cpp
     src/vendors/qhy/qhy_schema.cpp
+    src/vendors/touptek/touptek_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -261,6 +262,12 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     add_subdirectory(src/vendors/touptek)
     if(TARGET alpacacore_touptek)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_touptek)
+        # register_builtin_factories() guards its ToupTek factory behind this macro;
+        # the schema's gpioChip check and the StellaVita factory follow the second.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_TOUPTEK)
+        if(ALPACACORE_TOUPTEK_STELLAVITA)
+            target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_TOUPTEK_STELLAVITA)
+        endif()
     endif()
 endif()
 

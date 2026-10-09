@@ -33,6 +33,7 @@ if(ALPACACORE_ENABLE_TOUPTEK)
         touptek_focuser_driver.cpp
         touptek_filterwheel_driver.cpp
         touptek_thermal_switch_driver.cpp
+        touptek_catalog.cpp
     )
 
     # StellaVita power-box Switch backend. The StellaVita is a CM4-based
@@ -106,6 +107,9 @@ if(ALPACACORE_ENABLE_TOUPTEK)
     target_link_libraries(alpacacore_touptek PRIVATE Threads::Threads)
 
     if(_touptek_stellavita)
+        # touptek_catalog.cpp and touptek_fields.h (ODR) are compiled here, so
+        # this library needs the macro itself, not only alpacacore_builtins.
+        target_compile_definitions(alpacacore_touptek PRIVATE ALPACACORE_TOUPTEK_STELLAVITA)
         # libgpiod (>= 2.0) backs the StellaVita Switch driver. The DC outputs
         # are driven via /dev/gpiochip0 (BCM2711) character-device lines.
         if(LIBGPIOD_FOUND)

@@ -2288,3 +2288,241 @@ TEST_CASE("Builtin catalog - QHY sanitize keeps the declared fields per device t
     const DeviceConfig kept_camera = catalog.sanitize(kQhyCameraKey, camera);
     CHECK(kept_camera.entries().size() == 2);
 }
+
+namespace {
+const DeviceKey kTouptekCameraKey{"touptek", DeviceType::Camera};
+const DeviceKey kTouptekFocuserKey{"touptek", DeviceType::Focuser};
+const DeviceKey kTouptekWheelKey{"touptek", DeviceType::FilterWheel};
+const DeviceKey kTouptekSwitchKey{"touptek", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the ToupTek devices in every build",
+          "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kTouptekCameraKey, kTouptekFocuserKey, kTouptekWheelKey, kTouptekSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_TOUPTEK");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kTouptekCameraKey)) == std::vector<std::string>{"cameraIndex"});
+    CHECK(keys_of(find_view(views, kTouptekFocuserKey)) == std::vector<std::string>{"focuserIndex", "focuserId"});
+    CHECK(keys_of(find_view(views, kTouptekWheelKey)) ==
+          std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
+    CHECK(keys_of(find_view(views, kTouptekSwitchKey)) ==
+          std::vector<std::string>{"switchType", "cameraIndex", "gpioChip", "pwmFrequencyHz", "ports"});
+
+    const FieldRef* names = find_field(find_view(views, kTouptekWheelKey)->fields, "filterNames");
+    REQUIRE(names != nullptr);
+    CHECK(names->kind == FieldRef::Kind::StringList);
+    const FieldRef* ports = find_field(find_view(views, kTouptekSwitchKey)->fields, "ports");
+    REQUIRE(ports != nullptr);
+    CHECK(ports->kind == FieldRef::Kind::RecordList);
+    REQUIRE(ports->record_fields.size() == 2);
+    CHECK(std::string_view(ports->record_fields[0].key) == "name");
+    CHECK(std::string_view(ports->record_fields[1].key) == "pwm");
+    const FieldRef* type = find_field(find_view(views, kTouptekSwitchKey)->fields, "switchType");
+    REQUIRE(type != nullptr);
+    CHECK(type->allowed_values.empty());  // normalize owns the rule, to keep its wording
+    CHECK(same_scalar(type->default_value, std::string{"stellavita"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the ToupTek devices available only when built",
+          "[catalog][touptek][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kTouptekCameraKey, kTouptekFocuserKey, kTouptekWheelKey, kTouptekSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when ToupTek is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_TOUPTEK") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    // Nothing here opens the SDK: every ToupTek driver binds at connect.
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    auto camera_driver = catalog.create(kTouptekCameraKey, camera, 3);
+    REQUIRE(camera_driver != nullptr);
+    CHECK(camera_driver->get_device_type() == DeviceType::Camera);
+    CHECK(camera_driver->get_device_number() == 3);
+
+    DeviceConfig focuser;
+    focuser.set("focuserId", std::string{"AAF-TEST-1"});
+    auto focuser_driver = catalog.create(kTouptekFocuserKey, focuser, 4);
+    REQUIRE(focuser_driver != nullptr);
+    CHECK(focuser_driver->get_device_type() == DeviceType::Focuser);
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto wheel_driver = catalog.create(kTouptekWheelKey, wheel, 5);
+    REQUIRE(wheel_driver != nullptr);
+    {
+        // The factory's pass-through: filterNames reaches the driver.
+        const auto names = dynamic_cast<FilterWheelDriver&>(*wheel_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
+
+    DeviceConfig thermal;
+    thermal.set("switchType", std::string{"thermal"});
+    thermal.set("cameraIndex", std::int64_t{2});
+    auto thermal_driver = catalog.create(kTouptekSwitchKey, thermal, 6);
+    REQUIRE(thermal_driver != nullptr);
+    CHECK(thermal_driver->get_device_type() == DeviceType::Switch);
+
+    CHECK_THROWS_AS(catalog.create(
+                        kTouptekSwitchKey,
+                        [] {
+                            DeviceConfig bad;
+                            bad.set("switchType", std::string{"Thermal"});
+                            return bad;
+                        }(),
+                        7),
+                    AlpacaException);
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+    auto powerbox = catalog.create(kTouptekSwitchKey, DeviceConfig{}, 8);  // the default is stellavita
+    REQUIRE(powerbox != nullptr);
+    CHECK(powerbox->get_device_type() == DeviceType::Switch);
+#else
+    try {
+        (void)catalog.create(kTouptekSwitchKey, DeviceConfig{}, 8);
+        FAIL("a stellavita switch must throw when StellaVita is not built");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).find("ToupTek StellaVita switch not built") != std::string::npos);
+    }
+#endif
+#endif
+}
+
+TEST_CASE("Builtin catalog - ToupTek switch normalize accepts thermal and stellavita and refuses others",
+          "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* ok : {"thermal", "stellavita"}) {
+        DeviceConfig cfg;
+        cfg.set("switchType", std::string{ok});
+        CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, cfg, Source::Api).rejection.has_value());
+    }
+    // Absent means stellavita, as the router arm defaulted it.
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, DeviceConfig{}, Source::Api).rejection.has_value());
+
+    for (const char* bad : {"Thermal", "", "powerbox"}) {
+        DeviceConfig cfg;
+        cfg.set("switchType", std::string{bad});
+        const auto api = catalog.normalize(kTouptekSwitchKey, cfg, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              std::string("Unknown ToupTek switchType '") + bad + "' (expected 'thermal' or 'stellavita')");
+    }
+}
+
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+TEST_CASE("Builtin catalog - ToupTek stellavita gpioChip must be the board chip", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig board;
+    board.set("gpioChip", std::string{"/dev/gpiochip0"});
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, board, Source::Api).rejection.has_value());
+
+    DeviceConfig other;
+    other.set("gpioChip", std::string{"/dev/gpiochip1"});
+    const auto refused = catalog.normalize(kTouptekSwitchKey, other, Source::Api);
+    REQUIRE(refused.rejection.has_value());
+    CHECK(refused.rejection->rfind("Hardware config refused: 'gpioChip' must be '/dev/gpiochip0' for this board", 0) ==
+          0);
+
+    // The thermal backend opens no GPIO chip, so the field is not checked there.
+    other.set("switchType", std::string{"thermal"});
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, other, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - ToupTek stellavita factory refuses a foreign gpioChip", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    register_builtin_factories(catalog);
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    DeviceConfig cfg;
+    cfg.set("gpioChip", std::string{"/dev/gpiochip1"});
+    try {
+        (void)catalog.create(kTouptekSwitchKey, cfg, 9);
+        FAIL("a foreign gpioChip must be refused on the persisted path");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+    }
+#endif
+}
+#endif
+
+TEST_CASE("Builtin catalog - ToupTek sanitize keeps the declared fields per device type", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("focuserIndex", std::int64_t{5});  // a focuser key, not a camera one
+    const DeviceConfig kept_camera = catalog.sanitize(kTouptekCameraKey, camera);
+    CHECK(kept_camera.entries().size() == 1);
+    CHECK_FALSE(kept_camera.has("focuserIndex"));
+
+    DeviceConfig focuser;
+    focuser.set("focuserIndex", std::int64_t{2});
+    focuser.set("focuserId", std::string{"AAF-1"});
+    focuser.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_focuser = catalog.sanitize(kTouptekFocuserKey, focuser);
+    CHECK(kept_focuser.entries().size() == 2);
+    CHECK_FALSE(kept_focuser.has("bogusKey"));
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterwheelId", std::string{"AFW-1"});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    wheel.set("cameraIndex", std::int64_t{3});
+    const DeviceConfig kept_wheel = catalog.sanitize(kTouptekWheelKey, wheel);
+    CHECK(kept_wheel.entries().size() == 3);
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("cameraIndex"));
+
+    DeviceConfig sw;
+    sw.set("switchType", std::string{"stellavita"});
+    sw.set("cameraIndex", std::int64_t{2});
+    sw.set("gpioChip", std::string{"/dev/gpiochip0"});
+    sw.set("pwmFrequencyHz", std::int64_t{100});
+    DeviceConfig port;
+    port.set("name", std::string{"Flat Panel"});
+    port.set("pwm", true);
+    port.set("bogusKey", true);
+    sw.set("ports", std::vector<DeviceConfig>{port});
+    sw.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_switch = catalog.sanitize(kTouptekSwitchKey, sw);
+    CHECK(kept_switch.entries().size() == 5);
+    CHECK_FALSE(kept_switch.has("bogusKey"));
+    const ConfigValue* ports_value = kept_switch.find_value("ports");
+    REQUIRE(ports_value != nullptr);
+    const auto* kept_ports = std::get_if<std::vector<DeviceConfig>>(ports_value);
+    REQUIRE(kept_ports != nullptr);
+    REQUIRE(kept_ports->size() == 1);
+    CHECK((*kept_ports)[0].has("name"));
+    CHECK((*kept_ports)[0].has("pwm"));
+    CHECK_FALSE((*kept_ports)[0].has("bogusKey"));
+}

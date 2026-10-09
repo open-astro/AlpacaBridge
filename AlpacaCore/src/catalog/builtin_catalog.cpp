@@ -28,6 +28,7 @@ void register_builtin_schemas(DeviceCatalog& catalog) {
     register_celestron_schema(catalog);
     register_synscan_schema(catalog);
     register_qhy_schema(catalog);
+    register_touptek_schema(catalog);
 }
 
 void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
@@ -63,6 +64,9 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
     register_qhy_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    register_touptek_factory(catalog);
 #endif
 }
 

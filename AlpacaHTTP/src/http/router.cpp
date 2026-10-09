@@ -17,6 +17,7 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacahttp/config.h>
@@ -86,15 +87,6 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
-#endif
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-#include <alpacacore/vendor/touptek/touptek_camera_driver.h>
-#include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
-#include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
-#include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
-#ifdef ALPACACORE_TOUPTEK_STELLAVITA
-#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
-#endif
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 // The ioptron/camera (iCAM) arm only; the playerone pairs are catalog descriptors.
@@ -1407,7 +1399,7 @@ std::string build_image_bytes_payload(const alpacacore::ImageArray& image,
 namespace alpacahttp {
 
 // open-astro#765: configuredevice answers 400 for a refusal that starts with this.
-constexpr const char* kHardwareConfigRefusal = "Hardware config refused: ";
+constexpr const char* kHardwareConfigRefusal = alpacacore::util::kHardwareConfigRefusal;
 
 namespace {
 // Issue #358: a driver that refuses a connect explains why, and the client
@@ -6953,6 +6945,26 @@ nlohmann::json without_unknown_alignment_mode(const nlohmann::json& config,
     return out;
 }
 
+// A RecordList field (ports[]) is applied positionally, and the deleted ToupTek
+// arm skipped an entry that is not an object ("ports":[null]) instead of refusing
+// it. The typed read refuses a non-object entry, so each one becomes an empty
+// object here: it keeps its position and overrides nothing. Other configs come
+// back unchanged.
+nlohmann::json with_object_record_entries(const nlohmann::json& config,
+                                          std::span<const alpacacore::catalog::FieldRef> fields) {
+    if (!config.is_object()) return config;
+    nlohmann::json out = config;
+    for (const auto& f : fields) {
+        if (f.kind != alpacacore::catalog::FieldRef::Kind::RecordList) continue;
+        const auto it = out.find(f.key);
+        if (it == out.end() || !it->is_array()) continue;
+        for (auto& elem : *it) {
+            if (!elem.is_object()) elem = nlohmann::json::object();
+        }
+    }
+    return out;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8226,8 +8238,7 @@ std::string persisted_device_subject(const std::string& vendor, const std::strin
 // accepted values are the board's own; anything else is refused before the
 // device is built or saved (configuredevice answers 400 for this prefix).
 bool refuse_hardware_config(std::string& error_message, const std::string& field, const std::string& allowed) {
-    error_message = std::string(kHardwareConfigRefusal) + "'" + field + "' must be " + allowed +
-                    " for this board; the server does not open other chip nodes or GPIO lines";
+    error_message = alpacacore::util::hardware_config_refusal(field, allowed);
     return false;
 }
 
@@ -8328,8 +8339,9 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
         if (auto view = find_descriptor(catalog_, key)) {
-            const alpacacore::catalog::DeviceConfig typed =
-                catalog_json::config_from_json(without_unknown_alignment_mode(config, view->fields), view->fields);
+            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(
+                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields),
+                view->fields);
             const auto result =
                 catalog_.normalize(key, typed,
                                    source == ConfigSource::Api ? alpacacore::catalog::Source::Api
@@ -8990,169 +9002,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "touptek" && device_type_str == "camera") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        int camera_index = config_get(config, "cameraIndex", 0);
-
-        auto camera = alpacacore::vendor::touptek::create_touptek_camera(device_number, camera_index);
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(camera)))) {
-            util::log_info("Registered ToupTek camera");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        std::string focuser_id = config_get(config, "focuserId", "");
-        if (!focuser_id.empty()) {
-            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_id(
-                device_number, focuser_id);
-        } else {
-            int focuser_index = config_get(config, "focuserIndex", 0);
-            focuser = alpacacore::vendor::touptek::create_touptek_focuser_by_index(
-                device_number, focuser_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered ToupTek AAF focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "filterwheel") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        // Standalone ToupTek AFW (Astro Filter Wheel); AFW-M 5- and 7-slot.
-        // Enumerated by the toupcam SDK; the slot count is read from the wheel
-        // firmware at connect, so no slot count is supplied here.
-        std::unique_ptr<alpacacore::FilterWheelDriver> wheel;
-        std::string wheel_id = config_get(config, "filterwheelId", "");
-        if (!wheel_id.empty()) {
-            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(device_number, wheel_id);
-        } else {
-            int wheel_index = config_get(config, "filterwheelIndex", 0);
-            wheel = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(device_number, wheel_index);
-        }
-
-        if (config_has(config, "filterNames")) {
-            const auto& names_value = config.at("filterNames");
-            if (!names_value.is_array()) {
-                error_message = "ToupTek filter wheel filterNames must be an array";
-                return false;
-            }
-            for (const auto& name : names_value) {
-                if (!name.is_string()) {
-                    error_message = "ToupTek filter wheel filterNames must be an array of strings";
-                    return false;
-                }
-            }
-            wheel->set_names(names_value.get<std::vector<std::string>>());
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(wheel)))) {
-            util::log_info("Registered ToupTek AFW filter wheel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "touptek" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_TOUPTEK
-        // Two distinct ToupTek switch backends share the (touptek, switch) route:
-        //  - "thermal": a cooled camera's dew heater + fan via the camera SDK
-        //    (shared handle), available on any ToupTek build.
-        //  - "stellavita" (default): the StellaVita PowerBox's 12V GPIO ports,
-        //    only built when libgpiod (>= 2.0) is present.
-        const std::string switch_type = config_get(config, "switchType", "stellavita");
-        if (switch_type == "thermal") {
-            int camera_index = config_get(config, "cameraIndex", 0);
-            auto sw = alpacacore::vendor::touptek::create_touptek_thermal_switch(device_number, camera_index);
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-                util::log_info("Registered ToupTek thermal switch");
-                return true;
-            }
-            error_message = "Failed to register device. Device may already exist.";
-            return false;
-        }
-        // Only "thermal" (handled above) and "stellavita" (below) are valid.
-        // Reject anything else here so a typo'd/unknown switchType (e.g. "Thermal")
-        // can't silently fall through and create a StellaVita PowerBox instead.
-        if (switch_type != "stellavita") {
-            error_message = "Unknown ToupTek switchType '" + switch_type + "' (expected 'thermal' or 'stellavita')";
-            return false;
-        }
-#endif
-#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
-        // StellaVita PowerBox: on-board 12V DC power ports driven over local
-        // GPIO (libgpiod) on the CM4's /dev/gpiochip0 — independent of the
-        // ToupTek camera SDK. Switches 0..3 are the controllable Port 1..4
-        // lines (BCM GPIO 18/10/17/4).
-        auto powerbox_config = alpacacore::vendor::touptek::default_stellavita_config();
-        powerbox_config.gpio_chip_path = config_get(config, "gpioChip", powerbox_config.gpio_chip_path);
-        if (!gpio_chip_is_board_chip(powerbox_config.gpio_chip_path, "/dev/gpiochip0", error_message)) {
-            return false;
-        }
-        powerbox_config.pwm_frequency_hz = config_get(config, "pwmFrequencyHz", powerbox_config.pwm_frequency_hz);
-        // Per-port PWM/name overrides applied positionally onto the fixed
-        // Port 1..4 layout.
-        if (config_has(config, "ports") && config["ports"].is_array()) {
-            const auto& port_overrides = config["ports"];
-            auto& ports = powerbox_config.ports;
-            for (std::size_t i = 0; i < ports.size() && i < port_overrides.size(); ++i) {
-                const auto& p = port_overrides[i];
-                // Skip non-object entries (e.g. "ports":[null]) — contains()/value()
-                // throw nlohmann type_error on a non-object, which would 500 the request.
-                if (!p.is_object()) {
-                    continue;
-                }
-                if (p.contains("name")) {
-                    ports[i].name = p.value("name", ports[i].name);
-                }
-                ports[i].pwm_enabled = p.value("pwm", ports[i].pwm_enabled);
-            }
-        }
-
-        auto sw = alpacacore::vendor::touptek::create_touptek_switch(device_number, std::move(powerbox_config));
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(sw)))) {
-            util::log_info("Registered ToupTek StellaVita switch");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#elif defined(ALPACACORE_ENABLE_TOUPTEK)
-        error_message =
-            "ToupTek StellaVita switch not built. Rebuild on a host with "
-            "libgpiod (>= 2.0) installed (e.g. apt install libgpiod-dev).";
-        return false;
-#else
-        error_message = "ToupTek support not enabled. Rebuild with -DALPACACORE_ENABLE_TOUPTEK=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "gemini" && device_type_str == "focuser") {
 #ifdef ALPACACORE_ENABLE_GEMINI
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -9625,34 +9474,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
-    } else if (vendor == "touptek") {
-        if (device_type == "switch") {
-            // Two switch backends share (touptek, switch): the StellaVita
-            // PowerBox (local GPIO) and the cooled-camera thermal switch (dew
-            // heater + fan). switchType selects; persist the fields each needs.
-            copy_if_present("switchType");
-            const std::string touptek_switch_type = config_get(config, "switchType", "stellavita");
-            if (touptek_switch_type == "thermal") {
-                copy_if_present("cameraIndex");
-            } else {
-                // StellaVita PowerBox: optional chip path plus PWM frequency and
-                // per-port PWM/name overrides so dimmable-port config survives.
-                copy_if_present("gpioChip");
-                copy_if_present("pwmFrequencyHz");
-                copy_if_present("ports");
-            }
-        } else if (device_type == "filterwheel") {
-            // Standalone ToupTek AFW: bind by index or SDK id string, plus the
-            // user's custom filter names. Without these the wheel binding resets
-            // to index 0 and filter names are erased on every save.
-            copy_if_present("filterwheelIndex");
-            copy_if_present("filterwheelId");
-            copy_if_present("filterNames");
-        } else {
-            copy_if_present("cameraIndex");
-            copy_if_present("focuserIndex");
-            copy_if_present("focuserId");
-        }
     } else if (vendor == "gemini") {
         copy_if_present("connectionType");
         copy_if_present("focuserIndex");
