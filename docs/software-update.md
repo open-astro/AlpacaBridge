@@ -156,8 +156,11 @@ disables the check.
 templates in which `{version}` is replaced by the newer version: where its
 plain-language notes are read from (default: the `docs/releases/X.Y.Z.md`
 file at the `vX.Y.Z` tag on GitHub) and the release page the card links to.
-Empty disables each; the notes are informational and never gate the
-install.
+A beta that the index lists as `X.Y.Z~betaN` is written in its tag spelling
+`X.Y.Z-beta.N`, which is how its tag and notes file are named (see
+[beta-channel.md](beta-channel.md)); a custom template keyed on the Debian
+spelling must allow for that. Empty disables each; the notes are
+informational and never gate the install.
 
 ## Operator notes
 

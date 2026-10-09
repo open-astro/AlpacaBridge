@@ -451,12 +451,33 @@ InstallerState SystemSoftwareUpdateBackend::installer_state() {
 // Manager
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// The apt index spells a beta X.Y.Z~betaN (Debian pre-release order), but
+// release.yml tags it vX.Y.Z-beta.N and its notes live in
+// docs/releases/X.Y.Z-beta.N.md (the inverse of scripts/release_tag.py).
+// Anything else is returned as is.
+std::string tag_spelling(const std::string& version) {
+    const std::string marker = "~beta";
+    const auto pos = version.find(marker);
+    if (pos == std::string::npos) return version;
+    const std::string number = version.substr(pos + marker.size());
+    const bool numeric =
+        !number.empty() && number[0] != '0' &&
+        std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c) != 0; });
+    if (!numeric) return version;
+    return version.substr(0, pos) + "-beta." + number;
+}
+
+}  // namespace
+
 std::string expand_version_template(std::string url_template, const std::string& version) {
     const std::string placeholder = "{version}";
+    const std::string spelled = tag_spelling(version);
     std::size_t pos = 0;
     while ((pos = url_template.find(placeholder, pos)) != std::string::npos) {
-        url_template.replace(pos, placeholder.size(), version);
-        pos += version.size();
+        url_template.replace(pos, placeholder.size(), spelled);
+        pos += spelled.size();
     }
     return url_template;
 }

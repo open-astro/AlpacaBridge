@@ -11,6 +11,19 @@ half-finished PR back, and do not ask "shall I continue?" between rounds. The on
 are: every listed PR is merged (or closed), or a PR is blocked on something only the user can
 decide (see **Hard stops**).
 
+## Base branches other than `main`
+
+A PR may target `stable/X.Y` (a fix during a beta) or be a merge-down PR `stable/X.Y` -> `main`
+(`docs/beta-channel.md`; its head is `merge-down/X.Y-to-<main|X.Z>`, cut from the stable branch, so the
+update-branch and conflict steps below act on that branch and never on `stable/X.Y`). For a PR whose base is `stable/X.Y`, read `main` / `origin/main` in the
+steps below as that base (`gh pr view <N> --json baseRefName` says which), including the behind
+check and the format and conformu-report diffs. Those two kinds of PR (base `stable/X.Y`, and a
+merge-down into `main`) are merged with `gh pr merge <N> --merge` (merge commit); an ordinary PR
+into `main` keeps the method the steps below already use. A merge-down PR is **never squashed**:
+refuse `--squash` and `--rebase` on it, and when
+`update-branch` is needed use the merge-based one. Version-file conflicts in it follow the
+Merge down rule in `.claude/commands/bump-release.md`.
+
 ## Step 0 — Resolve the PR list
 
 ```bash

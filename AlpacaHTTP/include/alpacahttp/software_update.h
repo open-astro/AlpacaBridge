@@ -163,7 +163,9 @@ struct SoftwareUpdateSettings {
     std::string release_url_template;
 };
 
-// "{version}" in `url_template` replaced by `version`, every occurrence.
+// "{version}" in `url_template` replaced by `version`, every occurrence. A
+// beta "X.Y.Z~betaN" is written in its tag spelling "X.Y.Z-beta.N", which is
+// how the tag and the docs/releases/ notes file are named.
 std::string expand_version_template(std::string url_template, const std::string& version);
 
 // Policy over the backend. Thread-safe. The cached result (latest version,

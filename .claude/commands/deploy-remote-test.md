@@ -59,10 +59,11 @@ gh release create "$TAG" "../alpacabridge_${VERSION}_arm64.deb" \
   --notes "Temporary test artifact for branch $(git branch --show-current). Not a release; will be deleted after testing."
 ```
 
-The tag is created on the current HEAD. Note the asset URL:
+The tag is created on the current HEAD. Read the asset URL back from GitHub instead of building it from `VERSION`: GitHub may rename an uploaded asset whose name has special characters, and a beta `VERSION` (`5.0.0~beta2`) puts a `~` in the .deb name, so a URL built from the raw `VERSION` can 404.
 
-```
-https://github.com/open-astro/AlpacaBridge/releases/download/<TAG>/alpacabridge_<VERSION>_arm64.deb
+```bash
+ASSET_URL="$(gh release view "$TAG" --json assets --jq '.assets[] | select(.name | endswith("_arm64.deb")) | .url')"
+echo "$ASSET_URL"
 ```
 
 ## Step 4 — Hand the user the paste-ready commands
@@ -70,7 +71,7 @@ https://github.com/open-astro/AlpacaBridge/releases/download/<TAG>/alpacabridge_
 The browser shell's permission classifier blocks some interactive commands when the model types them, so **give the developer the commands to paste**, one block, nothing else in it:
 
 ```bash
-curl -sL -o /tmp/ab.deb https://github.com/open-astro/AlpacaBridge/releases/download/<TAG>/alpacabridge_<VERSION>_arm64.deb
+curl -fsSL -o /tmp/ab.deb <ASSET_URL>
 sudo dpkg -i /tmp/ab.deb || sudo apt-get -y -f install
 dpkg-query -W -f='${Status} ${Version}\n' alpacabridge
 sudo systemctl restart alpacabridge

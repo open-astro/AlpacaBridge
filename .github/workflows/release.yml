@@ -10,6 +10,17 @@
 # merges it, tags the merge commit and pushes the tag. The notes file, when
 # present, becomes the Release body with a link to the CHANGELOG section;
 # otherwise the CHANGELOG section itself is used.
+#
+# Beta tags (vX.Y.Z-beta.N, cut from a stable/X.Y branch by `/bump-release`
+# in beta mode, docs/beta-channel.md) differ in three ways: VERSION holds
+# X.Y.Z~betaN, there is no dated CHANGELOG section (the fragments are not
+# consumed), and the notes come only from docs/releases/X.Y.Z-beta.N.md. The
+# GitHub Release is marked a pre-release.
+#
+# Dry run: `gh workflow run release.yml --ref <branch> -f tag=vX.Y.Z-beta.N`
+# runs the mapping, the VERSION check and the notes build for that tag against
+# the branch's checkout and stops before anything is published. /bump-release
+# does this before the first beta tag of a stable branch.
 
 name: Release
 
@@ -17,37 +28,120 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to dry-run (vX.Y.Z or vX.Y.Z-beta.N); the checkout's VERSION must match. Nothing is published."
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   release:
-    name: Create GitHub Release from CHANGELOG
+    name: Create GitHub Release (CHANGELOG or beta notes)
     runs-on: ubuntu-24.04-arm   # text-only; kept on arm64 for a single-arch fleet
     timeout-minutes: 10
+    env:
+      # The pushed tag, or the tag a dry run names. Read only through this
+      # variable so the two paths cannot drift.
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
         with:
           persist-credentials: false
+          # Depth 1: only the beta step needs history, and it deepens the
+          # checkout itself, for its own stable/X.Y branch only.
 
-      - name: Verify tag matches VERSION
+      - name: Map tag to VERSION
+        id: tag
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
-          file_version="$(tr -d '[:space:]' < VERSION)"
-          if [ "${tag_version}" != "${file_version}" ]; then
-            echo "ERROR: tag ${GITHUB_REF_NAME} does not match VERSION file (${file_version})." >&2
-            echo "Cut the release on a PR first (VERSION, README badge, dated CHANGELOG), then tag the merge." >&2
+          python3 scripts/release_tag.py --self-test
+          # version=<VERSION spelling, ~betaN for a beta>, prerelease=true|false, notes_name=<tag without v>
+          python3 scripts/release_tag.py "${RELEASE_TAG}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Require a beta tag on its own stable branch
+        # Beta tags only: vX.Y.Z-beta.N must sit on stable/X.Y for its own X.Y
+        # (docs/beta-channel.md). Any stable/* is not enough: a newer stable
+        # branch cut from main contains all of main's older history, so a 5.0
+        # beta tag on a main commit would pass as "on stable/5.1" and publish
+        # main's unreleased work. A stable tag is not branch-checked: it is
+        # gated by its bare VERSION and dated CHANGELOG section, which only
+        # /bump-release writes, and a plain release from main stays possible
+        # when the maintainer asks for one. A dry run is checked the same way
+        # as the tag it names.
+        if: steps.tag.outputs.prerelease == 'true'
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          base="${TAG_VERSION%%~*}"
+          branch="stable/${base%.*}"
+          # --unshallow: the depth-1 checkout has no history to compare, and
+          # this fetches the full history of this one branch only (git refuses
+          # the flag on a complete clone, so it is passed only when shallow).
+          deepen=()
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then deepen=(--unshallow); fi
+          if ! git fetch --no-tags --quiet "${deepen[@]}" origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"; then
+            echo "ERROR: could not fetch ${branch}; beta tag ${RELEASE_TAG} must be cut from it." >&2
             exit 1
           fi
-          echo "Tag ${GITHUB_REF_NAME} matches VERSION ${file_version}."
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/${branch}"; then
+            echo "ERROR: beta tag ${RELEASE_TAG} ($(git rev-parse HEAD)) is not on ${branch}." >&2
+            echo "Tag the merge commit on ${branch} (docs/beta-channel.md); a beta never sits on main or another stable branch." >&2
+            exit 1
+          fi
+          echo "${RELEASE_TAG} is on ${branch}."
 
-      - name: Build release notes
+      - name: Verify tag matches VERSION
+        env:
+          TAG_VERSION: ${{ steps.tag.outputs.version }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
+          tag_version="${TAG_VERSION}"
+          file_version="$(tr -d '[:space:]' < VERSION)"
+          if [ "${tag_version}" != "${file_version}" ]; then
+            echo "ERROR: tag ${RELEASE_TAG} does not match VERSION file (${file_version})." >&2
+            if [ "${PRERELEASE}" = "true" ]; then
+              echo "Cut the beta on a PR first (VERSION ${tag_version}, README badge, docs/releases/${RELEASE_TAG#v}.md; no dated CHANGELOG section), then tag the merge on stable/X.Y." >&2
+            else
+              echo "Cut the release on a PR first (VERSION, README badge, dated CHANGELOG), then tag the merge." >&2
+            fi
+            exit 1
+          fi
+          echo "Tag ${RELEASE_TAG} matches VERSION ${file_version}."
+
+      - name: Build release notes
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+          NOTES_NAME: ${{ steps.tag.outputs.notes_name }}
+        run: |
+          set -euo pipefail
+          if [ "${PRERELEASE}" = "true" ]; then
+            # A beta has no dated CHANGELOG section; its notes file is required.
+            if [ ! -f "docs/releases/${NOTES_NAME}.md" ]; then
+              echo "ERROR: beta tag ${RELEASE_TAG} needs docs/releases/${NOTES_NAME}.md." >&2
+              exit 1
+            fi
+            cp "docs/releases/${NOTES_NAME}.md" release-notes.md
+            [ "$(tail -c1 release-notes.md)" = "" ] || echo "" >> release-notes.md
+            {
+              echo ""
+              # Resolves only when the tagged commit carries docs/beta-channel.md
+              # (every stable/X.Y cut after the beta tooling landed does).
+              echo "This is a beta. Opt in: https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/docs/beta-channel.md"
+            } >> release-notes.md
+            echo "::group::Release notes"
+            cat release-notes.md
+            echo "::endgroup::"
+            exit 0
+          fi
+          version="${RELEASE_TAG#v}"
           # Always run the extractor: it fails if the CHANGELOG section is
           # missing or still UNRELEASED, so a tag can never publish an uncut
           # version even when plain-language notes exist for it.
@@ -64,7 +158,7 @@ jobs:
             {
               echo ""
               echo "---"
-              echo "Full technical changelog: https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md#${anchor}"
+              echo "Full technical changelog: https://github.com/${GITHUB_REPOSITORY}/blob/${RELEASE_TAG}/CHANGELOG.md#${anchor}"
             } >> release-notes.md
           else
             python3 scripts/changelog_section.py "${version}" > release-notes.md
@@ -81,16 +175,27 @@ jobs:
           cat release-notes.md
           echo "::endgroup::"
 
+      - name: Dry run complete
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
+        run: |
+          echo "Dry run for ${RELEASE_TAG} (prerelease=${PRERELEASE}): notes built above, nothing published."
+
       - name: Create release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           set -euo pipefail
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            echo "Release ${GITHUB_REF_NAME} already exists; updating notes."
-            gh release edit "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md
+          # Explicit on both paths: a re-run of a stable tag clears a pre-release
+          # mark that was set by hand, instead of leaving it as it was.
+          if gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${RELEASE_TAG} already exists; updating notes."
+            gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${RELEASE_TAG}" --notes-file release-notes.md --prerelease="${PRERELEASE}"
           else
-            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --title "${GITHUB_REF_NAME}" --notes-file release-notes.md --verify-tag
+            gh release create "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --title "${RELEASE_TAG}" --notes-file release-notes.md --verify-tag --prerelease="${PRERELEASE}"
           fi

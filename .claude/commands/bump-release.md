@@ -12,6 +12,63 @@ for technical detail; the GitHub Release is written for someone standing at a te
 The user may pass a version (`/bump-release 4.0.0`). Without one, the version is the one
 `python3 scripts/changelog_fragments.py --bump` proposes from the fragments.
 
+## Modes (beta channel, `docs/beta-channel.md`)
+
+Every minor or major release goes through a stable branch `stable/X.Y` and an opt-in beta first.
+Pick the mode from the argument and the branch (ask when unclear):
+
+- **Beta** (`/bump-release beta` or `X.Y.0-beta.N`): on `main`, cut `stable/X.Y` for the first beta
+  (`git checkout main && git pull --ff-only && git checkout -b stable/X.Y && git push -u origin
+  stable/X.Y`; branch protection and pushes to `stable/*` are the maintainer's); on `stable/X.Y`,
+  the next beta. Follow the steps below with these differences: the release PR branch
+  `release/X.Y.Z-beta.N` is cut from `stable/X.Y` and its PR targets `stable/X.Y`; `VERSION` and the
+  README badge are `X.Y.0~betaN` (Step 2.1-2.2; the badge date is the beta date); skip Step 2.3: the
+  fragments are NOT consumed and `CHANGELOG.md` keeps its entries; the one edit there is a legacy
+  `## [A.B.C] - UNRELEASED` heading whose label is not `X.Y.0`, renamed to `## [X.Y.0] - UNRELEASED`
+  (heading only), so the `.deb` build does not warn about the label; skip Step 2.4 unless it is stale,
+  but run Step 2.5: the badge date is now the beta date, and docs-drift check 16 fails while the
+  `## Updated` line in `SUPPORTED-DRIVERS.md` is older than it; Step 3 writes `docs/releases/X.Y.0-beta.N.md`, starting from
+  `python3 scripts/changelog_fragments.py --preview --version X.Y.0~betaN` translated by the Step 3
+  rules (it opens with a line saying it is a beta; the beta scope rule in Step 3 says what the
+  second and later betas repeat); Step 5 and Step 6 use the beta spellings shown there; before the
+  first beta tag of a branch, Step 6 dry-runs `release.yml`; Step 6 tags `vX.Y.0-beta.N` on
+  `stable/X.Y` (`release.yml` publishes a pre-release, no dated CHANGELOG section needed) and then
+  runs the **Merge down** below. Publishing the `.deb` to the apt `beta` component happens outside
+  this repo. Every driver's `DriverVersion` reads `X.Y.0~betaN` during the beta (it is
+  `alpacacore::kVersion`); ConformU only logs that string (`DeviceTesterBaseClass.cs`, the
+  `DriverVersion` switch: OK for any non-empty value), so it is not a conformance failure.
+- **Stable** (`/bump-release` on `stable/X.Y`, or a hotfix `X.Y.Z`): the checklist below, with
+  every `main` read as `stable/X.Y`: the release PR targets `stable/X.Y`, Step 2.3 consumes the
+  fragments (Step 2.1 wrote `VERSION` `X.Y.0` first; `--release` takes a bare `X.Y.Z` only and
+  refuses a `~betaN`, so it cannot consume the fragments during a beta), Step 6 tags
+  `vX.Y.Z` on `stable/X.Y`, then run the **Merge down**. Check the promotion criteria first: 14
+  days since the last beta tag with no open regression, a full maintainer rig session on the final
+  beta, ConformU re-run for every driver touched in the beta. A hotfix needs no beta round.
+- **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so
+  (a stable tag is not branch-checked by `release.yml`; a beta tag must sit on its own `stable/X.Y` or the
+  workflow refuses it).
+
+**Merge down** (after every beta tag, after the stable tag, after a hotfix): open a PR from
+`stable/X.Y` into `main` (and, for a hotfix while `stable/X.Z` is in beta, a second one into
+`stable/X.Z`), each from its own short-lived `merge-down/X.Y-to-<main|X.Z>` head (never
+`stable/X.Y` itself), and merge it with the merge-commit method, never squash
+(`/submit-pr --merge-down stable/X.Y [--into stable/X.Z]`, then `/pr-checker`). Two repository
+settings decide whether that is safe, and neither is in this repo: before the first merge down
+confirm `gh api repos/open-astro/AlpacaBridge --jq .allow_merge_commit` prints `true` (it did on
+2026-10-09 NZ) and that an active ruleset covers `refs/heads/stable/**` with `deletion` and
+`non_fast_forward` rules (the `/submit-pr` merge-down section has the commands;
+`delete_branch_on_merge` is on). Ruleset 24766374, "stable branch protection", has covered it
+since 2026-10-09 (#924). If the query no longer lists it, stop and ask the maintainer to restore it. **Version files:** the receiving branch keeps its own `VERSION` and README badge, so `main`
+never carries a beta `VERSION` and dev builds from `main` never report one; the exception is a
+merge into `main` that brings a stable release newer than `main`'s `VERSION` (the promotion, or a
+hotfix before the next promotion), which takes the stable side's `VERSION` and badge. The first
+merge down after promotion therefore carries the dated CHANGELOG section, `VERSION`, badge and the
+fragment deletions. A dated `## [X.Y.Z]` section is inserted in version order below the receiving
+branch's sections; `docs/releases/` notes and the code come across as they are. After the final
+merge down of a promotion, the previous `stable/` branch retires (no further tags); it is not
+retired at the cut. Keep `release/X.Y.Z` as the short-lived
+release PR branch name; never name a long-lived branch `release/...`.
+
 ## Step 1 — Preconditions
 
 ```bash
@@ -25,22 +82,23 @@ gh release list --limit 1
 ```
 
 - The working tree must be clean. If not, STOP and tell the user to `/commit` first.
-- Releases are cut from an up-to-date `main`. If on `main`, pull first. If on another branch,
-  ask whether to release from `main` (the normal case) — never cut a release from a stale or
-  half-merged branch.
+- A beta is cut on an up-to-date `stable/X.Y` (the first one from `main`, which creates the
+  branch); a stable release or hotfix is cut on an up-to-date `stable/X.Y`. Pull first. On any
+  other branch, ask which mode applies — never cut a release from a stale or half-merged branch.
 - `changelog.d/` must hold at least one fragment besides `README.md` (or `CHANGELOG.md` a legacy
   `## [X.Y.Z] - UNRELEASED` section). If neither exists and the top heading is already dated, the
   release has been cut; go to Step 6 (tag) if no tag exists, otherwise report and stop.
 - Run `python3 scripts/changelog_fragments.py --check` (it must pass), then
-  `python3 scripts/changelog_fragments.py --bump`: it prints the proposed `X.Y.Z` from the latest
-  dated release (a legacy UNRELEASED label is a floor) per the SemVer rule in AGENTS.md ("Version
+  `python3 scripts/changelog_fragments.py --bump --version "$(tr -d '[:space:]' < VERSION)"`: it prints the proposed `X.Y.Z` from the latest
+  dated release (a legacy UNRELEASED label and a beta `VERSION` are floors) per the SemVer rule in AGENTS.md ("Version
   bump policy"): a `Breaking changes` subsection means major, an unqualified `Added` means minor,
   otherwise patch. `X.Y.Z` must be greater than the latest release tag; use the proposal unless
   the user names a higher one. `--preview` prints the section that Step 2 will write.
-- **Never commit on `main`.** Create `release/X.Y.Z` before any edit.
+- **Never commit on `main` or `stable/X.Y`.** Create `release/X.Y.Z` (beta: `release/X.Y.Z-beta.N`)
+  before any edit, from the branch the mode names.
 
 ```bash
-git checkout main && git pull --ff-only && git checkout -b release/X.Y.Z
+git checkout stable/X.Y && git pull --ff-only && git checkout -b release/X.Y.Z
 ```
 
 ## Step 2 — Finalize the version files
@@ -111,6 +169,12 @@ translate it. Rules for the file:
   periods), no headers deeper than `##`. Internal-only entries (CI gates, test seams, skills,
   review-bot changes, doc drift checks) collapse into one closing line under "Fixes" at most, or
   are left out.
+- **Beta scope** (beta mode): the notes cover everything since the last stable release, because
+  `--preview --version X.Y.0~betaN` renders every fragment on the branch and a beta tester may
+  join at any beta. From the second beta on, add a `## New since X.Y.0-beta.(N-1)` section right
+  after the summary, listing only the fragments added since the previous beta tag
+  (`git diff --name-only vX.Y.0-beta.(N-1) -- changelog.d/`), translated by the same rules; the
+  rest of the file is the full picture, restated.
 - Show the user the notes and get an OK before continuing; wording is their call.
 
 ## Step 4 — Record the release in the CHANGELOG (first run only)
@@ -131,8 +195,18 @@ entry.
    release notes in docs/releases/X.Y.Z.md.
    ```
 
+   Beta mode uses the tag spelling and names what did not change:
+
+   ```
+   Release X.Y.0-beta.N
+
+   VERSION and README badge set to X.Y.0~betaN / YYYY-MM-DD; fragments kept; plain-language
+   beta notes in docs/releases/X.Y.0-beta.N.md.
+   ```
+
    Then commit (with the session's attribution trailer) and push the branch.
-3. Open the PR with `gh pr create` titled `Release X.Y.Z`. The body is
+3. Open the PR with `gh pr create` (beta and stable modes: `--base stable/X.Y`) titled `Release X.Y.Z`
+   (beta: `Release X.Y.0-beta.N`). The body is
    `.github/PULL_REQUEST_TEMPLATE.md` filled in (the `pr-template` job refuses any other shape):
    the two-sentence summary from the notes under **What Changed**, plus "Notes for the GitHub
    Release: `docs/releases/X.Y.Z.md`."; "No issue exists" and the release under **Linked Issues
@@ -145,10 +219,31 @@ entry.
 ## Step 6 — Tag and verify the Release
 
 ```bash
-git checkout main && git pull --ff-only
+git checkout stable/X.Y && git pull --ff-only
 test "$(tr -d '[:space:]' < VERSION)" = "X.Y.Z"
 git tag -a vX.Y.Z -m "Release X.Y.Z"
 git push origin vX.Y.Z
+```
+
+Beta mode (the tag spelling differs from `VERSION`; `release_tag.py` rejects any other form):
+
+```bash
+git checkout stable/X.Y && git pull --ff-only
+test "$(tr -d '[:space:]' < VERSION)" = "X.Y.0~betaN"
+test -f docs/beta-channel.md   # the Release body links this file at the tag
+git tag -a vX.Y.0-beta.N -m "Release X.Y.0-beta.N"
+git push origin vX.Y.0-beta.N
+```
+
+Before the first beta tag of a branch, dry-run the workflow against the merged branch and read
+its "Build release notes" step; it stops before publishing anything. Dispatch it with
+`--ref stable/X.Y` and no other ref: a dry run has no tag, so the branch check tests the tip of the
+dispatched branch, and from any other branch it fails even when the eventual tag would pass:
+
+```bash
+gh workflow run release.yml --ref stable/X.Y -f tag=vX.Y.0-beta.N
+sleep 10   # the new run is not listed at once; the filters keep an older tag run out
+gh run watch "$(gh run list --workflow=release.yml --event workflow_dispatch --branch stable/X.Y --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
 Then wait for the `Release` workflow (it is text-only and finishes in under a minute):
@@ -163,10 +258,14 @@ The body must start with the plain-language notes, not the CHANGELOG bullets. If
 failed (tag/VERSION mismatch, an undated CHANGELOG section), fix the cause on a new PR, delete and re-push
 the tag after it merges (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`), and verify
 again. If the workflow never ran, the tag landed on a commit without `release.yml`; create the
-Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`.
+Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`
+(beta: `gh release create vX.Y.0-beta.N --prerelease --notes-file docs/releases/X.Y.0-beta.N.md
+--verify-tag`; without `--prerelease` the beta would become the Latest release above the current
+stable).
 
 ## Step 7 — Wrap up
 
+- Open the merge-down PR (Modes above) and run `/pr-checker` on it.
 - Delete the local `release/X.Y.Z` branch (origin deletes the remote one on merge).
 - Report: the version, the PR number, the tag, the Release URL, and the apt publish reminder
   (apt.openastro.net is published outside this repo; the Release is not the install channel).

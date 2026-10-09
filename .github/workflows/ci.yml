@@ -38,6 +38,7 @@ on:
   push:
     branches:
       - main
+      - "stable/**"
   workflow_dispatch:
 
 # A newer push to the same ref makes in-flight runs obsolete — cancel them so
@@ -96,6 +97,13 @@ jobs:
         env:
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
+
+      - name: Check the beta VERSION split
+        # Pins the ~betaN split both CMakeLists share
+        # (AlpacaCore/cmake/AlpacaBridgeVersion.cmake, docs/beta-channel.md)
+        # whatever the checkout's VERSION is: cmake -P over sample values, no
+        # configure, no compile.
+        run: scripts/check_beta_configure.sh
 
   build-vendors:
     name: Build + test (all vendors, arm64)
@@ -709,6 +717,17 @@ jobs:
         # build_deb.sh feeds the fragments into the .deb changelog through
         # this script; nothing else exercises that path.
         run: python3 scripts/changelog_to_deb.py --self-test
+
+      - name: Self-test the release tag mapping
+        # release.yml runs this too, but only on a tag push or a dry run; here
+        # a broken tag/VERSION mapping (scripts/release_tag_cases.txt) fails
+        # the PR that caused it instead of the first beta tag.
+        run: python3 scripts/release_tag.py --self-test
+
+      - name: Self-test the merge-down exemption
+        # pr-body.yml runs it on every PR as well; here a change to it is
+        # tested by the PR that makes it, whatever that PR's head is named.
+        run: python3 scripts/merge_down.py --self-test
 
   connect-error-hook:
     name: Connect-error hook

@@ -1,0 +1,13 @@
+# Release tag <-> VERSION pairs, one per line: <tag> <VERSION file spelling>.
+# scripts/release_tag.py maps the tag to the VERSION (--self-test reads this
+# file) and AlpacaHTTP/src/util/software_update.cpp maps the VERSION back to
+# the tag spelling for the update card (AlpacaHTTP/tests/test_software_update.cpp
+# reads it too), so both directions are pinned to the same examples. The two
+# mappings are separate implementations kept in step only by this file: add a
+# new case here, never to one side's own tests alone. A '#' starts a comment.
+v4.2.0 4.2.0
+v5.0.0 5.0.0
+v5.0.0-beta.1 5.0.0~beta1
+v5.0.0-beta.2 5.0.0~beta2
+v5.0.0-beta.10 5.0.0~beta10
+v5.1.0-beta.1 5.1.0~beta1

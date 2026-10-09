@@ -109,8 +109,24 @@ feature), otherwise patch. A qualified `Added (tests)` does not count as minor.
 python3 scripts/changelog_fragments.py --check     # validate every fragment (CI runs this)
 python3 scripts/changelog_fragments.py --preview   # the section the release would write
 python3 scripts/changelog_fragments.py --bump      # the proposed next version
+python3 scripts/changelog_fragments.py --preview --version 5.0.0~beta1   # beta notes; consumes nothing
+python3 scripts/changelog_fragments.py --bump --version 5.0.0~beta2      # a beta VERSION counts as its base 5.0.0
 python3 scripts/changelog_fragments.py --self-test
 ```
+
+Without `--version`, `--bump` and `--preview` read the `VERSION` file beside the changelog as the
+floor, so the two always name the same version. On `stable/X.Y` a beta `VERSION` therefore raises
+the proposal to its base (`5.0.0~beta2` floors it at `5.0.0`) even when the fragments alone would
+justify less; that is the version the branch is heading for. A merge down keeps the receiving
+branch's `VERSION`, so `main` never holds a beta, and `--bump` warns if it finds one off a stable
+branch. A `VERSION` that is neither `X.Y.Z` nor `X.Y.Z~betaN` is reported and not used as a floor.
+
+**Beta and stable branches.** A fix PR against `stable/X.Y` adds its fragment as on `main`. A beta
+(`VERSION` `X.Y.0~betaN`) does not consume fragments: its notes come from `--preview --version`
+into `docs/releases/X.Y.0-beta.N.md`. Fragments are consumed once, when `/bump-release` promotes
+the branch to the stable release (`--release X.Y.0`; it refuses a `~betaN` argument, so a beta
+cannot consume them by mistake), and the final merge down carries that deletion to `main`. See
+[beta-channel.md](../docs/beta-channel.md).
 
 A legacy `## [X.Y.Z] - UNRELEASED` section still in `CHANGELOG.md` is merged into
 the release by category (its entries first, then the fragments by file name) and

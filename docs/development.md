@@ -360,7 +360,7 @@ The only install channel is the OpenAstro APT repository ([apt.openastro.net](ht
 - A git tag `vX.Y.Z` on the merge commit that carried the release (the `VERSION` file, the README badge, and the dated CHANGELOG heading all agree at that commit).
 - A GitHub Release for that tag, created automatically by `.github/workflows/release.yml`. Its notes are the plain-language `docs/releases/X.Y.Z.md` (falling back to the version's CHANGELOG section) and its only assets are the source archives GitHub attaches itself. No `.deb` is attached; use apt.
 
-To cut a release, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, assembles the changelog fragments into a dated CHANGELOG section, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
+To cut a release or a beta, run `/bump-release` (Claude Code skill, `.claude/commands/bump-release.md`). It does the whole flow: writes `VERSION`, updates the README badge and device count, assembles the changelog fragments into a dated CHANGELOG section, writes plain-language notes to `docs/releases/X.Y.Z.md`, opens and merges the release PR, tags the merge commit, and verifies the Release. By hand the same steps are:
 
 1. On a `release/X.Y.Z` branch: write `VERSION`, update the README badge line, run `python3 scripts/changelog_fragments.py --release X.Y.Z --date <today>` (it writes the dated CHANGELOG section and deletes the `changelog.d/` fragments), and write `docs/releases/X.Y.Z.md` for the people who will not read the CHANGELOG (what changed, what to do, no issue numbers or code names).
 2. Merge the PR.
@@ -373,6 +373,8 @@ git push origin vX.Y.Z
 ```
 
 The Release body is `docs/releases/X.Y.Z.md` with a link to the CHANGELOG section appended; when no notes file exists the CHANGELOG section itself is used. The workflow refuses a tag whose version does not match `VERSION`, or whose CHANGELOG section is missing or still `UNRELEASED`, so a tag can never publish notes for an uncut release. Preview the CHANGELOG notes locally with `scripts/changelog_section.py X.Y.Z`.
+
+Betas and hotfixes follow the stable-branch flow in [beta-channel.md](beta-channel.md): `/bump-release` cuts from `main` only to create `stable/X.Y` and its first beta; every later beta, the stable release and hotfixes are cut on `stable/X.Y`, and each is merged back into `main` with a merge commit. A beta tag `vX.Y.Z-beta.N` publishes a GitHub pre-release from `docs/releases/X.Y.Z-beta.N.md` and needs no dated CHANGELOG section.
 
 Testers who need an unreleased build still build from source or use `/deploy-remote-test`; commits between tags report the last released version.
 

@@ -159,6 +159,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import changelog_fragments  # noqa: E402  (VERSION_RE, the one spelling of X.Y.Z[~betaN])
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -324,23 +327,35 @@ def check_cppcheck_suppress_sync():
 
 # --- check 4: VERSION vs README badge ---------------------------------------
 
-def check_version_matches_readme():
-    failures = []
-    version = read("VERSION").strip()
-    readme = read("README.md")
+# A beta VERSION spells its Debian pre-release suffix `~betaN` (5.0.0~beta1);
+# the README badge carries the same spelling. The form is owned by
+# scripts/changelog_fragments.py (VERSION_RE; release_tag.py's TAG_RE is its
+# tag-side twin) and only borrowed here, so there is one Python spelling.
+VERSION_FORM_RE = changelog_fragments.VERSION_RE
+# A plain string with no capturing group, embedded below; both badge regexes
+# read their fields by name, so a group added to it cannot shift them.
+VERSION_PATTERN = changelog_fragments.VERSION_PATTERN
+README_BADGE_RE = re.compile(
+    r"^####\s*\[(?P<version>" + VERSION_PATTERN + r")\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
-    m = re.search(r"^####\s*\[([0-9.]+)\]\s*-\s*[0-9-]+\s*&middot;\s*\[Changelog\]", readme, re.MULTILINE)
+
+def _version_badge_findings(version, readme):
+    """Check 4 over the VERSION text and README text. Pure, so --self-test can drive it."""
+    if not VERSION_FORM_RE.match(version.strip()):
+        return ["VERSION (%s) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)" % version.strip()]
+    m = README_BADGE_RE.search(readme)
     if not m:
-        failures.append("could not find the version badge line in README.md")
-        return failures
-
-    badge_version = m.group(1)
-    if badge_version != version:
-        failures.append(
+        return ["could not find the version badge line in README.md"]
+    if m.group("version") != version.strip():
+        return [
             "VERSION (%s) does not match the README badge version (%s)"
-            % (version, badge_version)
-        )
-    return failures
+            % (version.strip(), m.group("version"))
+        ]
+    return []
+
+
+def check_version_matches_readme():
+    return _version_badge_findings(read("VERSION"), read("README.md"))
 
 
 # --- check 5: the blocking-get_connected() list vs the code -----------------
@@ -1863,7 +1878,8 @@ SUPPORTED_UPDATED_RE = re.compile(r"^## Updated (\S+)\s*$", re.MULTILINE)
 # overshoots it at once. Relative to the badge, not to today, so the check
 # stays pure.
 MAX_UPDATED_DAYS_AHEAD = 366
-README_BADGE_DATE_RE = re.compile(r"^####\s*\[[0-9.]+\]\s*-\s*(\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
+README_BADGE_DATE_RE = re.compile(
+    r"^####\s*\[" + VERSION_PATTERN + r"\]\s*-\s*(?P<date>\S+)\s*&middot;\s*\[Changelog\]", re.MULTILINE)
 
 
 def _iso_date(text):
@@ -1890,16 +1906,16 @@ def _updated_date_findings(supported, readme):
     if not b:
         failures.append("could not find the release date in the README.md version badge line")
         return failures
-    released = _iso_date(b.group(1))
+    released = _iso_date(b.group("date"))
     if released is None:
-        failures.append("README.md badge date %r is not a YYYY-MM-DD date" % b.group(1))
+        failures.append("README.md badge date %r is not a YYYY-MM-DD date" % b.group("date"))
     elif updated is not None and updated < released:
         failures.append("SUPPORTED-DRIVERS.md says '## Updated %s' but README.md was released %s: set the Updated "
-                        "line to the release date (/bump-release Step 2.5) or later" % (m.group(1), b.group(1)))
+                        "line to the release date (/bump-release Step 2.5) or later" % (m.group(1), b.group("date")))
     elif updated is not None and (updated - released).days > MAX_UPDATED_DAYS_AHEAD:
         failures.append("SUPPORTED-DRIVERS.md says '## Updated %s', more than %d days after the README.md release "
                         "date %s: a mistyped year, or a release is long overdue"
-                        % (m.group(1), MAX_UPDATED_DAYS_AHEAD, b.group(1)))
+                        % (m.group(1), MAX_UPDATED_DAYS_AHEAD, b.group("date")))
     return failures
 
 
@@ -2656,6 +2672,30 @@ def self_test():
     check("counts: the summary keeps a declared comma item whole in the paste-ready headline",
           lines[1] == "brands: 4 (Four)" and "Canon, Nikon and Sony DSLRs" in lines[3])
 
+    # check 4: VERSION vs README badge, with the ~betaN suffix.
+    b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"
+    check("version badge: a beta VERSION and its beta badge agree",
+          _version_badge_findings("5.0.0~beta2\n", b_readme) == [])
+    check("version badge: a beta badge against the base VERSION is flagged",
+          len(_version_badge_findings("5.0.0\n", b_readme)) == 1)
+    check("version badge: a stable VERSION and badge still agree",
+          _version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2.0")) == [])
+    check("version badge: a missing badge line is flagged",
+          len(_version_badge_findings("4.2.0", "# no badge\n")) == 1)
+    b0_readme = b_readme.replace("5.0.0~beta2", "5.0.0~beta0")
+    check("version badge: ~beta0 is rejected even when VERSION and badge agree",
+          _version_badge_findings("5.0.0~beta0\n", b0_readme) == ["VERSION (5.0.0~beta0) is not X.Y.Z or X.Y.Z~betaN (betas count from 1)"])
+    check("version badge: a badge that is not X.Y.Z is not a badge",
+          len(_version_badge_findings("4.2.0\n", b_readme.replace("5.0.0~beta2", "4.2"))) == 1)
+    check("version badge: the form is changelog_fragments.VERSION_RE itself",
+          VERSION_FORM_RE is changelog_fragments.VERSION_RE and README_BADGE_RE.search(b_readme) is not None)
+    check("version badge: ~beta10 is accepted",
+          _version_badge_findings("5.0.0~beta10\n", b_readme.replace("5.0.0~beta2", "5.0.0~beta10")) == [])
+    check("updated date: a ~beta0 badge is not read as a release date",
+          len(_updated_date_findings("# S\n\n## Updated 2026-11-01\n", b0_readme)) == 1)
+    check("updated date: a beta badge still yields its release date",
+          _updated_date_findings("# S\n\n## Updated 2026-11-01\n", b_readme) == [])
+
     # check 16: SUPPORTED-DRIVERS.md Updated date vs README badge date (issue #692).
     ud_supported = "# Supported\n\n## Updated 2026-09-27\nintro\n"
     ud_readme = "#### [4.1.0] - 2026-09-27 &middot; [Changelog](CHANGELOG.md)\n"
@@ -2815,6 +2855,15 @@ def self_test():
 if __name__ == "__main__":
     if "--self-test" in sys.argv:
         sys.exit(self_test())
+    if "--badge-date" in sys.argv:
+        # The README badge's release date, by the same regex check 16 reads it
+        # with; scripts/build_deb.sh dates a beta's changelog stanza from it.
+        b = README_BADGE_DATE_RE.search(read("README.md"))
+        if not b or _iso_date(b.group("date")) is None:
+            print("could not find a dated version badge line in README.md", file=sys.stderr)
+            sys.exit(1)
+        print(b.group("date"))
+        sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
     sys.exit(main())

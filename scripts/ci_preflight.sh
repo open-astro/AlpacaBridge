@@ -308,6 +308,15 @@ section "Falsified-by (PR body)"
 if python3 scripts/check_falsified_by.py --self-test; then
   if [ -z "${PR_BODY_FILE:-}" ]; then
     record SKIP "falsified-by (no PR body)"
+  elif [[ "$(git branch --show-current 2>/dev/null)" == merge-down/* ]] \
+       && python3 scripts/merge_down.py --exempt --head-ref "$(git branch --show-current 2>/dev/null)" \
+            --base-ref "${BASE}" --base-rev "${MERGE_BASE}" \
+            --stable-remote "$(case "${BASE}" in */*) echo "${BASE%%/*}" ;; *) echo origin ;; esac)"; then
+    # Same exemption, same script as the falsified-by CI job: a merge down
+    # (merge-down/X.Y-to-<target> against that target, nothing that is not
+    # already on stable/X.Y) carries test cases already gated on their fix PRs
+    # (docs/beta-channel.md). Set PREFLIGHT_BASE to the PR's base.
+    record SKIP "falsified-by (merge down)"
   elif [ ! -f "${PR_BODY_FILE}" ]; then
     echo "falsified-by: PR_BODY_FILE is set but ${PR_BODY_FILE} does not exist"
     record FAIL "falsified-by"
@@ -354,7 +363,9 @@ if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs
    && python3 scripts/changelog_section.py --self-test \
    && python3 scripts/changelog_fragments.py --self-test \
    && python3 scripts/changelog_fragments.py --check \
-   && python3 scripts/changelog_to_deb.py --self-test; then
+   && python3 scripts/changelog_to_deb.py --self-test \
+   && python3 scripts/release_tag.py --self-test \
+   && python3 scripts/merge_down.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"
@@ -394,6 +405,19 @@ if ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
   record PASS "build+test (vendors OFF)"
 else
   record FAIL "build+test (vendors OFF)"
+fi
+
+# --- gate 3b: the beta VERSION split ---------------------------------------
+#
+# Mirrors the build-test CI step: the VERSION helper both CMakeLists include
+# gives project() the base version and the version defines the full string
+# (docs/beta-channel.md). cmake -P only, no configure.
+
+section "Beta VERSION split"
+if scripts/check_beta_configure.sh; then
+  record PASS "beta VERSION split"
+else
+  record FAIL "beta VERSION split"
 fi
 
 # --- gate 4: build + unit tests, all vendors -------------------------------

@@ -10,6 +10,8 @@ cmake_install.cmake
 *.cmake
 !CMakeLists.txt
 !*.cmake.in
+# Hand-written CMake modules (not generated output)
+!/cmake/*.cmake
 
 # Compiled files
 *.o
