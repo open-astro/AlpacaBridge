@@ -69,8 +69,8 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 }
 
 // Hammers every worker thread the driver's disconnect/destructor path must
-// join: slew_task_thread_, pulse_task_thread_, both per-axis
-// stop_task_thread_[axis] (MoveAxis stops issued close together — the exact
+// join: the slew slot, pulse_task_thread_, both per-axis
+// stop slots (MoveAxis stops issued close together — the exact
 // shape of the 2026-09-06 "superseded MoveAxis stop task strands Slewing"
 // bug in .github/instructions/skywatcher.instructions.md), rate_verify_thread_ (open-astro #248) and the
 // duty_thread_ that set_tracking starts and stops.
@@ -210,7 +210,7 @@ TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rat
             driver->move_axis(1, 1.0);
         } catch (const std::exception&) {
         }
-        // MoveAxis(axis, 0) on a moving axis is what spawns stop_task_thread_[axis].
+        // MoveAxis(axis, 0) on a moving axis is what starts the axis's stop slot.
         try {
             driver->move_axis(0, 0.0);
         } catch (const std::exception&) {

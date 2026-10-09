@@ -1079,13 +1079,13 @@ TEST_CASE(
     // Regression (found during EQM-35 Pro hardware bring-up, 2026-09-06), fixed in two
     // steps:
     //
-    // (1) reap_stop_task() used to cancel+join a SINGLE stop-completion thread shared by
+    // (1) The stop-completion machinery used to cancel+join a SINGLE thread shared by
     //     both axes. Stopping axis 1 while axis 0's stop task was still polling a
     //     ramping mount (CCDciel issues MoveAxis stop pairs ~44ms apart on button
     //     release -- see .github/instructions/skywatcher.instructions.md) cancelled the RA task before it reached
     //     manual_axis_slewing_[0] = false, stranding Slewing true FOREVER
     //     (get_hardware_slewing_locked() ORs both axes' flags) -- exactly the hardware
-    //     symptom. Fixed: each axis now has its own stop-task thread and cancel flag.
+    //     symptom. Fixed: each axis now has its own stop slot (and generation).
     //
     // (2) That fix alone was not sufficient: the RA stop task's tracking-restore tail
     //     guarded itself with `motion_generation_ == stop_task_generation`, a counter
@@ -1118,6 +1118,60 @@ TEST_CASE(
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 5000));
     CHECK(driver->get_tracking());
 
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher slot - a stop on one axis does not supersede the other axis's stop body",
+          "[skywatcher][async][slot]") {
+    // Each axis's MoveAxis(axis, 0) body runs in its own slot with its own
+    // generation (decision 0006, pilot re-check 2): the Dec stop dispatched
+    // while the RA body still polls must leave that body Current, so its tail
+    // clears manual_axis_slewing_[0] and restores the RA drive. One generation
+    // shared by both stop slots would mark the RA body Superseded and skip
+    // both.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    driver->move_axis(1, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+
+    driver->move_axis(0, 0.0);  // RA body starts polling; the ramp takes 800 ms
+    driver->move_axis(1, 0.0);  // Dec body starts on the other slot
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+    REQUIRE(wait_until([&] { return mount.axis_running(1) && !mount.axis_running(2); }, 5000));
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher slot - a slew that replaces a FindHome in flight does not leave Slewing true",
+          "[skywatcher][async][slot]") {
+    // The slew slot starts the new body without waiting for the homing body,
+    // so that body is Superseded and no longer clears homing_ itself: the
+    // initiator's claim has to. A claim that leaves homing_ set reads Slewing
+    // true for ever (the homing body, being Superseded, never clears it). A
+    // slew during a park is refused at the gate, so FindHome is the other
+    // body a slew can replace.
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(1, 25.0);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);
+
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(std::abs(driver->get_declination() - 40.0) < 0.05);
     driver->set_connected(false);
 }
 
