@@ -4661,7 +4661,7 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
 
 #endif  // _WIN32
 
-TEST_CASE("SkyWatcher fake - a steady reply latency is paid by every transaction and counted",
+TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transaction and counted",
           "[skywatcher][async][fake]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());

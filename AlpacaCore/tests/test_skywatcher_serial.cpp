@@ -1246,7 +1246,7 @@ TEST_CASE("SkyWatcher serial - a Dec pulse whose ':K' is lost stops before the f
 
 #endif  // _WIN32
 
-TEST_CASE("SkyWatcher serial - a steady reply latency is paid by every transaction and counted",
+TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every transaction and counted",
           "[skywatcher][serial]") {
     FakeSkyWatcherSerialBoard board;
     sw::SkyWatcherProtocolWrapper protocol;
