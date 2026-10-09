@@ -328,7 +328,7 @@ inline ContractEntry contract_entry_qhy_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::qhy::create_qhy_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
-// Second backend behind the same (qhy, filterwheel) router pair: the standalone CFW3 on a serial port.
+// Second backend behind the same (qhy, filterwheel) catalog pair: the standalone CFW3 on a serial port.
 inline ContractEntry contract_entry_qhy_filterwheel_cfw3() {
     return make_entry(
         "qhy_filterwheel_cfw3", "qhy", "filterwheel", DeviceType::FilterWheel,
