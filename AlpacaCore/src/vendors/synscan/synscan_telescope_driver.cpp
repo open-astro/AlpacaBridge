@@ -2445,7 +2445,7 @@ private:
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
     mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable util::TaskClock::clock::time_point last_utc_set_monotonic_;
+    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable int tracking_mode_cached_;
     mutable bool tracking_mode_valid_;

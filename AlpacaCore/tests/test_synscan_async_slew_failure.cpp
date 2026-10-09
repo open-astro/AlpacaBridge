@@ -632,6 +632,7 @@ TEST_CASE("SynScan AbortSlew - stops active pulse tasks and restores requested t
             CHECK(driver->get_tracking());
         }
         clock.advance(std::chrono::milliseconds(1700));
+        CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
         CHECK(static_cast<int>(st->command_snapshot().size()) == at_abort_size);
         driver->set_connected(false);
     }

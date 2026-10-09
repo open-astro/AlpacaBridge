@@ -426,6 +426,7 @@ TEST_CASE("Celestron AbortSlew - stops each active pulse chain before returning"
         const int stopped_count = st->guide_command_count(axis);
         CHECK_FALSE(driver->get_is_pulse_guiding());
         clock.advance(std::chrono::milliseconds(2700));
+        CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
         CHECK(st->guide_command_count(axis) == stopped_count);
         driver->set_connected(false);
     }
@@ -448,6 +449,7 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         // Past the 500 ms pulse plus the driver's 1 s completion delay, so the
         // first pulse has expired. Do not poll IsPulseGuiding.
         clock.advance(std::chrono::milliseconds(1700));
+        CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
         // The first read after a pulse returns its one-shot readback correction;
         // take it now so `held` below compares hold against hold.
         (void)(is_ra ? driver->get_right_ascension() : driver->get_declination());
@@ -455,6 +457,7 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         const double held = is_ra ? driver->get_right_ascension() : driver->get_declination();
         st->shifted_position.store(true);
         clock.advance(std::chrono::milliseconds(2100));  // Expire the 2 s position cache.
+        CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
 
         const double during = is_ra ? driver->get_right_ascension() : driver->get_declination();
         CHECK(std::abs(during - held) < 1e-5);
