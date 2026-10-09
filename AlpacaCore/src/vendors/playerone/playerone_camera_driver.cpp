@@ -40,11 +40,16 @@ namespace {
 
 std::pair<int, int> bayer_offsets(PlayerOneBayerPattern pattern) {
     switch (pattern) {
-    case PlayerOneBayerPattern::RG: return {0, 0};
-    case PlayerOneBayerPattern::BG: return {1, 1};
-    case PlayerOneBayerPattern::GR: return {1, 0};
-    case PlayerOneBayerPattern::GB: return {0, 1};
-    default:                        return {0, 0};
+        case PlayerOneBayerPattern::RG:
+            return {0, 0};
+        case PlayerOneBayerPattern::BG:
+            return {1, 1};
+        case PlayerOneBayerPattern::GR:
+            return {1, 0};
+        case PlayerOneBayerPattern::GB:
+            return {0, 1};
+        default:
+            return {0, 0};
     }
 }
 
@@ -263,7 +268,11 @@ public:
             } catch (const std::exception& e) {
                 try {
                     sdk.close_camera(camera_info_.camera_id);
+                } catch (const std::exception& close_error) {
+                    ALPACA_LOG_WARN("PlayerOne",
+                                    "close_camera after init failure failed: " + std::string(close_error.what()));
                 } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "close_camera after init failure threw a non-standard exception");
                 }
                 throw AlpacaException(std::string("POAInitCamera failed: ") + e.what(), AlpacaError::DriverException);
             }
@@ -300,13 +309,18 @@ public:
             try {
                 static_cast<void>(bytes_per_pixel(active_format_));
                 format_verified = sdk.get_image_format(camera_info_.camera_id) == active_format_;
-            } catch (const std::exception&) {
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("PlayerOne", "image format readback failed: " + std::string(e.what()));
             }
             if (!format_verified) {
                 const int failed_id = camera_info_.camera_id;
                 try {
                     sdk.close_camera(failed_id);
+                } catch (const std::exception& close_error) {
+                    ALPACA_LOG_WARN("PlayerOne",
+                                    "close_camera after format failure failed: " + std::string(close_error.what()));
                 } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne", "close_camera after format failure threw a non-standard exception");
                 }
                 throw AlpacaException("Unable to configure a supported Player One image format",
                                       AlpacaError::DriverException);
@@ -335,15 +349,24 @@ public:
             int bin = 1;
             try {
                 sdk.get_image_size(camera_info_.camera_id, w, h);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("PlayerOne", "initial image-size readback failed: " + std::string(e.what()));
             } catch (...) {
+                ALPACA_LOG_WARN("PlayerOne", "initial image-size readback threw a non-standard exception");
             }
             try {
                 sdk.get_image_start_pos(camera_info_.camera_id, sx, sy);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("PlayerOne", "initial start-position readback failed: " + std::string(e.what()));
             } catch (...) {
+                ALPACA_LOG_WARN("PlayerOne", "initial start-position readback threw a non-standard exception");
             }
             try {
                 bin = sdk.get_image_bin(camera_info_.camera_id);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG("PlayerOne", "initial bin readback failed: " + std::string(e.what()));
             } catch (...) {
+                ALPACA_LOG_WARN("PlayerOne", "initial bin readback threw a non-standard exception");
             }
 
             bin_ = bin;
@@ -410,8 +433,7 @@ public:
             with_camera([&](int id) { sdk_.set_fan_power_percent(id, percent); });
             return "";
         }
-        throw AlpacaException("Action not supported: " + std::string(action_name),
-                              AlpacaError::ActionNotImplemented);
+        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
     }
     bool can_action(std::string_view action_name) const override {
         const std::string name = to_lower_copy(action_name);
@@ -430,16 +452,14 @@ public:
     int get_bayer_offset_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
-            throw AlpacaException("Bayer offsets not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer).first;
     }
     int get_bayer_offset_y() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.is_color) {
-            throw AlpacaException("Bayer offsets not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer).second;
     }
@@ -575,7 +595,7 @@ public:
     int get_gain() const override {
         ensure_connected();
         return static_cast<int>(with_camera([this](int id) {
-            return sdk_.get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
+            return sdk_.get_config_int(id, /*config_id=*/1);  // POA_GAIN
         }));
     }
     void set_gain(int gain) override {
@@ -592,7 +612,7 @@ public:
             throw AlpacaException("Gain out of range", AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
-        sdk_.set_config_int(camera_info_.camera_id, /*POA_GAIN=*/1, static_cast<long>(gain), false);
+        sdk_.set_config_int(camera_info_.camera_id, /*config_id=*/1, static_cast<long>(gain), false);  // POA_GAIN
     }
     int get_gain_max() const override {
         ensure_connected();
@@ -613,14 +633,12 @@ public:
         return static_cast<int>(caps_.gain_min);
     }
     std::vector<std::string> get_gains() const override {
-        throw AlpacaException("Gain descriptions not supported",
-                              AlpacaError::PropertyNotImplemented);
+        throw AlpacaException("Gain descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
     bool get_has_shutter() const override { return false; }
     double get_heat_sink_temperature() const override {
-        throw AlpacaException("Heat sink temperature not supported",
-                              AlpacaError::NotImplemented);
+        throw AlpacaException("Heat sink temperature not supported", AlpacaError::NotImplemented);
     }
 
     ImageArray get_image_array() const override {
@@ -687,8 +705,7 @@ public:
     int get_max_bin_x() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_.supported_bins.empty()) return 1;
-        return *std::max_element(camera_info_.supported_bins.begin(),
-                                 camera_info_.supported_bins.end());
+        return *std::max_element(camera_info_.supported_bins.begin(), camera_info_.supported_bins.end());
     }
     int get_max_bin_y() const override { return get_max_bin_x(); }
 
@@ -708,18 +725,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         if (!caps_.has_offset) {
-            throw AlpacaException("Offset not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
         }
-        return static_cast<int>(sdk_.get_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7));
+        return static_cast<int>(sdk_.get_config_int(camera_info_.camera_id, /*config_id=*/7));  // POA_OFFSET
     }
     void set_offset(int offset) override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         if (!caps_.has_offset) {
-            throw AlpacaException("Offset not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
         }
         if (!caps_.offset_writable) {
             throw AlpacaException("Offset is read-only", AlpacaError::NotImplemented);
@@ -728,15 +743,14 @@ public:
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
-        sdk_.set_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7, static_cast<long>(offset), false);
+        sdk_.set_config_int(camera_info_.camera_id, /*config_id=*/7, static_cast<long>(offset), false);  // POA_OFFSET
     }
     int get_offset_max() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         if (!caps_.has_offset) {
-            throw AlpacaException("Offset not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
         }
         return static_cast<int>(caps_.offset_max);
     }
@@ -745,14 +759,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected_locked();
         if (!caps_.has_offset) {
-            throw AlpacaException("Offset not supported",
-                                  AlpacaError::PropertyNotImplemented);
+            throw AlpacaException("Offset not supported", AlpacaError::PropertyNotImplemented);
         }
         return static_cast<int>(caps_.offset_min);
     }
     std::vector<std::string> get_offsets() const override {
-        throw AlpacaException("Offset descriptions not supported",
-                              AlpacaError::PropertyNotImplemented);
+        throw AlpacaException("Offset descriptions not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_percent_completed() const override {
@@ -804,23 +816,20 @@ public:
     double get_set_ccd_temperature() const override {
         ensure_connected();
         if (!get_can_set_ccd_temperature()) {
-            throw AlpacaException("Set CCD temperature not supported",
-                                  AlpacaError::NotImplemented);
+            throw AlpacaException("Set CCD temperature not supported", AlpacaError::NotImplemented);
         }
         return static_cast<double>(with_camera([this](int id) { return sdk_.get_target_temp_c(id); }));
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
         if (!get_can_set_ccd_temperature()) {
-            throw AlpacaException("Set CCD temperature not supported",
-                                  AlpacaError::NotImplemented);
+            throw AlpacaException("Set CCD temperature not supported", AlpacaError::NotImplemented);
         }
         int target_c = static_cast<int>(std::lround(temperature));
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (target_c < caps_.target_temp_min || target_c > caps_.target_temp_max) {
-                throw AlpacaException("Target temperature out of range",
-                                      AlpacaError::InvalidValue);
+                throw AlpacaException("Target temperature out of range", AlpacaError::InvalidValue);
             }
         }
         with_camera([&](int id) { sdk_.set_target_temp_c(id, target_c); });
@@ -838,12 +847,10 @@ public:
     void set_start_y(int start_y) override { set_start_pos_common(std::nullopt, start_y); }
 
     double get_sub_exposure_duration() const override {
-        throw AlpacaException("Sub-exposure duration not supported",
-                              AlpacaError::NotImplemented);
+        throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
     void set_sub_exposure_duration(double) override {
-        throw AlpacaException("Sub-exposure duration not supported",
-                              AlpacaError::NotImplemented);
+        throw AlpacaException("Sub-exposure duration not supported", AlpacaError::NotImplemented);
     }
 
     void abort_exposure() override { stop_exposure(); }
@@ -861,10 +868,18 @@ public:
         }
         PlayerOneGuideDirection dir = PlayerOneGuideDirection::North;
         switch (direction) {
-        case 0: dir = PlayerOneGuideDirection::North; break;
-        case 1: dir = PlayerOneGuideDirection::South; break;
-        case 2: dir = PlayerOneGuideDirection::East;  break;
-        case 3: dir = PlayerOneGuideDirection::West;  break;
+            case 0:
+                dir = PlayerOneGuideDirection::North;
+                break;
+            case 1:
+                dir = PlayerOneGuideDirection::South;
+                break;
+            case 2:
+                dir = PlayerOneGuideDirection::East;
+                break;
+            case 3:
+                dir = PlayerOneGuideDirection::West;
+                break;
         }
 
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
@@ -915,11 +930,10 @@ public:
 
     void start_exposure(double duration, bool light) override {
         ensure_connected();
-        (void)light; // Player One has no mechanical shutter.
+        (void)light;  // Player One has no mechanical shutter.
 
         if (duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
         }
 
         // Held through the thread spawn at the end: serialises the spawn against
@@ -950,8 +964,7 @@ public:
             }
             if (exposure_us_long < caps_.exposure_min_us) exposure_us_long = caps_.exposure_min_us;
             if (exposure_us_long > caps_.exposure_max_us) {
-                throw AlpacaException("Exposure duration out of range",
-                                      AlpacaError::InvalidValue);
+                throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
             }
             id = camera_info_.camera_id;
             active_bin = bin_;
@@ -969,14 +982,11 @@ public:
                 throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
             }
             if (active_num_x > max_w || active_num_y > max_h) {
-                throw AlpacaException("ROI size exceeds sensor dimensions",
-                                      AlpacaError::InvalidValue);
+                throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
             }
-            if (active_start_x < 0 || active_start_y < 0 ||
-                active_start_x + active_num_x > max_w ||
+            if (active_start_x < 0 || active_start_y < 0 || active_start_x + active_num_x > max_w ||
                 active_start_y + active_num_y > max_h) {
-                throw AlpacaException("ROI extends beyond sensor bounds",
-                                      AlpacaError::InvalidValue);
+                throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
             }
         }
 
@@ -993,9 +1003,8 @@ public:
             image_ready_ = false;
             image_cached_ = false;
             last_image_ = {};
-            exposure_deadline_ = std::chrono::steady_clock::now() +
-                std::chrono::microseconds(exposure_us) +
-                std::chrono::seconds(15);
+            exposure_deadline_ =
+                std::chrono::steady_clock::now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
             // Publish exposure_active_ under mutex_ — the same lock the
             // setters hold for ensure_not_exposing_locked() — so a
@@ -1013,7 +1022,12 @@ public:
             const auto publish_failure = [this, &sdk, id](std::string reason) {
                 try {
                     sdk.stop_exposure(id);
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("PlayerOne",
+                                     "stop_exposure during failure publication failed: " + std::string(e.what()));
                 } catch (...) {
+                    ALPACA_LOG_WARN("PlayerOne",
+                                    "stop_exposure during failure publication threw a non-standard exception");
                 }
                 std::lock_guard<std::mutex> lock(mutex_);
                 exposure_failure_ = std::move(reason);
@@ -1029,7 +1043,8 @@ public:
                 if (dirty_format || dirty_roi) {
                     try {
                         sdk.stop_exposure(id);
-                    } catch (const std::exception&) {
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG("PlayerOne", "pre-exposure stop failed: " + std::string(e.what()));
                     }
                 }
 
@@ -1037,8 +1052,7 @@ public:
                     try {
                         sdk.set_image_format(id, active_format);
                     } catch (const std::exception& e) {
-                        ALPACA_LOG_WARN("PlayerOne",
-                            std::string("set_image_format failed: ") + e.what());
+                        ALPACA_LOG_WARN("PlayerOne", std::string("set_image_format failed: ") + e.what());
                     }
                     if (sdk.get_image_format(id) != active_format) {
                         alpacacore::util::throw_invalid_camera_image("camera did not apply the requested pixel format");
@@ -1065,13 +1079,19 @@ public:
                     // Read back — SDK may have further aligned values.
                     try {
                         sdk.get_image_size(id, sdk_w, sdk_h);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG("PlayerOne", "ROI size readback failed: " + std::string(e.what()));
                     } catch (...) {
+                        ALPACA_LOG_WARN("PlayerOne", "ROI size readback threw a non-standard exception");
                     }
                     int rx = active_start_x;
                     int ry = active_start_y;
                     try {
                         sdk.get_image_start_pos(id, rx, ry);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_DEBUG("PlayerOne", "ROI start-position readback failed: " + std::string(e.what()));
                     } catch (...) {
+                        ALPACA_LOG_WARN("PlayerOne", "ROI start-position readback threw a non-standard exception");
                     }
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -1082,8 +1102,7 @@ public:
                 }
 
                 // Set the exposure — POA_EXPOSURE's value is microseconds (long).
-                sdk.set_config_int(id, /*POA_EXPOSURE=*/0,
-                                   static_cast<long>(exposure_us), false);
+                sdk.set_config_int(id, /*POA_EXPOSURE=*/0, static_cast<long>(exposure_us), false);
 
                 sdk.start_exposure(id, /*single_frame=*/true);
 
@@ -1105,14 +1124,12 @@ public:
 
                 // Poll for image readiness so the abort path can short-circuit
                 // without a long blocking get_image_data.
-                auto poll_deadline = std::chrono::steady_clock::now() +
-                    std::chrono::microseconds(exposure_us) +
-                    std::chrono::seconds(15);
+                auto poll_deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(exposure_us) +
+                                     std::chrono::seconds(15);
 
                 bool ready = false;
                 std::string readiness_failure;
-                while (exposure_active_.load() &&
-                       std::chrono::steady_clock::now() < poll_deadline) {
+                while (exposure_active_.load() && std::chrono::steady_clock::now() < poll_deadline) {
                     try {
                         if (sdk.image_ready(id)) {
                             ready = true;
@@ -1135,7 +1152,12 @@ public:
                     } else {
                         try {
                             sdk.stop_exposure(id);
+                        } catch (const std::exception& e) {
+                            ALPACA_LOG_DEBUG("PlayerOne",
+                                             "stop_exposure after cancellation failed: " + std::string(e.what()));
                         } catch (...) {
+                            ALPACA_LOG_WARN("PlayerOne",
+                                            "stop_exposure after cancellation threw a non-standard exception");
                         }
                         exposure_active_.store(false);
                     }
@@ -1385,7 +1407,8 @@ private:
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
             }
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            ALPACA_LOG_DEBUG("PlayerOne", "camera-info refresh failed: " + std::string(e.what()));
         }
     }
 
@@ -1495,8 +1518,8 @@ private:
                 const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
                 for (int x = 0; x < copy_w; ++x) {
                     const std::size_t j = row_off + static_cast<std::size_t>(x) * 2;
-                    std::uint16_t px = static_cast<std::uint16_t>(buffer[j]) |
-                                       (static_cast<std::uint16_t>(buffer[j + 1]) << 8);
+                    std::uint16_t px =
+                        static_cast<std::uint16_t>(buffer[j]) | (static_cast<std::uint16_t>(buffer[j + 1]) << 8);
                     image.data[static_cast<std::size_t>(y) * out_w + x] = static_cast<std::int32_t>(px);
                 }
             }

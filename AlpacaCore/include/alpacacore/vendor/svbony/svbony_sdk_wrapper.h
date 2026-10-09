@@ -14,35 +14,19 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
-#include <optional>
 
 namespace alpacacore::vendor::svbony {
 
-enum class SVBImageType { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32, Unknown };
+enum class SVBImageType : std::uint8_t { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32, Unknown };
 
-enum class SVBBayerPattern {
-    None,
-    RG,
-    BG,
-    GR,
-    GB
-};
+enum class SVBBayerPattern { None, RG, BG, GR, GB };
 
-enum class SVBExposureStatus {
-    Idle,
-    Working,
-    Success,
-    Failed
-};
+enum class SVBExposureStatus { Idle, Working, Success, Failed };
 
-enum class SVBGuideDirection {
-    North,
-    South,
-    East,
-    West
-};
+enum class SVBGuideDirection { North, South, East, West };
 
 enum class SVBControlType {
     Gain,
@@ -173,4 +157,4 @@ private:
     ~SVBSDKWrapper();
 };
 
-} // namespace alpacacore::vendor::svbony
+}  // namespace alpacacore::vendor::svbony

@@ -22,13 +22,13 @@
 
 namespace alpacacore::vendor::zwo {
 
-enum class ZWOImageType { Raw8, Rgb24, Raw16, Y8, Unknown };
+enum class ZWOImageType : std::uint8_t { Raw8, Rgb24, Raw16, Y8, Unknown };
 
-enum class ZWOBayerPattern { None, RG, BG, GR, GB };
+enum class ZWOBayerPattern : std::uint8_t { None, RG, BG, GR, GB };
 
-enum class ZWOExposureStatus { Idle, Working, Success, Failed };
+enum class ZWOExposureStatus : std::uint8_t { Idle, Working, Success, Failed };
 
-enum class ZWOGuideDirection { North, South, East, West };
+enum class ZWOGuideDirection : std::uint8_t { North, South, East, West };
 
 enum class ZWOControlType {
     Gain,
