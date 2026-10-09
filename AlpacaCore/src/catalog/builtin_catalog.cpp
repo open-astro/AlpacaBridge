@@ -26,6 +26,7 @@ void register_builtin_schemas(DeviceCatalog& catalog) {
     register_bisque_schema(catalog);
     register_onstep_schema(catalog);
     register_celestron_schema(catalog);
+    register_synscan_schema(catalog);
 }
 
 void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
@@ -55,6 +56,9 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
     register_celestron_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+    register_synscan_factory(catalog);
 #endif
 }
 

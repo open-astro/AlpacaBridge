@@ -19,9 +19,9 @@
 // (compiles in every build, also no vendor header); register_astroasis_factory()
 // is defined in astroasis_catalog.cpp (vendor header allowed, compiled only
 // under ALPACACORE_ENABLE_ASTROASIS). The Sky-Watcher pair (open-astro#744),
-// WeeWX (open-astro#731), SVBONY, gphoto, Player One, Bisque, OnStep and Celestron follow the same split, e.g. WeeWX in
-// weewx_schema.cpp and weewx_catalog.cpp. All are called only from
-// builtin_catalog.cpp (the alpacacore_builtins library, open-astro#710).
+// WeeWX (open-astro#731), SVBONY, gphoto, Player One, Bisque, OnStep, Celestron and SynScan follow the same split, e.g.
+// WeeWX in weewx_schema.cpp and weewx_catalog.cpp. All are called only from builtin_catalog.cpp (the
+// alpacacore_builtins library, open-astro#710).
 
 #include <alpacacore/catalog/device_catalog.h>
 
@@ -45,5 +45,7 @@ void register_onstep_schema(DeviceCatalog& catalog);
 void register_onstep_factory(DeviceCatalog& catalog);
 void register_celestron_schema(DeviceCatalog& catalog);
 void register_celestron_factory(DeviceCatalog& catalog);
+void register_synscan_schema(DeviceCatalog& catalog);
+void register_synscan_factory(DeviceCatalog& catalog);
 
 }  // namespace alpacacore::catalog
