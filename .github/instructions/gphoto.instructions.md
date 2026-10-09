@@ -16,7 +16,7 @@ ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelS
 described below; a third session validated the D3300 on the same slot with no code change.
 The Canon EOS 4000D report came from a user's Raspberry Pi 5, not that rig (issue #611), also with no
 code change; the Canon EOS 70D report (issue #637) and the Canon EOS 250D report came from a second
-Raspberry Pi 5, again with no code change. The 70D works on mode dial B (its shutter-speed list holds only `bulb`; every exposure takes the Canon bulb path, issue #640), and a Raspberry Pi 3 is too
+Raspberry Pi 5, again with no code change; both were re-run on that Pi for the Canon bulb change (issue #640, ConformU 4.5.1, 2026-10-09), and the committed reports are those runs. The 70D works on mode dial B (its shutter-speed list holds only `bulb`; every exposure takes the Canon bulb path, issue #640), and a Raspberry Pi 3 is too
 slow for it under ConformU: libraw's `unpack()` of its 20 MP CR2 takes about 4 s there, the frame stays
 `Exposing` for about 8 s, and ConformU's `StartExposure` wait gives up. The Canon EOS 250D (the EOS 200D II in Asia) needs the
 lens on MF: with AF its priming capture and every exposure fail with "Unspecified error". Every run is clean (0 errors, 0 issues, 0 timing violations); see
