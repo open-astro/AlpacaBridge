@@ -642,7 +642,7 @@ TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][
     f.rtc_result = HostClock::RtcWrite::NoDevice;
     auto c = f.clock();
     CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
-    CHECK(f.rtc_writes == 1);  // attempted, but NoDevice: nothing written
+    CHECK(f.rtc_writes == 1);                        // attempted, but NoDevice: nothing written
     CHECK_FALSE(HostClock::host_booted_from_rtc());  // probe still settled
 
     HostClock::set_sysfs_root_for_test("");
