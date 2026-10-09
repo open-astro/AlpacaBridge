@@ -1245,3 +1245,27 @@ TEST_CASE("SkyWatcher serial - a Dec pulse whose ':K' is lost stops before the f
 }
 
 #endif  // _WIN32
+
+TEST_CASE("SkyWatcher serial - a steady reply latency is paid by every transaction and counted",
+          "[skywatcher][serial]") {
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper protocol;
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+
+    const auto timed_reads = [&](int n) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < n; ++i) (void)protocol.inquire_position(sw::kAxisRa);
+        return std::chrono::steady_clock::now() - start;
+    };
+    const int before = board.transactions_served();
+    board.set_reply_latency(40);
+    const auto slow = timed_reads(5);
+    CHECK(board.transactions_served() - before == 5);
+    CHECK(slow >= std::chrono::milliseconds(5 * 40));
+
+    board.set_reply_latency(0);
+    const auto fast = timed_reads(5);
+    CHECK(board.transactions_served() - before == 10);
+    CHECK(fast < std::chrono::milliseconds(5 * 40));
+    protocol.disconnect();
+}

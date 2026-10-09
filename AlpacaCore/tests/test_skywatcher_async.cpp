@@ -23,6 +23,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
 #include <algorithm>
@@ -4198,6 +4199,12 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
     // #334 already landed for the stress harness (StressCallGuard::total_calls,
     // documented in AGENTS.md as one of three lines that must always appear
     // together). "Never polled" is a failure here, not a pass.
+    //
+    // Keeping the slew past the first poll is the fake's job, by name: every
+    // reply pays kSlewPastFirstPollLatency, so the slew's board traffic alone
+    // outlasts the poller's first read and "never polled" cannot come from a
+    // fast fake.
+    mount.set_reply_latency(FakeSkyWatcherMount::kSlewPastFirstPollLatency);
     std::atomic<bool> slew_returned{false};
     std::atomic<std::chrono::steady_clock::rep> returned_at_tick{0};
     const double lst = driver->get_sidereal_time();
@@ -4653,3 +4660,67 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
 }
 
 #endif  // _WIN32
+
+TEST_CASE("SkyWatcher fake - a steady reply latency is paid by every transaction and counted",
+          "[skywatcher][async][fake]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    sw::SkyWatcherProtocolWrapper proto;
+    REQUIRE(proto.connect(endpoint(mount)));
+
+    const auto timed_reads = [&](int n) {
+        const auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < n; ++i) (void)proto.inquire_position(sw::kAxisRa);
+        return std::chrono::steady_clock::now() - start;
+    };
+    const int before = mount.transactions_served();
+    mount.set_reply_latency(std::chrono::milliseconds(40));
+    const auto slow = timed_reads(5);
+    CHECK(mount.transactions_served() - before == 5);
+    CHECK(slow >= std::chrono::milliseconds(5 * 40));
+
+    mount.set_reply_latency(std::chrono::milliseconds(0));
+    const auto fast = timed_reads(5);
+    CHECK(mount.transactions_served() - before == 10);
+    CHECK(fast < std::chrono::milliseconds(5 * 40));
+    proto.disconnect();
+}
+
+TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late datagram is a frame seen",
+          "[skywatcher][async][linkhealth]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    sw::SkyWatcherProtocolWrapper proto;
+    REQUIRE(proto.connect(endpoint(mount)));
+    REQUIRE_FALSE(proto.link_faulted());
+
+    // exchange_timed_out_ outcome: no datagram at all, three exchanges latch.
+    mount.set_silent(true);
+    const int served = mount.transactions_served();
+    for (int i = 0; i < 3; ++i) CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);
+    CHECK(proto.link_faulted());
+    CHECK(mount.transactions_served() > served);
+
+    // Recovery: the first answered exchange clears the latch.
+    mount.set_silent(false);
+    CHECK(proto.inquire_position(sw::kAxisRa) == 0x800000);
+    CHECK_FALSE(proto.link_faulted());
+
+    // exchange_saw_frame_ outcome: the exchange still fails, but a late reply
+    // to it arrives on the wire, so the board is talking and the failure is
+    // not counted. Two silent failures bank 2/3; a held reply that lands
+    // after the exchange gave up is seen by the next exchange; that exchange
+    // fails silent yet resets the count, so two more silences stay below 3.
+    // Held past the whole exchange (3 attempts of 250 ms plus the resync
+    // settle), so the exchange gives up before the datagram is sent.
+    const int served_before_hold = mount.transactions_served();
+    mount.hold_next_reply(std::chrono::milliseconds(4000));
+    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);            // timed out: 1
+    REQUIRE(wait_until([&] { return mount.transactions_served() > served_before_hold; }, 8000));  // late reply sent
+    mount.set_silent(true);
+    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // sees stale frame: reset
+    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // 1
+    CHECK_THROWS_AS(proto.inquire_position(sw::kAxisRa), alpacacore::AlpacaException);  // 2
+    CHECK_FALSE(proto.link_faulted());
+    proto.disconnect();
+}
