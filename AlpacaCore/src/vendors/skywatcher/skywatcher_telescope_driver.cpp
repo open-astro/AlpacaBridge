@@ -3451,14 +3451,18 @@ private:
     // silently unapplied RightAscensionRate leaves RA tracking at the wrong
     // rate until the next rate change (open-astro/AlpacaBridge#248).
     //
-    // Ownership follows the pulse task's discipline, with one difference:
-    // the task NEVER takes mutex_, so it is reaped (cancel + join) WITH
-    // mutex_ held by every path that takes the RA axis -- the setters
-    // themselves, Tracking off, stop_axis_and_wait_locked (goto/park/home/
-    // MoveAxis/duty bursts), the pulse dispatch and AbortSlew -- and by
-    // disconnect. Reaping under the lock is what closes the race a lock-free
-    // reap would leave: a setter spawning between an initiator's reap and
-    // its lock, whose re-kick would then land mid-pulse or on a stopped axis.
+    // Ownership: the check's waits and reads run without mutex_, but its
+    // resend takes mutex_ and goes out only while may_resend_locked() holds.
+    // Every path that takes the RA axis -- the setters themselves, Tracking
+    // off, stop_axis_and_wait_locked (goto/park/home/MoveAxis/duty bursts),
+    // the pulse dispatch and AbortSlew -- ends the check WITH mutex_ held
+    // through cancel_rate_verify_locked(): cancel() (which never joins) plus
+    // a rate_verify_epoch_ bump. The epoch closes the window between the
+    // check's last wait and a reaper, so a check past its last wait cannot
+    // re-kick a stopped or pulsing axis. Only cancel_async_tasks()
+    // (disconnect, destructor) joins, and it does so without mutex_.
+    // Two setters racing each other start their checks in best-effort order:
+    // the later epoch wins and the earlier check is cancelled.
     // Called with mutex_ held (through `lock`), after cancel_rate_verify_locked()
     // on the same lock hold; releases it around start() and returns with it held.
     void spawn_rate_verify_task_locked(std::unique_lock<std::mutex>& lock, double previous_rate_deg_per_sec,
