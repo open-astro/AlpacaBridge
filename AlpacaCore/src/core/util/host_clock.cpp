@@ -61,7 +61,9 @@ std::string boot_rtc_name() {
         if (name.rfind("rtc", 0) != 0) {
             continue;
         }
-        std::ifstream hctosys(root + "/" + name + "/hctosys");
+        std::string hctosys_path = root;
+        hctosys_path.append("/").append(name).append("/hctosys");
+        std::ifstream hctosys(hctosys_path);
         int used = 0;
         if (hctosys.is_open() && (hctosys >> used) && used == 1) {
             return name;
