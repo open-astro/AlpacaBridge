@@ -33,6 +33,7 @@ if(ALPACACORE_ENABLE_QHY)
         qhy_cfw3_filterwheel_driver.cpp
         qhy_qfocuser_protocol_wrapper.cpp
         qhy_focuser_driver.cpp
+        qhy_catalog.cpp
     )
 
     add_library(alpacacore_qhy STATIC ${QHY_SOURCES})

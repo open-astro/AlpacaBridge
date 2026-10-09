@@ -112,6 +112,52 @@
     ]
   },
   {
+    "vendor": "qhy",
+    "deviceType": "camera",
+    "displayName": "QHY Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_QHY",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "cameraId", "type": "string", "default": "", "required": false, "secret": false, "role": "DeviceId"}
+    ]
+  },
+  {
+    "vendor": "qhy",
+    "deviceType": "filterwheel",
+    "displayName": "QHY Filter Wheel",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_QHY",
+    "fields": [
+      {"key": "wheelType", "type": "string", "default": "integrated", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator", "appliesWhen": {"key": "wheelType", "value": "cfw3-usb"}},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "filterwheelIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex", "appliesWhen": {"key": "wheelType", "value": "cfw3-usb"}},
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "cameraId", "type": "string", "default": "", "required": false, "secret": false, "role": "DeviceId"},
+      {"key": "filterNames", "type": "stringList", "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
+    "vendor": "qhy",
+    "deviceType": "focuser",
+    "displayName": "QHY Q-Focuser",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_QHY",
+    "fields": [
+      {"key": "connectionType", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Discriminator"},
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath", "appliesWhen": {"key": "connectionType", "value": "serial"}},
+      {"key": "focuserIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "maxStep", "type": "int", "default": 64000, "required": false, "secret": false, "role": "Plain", "range": {"min": 1, "max": 2000000}},
+      {"key": "reverse", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"},
+      {"key": "speed", "type": "int", "default": 1, "required": false, "secret": false, "role": "Plain", "range": {"min": 1, "max": 8}},
+      {"key": "holdForce", "type": "bool", "default": false, "required": false, "secret": false, "role": "Plain"},
+      {"key": "holdIhold", "type": "int", "default": 4, "required": false, "secret": false, "role": "Plain", "range": {"min": 0, "max": 16}},
+      {"key": "holdIrun", "type": "int", "default": 8, "required": false, "secret": false, "role": "Plain", "range": {"min": 0, "max": 30}},
+      {"key": "temperatureSource", "type": "string", "default": "external", "required": false, "secret": false, "role": "Plain", "enum": ["external", "chip"]}
+    ]
+  },
+  {
     "vendor": "skywatcher",
     "deviceType": "telescope",
     "displayName": "SkyWatcher direct (motor controller)",

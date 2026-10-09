@@ -3012,9 +3012,9 @@ int main() {
         // qhy / filterwheel, wheelType "cfw3-usb" (standalone QHYCFW3 on its
         // own serial port) — serial mode persists wheelType, connectionType,
         // portPath, filterwheelIndex and filterNames through
-        // sanitize_device_config; the integrated wheel's cameraIndex/cameraId
-        // are NOT kept for this backend (only the two fields its branch
-        // reads), and an unknown key is dropped.
+        // sanitize_device_config; the catalog keeps every field the wheel
+        // declares, so the integrated wheel's cameraIndex stays in the entry
+        // (ADR 0004), and an undeclared key is dropped.
         const std::vector<std::string> names = {"L", "R", "G", "B", "Ha", "OIII", "SII"};
         const auto cfg = roundtrip_config(router,
                                           {{"vendor", "qhy"},
@@ -3034,7 +3034,7 @@ int main() {
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB7");
         EXPECT(cfg.value("filterwheelIndex", -1) == 1);
         EXPECT(cfg["filterNames"] == names);
-        EXPECT(!cfg.contains("cameraIndex"));
+        EXPECT(cfg.value("cameraIndex", -1) == 3);
         EXPECT(!cfg.contains("bogusKey"));
         remove_device(router, "qhy", "filterwheel", 9642);
     }
@@ -4358,12 +4358,13 @@ int main() {
         add("qhy", "filterwheel", "FilterWheel", "integrated",
             R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"],)"
             R"("connectionType":"serial","portPath":"/dev/x","filterwheelIndex":4})",
-            R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"]})");
+            R"({"wheelType":"integrated","cameraIndex":3,"cameraId":"QHY-CFW-1","filterNames":["L","R"],)"
+            R"("connectionType":"serial","portPath":"/dev/x","filterwheelIndex":4})");
         add("qhy", "filterwheel", "FilterWheel", "cfw3-usb",
             R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":"/dev/ttyUSB7","filterwheelIndex":1,)"
             R"("filterNames":["L","R","G"],"cameraIndex":3,"cameraId":"x"})",
             R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":"/dev/ttyUSB7","filterwheelIndex":1,)"
-            R"("filterNames":["L","R","G"]})");
+            R"("filterNames":["L","R","G"],"cameraIndex":3,"cameraId":"x"})");
         add("qhy", "filterwheel", "FilterWheel", "cfw3-usb auto",
             R"({"wheelType":"cfw3-usb","connectionType":"auto","filterwheelIndex":1,"filterNames":["L","R","G"]})",
             R"({"wheelType":"cfw3-usb","connectionType":"auto","filterwheelIndex":1,"filterNames":["L","R","G"]})");  // #659
@@ -4830,7 +4831,7 @@ int main() {
         pin("cfw3-usb serial with empty portPath is DROPPED (#508 item 1)", "qhy", "filterwheel", "FilterWheel",
             R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":""})",
             "QHY CFW3 connectionType \"serial\" requires portPath", "{}", false, "{}",
-            {"Skipping persisted device: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
+            {"config normalized: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
         drop_pin("gemini", "switch", "Switch", kPortRequired);
@@ -7000,8 +7001,8 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), SVBONY, SynScan and WeeWX
-    // descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
+    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan and
+    // WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7011,7 +7012,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 13);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 16);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7040,6 +7041,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "celestron") {
 #ifdef ALPACACORE_ENABLE_CELESTRON
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "qhy") {
+#ifdef ALPACACORE_ENABLE_QHY
                 entry["available"] = true;
 #else
                 entry["available"] = false;
@@ -8058,6 +8066,21 @@ int main() {
         EXPECT(off.message == "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Telescope", 9273).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_QHY
+    // With the vendor built out, the catalog path reports the deleted arms' text.
+    {
+        // case: QHY vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router,
+            nlohmann::json{{"vendor", "qhy"}, {"deviceType", "camera"}, {"deviceNumber", 9274}, {"cameraIndex", 0}},
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "QHY support not enabled. Rebuild with -DALPACACORE_ENABLE_QHY=ON");
+        EXPECT(listed_entry(router, "Camera", 9274).is_null());
     }
 #endif
 

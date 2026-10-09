@@ -1998,3 +1998,275 @@ TEST_CASE("Builtin catalog - SynScan synscanVersion defaults to auto and the fac
     }
 #endif
 }
+
+// ---------------------------------------------------------------------------
+// QHY camera, filter wheel (integrated and CFW3) and Q-Focuser. The CFW3 and
+// Q-Focuser auto-detect factories construct without a scan (#659), so no port
+// is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kQhyCameraKey{"qhy", DeviceType::Camera};
+const DeviceKey kQhyWheelKey{"qhy", DeviceType::FilterWheel};
+const DeviceKey kQhyFocuserKey{"qhy", DeviceType::Focuser};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the QHY devices in every build",
+          "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kQhyCameraKey, kQhyWheelKey, kQhyFocuserKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_QHY");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kQhyCameraKey)) == std::vector<std::string>{"cameraIndex", "cameraId"});
+    CHECK(keys_of(find_view(views, kQhyWheelKey)) == std::vector<std::string>{"wheelType", "connectionType", "portPath",
+                                                                              "filterwheelIndex", "cameraIndex",
+                                                                              "cameraId", "filterNames"});
+    CHECK(keys_of(find_view(views, kQhyFocuserKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "focuserIndex", "maxStep", "reverse", "speed",
+                                   "holdForce", "holdIhold", "holdIrun", "temperatureSource"});
+
+    const DescriptorView* wheel = find_view(views, kQhyWheelKey);
+    const FieldRef* names = find_field(wheel->fields, "filterNames");
+    REQUIRE(names != nullptr);
+    CHECK(names->kind == FieldRef::Kind::StringList);
+    const FieldRef* wheel_type = find_field(wheel->fields, "wheelType");
+    REQUIRE(wheel_type != nullptr);
+    CHECK(wheel_type->allowed_values.empty());  // normalize owns the rule, to keep its wording
+    CHECK(same_scalar(wheel_type->default_value, std::string{"integrated"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices available only when built",
+          "[catalog][qhy][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kQhyCameraKey, kQhyWheelKey, kQhyFocuserKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_QHY
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when QHY is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_QHY") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_QHY
+    // Nothing here touches the SDK or a port: the CFW3 and Q-Focuser auto
+    // paths resolve at connect (#659), the camera and integrated wheel open at connect.
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    auto camera_driver = catalog.create(kQhyCameraKey, camera, 3);
+    REQUIRE(camera_driver != nullptr);
+    CHECK(camera_driver->get_device_type() == DeviceType::Camera);
+    CHECK(camera_driver->get_device_number() == 3);
+
+    DeviceConfig integrated;
+    integrated.set("cameraId", std::string{"QHY-TEST-1"});
+    integrated.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto integrated_driver = catalog.create(kQhyWheelKey, integrated, 4);
+    REQUIRE(integrated_driver != nullptr);
+    CHECK(integrated_driver->get_device_type() == DeviceType::FilterWheel);
+
+    DeviceConfig cfw3_auto;
+    cfw3_auto.set("wheelType", std::string{"cfw3-usb"});
+    cfw3_auto.set("connectionType", std::string{"auto"});
+    auto cfw3_driver = catalog.create(kQhyWheelKey, cfw3_auto, 5);
+    REQUIRE(cfw3_driver != nullptr);
+    CHECK_FALSE(cfw3_driver->get_connected());
+
+    DeviceConfig cfw3_serial;
+    cfw3_serial.set("wheelType", std::string{"cfw3-usb"});
+    cfw3_serial.set("connectionType", std::string{"serial"});
+    cfw3_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-cfw3"});
+    REQUIRE(catalog.create(kQhyWheelKey, cfw3_serial, 6) != nullptr);
+
+    DeviceConfig focuser_auto;
+    auto focuser_driver = catalog.create(kQhyFocuserKey, focuser_auto, 7);
+    REQUIRE(focuser_driver != nullptr);
+    CHECK(focuser_driver->get_device_type() == DeviceType::Focuser);
+    CHECK_FALSE(focuser_driver->get_connected());
+
+    DeviceConfig focuser_serial;
+    focuser_serial.set("connectionType", std::string{"serial"});
+    focuser_serial.set("portPath", std::string{"/dev/ttyACM-no-such-qfocuser"});
+    focuser_serial.set("maxStep", std::int64_t{30000});
+    REQUIRE(catalog.create(kQhyFocuserKey, focuser_serial, 8) != nullptr);
+
+    // A saved config normalize could only warn about is refused here, never
+    // built into a wheel that would auto-probe (it DTR-resets every CP210x).
+    DeviceConfig no_port;
+    no_port.set("wheelType", std::string{"cfw3-usb"});
+    no_port.set("connectionType", std::string{"serial"});
+    CHECK_THROWS_AS(catalog.create(kQhyWheelKey, no_port, 9), AlpacaException);
+    CHECK_THROWS_AS(catalog.create(kQhyCameraKey, DeviceConfig{}, 10), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - QHY camera and integrated wheel need a camera index or id", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        DeviceKey key;
+        const char* message;
+    };
+    for (const Case& c : {Case{kQhyCameraKey, "QHY camera requires cameraIndex or cameraId"},
+                          Case{kQhyWheelKey, "QHY filter wheel requires cameraIndex or cameraId"}}) {
+        INFO(c.message);
+        const auto api = catalog.normalize(c.key, DeviceConfig{}, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == c.message);
+
+        DeviceConfig negative;
+        negative.set("cameraIndex", std::int64_t{-1});
+        REQUIRE(catalog.normalize(c.key, negative, Source::Api).rejection.has_value());
+
+        // A saved config is warned about and kept.
+        const auto persisted = catalog.normalize(c.key, DeviceConfig{}, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == c.message);
+
+        DeviceConfig by_index;
+        by_index.set("cameraIndex", std::int64_t{0});
+        CHECK_FALSE(catalog.normalize(c.key, by_index, Source::Api).rejection.has_value());
+        DeviceConfig by_id;
+        by_id.set("cameraId", std::string{"QHY-TEST-1"});
+        CHECK_FALSE(catalog.normalize(c.key, by_id, Source::Api).rejection.has_value());
+    }
+}
+
+TEST_CASE("Builtin catalog - QHY CFW3 wheel normalize refuses a bad wheelType, connectionType or endpoint",
+          "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto cfw3 = [](const char* type) {
+        DeviceConfig config;
+        config.set("wheelType", std::string{"cfw3-usb"});
+        config.set("connectionType", std::string{type});
+        return config;
+    };
+
+    DeviceConfig bad_wheel;
+    bad_wheel.set("wheelType", std::string{"cfw2-usb"});
+    bad_wheel.set("cameraIndex", std::int64_t{0});
+    const auto bad_wheel_api = catalog.normalize(kQhyWheelKey, bad_wheel, Source::Api);
+    REQUIRE(bad_wheel_api.rejection.has_value());
+    CHECK(*bad_wheel_api.rejection == "QHY filter wheel wheelType must be \"integrated\" or \"cfw3-usb\"");
+
+    const auto bad_type = catalog.normalize(kQhyWheelKey, cfw3("network"), Source::Api);
+    REQUIRE(bad_type.rejection.has_value());
+    CHECK(*bad_type.rejection == "QHY CFW3 connectionType must be \"auto\" or \"serial\"");
+
+    const auto no_port = catalog.normalize(kQhyWheelKey, cfw3("serial"), Source::Api);
+    REQUIRE(no_port.rejection.has_value());
+    CHECK(*no_port.rejection == "QHY CFW3 connectionType \"serial\" requires portPath");
+    const auto no_port_saved = catalog.normalize(kQhyWheelKey, cfw3("serial"), Source::Persisted);
+    CHECK_FALSE(no_port_saved.rejection.has_value());
+    REQUIRE(no_port_saved.warnings.size() == 1);
+    CHECK(no_port_saved.warnings[0] == "QHY CFW3 connectionType \"serial\" requires portPath");
+
+    DeviceConfig negative_index = cfw3("auto");
+    negative_index.set("filterwheelIndex", std::int64_t{-1});
+    const auto negative = catalog.normalize(kQhyWheelKey, negative_index, Source::Api);
+    REQUIRE(negative.rejection.has_value());
+    CHECK(*negative.rejection == "QHY CFW3 filterwheelIndex must be 0 or greater");
+
+    // "auto" needs no endpoint; "serial" with a port is fine.
+    CHECK_FALSE(catalog.normalize(kQhyWheelKey, cfw3("auto"), Source::Api).rejection.has_value());
+    DeviceConfig serial = cfw3("serial");
+    serial.set("portPath", std::string{"/dev/ttyUSB7"});
+    CHECK_FALSE(catalog.normalize(kQhyWheelKey, serial, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - QHY Q-Focuser settings are range checked per field", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        const char* key;
+        std::int64_t value;
+    };
+    for (const Case& c : {Case{"maxStep", 0}, Case{"maxStep", 2000001}, Case{"speed", 0}, Case{"speed", 9},
+                          Case{"holdIhold", 17}, Case{"holdIhold", -1}, Case{"holdIrun", 31}}) {
+        INFO(std::string(c.key) + " " + std::to_string(c.value));
+        DeviceConfig config;
+        config.set(c.key, c.value);
+        const auto api = catalog.normalize(kQhyFocuserKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(api.rejection->find(c.key) != std::string::npos);
+        // A saved out-of-range value drops to unset, so the factory's default applies.
+        const auto persisted = catalog.normalize(kQhyFocuserKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.config.has(c.key));
+    }
+    for (const Case& c : {Case{"maxStep", 1}, Case{"maxStep", 2000000}, Case{"speed", 8}, Case{"holdIhold", 16},
+                          Case{"holdIrun", 30}, Case{"holdIrun", 0}}) {
+        INFO(std::string(c.key) + " " + std::to_string(c.value));
+        DeviceConfig config;
+        config.set(c.key, c.value);
+        CHECK_FALSE(catalog.normalize(kQhyFocuserKey, config, Source::Api).rejection.has_value());
+    }
+
+    DeviceConfig source;
+    source.set("temperatureSource", std::string{"probe"});
+    const auto bad_source = catalog.normalize(kQhyFocuserKey, source, Source::Api);
+    REQUIRE(bad_source.rejection.has_value());
+    CHECK(bad_source.rejection->find("temperatureSource") != std::string::npos);
+    source.set("temperatureSource", std::string{"chip"});
+    CHECK_FALSE(catalog.normalize(kQhyFocuserKey, source, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - QHY sanitize keeps the declared fields per device type", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig focuser;
+    focuser.set("connectionType", std::string{"serial"});
+    focuser.set("portPath", std::string{"/dev/ttyACM3"});
+    focuser.set("focuserIndex", std::int64_t{1});
+    focuser.set("maxStep", std::int64_t{30000});
+    focuser.set("reverse", true);
+    focuser.set("speed", std::int64_t{4});
+    focuser.set("holdForce", true);
+    focuser.set("holdIhold", std::int64_t{6});
+    focuser.set("holdIrun", std::int64_t{12});
+    focuser.set("temperatureSource", std::string{"chip"});
+    focuser.set("cameraIndex", std::int64_t{7});  // a camera key, not a focuser one
+    const DeviceConfig kept = catalog.sanitize(kQhyFocuserKey, focuser);
+    CHECK(kept.entries().size() == 10);
+    CHECK_FALSE(kept.has("cameraIndex"));
+    CHECK(string_at(kept, "portPath") == "/dev/ttyACM3");
+
+    DeviceConfig wheel;
+    wheel.set("wheelType", std::string{"cfw3-usb"});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    wheel.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_wheel = catalog.sanitize(kQhyWheelKey, wheel);
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("bogusKey"));
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("cameraId", std::string{"QHY-TEST-1"});
+    camera.set("portPath", std::string{"/dev/x"});
+    const DeviceConfig kept_camera = catalog.sanitize(kQhyCameraKey, camera);
+    CHECK(kept_camera.entries().size() == 2);
+}

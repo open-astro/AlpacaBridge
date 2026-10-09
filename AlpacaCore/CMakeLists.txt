@@ -137,6 +137,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/onstep/onstep_schema.cpp
     src/vendors/celestron/celestron_schema.cpp
     src/vendors/synscan/synscan_schema.cpp
+    src/vendors/qhy/qhy_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -155,6 +156,8 @@ if(ALPACACORE_ENABLE_QHY)
     add_subdirectory(src/vendors/qhy)
     if(TARGET alpacacore_qhy)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_qhy)
+        # register_builtin_factories() guards its QHY factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_QHY)
     endif()
 endif()
 
