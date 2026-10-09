@@ -163,7 +163,7 @@ if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_svbony)
-    list(APPEND TEST_SOURCES test_svbony_camera.cpp)
+    list(APPEND TEST_SOURCES test_svbony_camera.cpp test_svbony_fake_sdk.cpp)
     # Camera lifecycle storm for the issue-#116 close-order/held-mutex fixes;
     # run under the sanitizers-tsan CI job (issue #101).
     list(APPEND TEST_SOURCES test_svbony_concurrency_stress.cpp)

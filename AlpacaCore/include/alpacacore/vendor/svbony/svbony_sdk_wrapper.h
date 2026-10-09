@@ -20,14 +20,7 @@
 
 namespace alpacacore::vendor::svbony {
 
-enum class SVBImageType {
-    Raw8,
-    Raw16,
-    Y8,
-    Y16,
-    Rgb24,
-    Rgb32
-};
+enum class SVBImageType { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32, Unknown };
 
 enum class SVBBayerPattern {
     None,
@@ -106,40 +99,71 @@ struct SVBROIFormat {
     int bin{};
 };
 
-class SVBSDKWrapper {
+// Non-owning interface used by the camera driver. The SDK seam must outlive
+// every driver (and its joined exposure worker).
+class SVBSDK {
+public:
+    virtual std::vector<SVBCameraInfo> enumerate_cameras() = 0;
+    virtual bool get_camera_info_by_index(int camera_index, SVBCameraInfo& info) = 0;
+    virtual void open_camera(int camera_id) = 0;
+    virtual void close_camera(int camera_id) = 0;
+    virtual std::vector<SVBControlCaps> get_control_caps(int camera_id) = 0;
+    virtual bool get_control_value(int camera_id, SVBControlType type, long& value, bool& is_auto) = 0;
+    virtual void set_control_value(int camera_id, SVBControlType type, long value, bool is_auto) = 0;
+    virtual SVBROIFormat get_roi_format(int camera_id) = 0;
+    virtual void set_roi_format(int camera_id, int start_x, int start_y, int width, int height, int bin) = 0;
+    virtual SVBImageType get_output_image_type(int camera_id) = 0;
+    virtual void set_output_image_type(int camera_id, SVBImageType type) = 0;
+    virtual void start_video_capture(int camera_id) = 0;
+    virtual void stop_video_capture(int camera_id) = 0;
+    virtual void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) = 0;
+    virtual void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) = 0;
+    virtual float get_sensor_pixel_size(int camera_id) = 0;
+    virtual std::string get_serial_number(int camera_id) = 0;
+    virtual std::string get_sdk_version() = 0;
+    virtual std::string get_firmware_version(int camera_id) = 0;
+    virtual void set_camera_mode_normal(int camera_id) = 0;
+    virtual void set_auto_save_param(int camera_id, bool enable) = 0;
+    virtual void restore_default_param(int camera_id) = 0;
+
+protected:
+    ~SVBSDK() = default;
+};
+
+class SVBSDKWrapper final : public SVBSDK {
 public:
     static SVBSDKWrapper& instance();
 
-    std::vector<SVBCameraInfo> enumerate_cameras();
-    bool get_camera_info_by_index(int camera_index, SVBCameraInfo& info);
+    std::vector<SVBCameraInfo> enumerate_cameras() override;
+    bool get_camera_info_by_index(int camera_index, SVBCameraInfo& info) override;
 
-    void open_camera(int camera_id);
-    void close_camera(int camera_id);
+    void open_camera(int camera_id) override;
+    void close_camera(int camera_id) override;
 
-    std::vector<SVBControlCaps> get_control_caps(int camera_id);
-    bool get_control_value(int camera_id, SVBControlType type, long& value, bool& is_auto);
-    void set_control_value(int camera_id, SVBControlType type, long value, bool is_auto);
+    std::vector<SVBControlCaps> get_control_caps(int camera_id) override;
+    bool get_control_value(int camera_id, SVBControlType type, long& value, bool& is_auto) override;
+    void set_control_value(int camera_id, SVBControlType type, long value, bool is_auto) override;
 
-    SVBROIFormat get_roi_format(int camera_id);
-    void set_roi_format(int camera_id, int start_x, int start_y, int width, int height, int bin);
+    SVBROIFormat get_roi_format(int camera_id) override;
+    void set_roi_format(int camera_id, int start_x, int start_y, int width, int height, int bin) override;
 
-    SVBImageType get_output_image_type(int camera_id);
-    void set_output_image_type(int camera_id, SVBImageType type);
+    SVBImageType get_output_image_type(int camera_id) override;
+    void set_output_image_type(int camera_id, SVBImageType type) override;
 
-    void start_video_capture(int camera_id);
-    void stop_video_capture(int camera_id);
-    void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms);
+    void start_video_capture(int camera_id) override;
+    void stop_video_capture(int camera_id) override;
+    void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) override;
 
-    void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms);
+    void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) override;
 
-    float get_sensor_pixel_size(int camera_id);
-    std::string get_serial_number(int camera_id);
-    std::string get_sdk_version();
-    std::string get_firmware_version(int camera_id);
+    float get_sensor_pixel_size(int camera_id) override;
+    std::string get_serial_number(int camera_id) override;
+    std::string get_sdk_version() override;
+    std::string get_firmware_version(int camera_id) override;
 
-    void set_camera_mode_normal(int camera_id);
-    void set_auto_save_param(int camera_id, bool enable);
-    void restore_default_param(int camera_id);
+    void set_camera_mode_normal(int camera_id) override;
+    void set_auto_save_param(int camera_id, bool enable) override;
+    void restore_default_param(int camera_id) override;
 
 private:
     class Impl;

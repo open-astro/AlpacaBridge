@@ -24,6 +24,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_svbony_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -56,4 +57,27 @@ TEST_CASE("SVBONY camera - concurrent connect/disconnect/operate stress", "[svbo
 TEST_CASE("SVBONY camera - destruction races an in-flight connect", "[svbony][camera][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::svbony::create_svbony_camera(0, 0); });
+}
+
+TEST_CASE("SVBONY camera - connected acquisition and lifecycle stress", "[svbony][camera][stress]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidValue,
+         alpacacore::AlpacaError::InvalidOperation, alpacacore::AlpacaError::MethodNotImplemented});
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        guard([&] { camera.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_image_array()); });
+        guard([&] { camera.abort_exposure(); });
+        guard([&] { static_cast<void>(camera.get_gain()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
 }

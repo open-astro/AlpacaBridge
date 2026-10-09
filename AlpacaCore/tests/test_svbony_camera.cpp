@@ -99,6 +99,7 @@ TEST_CASE("SVBONY Camera Driver - Sub-exposure not supported", "[svbony][camera]
 TEST_CASE("SVBONY Camera Driver - ASCOM Error Codes", "[svbony][camera][unit]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
 
+    require_alpaca_error([&]() { driver->start_exposure(-1.0, true); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
