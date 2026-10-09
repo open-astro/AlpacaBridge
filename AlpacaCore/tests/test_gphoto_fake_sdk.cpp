@@ -582,7 +582,8 @@ TEST_CASE("GPhoto camera fake - Canon B mode (only bulb in the shutter list) use
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - Canon B mode does not write the X
+TEST_CASE("GPhoto camera fake - Canon B mode does not write the shutter widget",
+          "[gphoto][camera][unit][fakesdk][canon]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     auto cam = make_canon_camera();
