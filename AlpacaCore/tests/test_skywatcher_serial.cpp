@@ -1244,8 +1244,6 @@ TEST_CASE("SkyWatcher serial - a Dec pulse whose ':K' is lost stops before the f
     driver->set_connected(false);
 }
 
-#endif  // _WIN32
-
 TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every transaction and counted",
           "[skywatcher][serial]") {
     FakeSkyWatcherSerialBoard board;
@@ -1269,3 +1267,5 @@ TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every t
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     protocol.disconnect();
 }
+
+#endif  // _WIN32

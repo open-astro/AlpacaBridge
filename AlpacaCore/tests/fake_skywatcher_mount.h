@@ -774,9 +774,12 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
-            served_.fetch_add(1);
-            if (silent_.load()) continue;
+            if (silent_.load()) {
+                served_.fetch_add(1);
+                continue;
+            }
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
+            served_.fetch_add(1);
         }
     }
 

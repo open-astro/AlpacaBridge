@@ -4659,8 +4659,6 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
     first->set_connected(false);
 }
 
-#endif  // _WIN32
-
 TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transaction and counted",
           "[skywatcher][async][fake]") {
     FakeSkyWatcherMount mount;
@@ -4724,3 +4722,5 @@ TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late da
     CHECK_FALSE(proto.link_faulted());
     proto.disconnect();
 }
+
+#endif  // _WIN32
