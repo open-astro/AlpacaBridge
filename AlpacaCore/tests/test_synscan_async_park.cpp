@@ -143,6 +143,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         if (pred()) return true;
+        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return pred();
@@ -164,6 +165,8 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
             case 'K':  // protocol echo: "K" + byte -> byte + "#"
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'V':
+                // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task
+                // clock.
                 std::this_thread::sleep_for(std::chrono::milliseconds(kStallMs));
                 return "042A00#";
             case 'e':
@@ -185,6 +188,7 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
     REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1000));
     // Past the port open and the echo, inside the stalled firmware query:
     // the connect task holds mutex_ for the next few hundred milliseconds.
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     // The flag's value mid-task is driver-specific (SynScan raises it before
     // the warm-up queries, see .github/instructions/alpaca-http-conformance.instructions.md
@@ -366,6 +370,7 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
     driver->park();
     REQUIRE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_at_park());
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     CHECK(st->goto_count.load() == 1);
 
@@ -559,6 +564,7 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     REQUIRE_FALSE(driver->get_at_park());
 

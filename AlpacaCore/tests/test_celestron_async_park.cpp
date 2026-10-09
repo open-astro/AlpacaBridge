@@ -135,6 +135,7 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         if (pred()) return true;
+        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return pred();
@@ -163,6 +164,7 @@ TEST_CASE("Celestron async - Park returns immediately, AtPark flips when the sle
     driver->park();
     REQUIRE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_at_park());
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     CHECK(st->goto_count.load() == 1);
 
@@ -192,6 +194,7 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(2500));
     REQUIRE_FALSE(driver->get_at_park());
 
