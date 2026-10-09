@@ -1,0 +1,3 @@
+### Added
+
+- **GPhoto Canon bulb exposures beyond 30 s** (GPhoto camera, issue #640): a Canon body with no standalone `bulb` widget now holds the shutter open by writing `eosremoterelease` `Press Full` then `Release Full` (matched by name) with the shutter-speed `bulb` choice, through the same hold loop as Nikon bulb. `ExposureMax` is 3600 s when the `bulb` widget exists or both choices are found, otherwise the longest native shutter speed. With the mode dial on B (shutter list holds only `bulb`) every exposure takes the bulb path instead of failing with "No shutter speed control exposed by this camera". Covered by `Canon bulb ...` cases in `AlpacaCore/tests/test_gphoto_fake_sdk.cpp`; rig check pending.

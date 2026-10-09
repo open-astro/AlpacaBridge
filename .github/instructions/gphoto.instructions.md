@@ -169,10 +169,20 @@ SDK cleanup checklist does not apply here).
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
-  **The classic Canon `eosremoterelease` press/release bulb
-  sequence (older EOS bodies with no standalone `"bulb"` widget) is NOT implemented** — a camera
-  in that category will report bulb support as unavailable (native shutter-speed ceiling only)
-  rather than fail confusingly; add the press/release path if/when tested against real hardware.
+  **Canon bodies (no standalone `"bulb"` widget, issue #640): implemented, rig check pending.**
+  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists both
+  `Press Full` and `Release Full` (matched by name, never by index), the same
+  `bulb_capture_with_abort` loop runs with `set_choice_value("eosremoterelease", "Press Full")` as
+  the open and `"Release Full"` as the close, so the #569 rules above hold unchanged (events pumped
+  during the hold, release sent on every exit path including a throw, abort closes early, frame
+  waited for by file event). `ExposureMax` is 3600 s only when the `"bulb"` widget exists or both
+  choices were found; a Canon body missing either choice stays at its longest native shutter speed.
+  **B mode:** with the mode dial on B the shutter-speed list holds only `bulb`, so there is no
+  native speed to use and every duration, short ones too, takes the bulb path instead of failing
+  with "No shutter speed control exposed by this camera". Bench evidence is in #640 (EOS 250D on M
+  with shutter Bulb, EOS 70D on B: 5 s and 35 s frames by hand); the EOS 4000D is not verified and
+  other Canon bodies need their own check. Written from libgphoto2's documented behaviour only
+  (INDI is LGPL; copy nothing from it).
 - **RAW format selection**: at connect, the driver scans the `"imageformat"`/`"imagequality"`
   widget's choices for one containing `raw`/`nef`/`cr2`/`cr3`/`arw` (case-insensitive), preferring
   a pure-RAW choice over a combined RAW+JPEG one, and sets it. If no RAW choice is found, capture

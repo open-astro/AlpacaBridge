@@ -987,7 +987,9 @@ public:
                 }
             }
             active_handle = handle_;
-            use_bulb = has_bulb_ && duration > max_native_shutter_seconds_ + 1e-9;
+            // A body in B mode lists only "bulb" for its shutter speed, so there is no native
+            // speed to fall back on: every duration takes the bulb path.
+            use_bulb = has_bulb_ && (native_shutter_choices_.empty() || duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
             shutter_widget_name = shutter_widget_name_;
 
@@ -1064,7 +1066,11 @@ private:
     // Widget capability caches, populated at connect (configure_after_connect_locked).
     std::vector<std::string> iso_choices_;
     int current_iso_index_{0};
-    bool has_bulb_{false};
+    bool has_bulb_{false};  // long exposure available: a "bulb" toggle, or both eosremoterelease choices
+    // Canon bodies have no "bulb" widget; bulb is the shutter-speed "bulb" choice held open by writing
+    // eosremoterelease (issue #640). Both are picked by name at connect, never by index; empty without the pair.
+    std::string remote_press_choice_;
+    std::string remote_release_choice_;
     std::string bulb_choice_;  // shutter-speed choice string selecting bulb mode
     std::vector<std::pair<std::string, double>> native_shutter_choices_;  // sorted ascending by seconds
     std::string shutter_widget_name_{"shutterspeed2"};  // whichever of the fallback names was found at connect
@@ -1253,14 +1259,26 @@ private:
             }
             break;
         }
-        // Bulb mode is only implementable when the standalone "bulb" toggle
-        // widget is present -- that is the only mechanism this driver drives
-        // (see bulb_capture_with_abort). A shutter-speed "bulb" choice with
-        // no toggle widget (the classic Canon eosremoterelease press/release
-        // sequence) is not supported yet; ExposureMax stays capped at the
-        // longest native shutter speed for such a camera. TODO(gphoto/canon):
-        // add the press/release path if/when tested against real hardware.
+        // Two ways to hold the shutter open (see bulb_capture_with_abort): the
+        // standalone "bulb" toggle (Nikon), or on Canon bodies, which have no
+        // such widget, the eosremoterelease press/release pair together with
+        // the shutter-speed "bulb" choice. Without either, ExposureMax stays
+        // capped at the longest native shutter speed.
+        remote_press_choice_.clear();
+        remote_release_choice_.clear();
         has_bulb_ = sdk.has_widget(handle, "bulb");
+        if (!has_bulb_ && !bulb_choice_.empty() && sdk.has_widget(handle, "eosremoterelease")) {
+            const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
+            const bool has_press =
+                std::find(remote_choices.begin(), remote_choices.end(), "Press Full") != remote_choices.end();
+            const bool has_release =
+                std::find(remote_choices.begin(), remote_choices.end(), "Release Full") != remote_choices.end();
+            if (has_press && has_release) {
+                remote_press_choice_ = "Press Full";
+                remote_release_choice_ = "Release Full";
+                has_bulb_ = true;
+            }
+        }
         if (!has_bulb_) {
             bulb_choice_.clear();
         }
@@ -1409,7 +1427,24 @@ private:
         constexpr auto kHoldSlice = std::chrono::milliseconds(100);
         constexpr auto kFilePollSlice = std::chrono::seconds(1);
 
-        sdk.set_toggle_value(handle, "bulb", true);
+        // Nikon: the "bulb" toggle. Canon: eosremoterelease Press Full / Release Full.
+        const bool use_remote_release = !remote_press_choice_.empty();
+        const auto shutter_open = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_press_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", true);
+            }
+        };
+        const auto shutter_close = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", false);
+            }
+        };
+
+        shutter_open();
         const auto hold_deadline =
             clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
         // The hold calls into the SDK, so unlike the sleep it replaced it can
@@ -1425,13 +1460,13 @@ private:
             }
         } catch (...) {
             try {
-                sdk.set_toggle_value(handle, "bulb", false);
+                shutter_close();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, "Bulb close after a failed hold also failed: " + std::string(e.what()));
             }
             throw;
         }
-        sdk.set_toggle_value(handle, "bulb", false);
+        shutter_close();
 
         bool aborted = abort_requested_.load();
         auto file_deadline =

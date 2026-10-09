@@ -168,6 +168,10 @@ public:
     // bulb-sequence tests can assert true-then-false-then-download ordering.
     std::vector<bool> bulb_toggle_history;
 
+    // Records every set_choice_value(handle, "eosremoterelease", value) call, in order (the Canon press/release
+    // bulb path), so tests can assert press-then-release ordering.
+    std::vector<std::string> remote_release_history;
+
     // drain_events() bookkeeping: how many hold slices the driver pumped and
     // their summed budget, so a test can pin that the bulb hold is spent
     // polling the camera's events rather than sleeping (issue #569).
@@ -251,6 +255,9 @@ public:
         log_and_maybe_throw("set_choice_value");
         auto& cam = camera_for(handle);
         cam.choice_value[name] = value;
+        if (name == "eosremoterelease") {
+            remote_release_history.push_back(value);
+        }
     }
 
     bool get_toggle_value(int handle, const std::string& name) override {

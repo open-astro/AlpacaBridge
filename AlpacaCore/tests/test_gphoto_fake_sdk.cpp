@@ -69,6 +69,18 @@ FakeGPhotoSDK::FakeCamera make_bulb_camera() {
     return cam;
 }
 
+// Canon EOS body: no standalone "bulb" widget, bulb is the shutterspeed choice plus the eosremoterelease
+// press/release pair (issue #640).
+FakeGPhotoSDK::FakeCamera make_canon_camera() {
+    auto cam = make_camera("Canon EOS 250D", "usb:001,006");
+    cam.toggle_value.erase("bulb");
+    cam.choices["shutterspeed2"] = {"1/4000", "1/200", "1/50", "bulb"};
+    cam.choice_value["shutterspeed2"] = "1/200";
+    cam.choices["eosremoterelease"] = {"None", "Press Half", "Press Full", "Release Half", "Release Full"};
+    cam.choice_value["eosremoterelease"] = "None";
+    return cam;
+}
+
 }  // namespace
 
 TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close", "[gphoto][camera][unit][fakesdk]") {
@@ -455,6 +467,137 @@ TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image
 
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK(driver->get_image_ready() == false);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - Canon bulb presses then releases eosremoterelease by name",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    // Reordered so an index-based pick would choose the wrong entries.
+    cam.choices["eosremoterelease"] = {"Release Full", "Press Full", "None"};
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    CHECK(driver->get_exposure_max() == 3600.0);
+
+    driver->start_exposure(0.05, true);  // > 1/50 s native ceiling
+    wait_for_exposure_to_finish(*driver);
+
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full");
+    CHECK(fake.remote_release_history.back() == "Release Full");
+    CHECK(fake.cameras[0].choice_value["shutterspeed2"] == "bulb");
+    CHECK(fake.bulb_toggle_history.empty());
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - Canon bulb stop_exposure releases early", "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_canon_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    driver->start_exposure(5.0, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto stop_started = std::chrono::steady_clock::now();
+    driver->stop_exposure();
+    CHECK(std::chrono::steady_clock::now() - stop_started < std::chrono::seconds(2));
+
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full");
+    CHECK(fake.remote_release_history.back() == "Release Full");
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - Canon release is sent even when the hold loop throws",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_canon_camera());
+    fake.throw_from.insert("drain_events");
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    driver->start_exposure(0.25, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == false);
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full");
+    CHECK(fake.remote_release_history.back() == "Release Full");
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - ExposureMax stays native unless both eosremoterelease choices exist",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    for (const char* missing : {"Press Full", "Release Full"}) {
+        reset_gphoto_sensor_cache();
+        FakeGPhotoSDK fake;
+        auto cam = make_canon_camera();
+        auto& list = cam.choices["eosremoterelease"];
+        list.erase(std::remove(list.begin(), list.end(), std::string(missing)), list.end());
+        fake.cameras.push_back(cam);
+        FakeRawDecoder decoder;
+
+        auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+        driver->set_connected(true);
+        CHECK(driver->get_exposure_max() == 1.0 / 50.0);
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("GPhoto camera fake - Canon B mode (only bulb in the shutter list) uses bulb for every duration",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    CHECK(driver->get_exposure_max() == 3600.0);
+
+    driver->start_exposure(0.01, true);  // shorter than any "native" speed would be
+    wait_for_exposure_to_finish(*driver);
+
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full");
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - bulb widget camera ignores eosremoterelease", "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_bulb_camera();
+    cam.choices["eosremoterelease"] = {"Press Full", "Release Full"};
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(fake.remote_release_history.empty());
+    REQUIRE(fake.bulb_toggle_history.size() == 2);
+    CHECK(fake.bulb_toggle_history.front() == true);
 
     driver->set_connected(false);
 }
