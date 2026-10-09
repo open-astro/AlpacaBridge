@@ -13,6 +13,8 @@ SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.
 - PulseGuide: do not apply permanent RA/Dec offsets based on expected guide motion. If synthetic offsets are needed, keep them temporary and clear after the pulse completes to avoid double-counting mount motion.
 - The ZWO and QHY SDKs both statically link libusb, causing duplicate symbol issues. The ZWO vendor `CMakeLists.txt` handles this — do not link both vendor static libs into the same binary without resolving the conflict.
+- ZWO camera SDK calls go through the injected `ZWOSDK` reference; its owner must outlive the driver, in-flight calls, and any delayed pulse-guide turn-off. `ASIGetDataAfterExp` is the lazy, potentially multi-second transfer: keep it outside the state and SDK-global locks, using only the per-camera operation lock that serializes transfer against start/close so abort and status calls remain responsive.
+- A successful `ASIGetDataAfterExp` does not report the actual received byte count. Validate ROI/format readbacks and the converted array, but do not claim that a partially-written SDK buffer can be detected; retain fake coverage for transfer errors, not fabricated partial-length certainty.
 
 #### ZWO ASIair Pro Switch (12V power ports via on-board GPIO)
 

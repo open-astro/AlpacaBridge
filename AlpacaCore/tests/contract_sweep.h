@@ -857,6 +857,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"skywatcher", "telescope", "fake_skywatcher_mount.h"},
     {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},  // hosted as skywatcher_telescope_serial
     {"zwo", "telescope", "fake_mount_server.h"},
+    {"zwo", "camera", "fake_zwo_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},

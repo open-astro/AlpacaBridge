@@ -34,6 +34,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_zwo_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -99,6 +100,30 @@ TEST_CASE("ZWO camera - concurrent connect/disconnect/operate stress", "[zwo][ca
 TEST_CASE("ZWO camera - destruction races an in-flight connect", "[zwo][camera][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_camera_by_index(0, 0); });
+}
+
+TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][camera][stress]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    sdk.frame_bytes.resize(16 * 8 * 2, 0x5a);
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        guard([&] { camera.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_image_array()); });
+        guard([&] { camera.stop_exposure(); });
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(sdk.call_count("get_data_after_exposure") > 0);
 }
 
 // Focuser stress (#271): same shape as the EFW/camera cases above — no fake
