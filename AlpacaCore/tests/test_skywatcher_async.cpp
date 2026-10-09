@@ -1079,13 +1079,13 @@ TEST_CASE(
     // Regression (found during EQM-35 Pro hardware bring-up, 2026-09-06), fixed in two
     // steps:
     //
-    // (1) reap_stop_task() used to cancel+join a SINGLE stop-completion thread shared by
+    // (1) The stop-completion machinery used to cancel+join a SINGLE thread shared by
     //     both axes. Stopping axis 1 while axis 0's stop task was still polling a
     //     ramping mount (CCDciel issues MoveAxis stop pairs ~44ms apart on button
     //     release -- see .github/instructions/skywatcher.instructions.md) cancelled the RA task before it reached
     //     manual_axis_slewing_[0] = false, stranding Slewing true FOREVER
     //     (get_hardware_slewing_locked() ORs both axes' flags) -- exactly the hardware
-    //     symptom. Fixed: each axis now has its own stop-task thread and cancel flag.
+    //     symptom. Fixed: each axis now has its own stop slot (and generation).
     //
     // (2) That fix alone was not sufficient: the RA stop task's tracking-restore tail
     //     guarded itself with `motion_generation_ == stop_task_generation`, a counter
@@ -1119,6 +1119,192 @@ TEST_CASE(
     CHECK(driver->get_tracking());
 
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher slot - a stop on one axis does not supersede the other axis's stop body",
+          "[skywatcher][async][slot]") {
+    // Each axis's MoveAxis(axis, 0) body runs in its own slot with its own
+    // generation (decision 0006, pilot re-check 2): the Dec stop dispatched
+    // while the RA body still polls must leave that body Current, so its tail
+    // clears manual_axis_slewing_[0] and restores the RA drive. One generation
+    // shared by both stop slots would mark the RA body Superseded and skip
+    // both.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 2.0); }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(1, 2.0); }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(2));
+
+    REQUIRE(call_on_clock(
+        clock, [&] { driver->move_axis(0, 0.0); },
+        std::chrono::milliseconds(5000)));  // RA body starts polling; the ramp takes 800 ms
+    REQUIRE(call_on_clock(
+        clock, [&] { driver->move_axis(1, 0.0); },
+        std::chrono::milliseconds(5000)));  // Dec body starts on the other slot
+
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.axis_running(1) && !mount.axis_running(2); }, std::chrono::milliseconds(5000)));
+    CHECK(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher slot - a slew that replaces a FindHome in flight does not leave Slewing true",
+          "[skywatcher][async][slot]") {
+    // The slew slot starts the new body without waiting for the homing body,
+    // so that body is Superseded and no longer clears homing_ itself: the
+    // initiator's claim has to. A claim that leaves homing_ set reads Slewing
+    // true for ever (the homing body, being Superseded, never clears it). A
+    // slew during a park is refused at the gate, so FindHome is the other
+    // body a slew can replace.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(1, 25.0);
+
+    driver->find_home();
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::milliseconds(5000)));
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);
+
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::seconds(120)));
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(std::abs(driver->get_declination() - 40.0) < 0.05);
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Holds back the thread of every body started while it is closed, so a case
+// can let a replaced body run its whole tail before the new body takes mutex_
+// (the order that exposes a tail which writes without checking ownership).
+// Declare it before the driver: the driver joins the gated threads.
+struct SlotGate {
+    std::mutex m;
+    std::condition_variable cv;
+    bool open = true;
+
+    std::function<std::thread(std::function<void()>)> spawn() {
+        return [this](std::function<void()> f) {
+            return std::thread([this, f = std::move(f)]() mutable {
+                {
+                    std::unique_lock<std::mutex> lock(m);
+                    cv.wait(lock, [this] { return open; });
+                }
+                f();
+            });
+        };
+    }
+    void close() {
+        std::lock_guard<std::mutex> lock(m);
+        open = false;
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            open = true;
+        }
+        cv.notify_all();
+    }
+};
+
+// Replaces the running goto with a second one while the new body's thread is
+// held back, lets the replaced body run to its end, and returns whether
+// Slewing still read true. `settle_s` > 0 puts the replaced body in the
+// post-landing settle sleep (stage 2); 0 puts it at offset_ms after the mount
+// stopped (stage 1). Stage 2 also requires that a rate write does not start
+// the RA axis.
+bool slewing_after_replaced_body_finishes(int settle_s, int offset_ms) {
+    SlotGate gate;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    if (settle_s > 0) {
+        driver->set_slew_settle_time(settle_s);
+    }
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 3.0 + 24.0, 24.0), 20.0);
+    bool stopped = false;
+    for (int i = 0; i < 4000 && !stopped; ++i) {
+        REQUIRE(step_clock(clock, std::chrono::milliseconds(10)));
+        stopped = !mount.axis_running(1) && !mount.axis_running(2) && driver->get_slewing();
+    }
+    REQUIRE(stopped);
+    if (settle_s > 0) {
+        // Slewing stays true to the end of the body, so the settle sleep is
+        // reached by time: the landing waits take well under 700 ms.
+        offset_ms = 700;
+    }
+    if (offset_ms > 0) {
+        REQUIRE(advance_through(clock, std::chrono::milliseconds(offset_ms), std::chrono::milliseconds(10)));
+    }
+
+    gate.close();
+    sw::set_slew_spawn_for_testing(*driver, gate.spawn());
+    driver->slew_to_coordinates_async(std::fmod(lst - 1.0 + 24.0, 24.0), 35.0);
+
+    // The replaced body is Superseded and parked on the clock or woken by the
+    // replacement; give it time to run its tail while the new body is held.
+    // 2.5 s of virtual time covers the longest settle.
+    for (int i = 0; i < 5; ++i) {
+        clock.advance(std::chrono::milliseconds(500));
+        clock.wait_for_woken_settled(kRendezvous);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    bool slewing = driver->get_slewing();
+    if (settle_s > 0) {
+        // slewing_cached_ is invisible through Slewing here (the new call's
+        // force window answers first) but it decides whether an axis is busy:
+        // a resumed old tail that cleared it would let this rate write drive
+        // the RA axis while the new goto is still waiting to start.
+        const int before = mount.frames_seen();
+        driver->set_right_ascension_rate(0.01);
+        slewing = slewing && mount.frames_seen() == before;
+    }
+
+    gate.release();
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::seconds(120)));
+    CHECK(std::abs(driver->get_declination() - 35.0) < 0.05);
+    driver->set_connected(false);
+    return slewing;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher slot - a slew started in the landing polls of another keeps Slewing true",
+          "[skywatcher][async][slot]") {
+    // The landing waits release mutex_. A new SlewToCoordinatesAsync that
+    // claims the slot meanwhile marks the old body Superseded; when that body
+    // resumes it must write nothing (it used to clear slewing_cached_ and the
+    // new slew's force window, so Slewing read false right after the new
+    // async call returned). The new body's thread is held back until the old
+    // body has finished, which is the order that exposes the old tail; the
+    // second slew is issued at several offsets across the polls and settles.
+    for (int offset_ms = 0; offset_ms <= 440; offset_ms += 40) {
+        CAPTURE(offset_ms);
+        CHECK(slewing_after_replaced_body_finishes(0, offset_ms));
+    }
+}
+
+TEST_CASE("SkyWatcher slot - a slew started in the settle sleep of another keeps Slewing true",
+          "[skywatcher][async][slot]") {
+    // With a slew settle time the old body sleeps after its landing writes,
+    // then runs refine_goto_landing's tail. Replaced during that sleep, the
+    // tail must not write slewing_cached_ = false over the new slew's window.
+    CHECK(slewing_after_replaced_body_finishes(2, 0));
 }
 
 TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refinement re-goto", "[skywatcher][async]") {

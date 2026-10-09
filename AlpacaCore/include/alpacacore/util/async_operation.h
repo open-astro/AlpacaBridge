@@ -28,6 +28,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -94,8 +95,9 @@ private:
     std::uint64_t token_;
 };
 
-// One body's state. Every field but `thread` and `token` is guarded by the
-// slot mutex; `token` is written before the thread starts and never changed.
+// One body's state. Every field but `thread` is guarded by the slot mutex;
+// `token` is written by start() under that mutex before the thread's first
+// action (it locks and unlocks the mutex) and never changed.
 struct OperationContext::Body {
     std::thread thread;
     std::uint64_t token = 0;
@@ -115,9 +117,9 @@ struct OperationContext::Body {
  * Rule 10, lock order and calling rules: driver mutex_, then the slot mutex.
  * The slot never runs a body, a log call or a user callback while holding its
  * mutex. start() and cancel_all_and_join() must be called WITHOUT the driver
- * mutex held, since a stale body may need it to return (as reap_slew_task
- * today); cancel(), running(), stale_count() and last_failure() may be called
- * with it held.
+ * mutex held, since a stale body may need it to return (the Sky-Watcher
+ * slew body takes it to clean up); cancel(), running(), stale_count() and
+ * last_failure() may be called with it held.
  *
  * Neither start() nor cancel_all_and_join() may be called from inside a body
  * of the same slot. cancel_all_and_join() from a body takes that body and
@@ -156,7 +158,8 @@ public:
      * Rule 10: call without the driver mutex held. Rule 2: never waits for
      * the body it replaces; rule 3 is its only wait, at most
      * kStaleReapTimeout. Throws AlpacaException(InvalidOperation) when the
-     * stale bound does not clear in time, and then changes nothing.
+     * stale bound does not clear in time, and AlpacaException(DriverException)
+     * when the OS refuses a thread (EAGAIN); both change nothing.
      */
     std::uint64_t start(std::function<void(OperationContext&)> body) {
         // Rule 1: the capacity check, the move into the stale list, the bump,
@@ -188,6 +191,20 @@ public:
             reap_returned_locked();
         }
 
+        // The thread is created before anything else changes, so a refused
+        // thread (EAGAIN) leaves the current body, the generation and the kept
+        // failure as they were. The thread's first action is to lock mutex_,
+        // which start() holds until it returns: the body cannot run, and
+        // `token` cannot be read, before the bookkeeping below is done.
+        auto next = std::make_unique<OperationContext::Body>();
+        OperationContext::Body* raw = next.get();
+        try {
+            next->thread = spawn_([this, raw, fn = std::move(body)]() mutable { run(*raw, fn); });
+        } catch (const std::system_error& e) {
+            throw AlpacaException(name_ + ": could not start a background thread: " + e.what(),
+                                  AlpacaError::DriverException);
+        }
+
         // Rule 2: mark the current body Superseded, wake it and move it to
         // the stale list without joining it (a body that has already
         // returned is joined at once instead).
@@ -209,15 +226,14 @@ public:
         // only the new body's throw may be kept.
         latest_token_ = token;
         last_failure_.reset();
-
-        auto next = std::make_unique<OperationContext::Body>();
         next->token = token;
-        OperationContext::Body* raw = next.get();
-        // The thread cannot observe slot state before this lock is released.
-        next->thread = std::thread([this, raw, fn = std::move(body)]() mutable { run(*raw, fn); });
         current_ = std::move(next);
         return token;
     }
+
+    /// Replaces the thread factory, for a test that must make thread creation
+    /// fail. Call before the first start().
+    void set_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) { spawn_ = std::move(spawn); }
 
     /// Rule 7: marks the current body Cancelled (rule 5 precedence still
     /// applies) and wakes it. Never joins and never blocks on a body, so it
@@ -330,6 +346,8 @@ private:
 
     // The thread function.
     void run(OperationContext::Body& b, std::function<void(OperationContext&)>& fn) {
+        // Wait for start() to finish its bookkeeping (see start()).
+        { std::lock_guard<std::mutex> started(mutex_); }
         std::optional<std::string> failure;
         // Rule 9: a throw never reaches std::terminate.
         try {
@@ -374,6 +392,9 @@ private:
     const std::string name_;
     OperationGeneration& generation_;
     TaskClock& clock_;
+    std::function<std::thread(std::function<void()>)> spawn_ = [](std::function<void()> f) {
+        return std::thread(std::move(f));
+    };
 
     mutable std::mutex mutex_;
     // One condition variable for every body's wait and for start()'s rule 3

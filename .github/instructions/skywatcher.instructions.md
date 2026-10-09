@@ -279,7 +279,8 @@ datagrams before each send so replies cannot get off-by-one.
   asks the board on every poll (`get_hardware_slewing_locked(false)`) instead of waiting out
   an 8 s window, so a short goto lands when the board stops. The one window left is
   `SlewToCoordinatesAsync`'s, covering only the gap before its task sets `goto_in_progress_`;
-  every exit of that task clears it, the early return of a reaped task included.
+  every exit of that body clears it, the early return of a cancelled body included (a
+  superseded body leaves it to the operation that replaced it).
 - **Reap the pulse task at every motion boundary** (slews, park, home,
   sync, abort): ConformU's dual-axis pulse test leaves a live pulse
   timer that otherwise fires its stop/step-period restore into the middle of
@@ -288,9 +289,39 @@ datagrams before each send so replies cannot get off-by-one.
   axis reaps only that axis's pulse (PulseGuide #620, MoveAxis #630; a no-op
   `MoveAxis(axis, 0)` reaps none) and sync stops both axes before `:E`.
   Gate before reaping: a refused slew, MoveAxis or sync cancels nothing.
-- **AbortSlew must cancel the async slew task** (set `slew_task_cancel_`,
-  join later via reap) or the landing refinement re-slews after the abort;
-  every slew entry point reaps first, which also resets the flag.
+- **AbortSlew must cancel the async slew body** (`slew_.cancel()`; the slot joins
+  it when the next body starts or on disconnect) or the landing refinement
+  re-slews after the abort. A cancelled body (AbortSlew, Unpark, disconnect)
+  stops the axes if it may have dispatched; a superseded one never touches them.
+- **Slew, goto, Park and FindHome bodies run in one `util::AsyncOperation` slot
+  (`slew_`); each axis's `MoveAxis(axis, 0)` stop-completion body has its own
+  (`stop_ops_[axis]`) with its own `OperationGeneration`** (decision 0006). Rules:
+  - A start does not wait for the body it replaces, so every initiator CLAIMS the
+    slot under `mutex_` first (`claim_slew_slot_locked()`: bump the slot generation
+    and `motion_generation_`, clear `parking_`/`homing_`), then sets its flags, then
+    calls `start_slew_body()` WITHOUT `mutex_`. A replaced body is Superseded: it
+    checks `owns_slew_state_locked(ctx)` under `mutex_` before touching a flag or
+    the axes. `MoveAxis` bumps `stop_generation_[axis]` under `mutex_` the same way.
+  - The four goto initiators (`SlewToCoordinates[Async]`, `SlewToTarget[Async]`)
+    share one start path, `start_goto()`, which is also where the #436 altitude
+    check runs; Park and FindHome claim the slot themselves and are exempt.
+  - A stop on one axis must not supersede the other axis's stop body, hence one
+    generation per axis (the same-axis refinement near the stop body's tail stays
+    on `motion_generation_`). Test: `SkyWatcher slot - a stop on one axis does not
+    supersede the other axis's stop body`.
+  - Waits inside a body go through `BodyScope`'s thread-local context
+    (`body_sleep()`, `body_stopped()`), so the helpers shared with the synchronous
+    `SlewToCoordinates` (which has no body) behave the same on both.
+  - `last_slew_error_` stays a driver member, not the slot's `last_failure()`:
+    AbortSlew, MoveAxis and a reconnect must clear it without starting a body. A
+    Park or FindHome failure is only logged (open-astro#631).
+  - No body calls `start()` or `cancel_all_and_join()` on its own slot (a park
+    tail that "restarts tracking" through a slot call would join itself or wait out
+    `kStaleReapTimeout`); use `cancel()` or `ctx.stop_reason()`. `start()` and
+    `cancel_all_and_join()` run without `mutex_`; `cancel()` may run with it.
+  - `start()` raises `AlpacaException` when the stale bound does not clear
+    (`InvalidOperation`) or the OS refuses a thread (`DriverException`); both change
+    nothing in the slot, and the initiator rolls its published flags back.
 - Debug technique: a watchdog loop that `pkill`s ConformU at the FIRST logged
   issue preserves the exact journal window and stops the mount from grinding
   through a failed run.
@@ -617,9 +648,9 @@ then drifts at 1.0x sidereal — the signature of a stationary mount — instead
 This is the dangerous shape: a sequencer that waits for `Slewing` to clear before
 exposing hangs forever, and one that does not wait images on an untracked mount.
 
-**Mechanism.** `move_axis()` uses a SINGLE shared `stop_task_thread_` for both axes.
-When a new stop supersedes a pending one, the old task is cancelled
-(`stop_task_cancel_.store(true)`) and returns early from `task_wait_for()` — before
+**Mechanism.** (As the code stood then.) `move_axis()` used a SINGLE shared stop thread
+for both axes. When a new stop superseded a pending one, the old task was cancelled
+and returned early from its wait — before
 reaching `manual_axis_slewing_[axis] = false` and the restore-tracking tail. Its axis's
 flag is stranded set, and `get_hardware_slewing_locked()` returns true forever because
 it ORs both `manual_axis_slewing_` entries.
@@ -633,9 +664,9 @@ reproduced it reliably.
 flag and restores tracking, because a stop on an axis whose flag is set spawns a fresh
 task that runs to completion.
 
-**Fix (done).** `stop_task_thread_` and `stop_task_cancel_` are now per-axis arrays;
-`reap_stop_task(axis)` and the spawn/retry-join block only ever race with a prior task
-for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
+**Fix (done).** The stop task became per-axis, and is now one `util::AsyncOperation`
+slot per axis (`stop_ops_[axis]`, each with its own generation), so a start only ever
+replaces a prior body for the SAME axis. A new loopback regression reproduces the exact scenario (RA stop
 dispatched, Dec stop dispatched while RA's stop task is still mid-ramp) and asserts
 `Slewing` clears promptly. The generation guard
 (`motion_generation_ == stop_task_generation`) is unchanged and still gates the
@@ -661,8 +692,8 @@ command on EITHER axis (see its declaration: "bumped by every motion command"). 
 stop dispatched while RA's stop task is polling bumps the shared counter for a reason
 that has nothing to do with RA, so the RA task's tail reads a mismatch and silently
 skips restoring RA's tracking — even though nothing actually superseded the RA stop
-itself (which is correctly detected via the now-per-axis `stop_task_cancel_[0]`, a
-separate and correctly-scoped check).
+itself (which is correctly detected by the axis's own stop slot, a separate and
+correctly-scoped check).
 
 The codebase already has the right idiom for this elsewhere: the duty-cycle worker
 (`apply_ra_drive_locked`'s burst path, guarding sub-floor rate duty-cycling) computes a
