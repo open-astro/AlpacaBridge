@@ -1814,8 +1814,7 @@ std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int 
     return create_zwo_camera_bound(device_number, binding, sdk);
 }
 
-std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding,
-                                                      ZWOSDK& sdk) {
+std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding, ZWOSDK& sdk) {
     return std::make_unique<ZWOCameraDriver>(device_number, binding, sdk);
 }
 
