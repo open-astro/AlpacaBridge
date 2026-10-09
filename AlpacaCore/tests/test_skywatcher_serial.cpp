@@ -1258,11 +1258,15 @@ TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every t
     const int before = board.transactions_served();
     board.set_reply_latency(40);
     const auto slow = timed_reads(5);
+    for (int i = 0; i < 40 && board.transactions_served() - before != 5; ++i)  // count follows the send
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(board.transactions_served() - before == 5);
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     board.set_reply_latency(0);
     const auto fast = timed_reads(5);
+    for (int i = 0; i < 40 && board.transactions_served() - before != 10; ++i)  // count follows the send
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(board.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     protocol.disconnect();

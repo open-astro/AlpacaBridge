@@ -4252,6 +4252,7 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
         break;
     }
     slewer.join();
+    mount.set_reply_latency(std::chrono::milliseconds(0));
     const auto returned_at =
         std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(returned_at_tick.load()));
 
@@ -4674,12 +4675,13 @@ TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transac
     const int before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(40));
     const auto slow = timed_reads(5);
-    CHECK(mount.transactions_served() - before == 5);
+    // The count follows the send, so the last reply can reach the client first.
+    CHECK(wait_until([&] { return mount.transactions_served() - before == 5; }, 2000));
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     mount.set_reply_latency(std::chrono::milliseconds(0));
     const auto fast = timed_reads(5);
-    CHECK(mount.transactions_served() - before == 10);
+    CHECK(wait_until([&] { return mount.transactions_served() - before == 10; }, 2000));
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     proto.disconnect();
 }
@@ -4706,9 +4708,9 @@ TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late da
 
     // exchange_saw_frame_ outcome: the exchange still fails, but a late reply
     // to it arrives on the wire, so the board is talking and the failure is
-    // not counted. Two silent failures bank 2/3; a held reply that lands
-    // after the exchange gave up is seen by the next exchange; that exchange
-    // fails silent yet resets the count, so two more silences stay below 3.
+    // not counted. One timeout banks 1/3; a held reply that lands after
+    // the exchange gave up is seen by the next exchange; that exchange fails
+    // silent yet resets the count, so two more silences stay below 3.
     // Held past the whole exchange (3 attempts of 250 ms plus the resync
     // settle), so the exchange gives up before the datagram is sent.
     const int served_before_hold = mount.transactions_served();
