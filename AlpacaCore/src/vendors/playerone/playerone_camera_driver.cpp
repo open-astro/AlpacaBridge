@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
@@ -23,8 +24,10 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -55,12 +58,35 @@ SensorType bayer_to_sensor_type(PlayerOneBayerPattern pattern) {
     return SensorType::RGGB;
 }
 
-bool format_is_16bit(PlayerOneImageFormat f) {
-    return f == PlayerOneImageFormat::Raw16;
+std::size_t bytes_per_pixel(PlayerOneImageFormat format) {
+    switch (format) {
+        case PlayerOneImageFormat::Raw16:
+            return 2;
+        case PlayerOneImageFormat::Raw8:
+        case PlayerOneImageFormat::Mono8:
+            return 1;
+        case PlayerOneImageFormat::Rgb24:
+            return 3;
+        case PlayerOneImageFormat::Unknown:
+            break;
+    }
+    alpacacore::util::throw_invalid_camera_image("unsupported Player One pixel format");
 }
 
-bool format_is_supported(const std::vector<PlayerOneImageFormat>& supported,
-                          PlayerOneImageFormat candidate) {
+std::size_t checked_frame_bytes(int width, int height, std::size_t pixel_bytes) {
+    if (width <= 0 || height <= 0) {
+        alpacacore::util::throw_invalid_camera_image("frame dimensions must be positive");
+    }
+    const auto w = static_cast<std::size_t>(width);
+    const auto h = static_cast<std::size_t>(height);
+    constexpr auto max_size = std::numeric_limits<std::size_t>::max();
+    if (w > max_size / h || w * h > max_size / pixel_bytes) {
+        alpacacore::util::throw_invalid_camera_image("frame dimensions overflow the buffer size");
+    }
+    return w * h * pixel_bytes;
+}
+
+bool format_is_supported(const std::vector<PlayerOneImageFormat>& supported, PlayerOneImageFormat candidate) {
     return std::find(supported.begin(), supported.end(), candidate) != supported.end();
 }
 
@@ -96,8 +122,7 @@ int parse_power_percent(std::string_view parameters, const char* action_name) {
 PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
     // Prefer RAW16 for anything >8-bit so we keep the sensor's full dynamic
     // range; fall back to RAW8 on 8-bit-only sensors.
-    if (info.bit_depth > 8 && format_is_supported(info.supported_formats,
-                                                   PlayerOneImageFormat::Raw16)) {
+    if (info.bit_depth > 8 && format_is_supported(info.supported_formats, PlayerOneImageFormat::Raw16)) {
         return PlayerOneImageFormat::Raw16;
     }
     if (format_is_supported(info.supported_formats, PlayerOneImageFormat::Raw8)) {
@@ -108,15 +133,15 @@ PlayerOneImageFormat choose_default_format(const PlayerOneCameraInfo& info) {
     return PlayerOneImageFormat::Raw16;
 }
 
-} // namespace
+}  // namespace
 
 class PlayerOneCameraDriver : public CameraDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    PlayerOneCameraDriver(int device_number, int camera_index)
-        : AsyncConnectable("PlayerOne"), device_number_(device_number), camera_index_(camera_index) {
+    PlayerOneCameraDriver(int device_number, int camera_index, PlayerOneSDK& sdk)
+        : AsyncConnectable("PlayerOne"), device_number_(device_number), camera_index_(camera_index), sdk_(sdk) {
         preload_camera_info();
     }
 
@@ -125,6 +150,7 @@ public:
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
         stop_exposure_thread();
+        stop_pulse_guide_thread();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -161,7 +187,7 @@ public:
 
     // Vendor SDK (library) version, surfaced in the web UI only (never in DriverInfo).
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = PlayerOneSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         if (version.empty()) {
             return std::nullopt;
         }
@@ -177,6 +203,7 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the camera,
@@ -190,7 +217,8 @@ public:
             // join with its thread-assignment (join vs operator= on the same
             // std::thread is UB). Lock order: exposure_lifecycle_mutex_ -> mutex_.
             lifecycle_lock.lock();
-            stop_exposure_thread();
+            stop_exposure_thread(true);
+            stop_pulse_guide_thread();
         }
         std::lock_guard<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
@@ -211,13 +239,12 @@ public:
             return;
         }
 
-        auto& sdk = PlayerOneSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             auto cameras = sdk.enumerate_cameras();
             if (cameras.empty()) {
-                throw AlpacaException("No Player One cameras detected",
-                                      AlpacaError::NotConnected);
+                throw AlpacaException("No Player One cameras detected", AlpacaError::NotConnected);
             }
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
@@ -226,18 +253,19 @@ public:
             camera_info_valid_ = true;
 
             ALPACA_LOG_INFO("PlayerOne", "SDK version: " + sdk.get_sdk_version());
-            ALPACA_LOG_INFO("PlayerOne", "Opening camera index " +
-                std::to_string(camera_index_) + " (id=" +
-                std::to_string(camera_info_.camera_id) + "): " + camera_info_.name);
+            ALPACA_LOG_INFO("PlayerOne", "Opening camera index " + std::to_string(camera_index_) + " (id=" +
+                                             std::to_string(camera_info_.camera_id) + "): " + camera_info_.name);
 
             sdk.open_camera(camera_info_.camera_id);
 
             try {
                 sdk.init_camera(camera_info_.camera_id);
             } catch (const std::exception& e) {
-                try { sdk.close_camera(camera_info_.camera_id); } catch (...) {}
-                throw AlpacaException(std::string("POAInitCamera failed: ") + e.what(),
-                                      AlpacaError::DriverException);
+                try {
+                    sdk.close_camera(camera_info_.camera_id);
+                } catch (...) {
+                }
+                throw AlpacaException(std::string("POAInitCamera failed: ") + e.what(), AlpacaError::DriverException);
             }
 
             // Probe capabilities from POAGetConfigAttributes — this gives us
@@ -258,8 +286,7 @@ public:
                 camera_info_ = fresh;
                 camera_info_.index = idx;
             } catch (const std::exception& e) {
-                ALPACA_LOG_DEBUG("PlayerOne",
-                                 "get_camera_properties_by_id failed: " + std::string(e.what()));
+                ALPACA_LOG_DEBUG("PlayerOne", "get_camera_properties_by_id failed: " + std::string(e.what()));
             }
 
             // Select default image format (prefer RAW16 on ≥10-bit sensors).
@@ -267,8 +294,22 @@ public:
             try {
                 sdk.set_image_format(camera_info_.camera_id, active_format_);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne",
-                                "set_image_format failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN("PlayerOne", "set_image_format failed: " + std::string(e.what()));
+            }
+            bool format_verified = false;
+            try {
+                static_cast<void>(bytes_per_pixel(active_format_));
+                format_verified = sdk.get_image_format(camera_info_.camera_id) == active_format_;
+            } catch (const std::exception&) {
+            }
+            if (!format_verified) {
+                const int failed_id = camera_info_.camera_id;
+                try {
+                    sdk.close_camera(failed_id);
+                } catch (...) {
+                }
+                throw AlpacaException("Unable to configure a supported Player One image format",
+                                      AlpacaError::DriverException);
             }
 
             // Default ROI = full sensor at bin 1. POASetImageBin resets the
@@ -280,11 +321,9 @@ public:
             }
             try {
                 sdk.set_image_start_pos(camera_info_.camera_id, 0, 0);
-                sdk.set_image_size(camera_info_.camera_id,
-                                   camera_info_.max_width, camera_info_.max_height);
+                sdk.set_image_size(camera_info_.camera_id, camera_info_.max_width, camera_info_.max_height);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne",
-                                "initial ROI setup failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN("PlayerOne", "initial ROI setup failed: " + std::string(e.what()));
             }
 
             // Re-query so our cache matches what the SDK actually accepted
@@ -294,9 +333,18 @@ public:
             int sx = 0;
             int sy = 0;
             int bin = 1;
-            try { sdk.get_image_size(camera_info_.camera_id, w, h); } catch (...) {}
-            try { sdk.get_image_start_pos(camera_info_.camera_id, sx, sy); } catch (...) {}
-            try { bin = sdk.get_image_bin(camera_info_.camera_id); } catch (...) {}
+            try {
+                sdk.get_image_size(camera_info_.camera_id, w, h);
+            } catch (...) {
+            }
+            try {
+                sdk.get_image_start_pos(camera_info_.camera_id, sx, sy);
+            } catch (...) {
+            }
+            try {
+                bin = sdk.get_image_bin(camera_info_.camera_id);
+            } catch (...) {
+            }
 
             bin_ = bin;
             num_x_ = w;
@@ -325,11 +373,6 @@ public:
         reset_exposure_state_locked();
         connected_.store(false);
         if (close_id >= 0) {
-            try {
-                sdk.stop_exposure(close_id);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne", "stop_exposure during disconnect failed: " + std::string(e.what()));
-            }
             sdk.close_camera(close_id);
         }
     }
@@ -344,29 +387,27 @@ public:
         if (name == "getheaterpower") {
             ensure_connected();
             ensure_heater_supported();
-            return std::to_string(
-                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_heater_power_percent(id); }));
+            return std::to_string(with_camera([this](int id) { return sdk_.get_heater_power_percent(id); }));
         }
         if (name == "setheaterpower") {
             ensure_connected();
             ensure_heater_supported();
             int percent = parse_power_percent(parameters, "SetHeaterPower");
             validate_heater_range(percent);
-            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_heater_power_percent(id, percent); });
+            with_camera([&](int id) { sdk_.set_heater_power_percent(id, percent); });
             return "";
         }
         if (name == "getfanpower") {
             ensure_connected();
             ensure_fan_supported();
-            return std::to_string(
-                with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_fan_power_percent(id); }));
+            return std::to_string(with_camera([this](int id) { return sdk_.get_fan_power_percent(id); }));
         }
         if (name == "setfanpower") {
             ensure_connected();
             ensure_fan_supported();
             int percent = parse_power_percent(parameters, "SetFanPower");
             validate_fan_range(percent);
-            with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_fan_power_percent(id, percent); });
+            with_camera([&](int id) { sdk_.set_fan_power_percent(id, percent); });
             return "";
         }
         throw AlpacaException("Action not supported: " + std::string(action_name),
@@ -416,19 +457,19 @@ public:
 
     CameraState get_camera_state() const override {
         if (!connected_.load()) return CameraState::Idle;
-        if (exposure_active_.load()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ &&
-                std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN("PlayerOne",
-                    "Exposure deadline exceeded; forcing CameraState=Idle.");
-                exposure_active_.store(false);
-                exposure_deadline_valid_ = false;
-                return CameraState::Idle;
-            }
-            return CameraState::Exposing;
+        if (!exposure_active_.load()) return CameraState::Idle;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load() || !exposure_active_.load()) return CameraState::Idle;
+        if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+            ALPACA_LOG_WARN("PlayerOne", "Exposure deadline exceeded; forcing CameraState=Idle.");
+            exposure_active_.store(false);
+            exposure_deadline_valid_ = false;
+            exposure_failure_ = "Player One exposure exceeded its completion deadline";
+            image_ready_ = false;
+            image_cached_ = false;
+            return CameraState::Idle;
         }
-        return CameraState::Idle;
+        return CameraState::Exposing;
     }
 
     int get_camera_x_size() const override {
@@ -456,13 +497,13 @@ public:
 
     double get_ccd_temperature() const override {
         ensure_connected();
-        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_temperature_c(id); });
+        return with_camera([this](int id) { return sdk_.get_temperature_c(id); });
     }
 
     bool get_cooler_on() const override {
         ensure_connected();
         if (!cooler_available_copy()) return false;
-        return with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_on(id); });
+        return with_camera([this](int id) { return sdk_.get_cooler_on(id); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
@@ -472,13 +513,13 @@ public:
             }
             return;
         }
-        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_cooler_on(id, cooler_on); });
+        with_camera([&](int id) { sdk_.set_cooler_on(id, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
         if (!cooler_available_copy()) return 0.0;
         try {
-            int pct = with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_cooler_power_percent(id); });
+            int pct = with_camera([this](int id) { return sdk_.get_cooler_power_percent(id); });
             if (pct < 0) pct = 0;
             if (pct > 100) pct = 100;
             return static_cast<double>(pct);
@@ -492,7 +533,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!caps_.has_egain) return 1.0;
         try {
-            return PlayerOneSDKWrapper::instance().get_egain(camera_info_.camera_id);
+            return sdk_.get_egain(camera_info_.camera_id);
         } catch (const std::exception&) {
             return 1.0;
         }
@@ -501,6 +542,7 @@ public:
     double get_exposure_max() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_exposure) {
             throw AlpacaException("Exposure not supported", AlpacaError::NotImplemented);
         }
@@ -509,6 +551,7 @@ public:
     double get_exposure_min() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_exposure) {
             throw AlpacaException("Exposure not supported", AlpacaError::NotImplemented);
         }
@@ -531,13 +574,14 @@ public:
 
     int get_gain() const override {
         ensure_connected();
-        return static_cast<int>(with_camera([](int id) {
-            return PlayerOneSDKWrapper::instance().get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
+        return static_cast<int>(with_camera([this](int id) {
+            return sdk_.get_config_int(id, /*config_id=*/1);  // 1 = POA_GAIN
         }));
     }
     void set_gain(int gain) override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_gain) {
             throw AlpacaException("Gain not supported", AlpacaError::PropertyNotImplemented);
         }
@@ -548,12 +592,12 @@ public:
             throw AlpacaException("Gain out of range", AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
-        PlayerOneSDKWrapper::instance().set_config_int(camera_info_.camera_id, /*POA_GAIN=*/1,
-                                                       static_cast<long>(gain), false);
+        sdk_.set_config_int(camera_info_.camera_id, /*POA_GAIN=*/1, static_cast<long>(gain), false);
     }
     int get_gain_max() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_gain) {
             throw AlpacaException("Gain not supported", AlpacaError::PropertyNotImplemented);
         }
@@ -562,6 +606,7 @@ public:
     int get_gain_min() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_gain) {
             throw AlpacaException("Gain not supported", AlpacaError::PropertyNotImplemented);
         }
@@ -581,6 +626,10 @@ public:
     ImageArray get_image_array() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        if (!exposure_failure_.empty()) {
+            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        }
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
             throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
         }
@@ -591,11 +640,15 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        if (!exposure_failure_.empty()) {
+            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        }
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
     bool get_is_pulse_guiding() const override {
-        if (!pulse_guiding_->load()) {
+        if (!pulse_guiding_.load()) {
             return false;
         }
         // Expiry check and clear under ONE mutex_ hold: an unlocked
@@ -604,7 +657,7 @@ public:
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
         if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
-            pulse_guiding_->store(false);
+            pulse_guiding_.store(false);
             return false;
         }
         return true;
@@ -653,16 +706,17 @@ public:
     int get_offset() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_offset) {
             throw AlpacaException("Offset not supported",
                                   AlpacaError::PropertyNotImplemented);
         }
-        return static_cast<int>(
-            PlayerOneSDKWrapper::instance().get_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7));
+        return static_cast<int>(sdk_.get_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7));
     }
     void set_offset(int offset) override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_offset) {
             throw AlpacaException("Offset not supported",
                                   AlpacaError::PropertyNotImplemented);
@@ -674,12 +728,12 @@ public:
             throw AlpacaException("Offset out of range", AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();  // M15 — sensor register, rejected mid-exposure
-        PlayerOneSDKWrapper::instance().set_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7,
-                                                       static_cast<long>(offset), false);
+        sdk_.set_config_int(camera_info_.camera_id, /*POA_OFFSET=*/7, static_cast<long>(offset), false);
     }
     int get_offset_max() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_offset) {
             throw AlpacaException("Offset not supported",
                                   AlpacaError::PropertyNotImplemented);
@@ -689,6 +743,7 @@ public:
     int get_offset_min() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_offset) {
             throw AlpacaException("Offset not supported",
                                   AlpacaError::PropertyNotImplemented);
@@ -752,8 +807,7 @@ public:
             throw AlpacaException("Set CCD temperature not supported",
                                   AlpacaError::NotImplemented);
         }
-        return static_cast<double>(
-            with_camera([](int id) { return PlayerOneSDKWrapper::instance().get_target_temp_c(id); }));
+        return static_cast<double>(with_camera([this](int id) { return sdk_.get_target_temp_c(id); }));
     }
     void set_set_ccd_temperature(double temperature) override {
         ensure_connected();
@@ -769,7 +823,7 @@ public:
                                       AlpacaError::InvalidValue);
             }
         }
-        with_camera([&](int id) { PlayerOneSDKWrapper::instance().set_target_temp_c(id, target_c); });
+        with_camera([&](int id) { sdk_.set_target_temp_c(id, target_c); });
     }
 
     int get_start_x() const override {
@@ -813,53 +867,50 @@ public:
         case 3: dir = PlayerOneGuideDirection::West;  break;
         }
 
-        // Overlap check, ST4 on-write, and flag/end-time publish under ONE
-        // mutex_ hold (M18): overlapping pulses each spawn a detached
-        // turn-off thread, so a second pulse racing the first would have the
-        // first pulse's off-write drop the ST4 line mid-pulse (truncated
-        // guide) and its unconditional flag clear misreport IsPulseGuiding.
-        // Reject the overlap with InvalidOperation instead — the flag stays
-        // latched until the off-thread completes the hardware off, so a pulse
-        // accepted here can no longer be cut short by a predecessor. The
-        // on-write is a fast register write, safe under mutex_ (shape (a),
-        // same as with_camera).
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        // Serialize timer replacement with disconnect/destruction. The timer
+        // is joinable so the injected SDK remains alive through pulse-off.
+        std::unique_lock<std::mutex> pulse_lifecycle_lock(pulse_guide_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pulse_guiding_.load()) {
+                throw AlpacaException("A pulse guide is already in progress", AlpacaError::InvalidOperation);
+            }
+        }
+        if (pulse_guide_thread_.joinable()) pulse_guide_thread_.join();
         const int pulse_camera_id = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!camera_info_valid_ || camera_info_.camera_id < 0) {
                 throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
             }
-            if (pulse_guiding_->load()) {
+            if (pulse_guiding_.load()) {
                 throw AlpacaException("A pulse guide is already in progress", AlpacaError::InvalidOperation);
             }
             const int id = camera_info_.camera_id;
-            PlayerOneSDKWrapper::instance().pulse_guide_on(id, dir);
+            sdk_.pulse_guide_on(id, dir);
             // End timestamp BEFORE the flag: a reader that observes the flag
             // as true must never see a stale (epoch) end time, or the
             // self-clearing getter would clear the pulse immediately.
             pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
-            pulse_guiding_->store(true);
+            pulse_guiding_.store(true);
             return id;
         }();
-        // The detached turn-off thread captures NO object state — only the id
-        // snapshot — so it cannot dereference a destroyed driver if the
-        // object is torn down mid-pulse (the previous flag-clear thread
-        // captured `this` for exactly that hazard; IsPulseGuiding now
-        // self-clears from pulse_guiding_end_ in the getter instead — the
-        // ZWO shape). A disconnect racing the sleep costs at most a rejected
-        // pulse_guide_off on a closed id.
-        std::thread([pulse_camera_id, dir, duration, flag = pulse_guiding_]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+        {
+            std::lock_guard<std::mutex> lock(pulse_timer_mutex_);
+            cancel_pulse_timer_ = false;
+        }
+        pulse_guide_thread_ = std::thread([this, pulse_camera_id, dir, duration]() {
+            std::unique_lock<std::mutex> lock(pulse_timer_mutex_);
+            pulse_timer_cv_.wait_for(lock, std::chrono::milliseconds(duration), [this] { return cancel_pulse_timer_; });
+            lock.unlock();
             try {
-                PlayerOneSDKWrapper::instance().pulse_guide_off(pulse_camera_id, dir);
+                sdk_.pulse_guide_off(pulse_camera_id, dir);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("PlayerOne",
-                    "pulse_guide_off failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN("PlayerOne", "pulse_guide_off failed: " + std::string(e.what()));
             }
-            // Unconditional clear for fire-and-forget clients that never
-            // poll IsPulseGuiding; the shared_ptr keeps the flag alive even
-            // if the driver is destroyed mid-pulse (round 9).
-            flag->store(false);
-        }).detach();
+            std::lock_guard<std::mutex> state_lock(mutex_);
+            pulse_guiding_.store(false);
+        });
     }
 
     void start_exposure(double duration, bool light) override {
@@ -890,6 +941,7 @@ public:
         PlayerOneImageFormat active_format = PlayerOneImageFormat::Raw16;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
             if (!camera_info_valid_) {
                 throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
             }
@@ -937,8 +989,10 @@ public:
             last_exposure_duration_ = duration;
             last_exposure_start_ = std::chrono::system_clock::now();
             last_exposure_valid_ = true;
+            exposure_failure_.clear();
             image_ready_ = false;
             image_cached_ = false;
+            last_image_ = {};
             exposure_deadline_ = std::chrono::steady_clock::now() +
                 std::chrono::microseconds(exposure_us) +
                 std::chrono::seconds(15);
@@ -953,17 +1007,30 @@ public:
             exposure_active_.store(true);
         }
 
-        exposure_thread_ = std::thread([this, id, exposure_us,
-                                        active_bin, active_start_x, active_start_y,
-                                        active_num_x, active_num_y,
-                                        dirty_format, dirty_roi, active_format]() {
-            auto& sdk = PlayerOneSDKWrapper::instance();
+        exposure_thread_ = std::thread([this, id, exposure_us, active_bin, active_start_x, active_start_y, active_num_x,
+                                        active_num_y, dirty_format, dirty_roi, active_format]() {
+            auto& sdk = sdk_;
+            const auto publish_failure = [this, &sdk, id](std::string reason) {
+                try {
+                    sdk.stop_exposure(id);
+                } catch (...) {
+                }
+                std::lock_guard<std::mutex> lock(mutex_);
+                exposure_failure_ = std::move(reason);
+                image_ready_ = false;
+                image_cached_ = false;
+                exposure_deadline_valid_ = false;
+                exposure_active_.store(false);
+            };
             try {
                 // Reconfiguring bin/format requires the camera be in STATE_OPENED
                 // (not exposing). Stop defensively in case a prior exposure was
                 // still running.
                 if (dirty_format || dirty_roi) {
-                    try { sdk.stop_exposure(id); } catch (const std::exception&) {}
+                    try {
+                        sdk.stop_exposure(id);
+                    } catch (const std::exception&) {
+                    }
                 }
 
                 if (dirty_format) {
@@ -972,6 +1039,9 @@ public:
                     } catch (const std::exception& e) {
                         ALPACA_LOG_WARN("PlayerOne",
                             std::string("set_image_format failed: ") + e.what());
+                    }
+                    if (sdk.get_image_format(id) != active_format) {
+                        alpacacore::util::throw_invalid_camera_image("camera did not apply the requested pixel format");
                     }
                     sdk.set_image_bin(id, active_bin);
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -993,10 +1063,16 @@ public:
                     sdk.set_image_size(id, sdk_w, sdk_h);
                     sdk.set_image_start_pos(id, active_start_x, active_start_y);
                     // Read back — SDK may have further aligned values.
-                    try { sdk.get_image_size(id, sdk_w, sdk_h); } catch (...) {}
+                    try {
+                        sdk.get_image_size(id, sdk_w, sdk_h);
+                    } catch (...) {
+                    }
                     int rx = active_start_x;
                     int ry = active_start_y;
-                    try { sdk.get_image_start_pos(id, rx, ry); } catch (...) {}
+                    try {
+                        sdk.get_image_start_pos(id, rx, ry);
+                    } catch (...) {
+                    }
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
                         start_x_ = rx;
@@ -1015,14 +1091,17 @@ public:
                 // matches the image the SDK will deliver.
                 int sdk_frame_w = sdk_w;
                 int sdk_frame_h = sdk_h;
-                try { sdk.get_image_size(id, sdk_frame_w, sdk_frame_h); } catch (...) {}
+                sdk.get_image_size(id, sdk_frame_w, sdk_frame_h);
+                if (sdk.get_image_format(id) != active_format) {
+                    alpacacore::util::throw_invalid_camera_image(
+                        "camera pixel format does not match the selected decoder");
+                }
+                const std::size_t bytes_per_pixel_value = bytes_per_pixel(active_format);
+                if (sdk_frame_w < sdk_w || sdk_frame_h < sdk_h) {
+                    alpacacore::util::throw_invalid_camera_image("frame dimensions are smaller than the aligned ROI");
+                }
 
-                const bool is_16 = format_is_16bit(active_format);
-                const std::size_t bytes_per_pixel = is_16 ? 2u
-                    : (active_format == PlayerOneImageFormat::Rgb24 ? 3u : 1u);
-                const std::size_t buffer_bytes =
-                    static_cast<std::size_t>(sdk_frame_w) *
-                    static_cast<std::size_t>(sdk_frame_h) * bytes_per_pixel;
+                const std::size_t buffer_bytes = checked_frame_bytes(sdk_frame_w, sdk_frame_h, bytes_per_pixel_value);
 
                 // Poll for image readiness so the abort path can short-circuit
                 // without a long blocking get_image_data.
@@ -1031,23 +1110,35 @@ public:
                     std::chrono::seconds(15);
 
                 bool ready = false;
+                std::string readiness_failure;
                 while (exposure_active_.load() &&
                        std::chrono::steady_clock::now() < poll_deadline) {
                     try {
-                        if (sdk.image_ready(id)) { ready = true; break; }
+                        if (sdk.image_ready(id)) {
+                            ready = true;
+                            break;
+                        }
                     } catch (const std::exception& e) {
-                        ALPACA_LOG_WARN("PlayerOne",
-                            std::string("image_ready failed: ") + e.what());
+                        readiness_failure = std::string("Player One readiness check failed: ") + e.what();
+                        ALPACA_LOG_WARN("PlayerOne", std::string("image_ready failed: ") + e.what());
                         break;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
 
                 if (!ready || !exposure_active_.load()) {
-                    ALPACA_LOG_WARN("PlayerOne",
-                        "Exposure aborted or did not complete before deadline");
-                    try { sdk.stop_exposure(id); } catch (...) {}
-                    exposure_active_.store(false);
+                    if (exposure_active_.load()) {
+                        ALPACA_LOG_WARN("PlayerOne", "Exposure did not complete before its deadline");
+                        publish_failure(readiness_failure.empty()
+                                            ? "Player One exposure did not complete before its deadline"
+                                            : std::move(readiness_failure));
+                    } else {
+                        try {
+                            sdk.stop_exposure(id);
+                        } catch (...) {
+                        }
+                        exposure_active_.store(false);
+                    }
                     return;
                 }
 
@@ -1056,23 +1147,25 @@ public:
                 bool got = sdk.get_image_data(id, raw.data(), raw.size(), 5000);
                 if (!got) {
                     ALPACA_LOG_WARN("PlayerOne", "get_image_data timed out after ready=true");
-                    exposure_active_.store(false);
+                    publish_failure("Player One image download timed out after readiness");
                     return;
                 }
 
-                ImageArray img = build_image_array(raw,
-                                                   sdk_frame_w, sdk_frame_h,
-                                                   active_num_x, active_num_y,
-                                                   active_format);
+                ImageArray img =
+                    build_image_array(raw, sdk_frame_w, sdk_frame_h, active_num_x, active_num_y, active_format);
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    if (!exposure_active_.load()) return;
                     last_image_ = std::move(img);
                     image_cached_ = true;
                     image_ready_ = true;
+                    exposure_failure_.clear();
+                    exposure_deadline_valid_ = false;
                 }
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne", "Exposure failed: " + std::string(e.what()));
+                publish_failure(e.what());
             }
             exposure_active_.store(false);
         });
@@ -1083,25 +1176,25 @@ public:
         // Serialise this join against start_exposure's spawn and the disconnect's
         // join+close (join vs thread-assignment on the same std::thread is UB).
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        exposure_active_.store(false);
-        if (exposure_thread_.joinable()) exposure_thread_.join();
-        try {
-            with_camera([](int id) { PlayerOneSDKWrapper::instance().stop_exposure(id); });
-        } catch (const std::exception&) {}
+        stop_exposure_thread(true);
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         image_ready_ = false;
         image_cached_ = false;
+        exposure_failure_.clear();
         exposure_deadline_valid_ = false;
     }
 
 private:
     int device_number_;
     int camera_index_;
+    PlayerOneSDK& sdk_;
     PlayerOneCameraInfo camera_info_{};
     bool camera_info_valid_{false};
     PlayerOneConfigCaps caps_{};
 
     std::atomic<bool> connected_{false};
+    std::mutex transition_mutex_;
     mutable std::mutex mutex_;
 
     int bin_{1};
@@ -1116,6 +1209,7 @@ private:
     mutable bool image_ready_{false};
     mutable bool image_cached_{false};
     mutable ImageArray last_image_{};
+    mutable std::string exposure_failure_;
     double last_exposure_duration_{0.0};
     std::chrono::system_clock::time_point last_exposure_start_{};
     bool last_exposure_valid_{false};
@@ -1132,15 +1226,21 @@ private:
     mutable std::chrono::steady_clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
-    // shared_ptr so the detached pulse-off thread can co-own the flag and
-    // clear it unconditionally after the pulse WITHOUT capturing `this`
-    // (destructor-safe): a fire-and-forget client that never polls
-    // IsPulseGuiding must not leave the flag latched true (round 9). The
-    // timestamp getter still self-clears for readers in the interim.
-    std::shared_ptr<std::atomic<bool>> pulse_guiding_{std::make_shared<std::atomic<bool>>(false)};
+    mutable std::atomic<bool> pulse_guiding_{false};
     std::chrono::steady_clock::time_point pulse_guiding_end_{};
+    std::mutex pulse_guide_lifecycle_mutex_;
+    std::mutex pulse_timer_mutex_;
+    std::condition_variable pulse_timer_cv_;
+    bool cancel_pulse_timer_{false};
+    std::thread pulse_guide_thread_;
 
     void ensure_connected() const {
+        if (!connected_.load()) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    void ensure_connected_locked() const {
         if (!connected_.load()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
@@ -1166,7 +1266,7 @@ private:
     template <typename Fn>
     auto with_camera(Fn&& fn) const -> decltype(fn(0)) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || camera_info_.camera_id < 0) {
+        if (!connected_.load() || !camera_info_valid_ || camera_info_.camera_id < 0) {
             throw AlpacaException("Camera ID not available", AlpacaError::NotConnected);
         }
         return fn(camera_info_.camera_id);
@@ -1179,6 +1279,7 @@ private:
 
     void ensure_heater_supported() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_heater_power) {
             throw AlpacaException("Dew heater not supported by this camera", AlpacaError::NotImplemented);
         }
@@ -1186,6 +1287,7 @@ private:
 
     void ensure_fan_supported() const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.has_fan_power) {
             throw AlpacaException("Radiator fan not supported by this camera", AlpacaError::NotImplemented);
         }
@@ -1193,6 +1295,7 @@ private:
 
     void validate_heater_range(int percent) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.heater_power_writable) {
             throw AlpacaException("Dew heater is read-only", AlpacaError::InvalidOperation);
         }
@@ -1205,6 +1308,7 @@ private:
 
     void validate_fan_range(int percent) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!caps_.fan_power_writable) {
             throw AlpacaException("Radiator fan is read-only", AlpacaError::InvalidOperation);
         }
@@ -1218,10 +1322,11 @@ private:
     void reset_exposure_state_locked() {
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
-        pulse_guiding_->store(false);
+        pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
+        exposure_failure_.clear();
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
@@ -1229,50 +1334,73 @@ private:
         exposure_deadline_valid_ = false;
     }
 
-    void stop_exposure_thread() {
-        exposure_active_.store(false);
+    void stop_exposure_thread(bool interrupt = false) {
+        const bool was_active = exposure_active_.exchange(false);
+        if (exposure_thread_.joinable() && connected_.load() && (was_active || interrupt)) {
+            try {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (camera_info_valid_ && camera_info_.camera_id >= 0) {
+                    sdk_.stop_exposure(camera_info_.camera_id);
+                }
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("PlayerOne", "stop_exposure before join failed: " + std::string(e.what()));
+            }
+        }
         if (exposure_thread_.joinable()) exposure_thread_.join();
+    }
+
+    void stop_pulse_guide_thread() {
+        std::lock_guard<std::mutex> lifecycle_lock(pulse_guide_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(pulse_timer_mutex_);
+            cancel_pulse_timer_ = true;
+        }
+        pulse_timer_cv_.notify_all();
+        if (pulse_guide_thread_.joinable()) pulse_guide_thread_.join();
+        {
+            std::lock_guard<std::mutex> lock(pulse_timer_mutex_);
+            cancel_pulse_timer_ = false;
+        }
     }
 
     void preload_camera_info() {
         std::lock_guard<std::mutex> lock(mutex_);
         try {
-            auto cameras = PlayerOneSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
             }
         } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("PlayerOne",
-                             "Preload enumerate failed: " + std::string(e.what()));
+            ALPACA_LOG_DEBUG("PlayerOne", "Preload enumerate failed: " + std::string(e.what()));
         }
     }
 
     void refresh_cached_camera_info_if_needed() {
         if (connected_.load()) return;
         try {
-            auto cameras = PlayerOneSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 std::lock_guard<std::mutex> lock(mutex_);
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
             }
-        } catch (const std::exception&) {}
+        } catch (const std::exception&) {
+        }
     }
 
     void set_bin_common(int bin_x, int bin_y) {
         ensure_connected();
         if (bin_x != bin_y) {
-            throw AlpacaException("Asymmetric binning not supported",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!camera_info_valid_) {
             throw AlpacaException("Camera info not valid", AlpacaError::DriverException);
         }
-        if (std::find(camera_info_.supported_bins.begin(),
-                      camera_info_.supported_bins.end(),
-                      bin_x) == camera_info_.supported_bins.end()) {
+        if (std::find(camera_info_.supported_bins.begin(), camera_info_.supported_bins.end(), bin_x) ==
+            camera_info_.supported_bins.end()) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
         // Geometry write: rejected mid-exposure, checked under the same
@@ -1305,6 +1433,7 @@ private:
         // set values beyond sensor dimensions and expect the error at
         // StartExposure rather than here.
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
@@ -1322,11 +1451,11 @@ private:
         ensure_connected();
         // ASCOM convention: setters are lenient, StartExposure validates.
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
-            throw AlpacaException("Start position must be non-negative",
-                                  AlpacaError::InvalidValue);
+            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
         ensure_not_exposing_locked();  // M15 — see set_bin_common
         if (start_x_ == sx && start_y_ == sy) return;
@@ -1335,25 +1464,29 @@ private:
         roi_dirty_ = true;
     }
 
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer,
-                                  int src_w, int src_h,
-                                  int out_w, int out_h,
-                                  PlayerOneImageFormat format) const {
+    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, int src_w, int src_h, int out_w, int out_h,
+                                 PlayerOneImageFormat format) const {
         ImageArray image;
         image.width = out_w;
         image.height = out_h;
-        image.rank = 2;
-        if (out_w <= 0 || out_h <= 0 || src_w <= 0 || src_h <= 0) {
-            image.rank = 0;
-            return image;
+        image.rank = format == PlayerOneImageFormat::Rgb24 ? 3 : 2;
+        const auto output_shape = alpacacore::util::validate_image_shape(image);
+        const std::size_t source_bytes = checked_frame_bytes(src_w, src_h, bytes_per_pixel(format));
+        const int min_sdk_width = out_w - (out_w % 4) == 0 ? 4 : out_w - (out_w % 4);
+        const int min_sdk_height = out_h - (out_h % 2) == 0 ? 2 : out_h - (out_h % 2);
+        if (src_w < min_sdk_width || src_h < min_sdk_height) {
+            alpacacore::util::throw_invalid_camera_image("frame dimensions are smaller than the aligned requested ROI");
+        }
+        if (buffer.size() < source_bytes) {
+            alpacacore::util::throw_invalid_camera_image(
+                "frame data is shorter than its reported dimensions and format require");
         }
         // The SDK buffer is src_w × src_h (aligned). The returned ImageArray is
         // out_w × out_h (what the client requested). Copy the overlapping
         // region; any trailing row/col is left zeroed.
         const int copy_w = std::min(src_w, out_w);
         const int copy_h = std::min(src_h, out_h);
-        const std::size_t out_pixels =
-            static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h);
+        const std::size_t out_pixels = output_shape.width * output_shape.height;
 
         if (format == PlayerOneImageFormat::Raw16) {
             image.data.assign(out_pixels, 0);
@@ -1362,56 +1495,53 @@ private:
                 const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
                 for (int x = 0; x < copy_w; ++x) {
                     const std::size_t j = row_off + static_cast<std::size_t>(x) * 2;
-                    if (j + 1 >= buffer.size()) break;
                     std::uint16_t px = static_cast<std::uint16_t>(buffer[j]) |
                                        (static_cast<std::uint16_t>(buffer[j + 1]) << 8);
-                    image.data[static_cast<std::size_t>(y) * out_w + x] =
-                        static_cast<std::int32_t>(px);
+                    image.data[static_cast<std::size_t>(y) * out_w + x] = static_cast<std::int32_t>(px);
                 }
             }
-        } else if (format == PlayerOneImageFormat::Raw8 ||
-                   format == PlayerOneImageFormat::Mono8) {
+        } else if (format == PlayerOneImageFormat::Raw8 || format == PlayerOneImageFormat::Mono8) {
             image.data.assign(out_pixels, 0);
             const std::size_t src_stride = static_cast<std::size_t>(src_w);
             for (int y = 0; y < copy_h; ++y) {
                 const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
                 for (int x = 0; x < copy_w; ++x) {
                     const std::size_t j = row_off + static_cast<std::size_t>(x);
-                    if (j >= buffer.size()) break;
-                    image.data[static_cast<std::size_t>(y) * out_w + x] =
-                        static_cast<std::int32_t>(buffer[j]);
+                    image.data[static_cast<std::size_t>(y) * out_w + x] = static_cast<std::int32_t>(buffer[j]);
                 }
             }
         } else if (format == PlayerOneImageFormat::Rgb24) {
             // Present RGB24 as rank-3 (H x W x 3). Pack each channel into its
             // plane as ASCOM clients expect.
-            image.rank = 3;
-            image.data.assign(out_pixels * 3, 0);
+            image.data.assign(output_shape.element_count, 0);
             const std::size_t src_stride = static_cast<std::size_t>(src_w) * 3;
             for (int y = 0; y < copy_h; ++y) {
                 const std::size_t row_off = static_cast<std::size_t>(y) * src_stride;
                 for (int x = 0; x < copy_w; ++x) {
                     const std::size_t j = row_off + static_cast<std::size_t>(x) * 3;
-                    if (j + 2 >= buffer.size()) break;
                     // Player One RGB24 is stored as B,G,R per pixel; transpose
                     // to R,G,B for Alpaca clients.
                     std::int32_t b = buffer[j];
                     std::int32_t g = buffer[j + 1];
                     std::int32_t r = buffer[j + 2];
-                    const std::size_t out_i =
-                        (static_cast<std::size_t>(y) * out_w + x) * 3;
+                    const std::size_t out_i = (static_cast<std::size_t>(y) * out_w + x) * 3;
                     image.data[out_i + 0] = r;
                     image.data[out_i + 1] = g;
                     image.data[out_i + 2] = b;
                 }
             }
         }
+        alpacacore::util::validate_image_array(image);
         return image;
     }
 };
 
 std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index) {
-    return std::make_unique<PlayerOneCameraDriver>(device_number, camera_index);
+    return create_playerone_camera(device_number, camera_index, PlayerOneSDKWrapper::instance());
 }
 
-} // namespace alpacacore::vendor::playerone
+std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index, PlayerOneSDK& sdk) {
+    return std::make_unique<PlayerOneCameraDriver>(device_number, camera_index, sdk);
+}
+
+}  // namespace alpacacore::vendor::playerone

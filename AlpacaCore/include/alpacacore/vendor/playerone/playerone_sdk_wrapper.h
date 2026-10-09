@@ -113,6 +113,54 @@ struct PlayerOneConfigCaps {
     bool has_guide_st4{};       // at least one of POA_GUIDE_NORTH/SOUTH/EAST/WEST
 };
 
+// Camera-driver SDK seam. It is deliberately non-owning: the implementation
+// must outlive its driver and any operation started by that driver.
+class PlayerOneSDK {
+public:
+    virtual std::string get_sdk_version() = 0;
+    virtual std::vector<PlayerOneCameraInfo> enumerate_cameras() = 0;
+    virtual void open_camera(int camera_id) = 0;
+    virtual void init_camera(int camera_id) = 0;
+    virtual void close_camera(int camera_id) = 0;
+    virtual PlayerOneCameraInfo get_camera_properties_by_id(int camera_id) = 0;
+    virtual PlayerOneConfigCaps probe_config_caps(int camera_id) = 0;
+    virtual long get_config_int(int camera_id, int config_id, bool* is_auto = nullptr) = 0;
+    virtual void set_config_int(int camera_id, int config_id, long value, bool is_auto = false) = 0;
+    virtual double get_config_float(int camera_id, int config_id, bool* is_auto = nullptr) = 0;
+    virtual bool get_config_bool(int camera_id, int config_id, bool* is_auto = nullptr) = 0;
+    virtual void set_config_float(int camera_id, int config_id, double value, bool is_auto = false) = 0;
+    virtual void set_config_bool(int camera_id, int config_id, bool value, bool is_auto = false) = 0;
+    virtual PlayerOneImageFormat get_image_format(int camera_id) = 0;
+    virtual void set_image_format(int camera_id, PlayerOneImageFormat format) = 0;
+    virtual void get_image_size(int camera_id, int& width, int& height) = 0;
+    virtual void set_image_size(int camera_id, int width, int height) = 0;
+    virtual void get_image_start_pos(int camera_id, int& start_x, int& start_y) = 0;
+    virtual void set_image_start_pos(int camera_id, int start_x, int start_y) = 0;
+    virtual int get_image_bin(int camera_id) = 0;
+    virtual void set_image_bin(int camera_id, int bin) = 0;
+    virtual void start_exposure(int camera_id, bool single_frame) = 0;
+    virtual void stop_exposure(int camera_id) = 0;
+    virtual PlayerOneCameraState get_camera_state(int camera_id) = 0;
+    virtual bool image_ready(int camera_id) = 0;
+    virtual bool get_image_data(int camera_id, std::uint8_t* buffer, std::size_t buffer_size, int timeout_ms) = 0;
+    virtual void pulse_guide_on(int camera_id, PlayerOneGuideDirection direction) = 0;
+    virtual void pulse_guide_off(int camera_id, PlayerOneGuideDirection direction) = 0;
+    virtual double get_temperature_c(int camera_id) = 0;
+    virtual bool get_cooler_on(int camera_id) = 0;
+    virtual void set_cooler_on(int camera_id, bool on) = 0;
+    virtual int get_target_temp_c(int camera_id) = 0;
+    virtual void set_target_temp_c(int camera_id, int target_c) = 0;
+    virtual int get_cooler_power_percent(int camera_id) = 0;
+    virtual double get_egain(int camera_id) = 0;
+    virtual int get_heater_power_percent(int camera_id) = 0;
+    virtual void set_heater_power_percent(int camera_id, int percent) = 0;
+    virtual int get_fan_power_percent(int camera_id) = 0;
+    virtual void set_fan_power_percent(int camera_id, int percent) = 0;
+
+protected:
+    ~PlayerOneSDK() = default;
+};
+
 /**
  * Thin wrapper around the Player One Camera SDK v3.10.0.
  *
@@ -125,80 +173,77 @@ struct PlayerOneConfigCaps {
  *
  * POAErrors != POA_OK is translated to AlpacaException via throw_on_error().
  */
-class PlayerOneSDKWrapper {
+class PlayerOneSDKWrapper final : public PlayerOneSDK {
 public:
     static PlayerOneSDKWrapper& instance();
 
-    std::string get_sdk_version();
+    std::string get_sdk_version() override;
     int get_api_version();
 
-    std::vector<PlayerOneCameraInfo> enumerate_cameras();
+    std::vector<PlayerOneCameraInfo> enumerate_cameras() override;
 
     // Opens + inits the camera. Open/close are reference-counted so the
     // camera and switch (dew heater / fan) devices can share one SDK handle:
     // the camera is physically closed only when the last user disconnects.
-    void open_camera(int camera_id);
-    void init_camera(int camera_id);
-    void close_camera(int camera_id);
+    void open_camera(int camera_id) override;
+    void init_camera(int camera_id) override;
+    void close_camera(int camera_id) override;
 
     // Re-read the properties struct for a specific ID (useful after setting
     // userCustomID or to pull serial_number once opened).
-    PlayerOneCameraInfo get_camera_properties_by_id(int camera_id);
+    PlayerOneCameraInfo get_camera_properties_by_id(int camera_id) override;
 
     // Capability probe — walks POAGetConfigAttributes(0..count).
-    PlayerOneConfigCaps probe_config_caps(int camera_id);
+    PlayerOneConfigCaps probe_config_caps(int camera_id) override;
 
     // Generic config access. Caller is responsible for knowing the value type.
-    long get_config_int(int camera_id, int config_id, bool* is_auto = nullptr);
-    double get_config_float(int camera_id, int config_id, bool* is_auto = nullptr);
-    bool get_config_bool(int camera_id, int config_id, bool* is_auto = nullptr);
-    void set_config_int(int camera_id, int config_id, long value, bool is_auto = false);
-    void set_config_float(int camera_id, int config_id, double value, bool is_auto = false);
-    void set_config_bool(int camera_id, int config_id, bool value, bool is_auto = false);
+    long get_config_int(int camera_id, int config_id, bool* is_auto = nullptr) override;
+    double get_config_float(int camera_id, int config_id, bool* is_auto = nullptr) override;
+    bool get_config_bool(int camera_id, int config_id, bool* is_auto = nullptr) override;
+    void set_config_int(int camera_id, int config_id, long value, bool is_auto = false) override;
+    void set_config_float(int camera_id, int config_id, double value, bool is_auto = false) override;
+    void set_config_bool(int camera_id, int config_id, bool value, bool is_auto = false) override;
 
     // ROI / format / binning. After every setter, re-query (SDK may align).
-    PlayerOneImageFormat get_image_format(int camera_id);
-    void set_image_format(int camera_id, PlayerOneImageFormat format);
-    void get_image_size(int camera_id, int& width, int& height);
-    void set_image_size(int camera_id, int width, int height);
-    void get_image_start_pos(int camera_id, int& start_x, int& start_y);
-    void set_image_start_pos(int camera_id, int start_x, int start_y);
-    int get_image_bin(int camera_id);
-    void set_image_bin(int camera_id, int bin);
+    PlayerOneImageFormat get_image_format(int camera_id) override;
+    void set_image_format(int camera_id, PlayerOneImageFormat format) override;
+    void get_image_size(int camera_id, int& width, int& height) override;
+    void set_image_size(int camera_id, int width, int height) override;
+    void get_image_start_pos(int camera_id, int& start_x, int& start_y) override;
+    void set_image_start_pos(int camera_id, int start_x, int start_y) override;
+    int get_image_bin(int camera_id) override;
+    void set_image_bin(int camera_id, int bin) override;
 
     // Exposure flow.
-    void start_exposure(int camera_id, bool single_frame);
-    void stop_exposure(int camera_id);
-    PlayerOneCameraState get_camera_state(int camera_id);
-    bool image_ready(int camera_id);
+    void start_exposure(int camera_id, bool single_frame) override;
+    void stop_exposure(int camera_id) override;
+    PlayerOneCameraState get_camera_state(int camera_id) override;
+    bool image_ready(int camera_id) override;
 
     // Blocks up to timeout_ms. Does NOT hold the wrapper mutex during the
     // wait. Throws on non-timeout errors. Returns true on success, false on
     // timeout.
-    bool get_image_data(int camera_id,
-                        std::uint8_t* buffer,
-                        std::size_t buffer_size,
-                        int timeout_ms);
+    bool get_image_data(int camera_id, std::uint8_t* buffer, std::size_t buffer_size, int timeout_ms) override;
 
     // ST4 pulse guide low-level: driver handles duration via std::thread.
     // direction maps to POA_GUIDE_NORTH/SOUTH/EAST/WEST.
-    void pulse_guide_on(int camera_id, PlayerOneGuideDirection direction);
-    void pulse_guide_off(int camera_id, PlayerOneGuideDirection direction);
+    void pulse_guide_on(int camera_id, PlayerOneGuideDirection direction) override;
+    void pulse_guide_off(int camera_id, PlayerOneGuideDirection direction) override;
 
     // Cooler helpers (thin wrappers over set_config_*).
-    double get_temperature_c(int camera_id);
-    bool get_cooler_on(int camera_id);
-    void set_cooler_on(int camera_id, bool on);
-    int get_target_temp_c(int camera_id);
-    void set_target_temp_c(int camera_id, int target_c);
-    int get_cooler_power_percent(int camera_id);
-    double get_egain(int camera_id);
+    double get_temperature_c(int camera_id) override;
+    bool get_cooler_on(int camera_id) override;
+    void set_cooler_on(int camera_id, bool on) override;
+    int get_target_temp_c(int camera_id) override;
+    void set_target_temp_c(int camera_id, int target_c) override;
+    int get_cooler_power_percent(int camera_id) override;
+    double get_egain(int camera_id) override;
 
     // Dew heater ("lens heater") and radiator fan power, percent [0-100].
-    int get_heater_power_percent(int camera_id);
-    void set_heater_power_percent(int camera_id, int percent);
-    int get_fan_power_percent(int camera_id);
-    void set_fan_power_percent(int camera_id, int percent);
+    int get_heater_power_percent(int camera_id) override;
+    void set_heater_power_percent(int camera_id, int percent) override;
+    int get_fan_power_percent(int camera_id) override;
+    void set_fan_power_percent(int camera_id, int percent) override;
 
     // Sensor mode (optional — 0 means not supported).
     int get_sensor_mode_count(int camera_id);
