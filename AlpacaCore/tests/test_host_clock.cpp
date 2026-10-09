@@ -627,11 +627,27 @@ TEST_CASE("HostClock - a failed RTC write leaves the step result alone and warns
 }
 
 TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][hostclock][unit]") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("hostclock_nortc_" + std::to_string(::getpid()));
+    fs::create_directories(root / "rtc0");
+    const auto put = [&](const char* file, const char* text) { std::ofstream(root / "rtc0" / file) << text; };
+    put("hctosys", "1");
+    put("since_epoch", "946684800");  // battery-less RTC: 2000-01-01
+    HostClock::set_sysfs_root_for_test(root.string());
+    HostClock::invalidate_rtc_probe();
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // settles "implausible"
+    put("since_epoch", "1900000000");
+
     Fake f;
     f.rtc_result = HostClock::RtcWrite::NoDevice;
     auto c = f.clock();
     CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
-    CHECK(f.rtc_writes == 1);  // attempted, but NoDevice: nothing to invalidate
+    CHECK(f.rtc_writes == 1);  // attempted, but NoDevice: nothing written
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // probe still settled
+
+    HostClock::set_sysfs_root_for_test("");
+    HostClock::invalidate_rtc_probe();
+    fs::remove_all(root);
 }
 
 TEST_CASE("HostClock - Sync Time with the opt-out off does not write the RTC (#296)", "[util][hostclock][unit]") {
