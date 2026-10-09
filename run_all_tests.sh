@@ -13,13 +13,13 @@ CORE_VENDORS="${ALPACACORE_ENABLE_ALL_VENDORS:-ON}"
 # run must find at least this many tests. THIS BLOCK is the one place to change
 # them: lower a floor only when tests are deliberately removed, raise it when
 # the suite grows. Floors sit about 10% below the counts at upstream/main
-# 0597698. Measured (x86_64, `ctest -N`): vendors OFF core 202, HTTP 15.
-# Vendors ON could not be measured off arm64; its core floor is set from the
-# 802-case figure in the CHANGELOG with ~13% margin, so re-measure on CI and
-# tighten it. A vendors setting with no floor fails loudly.
+# 420d74e. Measured: vendors OFF core 202, HTTP 15 (x86_64 `ctest -N`; CI run
+# 37869957757 jobs 113625511555 and 113625511686). Vendors ON core 1669, HTTP 16
+# (CI run 37869957757 jobs 113625511540 build-vendors and 113625511933
+# coverage). A vendors setting with no floor fails loudly.
 case "${CORE_VENDORS}" in
   OFF) CORE_FLOOR=180 ; HTTP_FLOOR=13 ;;
-  ON)  CORE_FLOOR=700 ; HTTP_FLOOR=13 ;;
+  ON)  CORE_FLOOR=1500 ; HTTP_FLOOR=14 ;;
   *)   CORE_FLOOR="" ; HTTP_FLOOR="" ;;
 esac
 
