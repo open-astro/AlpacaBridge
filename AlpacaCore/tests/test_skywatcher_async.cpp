@@ -1141,8 +1141,12 @@ TEST_CASE("SkyWatcher slot - a stop on one axis does not supersede the other axi
     REQUIRE(call_on_clock(clock, [&] { driver->move_axis(1, 2.0); }, std::chrono::milliseconds(5000)));
     REQUIRE(mount.axis_running(2));
 
-    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 0.0); }, std::chrono::milliseconds(5000)));  // RA body starts polling; the ramp takes 800 ms
-    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(1, 0.0); }, std::chrono::milliseconds(5000)));  // Dec body starts on the other slot
+    REQUIRE(call_on_clock(
+        clock, [&] { driver->move_axis(0, 0.0); },
+        std::chrono::milliseconds(5000)));  // RA body starts polling; the ramp takes 800 ms
+    REQUIRE(call_on_clock(
+        clock, [&] { driver->move_axis(1, 0.0); },
+        std::chrono::milliseconds(5000)));  // Dec body starts on the other slot
 
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(5000)));
     REQUIRE(run_clock_until(
