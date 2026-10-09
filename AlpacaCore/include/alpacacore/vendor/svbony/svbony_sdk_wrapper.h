@@ -22,11 +22,11 @@ namespace alpacacore::vendor::svbony {
 
 enum class SVBImageType : std::uint8_t { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32, Unknown };
 
-enum class SVBBayerPattern { None, RG, BG, GR, GB };
+enum class SVBBayerPattern : std::uint8_t { None, RG, BG, GR, GB };
 
-enum class SVBExposureStatus { Idle, Working, Success, Failed };
+enum class SVBExposureStatus : std::uint8_t { Idle, Working, Success, Failed };
 
-enum class SVBGuideDirection { North, South, East, West };
+enum class SVBGuideDirection : std::uint8_t { North, South, East, West };
 
 enum class SVBControlType {
     Gain,

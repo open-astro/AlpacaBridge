@@ -1102,7 +1102,7 @@ public:
                 }
 
                 // Set the exposure — POA_EXPOSURE's value is microseconds (long).
-                sdk.set_config_int(id, /*POA_EXPOSURE=*/0, static_cast<long>(exposure_us), false);
+                sdk.set_config_int(id, /*config_id=*/0, static_cast<long>(exposure_us), false);  // POA_EXPOSURE
 
                 sdk.start_exposure(id, /*single_frame=*/true);
 
