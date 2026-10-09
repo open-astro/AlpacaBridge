@@ -601,3 +601,28 @@ TEST_CASE("GPhoto camera fake - bulb widget camera ignores eosremoterelease", "[
 
     driver->set_connected(false);
 }
+
+TEST_CASE("GPhoto camera fake - Canon shutter list with only auto does not enable bulb",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"auto"};
+    cam.choice_value["shutterspeed2"] = "auto";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    CHECK(driver->get_exposure_max() != 3600.0);
+
+    try {
+        driver->start_exposure(1.0, true);
+        FAIL("start_exposure should refuse a body with no bulb entry");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotImplemented);
+    }
+    CHECK(fake.remote_release_history.empty());
+
+    driver->set_connected(false);
+}

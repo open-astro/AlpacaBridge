@@ -137,7 +137,9 @@ SDK cleanup checklist does not apply here).
   hardware class.
 - **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
   `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
-- **Bulb capture drives the standalone `"bulb"` toggle widget only** (confirmed present in
+- **Bulb capture has two mechanisms: the standalone `"bulb"` toggle widget (Nikon) or, on Canon
+  bodies without it, the `eosremoterelease` `Press Full` / `Release Full` pair plus the
+  shutter-speed `"bulb"` choice (see the Canon paragraph below).** The toggle path (confirmed present in
   libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
   Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
   set the shutter-speed widget to its `"bulb"` choice if the choice list has one, flip `"bulb"`

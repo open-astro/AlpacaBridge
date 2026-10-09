@@ -989,7 +989,7 @@ public:
             active_handle = handle_;
             // A body in B mode lists only "bulb" for its shutter speed, so there is no native
             // speed to fall back on: every duration takes the bulb path.
-            use_bulb = has_bulb_ && (native_shutter_choices_.empty() || duration > max_native_shutter_seconds_ + 1e-9);
+            use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") || duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
             shutter_widget_name = shutter_widget_name_;
 
@@ -1252,7 +1252,9 @@ private:
                     // A "bulb"/fraction-sentinel entry in the shutter-speed
                     // choice list: remember it so run_exposure can prime the
                     // dial into bulb mode before driving the toggle below.
-                    bulb_choice_ = choice;
+                    // Prefer a literal "bulb" over other unparseable labels such as
+                    // "auto" (Canon shutter value 0), which does not hold the shutter.
+                    if (bulb_choice_.empty() || to_lower(choice) == "bulb") bulb_choice_ = choice;
                     continue;
                 }
                 native_shutter_choices_.emplace_back(choice, *seconds);
@@ -1267,7 +1269,7 @@ private:
         remote_press_choice_.clear();
         remote_release_choice_.clear();
         has_bulb_ = sdk.has_widget(handle, "bulb");
-        if (!has_bulb_ && !bulb_choice_.empty() && sdk.has_widget(handle, "eosremoterelease")) {
+        if (!has_bulb_ && to_lower(bulb_choice_) == "bulb" && sdk.has_widget(handle, "eosremoterelease")) {
             const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
             const bool has_press =
                 std::find(remote_choices.begin(), remote_choices.end(), "Press Full") != remote_choices.end();
