@@ -7045,6 +7045,13 @@ int main() {
                 entry["available"] = false;
 #endif
             }
+            if (entry.value("vendor", "") == "synscan") {
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
             if (entry.value("vendor", "") == "onstep") {
 #ifdef ALPACACORE_ENABLE_ONSTEP
                 entry["available"] = true;
@@ -8036,6 +8043,21 @@ int main() {
         EXPECT(off.message == "Celestron support not enabled. Rebuild with -DALPACACORE_ENABLE_CELESTRON=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Telescope", 9272).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_SYNSCAN
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: SynScan vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router, nlohmann::json{{"vendor", "synscan"}, {"deviceType", "telescope"}, {"deviceNumber", 9273}},
+            "Telescope");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "SynScan support not enabled. Rebuild with -DALPACACORE_ENABLE_SYNSCAN=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Telescope", 9273).is_null());
     }
 #endif
 
