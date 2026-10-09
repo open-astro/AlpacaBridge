@@ -5038,14 +5038,12 @@ private:
         parked_ = false;
         at_home_ = false;
         lock.unlock();
-        std::function<void(util::OperationContext&)> run = [body = std::move(body), slew_epoch](util::OperationContext& ctx) {
-            body(ctx, slew_epoch);
-        };
-        start_slew_body(std::move(run),
-                        [this] {
-                            slewing_cached_ = false;
-                            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                        });
+        std::function<void(util::OperationContext&)> run =
+            [body = std::move(body), slew_epoch](util::OperationContext& ctx) { body(ctx, slew_epoch); };
+        start_slew_body(std::move(run), [this] {
+            slewing_cached_ = false;
+            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        });
         return lock;
     }
 
