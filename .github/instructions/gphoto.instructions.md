@@ -16,8 +16,7 @@ ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelS
 described below; a third session validated the D3300 on the same slot with no code change.
 The Canon EOS 4000D report came from a user's Raspberry Pi 5, not that rig (issue #611), also with no
 code change; the Canon EOS 70D report (issue #637) and the Canon EOS 250D report came from a second
-Raspberry Pi 5, again with no code change. The 70D needs the mode dial on M (on B its shutter-speed choice list is empty and
-`StartExposure` throws "No shutter speed control exposed by this camera"), and a Raspberry Pi 3 is too
+Raspberry Pi 5, again with no code change; both were re-run on that Pi for the Canon bulb change (issue #640, ConformU 4.5.1, 2026-10-09), and the committed reports are those runs. The 70D works on mode dial B (its shutter-speed list holds only `bulb`; every exposure takes the Canon bulb path, issue #640), and a Raspberry Pi 3 is too
 slow for it under ConformU: libraw's `unpack()` of its 20 MP CR2 takes about 4 s there, the frame stays
 `Exposing` for about 8 s, and ConformU's `StartExposure` wait gives up. The Canon EOS 250D (the EOS 200D II in Asia) needs the
 lens on MF: with AF its priming capture and every exposure fail with "Unspecified error". Every run is clean (0 errors, 0 issues, 0 timing violations); see
@@ -137,7 +136,9 @@ SDK cleanup checklist does not apply here).
   hardware class.
 - **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
   `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
-- **Bulb capture drives the standalone `"bulb"` toggle widget only** (confirmed present in
+- **Bulb capture has two mechanisms: the standalone `"bulb"` toggle widget (Nikon) or, on Canon
+  bodies without it, the `eosremoterelease` `Press Full` / `Release Full` pair plus the
+  shutter-speed `"bulb"` choice (see the Canon paragraph below).** The toggle path (confirmed present in
   libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
   Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
   set the shutter-speed widget to its `"bulb"` choice if the choice list has one, flip `"bulb"`
@@ -169,10 +170,20 @@ SDK cleanup checklist does not apply here).
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
-  **The classic Canon `eosremoterelease` press/release bulb
-  sequence (older EOS bodies with no standalone `"bulb"` widget) is NOT implemented** — a camera
-  in that category will report bulb support as unavailable (native shutter-speed ceiling only)
-  rather than fail confusingly; add the press/release path if/when tested against real hardware.
+  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues.**
+  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists both
+  `Press Full` and `Release Full` (matched by name, never by index), the same
+  `bulb_capture_with_abort` loop runs with `set_choice_value("eosremoterelease", "Press Full")` as
+  the open and `"Release Full"` as the close, so the #569 rules above hold unchanged (events pumped
+  during the hold, release sent on every exit path including a throw, abort closes early, frame
+  waited for by file event). `ExposureMax` is 3600 s only when the `"bulb"` widget exists or both
+  choices were found; a Canon body missing either choice stays at its longest native shutter speed.
+  **B mode:** with the mode dial on B the shutter-speed list holds only `bulb`, so there is no
+  native speed to use and every duration, short ones too, takes the bulb path instead of failing
+  with "No shutter speed control exposed by this camera". The shutter-speed widget is not written there: the body owns the shutter and refuses the write ("I/O in progress", EOS 70D), so the press/release pair alone drives the exposure. Bench evidence is in #640 (EOS 250D on M
+  with shutter Bulb, EOS 70D on B: 5 s and 35 s frames by hand); the EOS 4000D is not verified and
+  other Canon bodies need their own check. Written from libgphoto2's documented behaviour only
+  (INDI is LGPL; copy nothing from it).
 - **RAW format selection**: at connect, the driver scans the `"imageformat"`/`"imagequality"`
   widget's choices for one containing `raw`/`nef`/`cr2`/`cr3`/`arw` (case-insensitive), preferring
   a pure-RAW choice over a combined RAW+JPEG one, and sets it. If no RAW choice is found, capture
