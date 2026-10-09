@@ -18,6 +18,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -169,7 +170,8 @@ public:
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                            std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
                            SynScanAlignmentSetting alignment,
-                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                           util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("SynScan"),
           device_number_(device_number),
           connection_info_(connection_info),
@@ -189,6 +191,7 @@ public:
           timezone_offset_valid_(false),
           dst_observed_(false),
           last_utc_set_{},
+          // Pointing time stays on the host's steady clock, not the task clock (decision 0005).
           last_utc_set_monotonic_(std::chrono::steady_clock::now()),
           last_utc_valid_(false),
           tracking_mode_cached_(0),
@@ -201,7 +204,8 @@ public:
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
           sync_time_on_connect_(sync_time_on_connect.value_or(false)),
-          alignment_setting_(alignment) {
+          alignment_setting_(alignment),
+          clock_(clock) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -382,8 +386,8 @@ public:
             slewing_cached_ = false;
             refining_generation_ = 0;
             last_slew_error_.clear();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = util::TaskClock::clock::time_point::min();
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             guide_position_valid_ = false;
             last_utc_valid_ = false;
             client_disagreement_warned_ = false;
@@ -391,7 +395,7 @@ public:
             altaz_cache_valid_ = false;
             position_link_health_.reset();
             publish_link_fault_locked();
-            last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
+            last_site_info_attempt_ = util::TaskClock::clock::time_point::min();
 
             try {
                 mount_firmware_version_ = protocol.get_handset_firmware_version();
@@ -437,7 +441,7 @@ public:
                 cached_ra_hours_ = decode_ra_hours(raw.first, bits);
                 cached_dec_degrees_ = decode_angle(raw.second, bits);
                 equatorial_cache_valid_ = true;
-                last_equatorial_update_ = std::chrono::steady_clock::now();
+                last_equatorial_update_ = clock_.now();
             } catch (...) {
             }
             try {
@@ -446,7 +450,7 @@ public:
                 cached_az_degrees_ = wrap_degrees(decode_angle(raw.first, bits));
                 cached_alt_degrees_ = decode_angle(raw.second, bits);
                 altaz_cache_valid_ = true;
-                last_altaz_update_ = std::chrono::steady_clock::now();
+                last_altaz_update_ = clock_.now();
             } catch (...) {
             }
             try {
@@ -472,8 +476,8 @@ public:
             slewing_cached_ = false;
             refining_generation_ = 0;
             last_slew_error_.clear();
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = util::TaskClock::clock::time_point::min();
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -598,7 +602,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         for (std::size_t axis = 0; axis < pulse_guiding_active_.size(); ++axis) {
             if (pulse_guiding_active_[axis] && now >= pulse_guide_end_time_[axis]) {
                 pulse_guiding_active_[axis] = false;
@@ -662,8 +666,8 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!position_link_health_.faulted() && guide_position_valid_ &&
-            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && guide_position_valid_ && clock_.now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return std::clamp(guide_position_dec_degrees_, -90.0, 90.0);
         }
         refresh_equatorial_cache_locked();
@@ -744,8 +748,8 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!position_link_health_.faulted() && guide_position_valid_ &&
-            std::chrono::steady_clock::now() < position_override_until_ && !get_slewing_locked()) {
+        if (!position_link_health_.faulted() && guide_position_valid_ && clock_.now() < position_override_until_ &&
+            !get_slewing_locked()) {
             return guide_position_ra_hours_;
         }
         refresh_equatorial_cache_locked();
@@ -1087,8 +1091,8 @@ public:
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
             slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             guide_position_valid_ = false;
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
@@ -1110,7 +1114,7 @@ public:
             std::thread stale = std::move(slew_task_thread_);
             tlock.unlock();
             slew_task_cancel_.store(true);
-            task_cv_.notify_all();
+            notify_task_waiters();
             stale.join();
             slew_task_cancel_.store(false);
             tlock.lock();
@@ -1137,7 +1141,7 @@ public:
             // Poll for completion with mutex_ released between polls so the
             // HTTP getters (Slewing, RightAscension, ...) stay responsive.
             const auto timeout = std::chrono::seconds(120);
-            const auto start = std::chrono::steady_clock::now();
+            const auto start = clock_.now();
             const auto start_grace = std::chrono::seconds(2);
             bool saw_slewing = false;
             while (true) {
@@ -1155,12 +1159,12 @@ public:
                 if (slewing) {
                     saw_slewing = true;
                 } else {
-                    if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                    if (!saw_slewing && (clock_.now() - start) < start_grace) {
                         continue;
                     }
                     break;
                 }
-                if (std::chrono::steady_clock::now() - start > timeout) {
+                if (clock_.now() - start > timeout) {
                     fail_park_locked("Park slew timed out after 120s");
                     return;
                 }
@@ -1187,7 +1191,7 @@ public:
                 return;
             }
             slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = util::TaskClock::clock::time_point::min();
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             guide_position_valid_ = false;
@@ -1236,8 +1240,8 @@ public:
             ALPACA_LOG_ERROR("SynScan",
                              "stop after park failure failed: " + stop_error + "; the mount may still be moving");
         }
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         ALPACA_LOG_WARN("SynScan", message);
     }
 
@@ -1296,7 +1300,7 @@ public:
             }
 
             const double duration_sec = duration / 1000.0;
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
 
             // Initialize the guide-position estimate from mount position when its override expires.
             if (!guide_position_valid_ || now >= position_override_until_) {
@@ -1488,8 +1492,8 @@ public:
             // that retries a rejected goto must not be told the OLD goto
             // failed.
             last_slew_error_.clear();
-            slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-            position_override_until_ = std::chrono::steady_clock::time_point::min();
+            slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+            position_override_until_ = util::TaskClock::clock::time_point::min();
             guide_position_valid_ = false;
             target_ra_hours_ = ra;
             target_dec_degrees_ = dec;
@@ -1512,7 +1516,7 @@ public:
             std::thread stale = std::move(slew_task_thread_);
             tlock.unlock();
             slew_task_cancel_.store(true);
-            task_cv_.notify_all();
+            notify_task_waiters();
             stale.join();
             slew_task_cancel_.store(false);
             tlock.lock();
@@ -1532,8 +1536,8 @@ public:
                 }
             } catch (const std::exception& ex) {
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                position_override_until_ = util::TaskClock::clock::time_point::min();
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
                 // AbortSlew now reaps the worker as well, so recording an error
@@ -1545,8 +1549,8 @@ public:
                 ALPACA_LOG_WARN("SynScan", std::string("Async slew dispatch failed: ") + ex.what());
             } catch (...) {
                 slewing_cached_ = false;
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                position_override_until_ = util::TaskClock::clock::time_point::min();
                 if (!slew_task_cancel_.load()) {
                     last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
                 }
@@ -1603,7 +1607,7 @@ public:
         guide_position_ra_hours_ = ra;
         guide_position_dec_degrees_ = dec;
         guide_position_valid_ = true;
-        position_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        position_override_until_ = clock_.now() + std::chrono::seconds(10);
     }
 
     void sync_to_target() override {
@@ -1638,8 +1642,8 @@ public:
                 if (stop_error.empty()) {
                     slewing_cached_ = false;
                 }
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                position_override_until_ = util::TaskClock::clock::time_point::min();
             }
         }
         if (was_parking) {
@@ -1694,10 +1698,10 @@ public:
 
         SynScanProtocolWrapper::instance().move_axis_variable_rate(axis, moving ? rate : 0.0);
         slewing_cached_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         pulse_guiding_active_[static_cast<std::size_t>(axis)] = false;
-        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = std::chrono::steady_clock::time_point::min();
+        pulse_guide_end_time_[static_cast<std::size_t>(axis)] = util::TaskClock::clock::time_point::min();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1725,7 +1729,7 @@ public:
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
             slew_task_cancel_.store(true);
-            task_cv_.notify_all();
+            notify_task_waiters();
         }
         try {
             reap_pulse_tasks();
@@ -1753,8 +1757,8 @@ public:
                 // slew failure -- the client acted on the error, so the next Slewing
                 // read must answer normally again.
                 last_slew_error_.clear();
-                slew_force_until_ = std::chrono::steady_clock::time_point::min();
-                position_override_until_ = std::chrono::steady_clock::time_point::min();
+                slew_force_until_ = util::TaskClock::clock::time_point::min();
+                position_override_until_ = util::TaskClock::clock::time_point::min();
                 manual_axis_slewing_[0] = false;
                 manual_axis_slewing_[1] = false;
             }
@@ -1808,10 +1812,20 @@ private:
     // condition_variable, cancelled and joined in the destructor and on
     // disconnect so a wakeup can never touch a destroyed/disconnected driver.
 
+    // Wakes every task parked in task_wait_for after its cancel flag is stored.
+    // Passing through task_mutex_ first publishes the store to a waiter that has
+    // read its flag as false but not yet blocked: without it the notify is lost
+    // and the waiter sleeps out its whole wait, holding up the reaper's join.
+    // The caller must not hold task_mutex_ (it is not recursive).
+    void notify_task_waiters() {
+        { std::lock_guard<std::mutex> publish(task_mutex_); }
+        task_cv_.notify_all();
+    }
+
     // Interruptible sleep for a task thread. Returns false if cancelled.
     bool task_wait_for(std::chrono::milliseconds d, std::atomic<bool>& cancel) const {
         std::unique_lock<std::mutex> tlock(task_mutex_);
-        task_cv_.wait_for(tlock, d, [&] { return cancel.load(); });
+        clock_.wait_for(tlock, task_cv_, d, [&] { return cancel.load(); });
         return !cancel.load();
     }
 
@@ -1822,7 +1836,7 @@ private:
         for (auto& cancel : pulse_task_cancel_) {
             cancel.store(true);
         }
-        task_cv_.notify_all();
+        notify_task_waiters();
         std::thread slew_thread;
         std::array<std::thread, 2> pulse_threads;
         {
@@ -1846,7 +1860,7 @@ private:
     // one can start. Must be called WITHOUT mutex_ held (see above).
     void reap_slew_task() {
         slew_task_cancel_.store(true);
-        task_cv_.notify_all();
+        notify_task_waiters();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
@@ -1863,7 +1877,7 @@ private:
     void reap_pulse_task(int axis) {
         const auto index = static_cast<std::size_t>(axis);
         pulse_task_cancel_[index].store(true);
-        task_cv_.notify_all();
+        notify_task_waiters();
         std::thread prev;
         {
             std::lock_guard<std::mutex> tlock(task_mutex_);
@@ -1882,7 +1896,7 @@ private:
 
     void clear_pulse_guiding_locked() {
         pulse_guiding_active_.fill(false);
-        pulse_guide_end_time_.fill(std::chrono::steady_clock::time_point::min());
+        pulse_guide_end_time_.fill(util::TaskClock::clock::time_point::min());
     }
 
     // A park in flight (parking_) gates the same members as a completed park:
@@ -1904,7 +1918,7 @@ private:
     }
 
     void refresh_equatorial_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!position_link_health_.faulted() && equatorial_cache_valid_ &&
             (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
@@ -1929,7 +1943,7 @@ private:
     }
 
     void refresh_altaz_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!position_link_health_.faulted() && altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1998,7 +2012,7 @@ private:
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
             return true;
         }
-        if (std::chrono::steady_clock::now() < slew_force_until_) {
+        if (clock_.now() < slew_force_until_) {
             return true;
         }
         bool was_slewing = slewing_cached_;
@@ -2064,9 +2078,8 @@ private:
         if (!connected_) {
             return;
         }
-        auto now = std::chrono::steady_clock::now();
-        if (!site_info_valid_ &&
-            last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
+        auto now = clock_.now();
+        if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;
         }
@@ -2150,8 +2163,8 @@ private:
         // that retries a rejected goto (even via the blocking
         // SlewToCoordinates) must not be told the OLD goto failed.
         last_slew_error_.clear();
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         guide_position_valid_ = false;
         protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
         target_ra_hours_ = ra;
@@ -2173,8 +2186,8 @@ private:
         altaz_cache_valid_ = false;
         slewing_cached_ = true;
         last_slew_error_.clear();
-        slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = clock_.now() + std::chrono::seconds(8);
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         guide_position_valid_ = false;
         protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_);
         parked_ = false;
@@ -2194,7 +2207,7 @@ private:
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t owner_generation, bool apply_settle = true,
                                 std::atomic<bool>* cancel = nullptr) const {
         const auto timeout = std::chrono::seconds(120);
-        auto start = std::chrono::steady_clock::now();
+        auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
         bool saw_slewing = false;
         auto sleep_unlocked = [&](std::chrono::milliseconds d) {
@@ -2202,7 +2215,7 @@ private:
             if (cancel != nullptr) {
                 task_wait_for(d, *cancel);
             } else {
-                std::this_thread::sleep_for(d);
+                clock_.sleep_for(d);
             }
             lock.lock();
             // The mount may have been disconnected while the lock was released.
@@ -2218,23 +2231,23 @@ private:
                 saw_slewing = true;
             }
             if (!slewing) {
-                if (!saw_slewing && (std::chrono::steady_clock::now() - start) < start_grace) {
+                if (!saw_slewing && (clock_.now() - start) < start_grace) {
                     sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
                 }
                 break;
             }
-            if (std::chrono::steady_clock::now() - start > timeout) {
+            if (clock_.now() - start > timeout) {
                 throw AlpacaException("Slew timed out");
             }
             sleep_unlocked(std::chrono::milliseconds(250));
         }
         slewing_cached_ = false;
-        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        slew_force_until_ = util::TaskClock::clock::time_point::min();
         equatorial_cache_valid_ = false;
         altaz_cache_valid_ = false;
         guide_position_valid_ = false;
-        position_override_until_ = std::chrono::steady_clock::time_point::min();
+        position_override_until_ = util::TaskClock::clock::time_point::min();
         if (apply_settle && slew_settle_time_seconds_ > 0) {
             sleep_unlocked(std::chrono::seconds(slew_settle_time_seconds_));
         }
@@ -2246,7 +2259,7 @@ private:
     bool settle_after_slew_locked(std::unique_lock<std::mutex>& lock, uint64_t owner_generation) const {
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
             lock.lock();
             check_connected();
         }
@@ -2328,7 +2341,7 @@ private:
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             slewing_cached_ = true;
-            slew_force_until_ = std::chrono::steady_clock::now() + kRefineStartForce;
+            slew_force_until_ = clock_.now() + kRefineStartForce;
             guide_position_valid_ = false;
             protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
             if (!wait_for_slew_complete(lock, owner_generation, false, async_task ? &slew_task_cancel_ : nullptr)) {
@@ -2350,6 +2363,7 @@ private:
             last_utc_set_monotonic_ = std::chrono::steady_clock::now();
             last_utc_valid_ = true;
         }
+        // Pointing time (UTC extrapolation), not a task wait: real steady clock on purpose.
         auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
         return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
     }
@@ -2419,13 +2433,13 @@ private:
     mutable util::PolledLinkHealth position_link_health_;
     mutable std::mutex link_fault_mutex_;
     mutable std::string link_fault_text_;
-    mutable std::chrono::steady_clock::time_point last_equatorial_update_;
-    mutable std::chrono::steady_clock::time_point last_altaz_update_;
+    mutable util::TaskClock::clock::time_point last_equatorial_update_;
+    mutable util::TaskClock::clock::time_point last_altaz_update_;
 
     mutable double site_latitude_cached_;
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
-    mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
+    mutable util::TaskClock::clock::time_point last_site_info_attempt_;
     double site_elevation_m_;
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
@@ -2457,8 +2471,8 @@ private:
     // on the task's own cancellation), cleared by the next slew initiator and
     // by AbortSlew. Consulted by get_slewing() before the cached bool.
     mutable std::string last_slew_error_;
-    mutable std::chrono::steady_clock::time_point slew_force_until_;
-    mutable std::chrono::steady_clock::time_point position_override_until_;
+    mutable util::TaskClock::clock::time_point slew_force_until_;
+    mutable util::TaskClock::clock::time_point position_override_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable int side_of_pier_cached_ = -1;
     mutable bool side_of_pier_valid_ = false;
@@ -2482,7 +2496,7 @@ private:
     const SynScanAlignmentSetting alignment_setting_;  // AZ-EQ geometry from the device config (#860)
     GuideRate guide_rate_{};
     mutable std::array<bool, 2> pulse_guiding_active_{};
-    mutable std::array<std::chrono::steady_clock::time_point, 2> pulse_guide_end_time_{};
+    mutable std::array<util::TaskClock::clock::time_point, 2> pulse_guide_end_time_{};
 
     bool park_position_set_ = false;
     mutable bool parking_ = false;  // park task in flight (Slewing true, AtPark false)
@@ -2509,6 +2523,8 @@ private:
     std::array<std::thread, 2> pulse_task_threads_;
     mutable std::atomic<bool> slew_task_cancel_{false};
     std::array<std::atomic<bool>, 2> pulse_task_cancel_{};
+    // Declared last, initialised last; must outlive the driver (decision 0005).
+    util::TaskClock& clock_;
 };
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
@@ -2522,24 +2538,24 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope(
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
     int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-    SynScanAlignmentSetting alignment) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect, SynScanAlignmentSetting alignment,
+    util::TaskClock& clock) {
     return std::make_unique<SynScanTelescopeDriver>(device_number, connection_info, version, site_latitude_deg,
                                                     site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                    alignment);
+                                                    alignment, util::ConnectionResolver<ConnectionInfo>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver, SynScanVersion version,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-    SynScanAlignmentSetting alignment) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect, SynScanAlignmentSetting alignment,
+    util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("SynScan telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SynScanTelescopeDriver>(device_number, ConnectionInfo{}, version, site_latitude_deg,
                                                     site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                    alignment, std::move(connection_resolver));
+                                                    alignment, std::move(connection_resolver), clock);
 }
 
 ConnectionInfo resolve_synscan_serial_auto(int mount_index) {
@@ -2565,11 +2581,11 @@ ConnectionInfo resolve_synscan_serial_auto(int mount_index) {
 std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
     int device_number, int mount_index, SynScanVersion version, std::optional<double> site_latitude_deg,
     std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect, SynScanAlignmentSetting alignment) {
+    std::optional<bool> sync_time_on_connect, SynScanAlignmentSetting alignment, util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
     return create_synscan_telescope_deferred(
         device_number, [mount_index] { return resolve_synscan_serial_auto(mount_index); }, version, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, alignment, clock);
 }
 
 } // namespace alpacacore::vendor::synscan
