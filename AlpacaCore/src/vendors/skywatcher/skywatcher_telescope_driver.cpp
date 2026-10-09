@@ -4935,8 +4935,8 @@ private:
     // Call without mutex_ held. Starts the body on the slew slot; when the slot
     // refuses (stale bound, or no thread), `rollback_locked` undoes the flags
     // the initiator published and the AlpacaException goes to the caller.
-    void start_slew_body(std::function<void(util::OperationContext&)> body,
-                         const std::function<void()>& rollback_locked) {
+    template <typename Rollback>
+    void start_slew_body(std::function<void(util::OperationContext&)> body, Rollback&& rollback_locked) {
         try {
             slew_.start(std::move(body));
         } catch (...) {
@@ -4992,7 +4992,7 @@ private:
     //   Synchronous (`body` empty): gates, stops any body in flight, and
     //   returns with mutex_ held for the caller to run the goto itself.
     std::unique_lock<std::mutex> start_goto(const char* who, double ra, double dec,
-                                            const std::function<void(util::OperationContext&, uint64_t)>& body) {
+                                            std::function<void(util::OperationContext&, uint64_t)> body) {
         const auto check_request_locked = [&] {
             check_connected();
             check_not_parked_locked(who);
@@ -5038,7 +5038,10 @@ private:
         parked_ = false;
         at_home_ = false;
         lock.unlock();
-        start_slew_body([body, slew_epoch](util::OperationContext& ctx) { body(ctx, slew_epoch); },
+        std::function<void(util::OperationContext&)> run = [body = std::move(body), slew_epoch](util::OperationContext& ctx) {
+            body(ctx, slew_epoch);
+        };
+        start_slew_body(std::move(run),
                         [this] {
                             slewing_cached_ = false;
                             slew_force_until_ = std::chrono::steady_clock::time_point::min();
