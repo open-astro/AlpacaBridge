@@ -16,8 +16,7 @@ ASCOM contract, a `StartExposure` ROI bounds check, and the `PixelSizeX`/`PixelS
 described below; a third session validated the D3300 on the same slot with no code change.
 The Canon EOS 4000D report came from a user's Raspberry Pi 5, not that rig (issue #611), also with no
 code change; the Canon EOS 70D report (issue #637) and the Canon EOS 250D report came from a second
-Raspberry Pi 5, again with no code change. The 70D needs the mode dial on M (on B its shutter-speed choice list is empty and
-`StartExposure` throws "No shutter speed control exposed by this camera"), and a Raspberry Pi 3 is too
+Raspberry Pi 5, again with no code change. The 70D works on mode dial B (its shutter-speed list holds only `bulb`; every exposure takes the Canon bulb path, issue #640), and a Raspberry Pi 3 is too
 slow for it under ConformU: libraw's `unpack()` of its 20 MP CR2 takes about 4 s there, the frame stays
 `Exposing` for about 8 s, and ConformU's `StartExposure` wait gives up. The Canon EOS 250D (the EOS 200D II in Asia) needs the
 lens on MF: with AF its priming capture and every exposure fail with "Unspecified error". Every run is clean (0 errors, 0 issues, 0 timing violations); see
@@ -171,7 +170,7 @@ SDK cleanup checklist does not apply here).
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
-  **Canon bodies (no standalone `"bulb"` widget, issue #640): implemented, rig check pending.**
+  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues.**
   When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists both
   `Press Full` and `Release Full` (matched by name, never by index), the same
   `bulb_capture_with_abort` loop runs with `set_choice_value("eosremoterelease", "Press Full")` as
