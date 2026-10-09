@@ -8,6 +8,7 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     set(SYNSCAN_SOURCES
         synscan_protocol_wrapper.cpp
         synscan_telescope_driver.cpp
+        synscan_catalog.cpp
     )
 
     add_library(alpacacore_synscan STATIC ${SYNSCAN_SOURCES})

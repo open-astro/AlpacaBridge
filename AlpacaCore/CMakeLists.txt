@@ -136,6 +136,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/bisque/bisque_schema.cpp
     src/vendors/onstep/onstep_schema.cpp
     src/vendors/celestron/celestron_schema.cpp
+    src/vendors/synscan/synscan_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -168,6 +169,8 @@ if(ALPACACORE_ENABLE_SYNSCAN)
     add_subdirectory(src/vendors/synscan)
     if(TARGET alpacacore_synscan)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_synscan)
+        # register_builtin_factories() guards its SynScan factory behind this macro.
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_SYNSCAN)
     endif()
 endif()
 
