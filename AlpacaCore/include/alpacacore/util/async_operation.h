@@ -118,8 +118,8 @@ struct OperationContext::Body {
  * The slot never runs a body, a log call or a user callback while holding its
  * mutex. start() and cancel_all_and_join() must be called WITHOUT the driver
  * mutex held, since a stale body may need it to return (the Sky-Watcher
- * slew body takes it to clean up); cancel(), running(), stale_count() and last_failure() may be called
- * with it held.
+ * slew body takes it to clean up); cancel(), running(), stale_count() and
+ * last_failure() may be called with it held.
  *
  * Neither start() nor cancel_all_and_join() may be called from inside a body
  * of the same slot. cancel_all_and_join() from a body takes that body and

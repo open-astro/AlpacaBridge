@@ -1129,22 +1129,24 @@ TEST_CASE("SkyWatcher slot - a stop on one axis does not supersede the other axi
     // clears manual_axis_slewing_[0] and restores the RA drive. One generation
     // shared by both stop slots would mark the RA body Superseded and skip
     // both.
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     mount.set_stop_ramp_ms(800);
-    auto driver = connected_driver(mount);
+    auto driver = connected_driver(mount, clock);
     driver->set_tracking(true);
 
-    driver->move_axis(0, 2.0);
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
-    driver->move_axis(1, 2.0);
-    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 2.0); }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(1, 2.0); }, std::chrono::milliseconds(5000)));
+    REQUIRE(mount.axis_running(2));
 
-    driver->move_axis(0, 0.0);  // RA body starts polling; the ramp takes 800 ms
-    driver->move_axis(1, 0.0);  // Dec body starts on the other slot
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 0.0); }, std::chrono::milliseconds(5000)));  // RA body starts polling; the ramp takes 800 ms
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(1, 0.0); }, std::chrono::milliseconds(5000)));  // Dec body starts on the other slot
 
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
-    REQUIRE(wait_until([&] { return mount.axis_running(1) && !mount.axis_running(2); }, 5000));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(5000)));
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.axis_running(1) && !mount.axis_running(2); }, std::chrono::milliseconds(5000)));
     CHECK(driver->get_tracking());
     driver->set_connected(false);
 }
@@ -1157,22 +1159,77 @@ TEST_CASE("SkyWatcher slot - a slew that replaces a FindHome in flight does not 
     // true for ever (the homing body, being Superseded, never clears it). A
     // slew during a park is refused at the gate, so FindHome is the other
     // body a slew can replace.
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount);
+    auto driver = connected_driver(mount, clock);
     driver->set_tracking(true);
     mount.jump_axis_degrees(1, 25.0);
 
     driver->find_home();
-    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::milliseconds(5000)));
 
     const double lst = driver->get_sidereal_time();
     driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0);
 
-    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::seconds(120)));
     CHECK_FALSE(driver->get_at_home());
     CHECK(std::abs(driver->get_declination() - 40.0) < 0.05);
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher slot - a slew started in the landing settle of another keeps Slewing true",
+          "[skywatcher][async][slot]") {
+    // The landing settle releases mutex_. A new SlewToCoordinatesAsync that
+    // claims the slot meanwhile marks the old body Superseded; when that body
+    // resumes it must write nothing (it used to clear slewing_cached_ and the
+    // new slew's force window, so Slewing read false right after the new
+    // async call returned). Where the settle falls inside the old body's
+    // polling is not observable, so the second slew is issued at every 20 ms
+    // offset after the mount stopped, across the poll and both settles.
+    for (int offset_ms = 0; offset_ms <= 440; offset_ms += 20) {
+        CAPTURE(offset_ms);
+        FakeTaskClock clock;
+        FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+        REQUIRE(mount.ok());
+        auto driver = connected_driver(mount, clock);
+        driver->set_tracking(true);
+
+        const double lst = driver->get_sidereal_time();
+        driver->slew_to_coordinates_async(std::fmod(lst - 3.0 + 24.0, 24.0), 20.0);
+        bool stopped = false;
+        for (int i = 0; i < 4000 && !stopped; ++i) {
+            REQUIRE(step_clock(clock, std::chrono::milliseconds(10)));
+            stopped = !mount.axis_running(1) && !mount.axis_running(2) && driver->get_slewing();
+        }
+        REQUIRE(stopped);
+        if (offset_ms > 0) {
+            REQUIRE(advance_through(clock, std::chrono::milliseconds(offset_ms), std::chrono::milliseconds(10)));
+        }
+
+        // Slewing must read true from the moment the new call returns; a
+        // poller on its own thread catches the window before the new body has
+        // taken mutex_, which the old body's resumed tail used to clear.
+        std::atomic<bool> polling{true};
+        std::atomic<int> false_reads{0};
+        std::thread poller([&] {
+            while (polling.load()) {
+                if (!driver->get_slewing()) {
+                    ++false_reads;
+                }
+            }
+        });
+        driver->slew_to_coordinates_async(std::fmod(lst - 1.0 + 24.0, 24.0), 35.0);
+        clock.wait_for_woken_settled(kRendezvous);
+        polling = false;
+        poller.join();
+        CHECK(false_reads.load() == 0);
+        REQUIRE(driver->get_slewing());
+        REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::seconds(120)));
+        CHECK(std::abs(driver->get_declination() - 35.0) < 0.05);
+        driver->set_connected(false);
+    }
 }
 
 TEST_CASE("SkyWatcher async - AbortSlew cancels the slew task without a refinement re-goto", "[skywatcher][async]") {

@@ -2276,6 +2276,9 @@ public:
         }
 
         try {
+            // No BodyScope here: the helpers it feeds (body_stopped, body_sleep)
+            // serve the goto/park/home waits; this body only polls the status
+            // and checks ctx directly under mutex_, so it never reads body_ctx_.
             stop_op(axis).start([this, channel, axis, stop_task_generation](util::OperationContext& ctx) {
                 auto& protocol = *protocol_;
                 auto deadline = clock_.now() + kAxisStopTimeout;
@@ -4025,6 +4028,9 @@ private:
         if (expected_generation && motion_generation_ != *expected_generation) {
             return false;
         }
+        if (body_stopped()) {
+            return false;  // cancelled or replaced: the canceller/new slew owns Slewing
+        }
         slewing_cached_ = false;
         return true;
     }
@@ -4597,6 +4603,12 @@ private:
         if (expected_generation && motion_generation_ != *expected_generation) {
             return false;
         }
+        if (body_stopped()) {
+            // The settle waits release mutex_: a newer slew may have claimed the
+            // slot meanwhile, and the landing writes below would clear ITS
+            // Slewing window. Same exit as the polling loop above.
+            throw AlpacaException("Slew wait cancelled");
+        }
         last_landing_time_ = clock_.now();
         if (last_goto_dispatch_time_ != std::chrono::steady_clock::time_point{}) {
             const double took = std::chrono::duration<double>(last_landing_time_ - last_goto_dispatch_time_).count();
@@ -4930,6 +4942,10 @@ private:
         ++motion_generation_;
         parking_ = false;
         homing_ = false;
+        // The replaced goto's 8 s Slewing window is not the new operation's
+        // (FindHome never passes wait_for_slew_complete, which would end it);
+        // an initiator that wants a window sets its own after the claim.
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
     }
 
     // Call without mutex_ held. Starts the body on the slew slot; when the slot
