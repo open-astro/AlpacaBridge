@@ -131,7 +131,8 @@
       {"key": "apertureDiameter", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
       {"key": "focalLength", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain"},
       {"key": "minAltitudeDeg", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": -90.0, "max": 90.0}},
-      {"key": "meridianLimitMinutes", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": 0.0, "max": 360.0}}
+      {"key": "meridianLimitMinutes", "type": "double", "default": 0.0, "required": false, "secret": false, "role": "Plain", "range": {"min": 0.0, "max": 360.0}},
+      {"key": "decAxisSense", "type": "string", "default": "auto", "required": false, "secret": false, "role": "Plain"}
     ]
   },
   {

@@ -56,12 +56,18 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                                                      std::string(kSkyWatcherMissingSite));
         }
 
+        // #582: normalize drops an unknown value, so anything else is "auto".
+        const std::string sense_text = config.get(kSkyWatcherDecAxisSense);
+        const auto dec_axis_sense = sense_text == "normal"     ? vendor::skywatcher::DecAxisSenseSetting::Normal
+                                    : sense_text == "reversed" ? vendor::skywatcher::DecAxisSenseSetting::Reversed
+                                                               : vendor::skywatcher::DecAxisSenseSetting::Auto;
+
         std::unique_ptr<TelescopeDriver> telescope;
         const std::string type = config.get(kSkyWatcherConnectionType);
         if (type.empty() || type == "auto") {
             const int mount_index = static_cast<int>(config.get(kSkyWatcherMountIndex));
-            telescope = vendor::skywatcher::create_skywatcher_telescope_auto(device_number, mount_index, latitude,
-                                                                             longitude, elevation, limits);
+            telescope = vendor::skywatcher::create_skywatcher_telescope_auto(
+                device_number, mount_index, latitude, longitude, elevation, limits, dec_axis_sense);
         } else {
             // normalize has left "serial" or "network" here; anything else is
             // read as serial, never auto (#380).
@@ -76,8 +82,9 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                 info.baud_rate = static_cast<int>(config.get(kSkyWatcherBaudRate));
             }
             info.response_timeout_ms = static_cast<int>(config.get(kSkyWatcherResponseTimeoutMs));
-            telescope = vendor::skywatcher::create_skywatcher_telescope(device_number, info, latitude, longitude,
-                                                                        elevation, {}, limits);
+            telescope =
+                vendor::skywatcher::create_skywatcher_telescope(device_number, info, latitude, longitude, elevation, {},
+                                                                limits, util::default_task_clock(), dec_axis_sense);
         }
 
         if (const double aperture = config.get(kSkyWatcherApertureDiameter); aperture > 0.0) {

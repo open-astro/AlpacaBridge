@@ -823,7 +823,8 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
                                                       "apertureDiameter",
                                                       "focalLength",
                                                       "minAltitudeDeg",
-                                                      "meridianLimitMinutes"};
+                                                      "meridianLimitMinutes",
+                                                      "decAxisSense"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -853,6 +854,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
         {"focalLength", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, {}, {}},
         {"minAltitudeDeg", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -90.0, 90.0},
         {"meridianLimitMinutes", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, 0.0, 360.0},
+        {"decAxisSense", FieldRef::Kind::String, Role::Plain, std::nullopt, std::string{"auto"}, {}, {}},
     };
     for (const Expect& e : expectations) {
         INFO(e.key);
@@ -1058,6 +1060,34 @@ TEST_CASE("Builtin catalog - SkyWatcher normalize refuses an empty endpoint and 
     automatic.set("siteLatitude", -33.87);
     automatic.set("siteLongitude", 151.21);
     CHECK_FALSE(catalog.normalize(kSkyWatcherKey, automatic, Source::Api).rejection.has_value());
+}
+
+TEST_CASE(
+    "Builtin catalog - SkyWatcher normalize refuses an unknown decAxisSense from the API and drops a saved one (#582)",
+    "[catalog][skywatcher][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* good : {"auto", "normal", "reversed"}) {
+        INFO(good);
+        DeviceConfig config = skywatcher_serial_with_site();
+        config.set("decAxisSense", std::string{good});
+        const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(string_at(api.config, "decAxisSense") == good);
+    }
+
+    DeviceConfig bogus = skywatcher_serial_with_site();
+    bogus.set("decAxisSense", std::string{"bogus"});
+    const auto api = catalog.normalize(kSkyWatcherKey, bogus, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "Invalid dec axis sense. Use 'auto', 'normal', or 'reversed'");
+
+    const auto persisted = catalog.normalize(kSkyWatcherKey, bogus, Source::Persisted);
+    CHECK_FALSE(persisted.rejection.has_value());
+    REQUIRE(persisted.warnings.size() == 1);
+    CHECK(persisted.warnings[0].find("decAxisSense \"bogus\"") != std::string::npos);
+    CHECK_FALSE(persisted.config.has("decAxisSense"));
 }
 
 TEST_CASE("Builtin catalog - SkyWatcher site range is per-field and precedes the missing-site rule (#398, #508 item 5)",

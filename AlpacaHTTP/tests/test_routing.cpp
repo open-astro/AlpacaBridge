@@ -3256,6 +3256,35 @@ int main() {
         accepted(9666, "meridianLimitMinutes", 360.0);
     }
     {
+        // case: skywatcher decAxisSense config round trip
+        // open-astro#582: the per-device dec axis sense survives the sanitize
+        // round-trip (Required Test Case 9), and the API refuses an unknown value.
+        for (const char* sense : {"normal", "reversed"}) {
+            const int number = std::string(sense) == "normal" ? 9667 : 9668;
+            const auto cfg = roundtrip_config(router,
+                                              {{"vendor", "skywatcher"},
+                                               {"deviceType", "telescope"},
+                                               {"deviceNumber", number},
+                                               {"connectionType", "network"},
+                                               {"host", "192.168.4.1"},
+                                               {"udpPort", 11880},
+                                               {"siteLatitude", 39.7392},
+                                               {"siteLongitude", -104.9903},
+                                               {"decAxisSense", sense}},
+                                              "Telescope", number);
+            EXPECT(cfg.is_object() && !cfg.empty());
+            EXPECT(cfg.value("decAxisSense", "") == sense);
+            remove_device(router, "skywatcher", "telescope", number);
+        }
+        const nlohmann::json bogus{
+            {"vendor", "skywatcher"},      {"deviceType", "telescope"},  {"deviceNumber", 9669},
+            {"connectionType", "network"}, {"host", "192.168.4.1"},      {"udpPort", 11880},
+            {"siteLatitude", 39.7392},     {"siteLongitude", -104.9903}, {"decAxisSense", "bogus"}};
+        const auto response = route_request(router, "POST", "/management/v1/configuredevice", bogus.dump());
+        const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+        EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+    }
+    {
         // issue #274: configuredevice is a first-class REST API independent of
         // the web UI, and used to accept a skywatcher config with no
         // coordinates at all. Both would then collapse to 0.0 in the driver,

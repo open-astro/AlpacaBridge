@@ -77,6 +77,12 @@ inline const Field<double> kSkyWatcherMinAltitudeDeg{
 inline const Field<double> kSkyWatcherMeridianLimitMinutes{
     .key = "meridianLimitMinutes", .default_value = 0.0, .min = 0.0, .max = 360.0};
 
+// #582: "auto" (the measured-board table, else the unmeasured default), "normal"
+// (eps = +1) or "reversed" (eps = -1). No allowed_values, for the reason the
+// connection type has none: the schema's normalize refuses an unknown value from
+// the API and drops it from a saved config, where it reads as "auto".
+inline const Field<std::string> kSkyWatcherDecAxisSense{.key = "decAxisSense", .default_value = "auto"};
+
 inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
     static const std::vector<FieldRef> fields{kSkyWatcherConnectionType.ref(),
                                               kSkyWatcherMountIndex.ref(),
@@ -91,7 +97,8 @@ inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
                                               kSkyWatcherApertureDiameter.ref(),
                                               kSkyWatcherFocalLength.ref(),
                                               kSkyWatcherMinAltitudeDeg.ref(),
-                                              kSkyWatcherMeridianLimitMinutes.ref()};
+                                              kSkyWatcherMeridianLimitMinutes.ref(),
+                                              kSkyWatcherDecAxisSense.ref()};
     return fields;
 }
 

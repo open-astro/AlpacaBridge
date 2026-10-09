@@ -45,6 +45,7 @@
 
 #ifndef _WIN32
 
+#include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -54,8 +55,12 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <mutex>
 #include <numbers>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
@@ -440,7 +445,7 @@ TEST_CASE("SkyWatcher pointing - the EQ-AL55i Pro reaches a southern target on t
 
     // ":e" -> "=032E09": firmware 3.46, mount code 0x09. The name comes from
     // mount_code_to_name(), so this is the only thing that pins `case 0x09`.
-    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD)");
+    CHECK(driver->get_name() == "Sky-Watcher EQ-AL55i Pro (EQMOD, eps: measured)");
     const auto firmware = driver->get_device_firmware();
     REQUIRE(firmware.has_value());
     CHECK(*firmware == "3.46");
@@ -1511,6 +1516,193 @@ TEST_CASE("SkyWatcher pointing - landing is reported when the board reports stop
     check_landing(f, latitude, target_ra, target_dec, expected_side);
 
     driver->set_connected(false);
+}
+
+// ── decAxisSense override (open-astro#582) ──────────────────────────────────
+namespace {
+
+alpacacore::test::FakeMountProfile wave_150i_profile() {
+    auto p = alpacacore::test::FakeMountProfile::wave_100i();
+    p.version_reply = "033B45";  // fw 3.59, mount code 0x45
+    return p;
+}
+
+// Connects over `profile` with the given setting, goes to HA -3 h at `dec`,
+// checks the landing against eps `expected_eps` and that SideOfPier agrees
+// with DestinationSideOfPier, and that a2 has the sign eps implies.
+void connect_and_land(const alpacacore::test::FakeMountProfile& profile, sw::DecAxisSenseSetting setting,
+                      double latitude, double dec, int expected_eps, int expected_a2_sign, bool garble = false) {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(profile, clock);
+    REQUIRE(mount.ok());
+    if (garble) {
+        mount.set_garbled_version_replies(true);
+    }
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 150.0, 80.0, {}, {}, clock, setting);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 3.0, 24.0);  // HA -3 h
+    // HA -3 h is the east side whatever eps is: the side follows the sky hour
+    // angle, and eps moves the dec-axis angle (the sign of a2) instead.
+    const int destination_side = driver->get_destination_side_of_pier(target_ra, dec);
+    CHECK(destination_side == 1);
+
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, dec);
+    check_landing(f, latitude, target_ra, dec, 1, expected_eps);
+    CHECK((f.a2 > 0.0 ? 1 : -1) == expected_a2_sign);
+    CHECK(f.side_of_pier == destination_side);
+
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - decAxisSense normal beats the measured -1 of an EQM-35 Pro (#582)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere][taskclock]") {
+    // eps = +1 north is the unmeasured model's k = +1: a2 < 0 at HA -3 h.
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, 37.2, 30.0, +1,
+                     -1);
+}
+
+TEST_CASE("SkyWatcher pointing - decAxisSense reversed beats the measured +1 of a Wave 150i (#582)",
+          "[skywatcher][telescope][pointing][hemisphere][taskclock]") {
+    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Reversed, 37.2, 30.0, -1, +1);
+}
+
+TEST_CASE("SkyWatcher pointing - decAxisSense auto keeps the measured table (#582)",
+          "[skywatcher][telescope][pointing][eqm35][hemisphere][taskclock]") {
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, 37.2, 30.0, -1,
+                     +1);
+    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Auto, 37.2, 30.0, +1, -1);
+}
+
+TEST_CASE("SkyWatcher pointing - decAxisSense applies when the board will not identify itself (#582)",
+          "[skywatcher][telescope][pointing][hemisphere][taskclock]") {
+    // North: the unmeasured default is k = +1 (a2 < 0); reversed is k = -1 (a2 > 0).
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Reversed, 37.2, 30.0, -1,
+                     +1, true);
+    // South: normal is k = s = -1, which puts a2 on the other branch (a2 > 0).
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, -35.0, -30.0, +1,
+                     +1, true);
+}
+
+TEST_CASE("SkyWatcher pointing - the connect log names where eps came from (#582)",
+          "[skywatcher][telescope][pointing][taskclock]") {
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    std::mutex log_mutex;
+    std::vector<std::pair<alpacacore::logging::LogLevel, std::string>> lines;
+    alpacacore::logging::set_log_sink(
+        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            lines.emplace_back(level, std::string(message));
+        });
+    using alpacacore::logging::LogLevel;
+    const auto connect_log = [&](const alpacacore::test::FakeMountProfile& profile, sw::DecAxisSenseSetting setting,
+                                 bool garble) {
+        {
+            std::lock_guard<std::mutex> lock(log_mutex);
+            lines.clear();
+        }
+        alpacacore::test::FakeTaskClock clock;
+        FakeSkyWatcherMount mount(profile, clock);
+        REQUIRE(mount.ok());
+        if (garble) {
+            mount.set_garbled_version_replies(true);
+        }
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 35.0, 11.0, 100.0, {}, {}, clock, setting);
+        driver->set_connected(true);
+        const std::string name = driver->get_name();
+        driver->set_connected(false);
+        std::lock_guard<std::mutex> lock(log_mutex);
+        return std::make_pair(name, lines);
+    };
+    const auto find_line = [](const auto& captured, const std::string& needle) -> const LogLevel* {
+        for (const auto& [level, text] : captured) {
+            if (text.find(needle) != std::string::npos) return &level;
+        }
+        return nullptr;
+    };
+
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, false);
+        CHECK(find_line(captured, "from the measured table"));
+        CHECK(name == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    }
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::wave_100i(), sw::DecAxisSenseSetting::Auto, false);
+        CHECK(find_line(captured, "unmeasured-board default"));
+    }
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::wave_100i(), sw::DecAxisSenseSetting::Reversed, false);
+        const LogLevel* level = find_line(captured, "from the user override");
+        REQUIRE(level);
+        CHECK(*level == LogLevel::Info);
+        CHECK(name == "Sky-Watcher Wave 100i (EQMOD, eps: override reversed)");
+    }
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, false);
+        const LogLevel* level = find_line(captured, "disagrees with the measured value");
+        REQUIRE(level);
+        CHECK(*level == LogLevel::Warn);
+        CHECK(name == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override normal)");
+    }
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, true);
+        CHECK(find_line(captured, "Motor board not identified"));
+        CHECK(find_line(captured, "unmeasured-board default"));
+        CHECK(name == "Sky-Watcher Mount (EQMOD, eps: identify failed)");
+    }
+    {
+        auto [name, captured] =
+            connect_log(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Reversed, true);
+        CHECK(find_line(captured, "Motor board not identified"));
+        CHECK(find_line(captured, "from the user override"));
+        CHECK(name == "Sky-Watcher Mount (EQMOD, eps: override reversed)");
+    }
+}
+
+TEST_CASE("SkyWatcher pointing - a catalog-built driver maps decAxisSense to the override (#582)",
+          "[skywatcher][telescope][pointing][catalog]") {
+    using alpacacore::catalog::DeviceCatalog;
+    using alpacacore::catalog::DeviceConfig;
+    DeviceCatalog catalog;
+    alpacacore::catalog::register_builtin_schemas(catalog);
+    alpacacore::catalog::register_builtin_factories(catalog);
+    const alpacacore::catalog::DeviceKey key{"skywatcher", alpacacore::DeviceType::Telescope};
+
+    const auto name_for = [&](const char* sense) {
+        FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
+        REQUIRE(mount.ok());
+        DeviceConfig config;
+        config.set("connectionType", std::string{"network"});
+        config.set("host", std::string{"127.0.0.1"});
+        config.set("udpPort", static_cast<std::int64_t>(mount.port()));
+        config.set("responseTimeoutMs", std::int64_t{250});
+        config.set("siteLatitude", 35.0);
+        config.set("siteLongitude", 11.0);
+        config.set("decAxisSense", std::string{sense});
+        auto driver = catalog.create(key, config, 0);
+        REQUIRE(driver);
+        driver->set_connected(true);
+        std::string name = driver->get_name();
+        driver->set_connected(false);
+        return name;
+    };
+    CHECK(name_for("auto") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: measured)");
+    CHECK(name_for("normal") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override normal)");
+    CHECK(name_for("reversed") == "Sky-Watcher EQM-35 Pro (EQMOD, eps: override reversed)");
 }
 
 #endif  // !_WIN32

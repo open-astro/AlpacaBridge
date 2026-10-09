@@ -272,7 +272,8 @@ public:
                               std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
                               util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
                               util::MotionLimits motion_limits = {},
-                              util::TaskClock& clock = util::default_task_clock())
+                              util::TaskClock& clock = util::default_task_clock(),
+                              DecAxisSenseSetting dec_axis_sense_setting = DecAxisSenseSetting::Auto)
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
@@ -287,7 +288,8 @@ public:
           // real place, so the magic value cannot stand in for "never set";
           // only the optionals know, and only here.
           site_latitude_set_(site_latitude_deg.has_value()),
-          site_longitude_set_(site_longitude_deg.has_value()) {
+          site_longitude_set_(site_longitude_deg.has_value()),
+          dec_axis_sense_setting_(dec_axis_sense_setting) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
     }
@@ -324,10 +326,31 @@ public:
     // which "USB"/"EQDIR" would not.
     std::string get_name() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
-        if (model_cache_.empty()) {
-            return "Sky-Watcher Mount (EQMOD)";
+        // open-astro#582: the web UI shows this name and has no field for the
+        // eps source, so every connected source is named here. It is kept with
+        // the model across a disconnect, like the model itself.
+        std::string source;
+        switch (eps_source_) {
+            case EpsSource::Measured:
+                source = ", eps: measured";
+                break;
+            case EpsSource::Override:
+                source = dec_axis_sense_setting_ == DecAxisSenseSetting::Reversed ? ", eps: override reversed"
+                                                                                  : ", eps: override normal";
+                break;
+            case EpsSource::Unmeasured:
+                source = ", eps: unmeasured default";
+                break;
+            case EpsSource::IdentifyFailed:
+                source = ", eps: identify failed";
+                break;
+            case EpsSource::None:
+                break;
         }
-        return "Sky-Watcher " + model_cache_ + " (EQMOD)";
+        if (model_cache_.empty()) {
+            return "Sky-Watcher Mount (EQMOD" + source + ")";
+        }
+        return "Sky-Watcher " + model_cache_ + " (EQMOD" + source + ")";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
@@ -482,7 +505,7 @@ public:
                 ALPACA_LOG_INFO("SkyWatcher", "Motor board: " + board.model_name + " (mount code " + code_hex + ", " +
                                                   std::to_string(static_cast<int>(board.mount_code)) + "), firmware " +
                                                   board.firmware_version);
-                dec_axis_sense_ = measured_dec_axis_sense(board.mount_code);  // open-astro#458
+                resolve_dec_axis_sense_locked(board.mount_code);                        // open-astro#458, #582
                 live_rate_relatch_ = live_rate_change_needs_relatch(board.mount_code);  // open-astro#666
                 if (!step_period_readback_usable(board.mount_code)) {                   // open-astro#686
                     protocol.disable_step_period_readback();
@@ -496,13 +519,22 @@ public:
                 // connection's identity either. Identity is not cosmetic: it
                 // picks the measured dec-axis sense, and without it the session
                 // runs on the unmeasured model (open-astro#458).
-                ALPACA_LOG_WARN("SkyWatcher",
-                                "Motor board not identified; pointing falls back to the unmeasured-board model, "
-                                "which is 12 h out in hour angle on a board whose measured dec-axis sense differs "
-                                "(open-astro#458)");
+                if (dec_axis_sense_setting_ != DecAxisSenseSetting::Auto) {
+                    dec_axis_sense_ = override_dec_axis_sense();
+                    ALPACA_LOG_WARN("SkyWatcher", "Motor board not identified; dec-axis sense eps = " +
+                                                      std::string(dec_axis_sense_ > 0 ? "+1" : "-1") +
+                                                      " from the user override (decAxisSense, open-astro#582)");
+                } else {
+                    ALPACA_LOG_WARN("SkyWatcher",
+                                    "Motor board not identified; dec-axis sense eps from the unmeasured-board default "
+                                    "(k = +1), which is 12 h out in hour angle on a board whose measured dec-axis "
+                                    "sense differs; set decAxisSense to override it (open-astro#458, #582)");
+                }
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
                 model_cache_.clear();
+                eps_source_ = dec_axis_sense_setting_ != DecAxisSenseSetting::Auto ? EpsSource::Override
+                                                                                   : EpsSource::IdentifyFailed;
             }
 
             // open-astro#445: the sequence below is the first thing the board
@@ -2809,6 +2841,44 @@ private:
     // applies this: a signed axis rate means the same thing everywhere.
     double ra_axis_sign_locked() const { return hemisphere_south_locked() ? -1.0 : 1.0; }
 
+    int override_dec_axis_sense() const { return dec_axis_sense_setting_ == DecAxisSenseSetting::Reversed ? -1 : +1; }
+
+    // open-astro#582: picks eps at connect and logs where it came from. A user
+    // override beats the measured table in both directions; it disagreeing with
+    // a measured entry is honoured with a WARN. Only the home term reads eps.
+    void resolve_dec_axis_sense_locked(std::uint8_t mount_code) {
+        const int measured = measured_dec_axis_sense(mount_code);
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            eps_source_ = dec_axis_sense_setting_ != DecAxisSenseSetting::Auto ? EpsSource::Override
+                          : measured != 0                                      ? EpsSource::Measured
+                                                                               : EpsSource::Unmeasured;
+        }
+        if (dec_axis_sense_setting_ != DecAxisSenseSetting::Auto) {
+            dec_axis_sense_ = override_dec_axis_sense();
+            const std::string eps = dec_axis_sense_ > 0 ? "+1" : "-1";
+            if (measured != 0 && measured != dec_axis_sense_) {
+                ALPACA_LOG_WARN("SkyWatcher", "Dec-axis sense eps = " + eps +
+                                                  " from the user override (decAxisSense), which disagrees with the "
+                                                  "measured value for this board (" +
+                                                  std::string(measured > 0 ? "+1" : "-1") +
+                                                  "); the override is honoured (open-astro#582)");
+            } else {
+                ALPACA_LOG_INFO("SkyWatcher", "Dec-axis sense eps = " + eps +
+                                                  " from the user override (decAxisSense, open-astro#582)");
+            }
+        } else if (measured != 0) {
+            dec_axis_sense_ = measured;
+            ALPACA_LOG_INFO("SkyWatcher", "Dec-axis sense eps = " + std::string(measured > 0 ? "+1" : "-1") +
+                                              " from the measured table for this board (open-astro#458)");
+        } else {
+            dec_axis_sense_ = 0;
+            ALPACA_LOG_INFO("SkyWatcher",
+                            "Dec-axis sense eps from the unmeasured-board default (k = +1); set decAxisSense to "
+                            "override it (open-astro#458, #582)");
+        }
+    }
+
     // open-astro#458: the sign `k` of the 6 h home term, `s * eps` for a board
     // whose dec-axis sense was measured, and +1 for any other board, which
     // keeps the #432 model it was validated on. Every reader of the dec-axis
@@ -5074,9 +5144,12 @@ private:
     // command path last committed; the readback's answer inside the pole
     // deadband where the encoder cannot say. See branch_from_axis_locked().
     int pointing_branch_ = 1;
-    // open-astro#458: measured_dec_axis_sense() of the connected board, 0 when
-    // unmeasured or unknown. See home_term_sign_locked().
+    // open-astro#458, #582: eps of the connected board -- the user override,
+    // else measured_dec_axis_sense() -- 0 when unmeasured or unknown. See
+    // resolve_dec_axis_sense_locked() and home_term_sign_locked().
     int dec_axis_sense_ = 0;
+    // open-astro#582: the configured decAxisSense; fixed at construction.
+    const DecAxisSenseSetting dec_axis_sense_setting_;
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.
@@ -5201,6 +5274,9 @@ private:
     // Web-UI firmware copy under its own narrow mutex (never mutex_).
     mutable std::mutex firmware_mutex_;
     std::string model_cache_;  // guarded by firmware_mutex_
+    // open-astro#582: where eps came from, shown in get_name(). Guarded by firmware_mutex_.
+    enum class EpsSource : std::uint8_t { None, Measured, Override, Unmeasured, IdentifyFailed };
+    EpsSource eps_source_ = EpsSource::None;
     std::string firmware_cache_;
 
     // Background task threads; task_mutex_ only guards handles + cv, never
@@ -5335,23 +5411,24 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
                                                              std::optional<double> site_longitude_deg,
                                                              std::optional<double> site_elevation_m,
                                                              std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                                                             util::MotionLimits motion_limits, util::TaskClock& clock) {
+                                                             util::MotionLimits motion_limits, util::TaskClock& clock,
+                                                             DecAxisSenseSetting dec_axis_sense) {
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
-        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock);
+        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense);
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-    util::MotionLimits motion_limits, util::TaskClock& clock) {
+    util::MotionLimits motion_limits, util::TaskClock& clock, DecAxisSenseSetting dec_axis_sense) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
-    return std::make_unique<SkyWatcherTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
-                                                       site_longitude_deg, site_elevation_m, std::move(protocol),
-                                                       std::move(connection_resolver), motion_limits, clock);
+    return std::make_unique<SkyWatcherTelescopeDriver>(
+        device_number, ConnectionInfo{}, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
+        std::move(connection_resolver), motion_limits, clock, dec_axis_sense);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
@@ -5396,11 +5473,12 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_num
                                                                   std::optional<double> site_latitude_deg,
                                                                   std::optional<double> site_longitude_deg,
                                                                   std::optional<double> site_elevation_m,
-                                                                  util::MotionLimits motion_limits) {
+                                                                  util::MotionLimits motion_limits,
+                                                                  DecAxisSenseSetting dec_axis_sense) {
     // The serial scan and UDP discovery run at connect time (#659), not here.
     return create_skywatcher_telescope_deferred(
         device_number, [mount_index] { return resolve_skywatcher_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, {}, motion_limits);
+        site_longitude_deg, site_elevation_m, {}, motion_limits, util::default_task_clock(), dec_axis_sense);
 }
 
 }  // namespace alpacacore::vendor::skywatcher

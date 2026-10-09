@@ -153,6 +153,25 @@ The value is read once at start, so apply it with `sudo systemctl restart alpaca
 Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 ```
 
+### A Sky-Watcher direct mount points 12 hours out in hour angle (Dec axis sense)
+
+**Symptom**: after a goto, the Sky-Watcher direct (motor controller) mount ends up with the telescope on the wrong side of the sky, and the pier side and the real direction disagree by 12 hours of hour angle.
+
+**Cause**: the driver knows the direction of the Dec axis counts (`eps`) only for boards that were measured: EQ-AL55i Pro (mount code `0x09`), EQM-35 Pro (`0x32`) and Wave 150i (`0x45`). Any other board keeps the shipped model `k = +1` (the home term sign, `eps` times the hemisphere sign), which is `eps = +1` in the north and `eps = -1` in the south, and is wrong for a board wired the other way (issue #582, #579). The connect log says where `eps` came from: `from the measured table`, `from the user override`, `from the unmeasured-board default`, or `Motor board not identified`.
+
+**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, send a Dec-only `MoveAxis` until the Dec axis has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. Then look at which way the dovetail points:
+
+| Dovetail points | Your site | Dec axis sense |
+| --- | --- | --- |
+| West | Northern hemisphere | `normal` |
+| East | Northern hemisphere | `reversed` |
+| West | Southern hemisphere | `reversed` |
+| East | Southern hemisphere | `normal` |
+
+`auto` (the default) keeps the measured table, and `k = +1` (eps +1 north, -1 south) for a board that is not in it. `normal` and `reversed` set `eps` only, never the hemisphere term, so a mount you move to the other hemisphere stays right without a change. The setting is used on connect, also when the board does not identify itself, and the device name in the web UI shows where `eps` came from (`eps: measured`, `eps: override normal`, `eps: override reversed`, `eps: unmeasured default` or `eps: identify failed`). Pick the value in the Dec axis sense list of the Sky-Watcher form; saving the form keeps it. An override that disagrees with a measured board logs a WARN and is used anyway.
+
+If you set it, please post your reading (mount code from the connect log, dovetail side, latitude) on issue #579 so the board can join the measured table.
+
 ## Clean build
 
 If all else fails, try a clean build:
