@@ -31,8 +31,8 @@ namespace {
 constexpr std::string_view kQhyBuildOption = "ALPACACORE_ENABLE_QHY";
 
 // A refusal is rejected from the API; for a saved config the catalog turns it
-// into a warning and the device still registers, so it stays listed and
-// editable in the web UI (the factory then refuses to build it).
+// into a warning, then the factory throws the same text, so the device is not
+// registered and is listed as failed to load.
 std::function<NormalizeResult(const DeviceConfig&, Source)> refuse_with(
     std::optional<std::string> (*refusal)(const DeviceConfig&)) {
     return [refusal](const DeviceConfig& in, Source) {

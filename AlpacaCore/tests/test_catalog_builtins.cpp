@@ -22,6 +22,7 @@
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -2083,6 +2084,13 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     auto integrated_driver = catalog.create(kQhyWheelKey, integrated, 4);
     REQUIRE(integrated_driver != nullptr);
     CHECK(integrated_driver->get_device_type() == DeviceType::FilterWheel);
+    {
+        // The factory's pass-through: filterNames reaches the driver.
+        const auto names = dynamic_cast<FilterWheelDriver&>(*integrated_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
 
     DeviceConfig cfw3_auto;
     cfw3_auto.set("wheelType", std::string{"cfw3-usb"});
@@ -2095,7 +2103,15 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     cfw3_serial.set("wheelType", std::string{"cfw3-usb"});
     cfw3_serial.set("connectionType", std::string{"serial"});
     cfw3_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-cfw3"});
-    REQUIRE(catalog.create(kQhyWheelKey, cfw3_serial, 6) != nullptr);
+    cfw3_serial.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto cfw3_serial_driver = catalog.create(kQhyWheelKey, cfw3_serial, 6);
+    REQUIRE(cfw3_serial_driver != nullptr);
+    {
+        const auto names = dynamic_cast<FilterWheelDriver&>(*cfw3_serial_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
 
     DeviceConfig focuser_auto;
     auto focuser_driver = catalog.create(kQhyFocuserKey, focuser_auto, 7);
@@ -2107,7 +2123,9 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     focuser_serial.set("connectionType", std::string{"serial"});
     focuser_serial.set("portPath", std::string{"/dev/ttyACM-no-such-qfocuser"});
     focuser_serial.set("maxStep", std::int64_t{30000});
-    REQUIRE(catalog.create(kQhyFocuserKey, focuser_serial, 8) != nullptr);
+    auto focuser_serial_driver = catalog.create(kQhyFocuserKey, focuser_serial, 8);
+    REQUIRE(focuser_serial_driver != nullptr);
+    CHECK(dynamic_cast<FocuserDriver&>(*focuser_serial_driver).get_max_step() == 30000);
 
     // A saved config normalize could only warn about is refused here, never
     // built into a wheel that would auto-probe (it DTR-resets every CP210x).
