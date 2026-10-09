@@ -309,6 +309,25 @@ public:
     /// make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
 
+    /// Steady state, until set back to zero: every reply is held for @p latency
+    /// before it is sent, on wall time like hold_next_reply. Models a link with
+    /// a fixed per-transaction cost; transactions_served() counts the replies
+    /// that paid it. A reply is counted when the fake sends it (or drops it
+    /// under set_silent), so the count never runs ahead of the wire.
+    void set_reply_latency(std::chrono::milliseconds latency) { latency_ms_.store(static_cast<int>(latency.count())); }
+
+    /// A reply latency long enough that a slew still runs after the driver's
+    /// first poll of it: the named constant a case uses to keep a slew alive.
+    static constexpr std::chrono::milliseconds kSlewPastFirstPollLatency{30};
+
+    /// While @p on, the board hears every frame (frames_seen() still counts
+    /// it and the axes still act on it) but never answers: the driver's
+    /// exchange times out with no datagram seen. Until cleared.
+    void set_silent(bool on) { silent_.store(on); }
+
+    /// Transactions the fake has finished, answered or dropped by set_silent().
+    int transactions_served() const { return served_.load(); }
+
     /// While @p on, answer every ":e" identity request with a reply of the
     /// right length that is not hex, so the driver's identify fails
     /// (open-astro#458 review: an unidentified board loses its measured
@@ -753,7 +772,14 @@ private:
             std::string reply = handle(frame) + "\r";
             if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+            if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
+                std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
+            if (silent_.load()) {
+                served_.fetch_add(1);
+                continue;
+            }
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
+            served_.fetch_add(1);
         }
     }
 
@@ -764,6 +790,9 @@ private:
     std::atomic<bool> stop_{false};
     std::thread thread_;
     std::atomic<int> hold_ms_{0};
+    std::atomic<int> latency_ms_{0};
+    std::atomic<bool> silent_{false};
+    std::atomic<int> served_{0};
     std::mutex mutex_;
     std::condition_variable frames_cv_;
     int total_frames_ = 0;

@@ -150,6 +150,12 @@ public:
         delay_command_ = command;
     }
 
+    /// Steady state, until set back to zero: every reply is held for @p ms
+    /// before it is sent (delay_next_reply() is the one-shot form).
+    /// transactions_served() counts the replies sent, readable from a test.
+    void set_reply_latency(int ms) { latency_ms_.store(ms); }
+    int transactions_served() const { return served_.load(); }
+
     /// open-astro#559: LOSE the next @p times frames of @p command on the
     /// wire -- the board neither applies them nor answers, as a frame that
     /// arrived corrupted (or not at all) over a noisy EQDIR link. The frame
@@ -427,7 +433,11 @@ private:
                 if (delay > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
+                if (const int latency_ms = latency_ms_.load(); latency_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
+                }
                 pty_write_bounded(pty_.master_fd(), reply, stop_);
+                served_.fetch_add(1);
                 std::string straggler;
                 int straggler_ms = 0;
                 {
@@ -451,6 +461,8 @@ private:
     PtyPair pty_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
+    std::atomic<int> latency_ms_{0};
+    std::atomic<int> served_{0};
     mutable std::mutex mutex_;
     uint32_t counts_[2] = {0x800000, 0x800000};
     uint32_t t1_[2] = {0, 0};
