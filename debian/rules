@@ -119,6 +119,11 @@ override_dh_auto_install:
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/oasisastro/99-astroasis-focuser.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
+	# RTC write-back (client-corrected time -> /dev/rtcN). Named so dh_installudev
+	# (which only picks up debian/alpacabridge.udev) does not also install it
+	# into /lib/udev/rules.d.
+	install -m 644 $(CURDIR)/debian/alpacabridge-rtc.udev \
+	  $(STAGING)/usr/lib/udev/rules.d/60-alpacabridge.rules
 
 	# --- Polkit rule: WiFi management via NetworkManager ---
 	install -D -m 644 $(CURDIR)/debian/alpacabridge.polkit-rules \
