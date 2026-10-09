@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::skywatcher {
 
@@ -119,6 +120,12 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {}, util::MotionLimits motion_limits = {},
     util::TaskClock& clock = util::default_task_clock(),
     DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can hold a new body's thread back until a replaced body has finished its
+/// tail. Call only while no start is in flight. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.

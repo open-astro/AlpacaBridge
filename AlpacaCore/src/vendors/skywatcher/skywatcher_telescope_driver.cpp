@@ -5065,6 +5065,12 @@ private:
 
     util::AsyncOperation& stop_op(int axis) { return stop_ops_[axis]; }
 
+public:
+    void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slew_.set_spawn_for_testing(std::move(spawn));
+    }
+
+private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse task -- ASCOM allows RA and Dec PulseGuide
     // to run concurrently.
@@ -5462,6 +5468,12 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, 
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
         util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense);
+}
+
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_slew_spawn_for_testing(std::move(spawn));
+    }
 }
 
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
