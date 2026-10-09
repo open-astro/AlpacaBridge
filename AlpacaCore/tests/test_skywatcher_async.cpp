@@ -372,6 +372,53 @@ TEST_CASE("SkyWatcher async - a pulse that supersedes another still reports IsPu
     driver->set_connected(false);
 }
 
+// open-astro#559 under virtual time (decision 0005): the flag follows the
+// pulse's real stop. Once the axis has stopped, IsPulseGuiding is false with
+// no further virtual time passing -- a flag stamped from a deadline (the old
+// duration + 1000 ms) would still read true here.
+TEST_CASE("SkyWatcher async - IsPulseGuiding clears with the pulse's stop on virtual time (#559)",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 500);  // North
+    REQUIRE(driver->get_is_pulse_guiding());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(3000)));
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
+// open-astro#521: a disconnect that lands mid-pulse and a reconnect after it
+// must leave no axis running and no pulse task to act on the new session. The
+// cancelled pulse body does not touch the hardware (the disconnect stops the
+// axes); virtual time then passes the pulse's original end and nothing moves.
+TEST_CASE("SkyWatcher async - a reconnect after a mid-pulse disconnect leaves no axis running (#521)",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->pulse_guide(0, 2000);                     // North
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(mount.axis_running(2));
+    REQUIRE(call_on_clock(clock, [&] { driver->set_connected(false); }, std::chrono::milliseconds(5000)));
+    REQUIRE_FALSE(driver->get_connected());
+    REQUIRE(call_on_clock(clock, [&] { driver->set_connected(true); }, std::chrono::milliseconds(5000)));
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    elapse(clock, std::chrono::milliseconds(2500));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
 // open-astro#559 (review): once IsPulseGuiding reads false the pulse must also
 // have released its axis. A client that waits for the property and then
 // writes DeclinationRate is following the ASCOM contract; if the pulse still
@@ -395,7 +442,7 @@ TEST_CASE("SkyWatcher async - a DeclinationRate write right after IsPulseGuiding
 }
 
 // open-astro#620 (regression, fixed below): pulse_guide() USED TO HAVE one
-// pulse task slot shared by both axes. reap_pulse_task() cancelled+joined
+// pulse task slot shared by both axes. stop_pulse_ops() cancelled+joined
 // whatever pulse task was running regardless of axis, and a cancelled task's
 // cancel path deliberately does not touch the hardware (the reaper is
 // supposed to stop or re-command the axes itself -- see the #559 comment on
@@ -403,8 +450,8 @@ TEST_CASE("SkyWatcher async - a DeclinationRate write right after IsPulseGuiding
 // or stop BOTH axes (MoveAxis is per-axis too, #630), but pulse_guide() only
 // dispatches its OWN axis: an RA pulse arriving mid-Dec pulse reaped the Dec
 // task and only commanded RA, leaving Dec running at guide rate with nothing
-// left to stop it. Pulse tasks are now per-axis (pulse_task_thread_[2]) and
-// reap_pulse_task(axis) reaps only its own axis's task.
+// left to stop it. Pulse bodies now run in one slot per axis (pulse_ops_[2]) and
+// stop_pulse_op(axis) ends only its own axis's body.
 TEST_CASE("SkyWatcher async - an RA pulse does not leave a running Dec pulse's axis turning (#620)",
           "[skywatcher][async][pulseguide]") {
     FakeTaskClock clock;
@@ -890,23 +937,17 @@ TEST_CASE("SkyWatcher async - the axis stop-confirm poll times out at 5 s of clo
     driver->set_connected(false);
 }
 
-// open-astro#743 (assumption in the plan): a reaper publishes its cancel
-// under task_mutex_, the mutex task_wait_for() checks the flag under. Before
-// #743 every reaper stored the flag and notified without it; a task between its
-// predicate check and its block then missed the notify. The real
-// condition_variable::wait_for hid that behind its timeout (the task woke at
-// the deadline and saw the flag); the fake clock has no deadline of its own,
-// so the task stays parked until the next advance() and the reaper's join
-// hangs with it. FakeTaskClock's before_block hook holds the task in exactly that
-// window while the reaper runs: it holds the task there until the task's
-// own predicate sees the reaper's cancel store. The reaper's notify is the
-// statement after that store, so with the fix the reaper is then blocked on
-// task_mutex_ until the task blocks, and without it the notify goes by while
-// the task is still outside its wait.
+// open-astro#743: a reaper's cancel must not be lost between a parked task's
+// predicate check and its block. The real condition_variable::wait_for hides a
+// lost notify behind its timeout; the fake clock has no deadline of its own,
+// so the task would stay parked until the next advance() and the reaper's join
+// would hang with it. The pulse body waits through the AsyncOperation slot,
+// which checks and blocks under the slot mutex that cancel() takes.
+// FakeTaskClock's before_block hook holds the task in exactly that window
+// while the reaper runs.
 TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked task's check and its block (#743)",
           "[skywatcher][async][pulseguide]") {
     std::atomic<bool> at_window{false};
-    std::atomic<bool> saw_cancel{false};
     std::atomic<int> fired{0};
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
@@ -921,24 +962,27 @@ TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked tas
     clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
-            const auto give_up = std::chrono::steady_clock::now() + kRendezvous;
+            // The slot runs the predicate and the block under its one mutex,
+            // so the reaper's cancel() cannot even reach the flag until the
+            // task blocks: hold the task in the window for a moment of real
+            // time and let the outcome below say whether the cancel was lost.
+            const auto give_up = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
             while (!pred() && std::chrono::steady_clock::now() < give_up) {
                 std::this_thread::yield();
             }
-            saw_cancel.store(pred());
         }
     });
     driver->pulse_guide(0, 2000);  // North: its hold parks on the clock
     REQUIRE(wait_until([&] { return at_window.load(); }, 3000));
 
-    // The superseding pulse reaps the parked one: cancel, notify, join.
+    // The superseding pulse ends the parked one: cancel, wake, join -- with no
+    // virtual time passing, so a lost wake leaves the join hanging.
     std::atomic<bool> reaped{false};
     std::thread reaper([&] {
         driver->pulse_guide(0, 300);
         reaped.store(true);
     });
     CHECK(wait_until([&] { return reaped.load(); }, 2000));
-    CHECK(saw_cancel.load());
 
     // Whatever happened, reaching the hold's deadline wakes it, so the case
     // ends cleanly instead of hanging in a join.

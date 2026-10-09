@@ -1265,7 +1265,7 @@ public:
                 return;
             }
         }
-        reap_pulse_task();
+        stop_pulse_ops();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1359,7 +1359,7 @@ public:
                 return;  // calling Park twice (or while parking) is harmless
             }
         }
-        reap_pulse_task();
+        stop_pulse_ops();
         double target_ra_axis = 0.0;
         double target_dec_axis = 0.0;
         {
@@ -1513,30 +1513,24 @@ public:
         }
 
         const int ai = axis - 1;  // 0=RA, 1=Dec (open-astro#620)
-        // Stop-the-pulse timer thread — joinable member thread, never detached.
-        // Reaps only THIS axis's task: a Dec pulse must not cancel a running
-        // RA pulse's task (open-astro#620), unlike goto/park/home/abort/
-        // sync/disconnect, which own and re-command both axes.
-        reap_pulse_task(axis);
-        // Join any task that raced in between the reap above and this lock,
-        // WITHOUT task_mutex_ held: the task's task_wait_for() must acquire it
-        // to observe the cancel and exit, so joining under the lock deadlocks.
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        while (pulse_task_thread_[ai].joinable()) {
-            std::thread stale = std::move(pulse_task_thread_[ai]);
-            tlock.unlock();
-            pulse_task_cancel_[ai].store(true);
-            notify_task_waiters();
-            stale.join();
-            pulse_task_cancel_[ai].store(false);
-            tlock.lock();
-        }
+        // Stop-the-pulse timer body: one slot per axis, never detached. Ends
+        // only THIS axis's body: a Dec pulse must not cancel a running RA
+        // pulse's body (open-astro#620), unlike goto/park/home/abort/sync/
+        // disconnect, which own and re-command both axes. initiator_mutex_
+        // keeps a second pulse_guide() from starting between this join and the
+        // start() below; mutex_ is not held (AsyncOperation rule 10).
+        pulse_ops_[ai].cancel_all_and_join();
         const bool restore_tracking = ra_rate_adjust;
         const double dec_rate = dec_rate_deg_per_sec;
         const double ra_pulse_rate = ra_pulse_rate_deg_per_sec;
         const bool pulse_restart = ra_pulse_restart;
-        pulse_task_thread_[ai] = std::thread([this, axis, ai, duration, restore_tracking, direction, dec_rate,
-                                              ra_pulse_rate, ra_restore_rate_deg_per_sec, pulse_restart, my_seq]() {
+        const auto pulse_body = [this, axis, ai, duration, restore_tracking, direction, dec_rate, ra_pulse_rate,
+                                 ra_restore_rate_deg_per_sec, pulse_restart, my_seq](util::OperationContext& ctx) {
+            // A body that was cancelled (a reaper, disconnect) or replaced
+            // leaves the hardware to whoever stopped it: the reaper stops or
+            // re-commands the axes itself.
+            const auto stopped_by_other = [&ctx] { return ctx.stop_reason() != util::StopReason::None; };
+            const auto may_resend_locked = [&stopped_by_other] { return !stopped_by_other(); };
             // open-astro#559: a task clears pulse state only while its pulse
             // is still the current one. A superseding pulse sets both flags
             // before it reaps this task, and this task's exit used to clear
@@ -1616,7 +1610,7 @@ public:
                 // (routine while autoguiding) would silently drop the one
                 // chance to catch a stalled ":I" (#258 review).
                 if (axis == kAxisRa) {
-                    reap_rate_verify_task();
+                    cancel_rate_verify_locked();
                 }
                 auto& proto = *protocol_;
                 if (axis == kAxisDec) {
@@ -1682,8 +1676,8 @@ public:
             // take" and resent ":I"+":J". Stop RA again, unless a reaper owns
             // the axis now. Called with mutex_ held. Same three attempts as
             // the pulse stop below, and the same runaway flag if all fail.
-            auto stop_ra_if_tracking_off_locked = [this, ai]() {
-                if (tracking_effectively_on_locked() || !connected_ || pulse_task_cancel_[ai].load()) {
+            auto stop_ra_if_tracking_off_locked = [this, &stopped_by_other]() {
+                if (tracking_effectively_on_locked() || !connected_ || stopped_by_other()) {
                     return;
                 }
                 constexpr int kAttempts = 3;
@@ -1720,7 +1714,7 @@ public:
                 const auto dispatch_max_window = std::chrono::milliseconds(duration) > kRateVerifySettle
                                                      ? std::chrono::milliseconds(duration) - kRateVerifySettle
                                                      : std::chrono::milliseconds(0);
-                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, pulse_task_cancel_[ai],
+                verify_live_rate_or_rekick(kAxisRa, ra_restore_rate_deg_per_sec, ra_pulse_rate, ctx, may_resend_locked,
                                            dispatch_max_window);
                 verify_elapsed = clock_.now() - verify_start;
                 // A West pulse runs faster than the drive rate, so a stopped
@@ -1850,7 +1844,7 @@ public:
                                        ? std::chrono::duration_cast<std::chrono::milliseconds>(
                                              std::chrono::milliseconds(duration) - verify_elapsed)
                                        : std::chrono::milliseconds(0);
-            if (!task_wait_for(remaining, pulse_task_cancel_[ai])) {
+            if (!ctx.wait_for(remaining)) {
                 // Cancelled by a reaper (a new pulse/slew/park/home/moveaxis/
                 // abort/disconnect). DO NOT touch the hardware here: the
                 // reaper stops or re-commands the axes itself, and a stop or
@@ -1874,7 +1868,7 @@ public:
                 } catch (...) {
                     last_error = "unknown error";
                 }
-                if (!stopped && !task_wait_for(std::chrono::milliseconds(100), pulse_task_cancel_[ai])) {
+                if (!stopped && !ctx.wait_for(std::chrono::milliseconds(100))) {
                     break;
                 }
             }
@@ -1895,7 +1889,7 @@ public:
                 // running. Narrow (East pulses, offset > ~0.25 s/s) but it is
                 // exactly the contract set_right_ascension_rate()'s skip rests
                 // on (round-4 review note).
-                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, pulse_task_cancel_[ai]);
+                verify_live_rate_or_rekick(kAxisRa, ra_pulse_rate, applied_ra_restore_rate, ctx, may_resend_locked);
             }
             if (stopped) {
                 // open-astro#559: the property and the axis are released
@@ -1923,7 +1917,19 @@ public:
                     manual_axis_slewing_[axis - 1] = true;
                 }
             }
-        });
+        };
+        try {
+            pulse_ops_[ai].start(pulse_body);
+        } catch (...) {
+            // Nothing was dispatched: release the property the dispatch lock
+            // published, unless a newer pulse owns it.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pulse_seq_[ai] == my_seq) {
+                pulse_axis_active_[ai] = false;
+                pulse_axis_in_motion_[ai] = false;
+            }
+            throw;
+        }
     }
 
     void set_park() override {
@@ -2068,7 +2074,7 @@ public:
             check_not_parked_locked("SyncToCoordinates");
             validate_ra_dec(ra, dec, "SyncToCoordinates");
         }
-        reap_pulse_task();
+        stop_pulse_ops();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
@@ -2202,7 +2208,7 @@ public:
         // Only THIS axis's pulse (open-astro#630): MoveAxis commands only its
         // own channel, so a pulse on the other axis runs on and ends itself
         // (ASCOM allows the axes to move concurrently).
-        reap_pulse_task(axis == 0 ? kAxisRa : kAxisDec);
+        stop_pulse_op(axis == 0 ? kAxisRa : kAxisDec);
         bool need_stop_task = false;
         bool started = false;
         uint64_t stop_task_generation = 0;
@@ -2388,7 +2394,7 @@ public:
     }
 
     void abort_slew() override {
-        reap_pulse_task();
+        stop_pulse_ops();
         // Cancel an in-flight async slew/refinement (the slot joins the body
         // when the next one starts or on disconnect; cancel() wakes its waits
         // and the refine loop exits promptly -- without this, the refinement
@@ -2402,7 +2408,7 @@ public:
         // and its dispatch aborts BEFORE sending new motor commands (the
         // cancel flag alone only catches it after the re-dispatch).
         ++motion_generation_;
-        reap_rate_verify_task();  // AbortSlew stops RA too: no resend into it
+        cancel_rate_verify_locked();  // AbortSlew stops RA too: no resend into it
         auto& protocol = *protocol_;
         // Instant stop (":L") rather than the ramped ":K": AbortSlew's contract
         // is to stop NOW, and the ramp-down from an 800x slew otherwise leaves
@@ -3327,8 +3333,13 @@ private:
     // max_window bounds how far the sample window may stretch to resolve a
     // small rate delta (see kRateVerifyMaxWindow above for why the pulse
     // dispatch call passes something tighter than the default).
+    // `ctx` is the owning body's slot context (pulse or rate-verify), so a
+    // cancel or a replacement ends the sampling at once. The resend takes
+    // mutex_ and goes out only while `may_resend_locked()` still holds: a
+    // reaper cancels with mutex_ held and does not join, so without that gate
+    // a body past its last wait could resend into an axis the reaper now owns.
     void verify_live_rate_or_rekick(int channel, double previous_rate_deg_per_sec, double expected_rate_deg_per_sec,
-                                    std::atomic<bool>& cancel,
+                                    util::OperationContext& ctx, const std::function<bool()>& may_resend_locked,
                                     std::chrono::milliseconds max_window = kRateVerifyMaxWindow) {
         if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
             return;  // nothing changed, nothing to verify
@@ -3370,11 +3381,11 @@ private:
         uint32_t before = 0;
         uint32_t after = 0;
         try {
-            if (!task_wait_for(kRateVerifySettle, cancel)) {
+            if (!ctx.wait_for(kRateVerifySettle)) {
                 return;  // cancelled by a reaper — it owns the axis now
             }
             before = protocol.inquire_position(channel);
-            if (!task_wait_for(window, cancel)) {
+            if (!ctx.wait_for(window)) {
                 return;
             }
             after = protocol.inquire_position(channel);
@@ -3418,7 +3429,11 @@ private:
         try {
             // Same preset the dispatch computed (slow mode: a live change never
             // switches speed mode). step_period_for_locked only reads
-            // axis_params_, immutable after connect, so it is safe unlocked.
+            // axis_params_, immutable after connect.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!may_resend_locked()) {
+                return;  // a reaper owns the axis now
+            }
             protocol.set_step_period(channel, step_period_for_locked(channel, expected_rate_deg_per_sec, false));
             protocol.start_motion(channel);
         } catch (const std::exception& e) {
@@ -3444,23 +3459,37 @@ private:
     // disconnect. Reaping under the lock is what closes the race a lock-free
     // reap would leave: a setter spawning between an initiator's reap and
     // its lock, whose re-kick would then land mid-pulse or on a stopped axis.
-    // Called with mutex_ held, after reap_rate_verify_task() on the same
-    // lock hold, so the handle is never joinable here.
-    void spawn_rate_verify_task_locked(double previous_rate_deg_per_sec, double expected_rate_deg_per_sec) {
+    // Called with mutex_ held (through `lock`), after cancel_rate_verify_locked()
+    // on the same lock hold; releases it around start() and returns with it held.
+    void spawn_rate_verify_task_locked(std::unique_lock<std::mutex>& lock, double previous_rate_deg_per_sec,
+                                       double expected_rate_deg_per_sec) {
         if (previous_rate_deg_per_sec == expected_rate_deg_per_sec) {
             return;
         }
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        rate_verify_thread_ = std::thread([this, previous_rate_deg_per_sec, expected_rate_deg_per_sec]() {
-            try {
-                verify_live_rate_or_rekick(kAxisRa, previous_rate_deg_per_sec, expected_rate_deg_per_sec,
-                                           rate_verify_cancel_);
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("SkyWatcher", std::string("RA rate-applied check failed: ") + e.what());
-            } catch (...) {
-                ALPACA_LOG_WARN("SkyWatcher", "RA rate-applied check failed with unknown exception");
-            }
-        });
+        const std::uint64_t epoch = ++rate_verify_epoch_;
+        // start() is called without mutex_ (AsyncOperation rule 10). The epoch
+        // is what a reaper in the unlocked window invalidates: it bumps it
+        // under mutex_, and the body's resend checks it under mutex_.
+        lock.unlock();
+        try {
+            rate_verify_.start(
+                [this, previous_rate_deg_per_sec, expected_rate_deg_per_sec, epoch](util::OperationContext& ctx) {
+                    try {
+                        verify_live_rate_or_rekick(
+                            kAxisRa, previous_rate_deg_per_sec, expected_rate_deg_per_sec, ctx, [this, &ctx, epoch] {
+                                return rate_verify_epoch_ == epoch && ctx.stop_reason() == util::StopReason::None;
+                            });
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("SkyWatcher", std::string("RA rate-applied check failed: ") + e.what());
+                    } catch (...) {
+                        ALPACA_LOG_WARN("SkyWatcher", "RA rate-applied check failed with unknown exception");
+                    }
+                });
+        } catch (const std::exception& e) {
+            // Best effort: the rate itself is already written.
+            ALPACA_LOG_WARN("SkyWatcher", std::string("RA rate-applied check did not start: ") + e.what());
+        }
+        lock.lock();
     }
 
     // Direction char for ":G": '0' = increasing counts, '1' = decreasing.
@@ -3491,7 +3520,7 @@ private:
         if (channel == kAxisRa) {
             // Whoever stops RA owns it from here: a rate-applied check still
             // sampling the tracking rate must not resend it after the stop.
-            reap_rate_verify_task();
+            cancel_rate_verify_locked();
         }
         auto& protocol = *protocol_;
         cmd_axis_rate_deg_s_[channel - 1] = 0.0;
@@ -3846,20 +3875,20 @@ private:
             }
             // A check still sampling an OLDER rate change would resend that
             // rate over this one; this write supersedes it (see
-            // spawn_rate_verify_task_locked for why reaping under mutex_ is
+            // cancel_rate_verify_locked for why cancelling under mutex_ is
             // safe).
-            reap_rate_verify_task();
+            cancel_rate_verify_locked();
             auto& protocol = *protocol_;
             protocol.set_step_period(kAxisRa, tracking_step_period_for(eff));
             if (live_rate_relatch_) {  // open-astro#666: see live_rate_change_needs_relatch()
                 protocol.start_motion(kAxisRa);
             }
             cmd_axis_rate_deg_s_[0] = eff;  // keep dead reckoning on the new rate
-            spawn_rate_verify_task_locked(previous_effective, eff);
+            spawn_rate_verify_task_locked(lock, previous_effective, eff);
         } else {
             // Stop-and-restart path: the axis is about to stop, so any
             // pending check must go first (its resend would restart it).
-            reap_rate_verify_task();
+            cancel_rate_verify_locked();
             apply_ra_drive_locked(lock);
         }
     }
@@ -3867,7 +3896,7 @@ private:
     void set_tracking_locked(std::unique_lock<std::mutex>& lock, bool tracking) {
         // Tracking off stops the RA axis: a pending rate-applied check must
         // not resend its ":I"+":J" into the stopped axis and restart it.
-        reap_rate_verify_task();
+        cancel_rate_verify_locked();
         if (tracking) {
             // Track: RA axis in the direction of increasing SKY hour angle
             // (increasing counts north of the equator, decreasing south of
@@ -4858,31 +4887,15 @@ private:
         slew_.cancel();
         stop_ops_[0].cancel();
         stop_ops_[1].cancel();
-        pulse_task_cancel_[0].store(true);
-        pulse_task_cancel_[1].store(true);
-        rate_verify_cancel_.store(true);
-        notify_task_waiters();
-        std::thread pulse_thread_ra;
-        std::thread pulse_thread_dec;
-        std::thread rate_verify_thread;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            pulse_thread_ra = std::move(pulse_task_thread_[0]);
-            pulse_thread_dec = std::move(pulse_task_thread_[1]);
-            rate_verify_thread = std::move(rate_verify_thread_);
-        }
+        pulse_ops_[0].cancel();
+        pulse_ops_[1].cancel();
+        rate_verify_.cancel();
         slew_.cancel_all_and_join();
-        if (pulse_thread_ra.joinable()) {
-            pulse_thread_ra.join();
-        }
-        if (pulse_thread_dec.joinable()) {
-            pulse_thread_dec.join();
-        }
+        pulse_ops_[0].cancel_all_and_join();
+        pulse_ops_[1].cancel_all_and_join();
         stop_ops_[0].cancel_all_and_join();
         stop_ops_[1].cancel_all_and_join();
-        if (rate_verify_thread.joinable()) {
-            rate_verify_thread.join();
-        }
+        rate_verify_.cancel_all_and_join();
         // The duty worker goes through the lifecycle mutex like every other
         // reap+create path, so a disconnect racing a setter serializes with
         // it instead of joining a freshly-started worker out from under it.
@@ -5025,7 +5038,7 @@ private:
             slew_.cancel_all_and_join();
         }
         // A stale pulse timer firing mid-goto corrupts the slew.
-        reap_pulse_task();
+        stop_pulse_ops();
         std::unique_lock<std::mutex> lock(mutex_);
         check_request_locked();
         if (!body) {
@@ -5072,58 +5085,40 @@ public:
 
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
-    // join the other axis's pulse task -- ASCOM allows RA and Dec PulseGuide
-    // to run concurrently.
-    void reap_pulse_task(int axis) {
+    // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
+    // to run concurrently. Call without mutex_ held (AsyncOperation rule 10):
+    // the join waits for the body, which may need mutex_ to return.
+    void stop_pulse_op(int axis) {
         if (axis != kAxisRa && axis != kAxisDec) {
             return;  // pulse_guide() will reject this axis under the lock shortly.
         }
-        const int ai = axis - 1;
-        pulse_task_cancel_[ai].store(true);
-        notify_task_waiters();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(pulse_task_thread_[ai]);
-        }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        pulse_task_cancel_[ai].store(false);
+        pulse_ops_[axis - 1].cancel_all_and_join();
     }
 
     // Both-axes wrapper for the reapers that stop or re-command BOTH axes
     // afterwards: goto/park/home/abort/disconnect, and sync_to_coordinates(),
     // which stops both for its ":E" writes. pulse_guide() and move_axis()
-    // command only their own axis and reap only that axis's task
-    // (open-astro#620, open-astro#630). Cancel BOTH
-    // flags before joining either (mirrors cancel_async_tasks()): joining
-    // RA first would let the still-uncancelled Dec task run to completion
-    // (sending its own stop/offset-reapply I/O) while this reaper waits on
-    // RA, instead of both tasks unwinding in parallel.
-    void reap_pulse_task() {
-        pulse_task_cancel_[kAxisRa - 1].store(true);
-        pulse_task_cancel_[kAxisDec - 1].store(true);
-        notify_task_waiters();
-        reap_pulse_task(kAxisRa);
-        reap_pulse_task(kAxisDec);
+    // command only their own axis and stop only that axis's body
+    // (open-astro#620, open-astro#630). Cancel BOTH before joining either
+    // (mirrors cancel_async_tasks()): joining RA first would let the
+    // still-uncancelled Dec body run to completion (sending its own
+    // stop/offset-reapply I/O) while this reaper waits on RA, instead of both
+    // unwinding in parallel.
+    void stop_pulse_ops() {
+        pulse_ops_[kAxisRa - 1].cancel();
+        pulse_ops_[kAxisDec - 1].cancel();
+        stop_pulse_op(kAxisRa);
+        stop_pulse_op(kAxisDec);
     }
 
-    // Safe with mutex_ held: the rate-verify task never takes mutex_ (see
-    // spawn_rate_verify_task_locked). A cancelled check just returns; it
-    // never touches the hardware on the way out.
-    void reap_rate_verify_task() {
-        rate_verify_cancel_.store(true);
-        notify_task_waiters();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(rate_verify_thread_);
-        }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        rate_verify_cancel_.store(false);
+    // Ends a pending rate-applied check. Safe with mutex_ held (and called
+    // with it held): cancel() never joins. Bumping the epoch under mutex_ is
+    // what keeps a check that is past its last wait from resending ":I"+":J"
+    // after the caller took the RA axis (its resend runs under mutex_ and
+    // compares the epoch).
+    void cancel_rate_verify_locked() {
+        ++rate_verify_epoch_;
+        rate_verify_.cancel();
     }
 
     // ── State ───────────────────────────────────────────────────────────────
@@ -5333,10 +5328,8 @@ private:
     std::mutex initiator_mutex_;
     mutable std::mutex task_mutex_;
     mutable std::condition_variable task_cv_;
-    std::thread pulse_task_thread_[2];  // indexed by axis (0=RA, 1=Dec) -- open-astro#620
-    std::thread rate_verify_thread_;    // one-shot RightAscensionRate/TrackingRate rate-applied check
-    mutable std::atomic<bool> pulse_task_cancel_[2]{false, false};  // indexed by axis
-    mutable std::atomic<bool> rate_verify_cancel_{false};
+    // Guarded by mutex_: bumped by every rate-applied check start and cancel.
+    std::uint64_t rate_verify_epoch_ = 0;
 
     // open-astro#436 live limit guard. The baseline is the last sample taken
     // (under mutex_), empty when no guarded motion runs. Its own generation:
@@ -5353,6 +5346,17 @@ private:
     // (and join) before it.
     util::OperationGeneration slew_generation_;
     util::AsyncOperation slew_{"SkyWatcher slew", slew_generation_, clock_};
+    // Pulse guide, one slot per axis (open-astro#620) with a generation of its
+    // own each: a pulse start must not supersede the slew body or the other
+    // axis's pulse (decision 0006). A slew, park, home, abort, sync, MoveAxis
+    // or disconnect ends a pulse by cancelling and joining its slot
+    // (stop_pulse_op[s]), not by a generation bump.
+    util::OperationGeneration pulse_generation_[2];
+    util::AsyncOperation pulse_ops_[2] = {{"SkyWatcher pulse guide (RA)", pulse_generation_[0], clock_},
+                                          {"SkyWatcher pulse guide (Dec)", pulse_generation_[1], clock_}};
+    // The one-shot RightAscensionRate/TrackingRate rate-applied check.
+    util::OperationGeneration rate_verify_generation_;
+    util::AsyncOperation rate_verify_{"SkyWatcher rate-applied check", rate_verify_generation_, clock_};
     util::OperationGeneration stop_generation_[2];
     util::AsyncOperation stop_ops_[2] = {{"SkyWatcher MoveAxis stop (RA)", stop_generation_[0], clock_},
                                          {"SkyWatcher MoveAxis stop (Dec)", stop_generation_[1], clock_}};

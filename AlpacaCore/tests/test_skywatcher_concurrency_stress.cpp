@@ -69,10 +69,11 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 }
 
 // Hammers every worker thread the driver's disconnect/destructor path must
-// join: the slew slot, pulse_task_thread_, both per-axis
+// join: the slew slot, both per-axis pulse
+// slots, both per-axis
 // stop slots (MoveAxis stops issued close together — the exact
 // shape of the 2026-09-06 "superseded MoveAxis stop task strands Slewing"
-// bug in .github/instructions/skywatcher.instructions.md), rate_verify_thread_ (open-astro #248) and the
+// bug in .github/instructions/skywatcher.instructions.md), the rate-verify slot (open-astro #248) and the
 // duty_thread_ that set_tracking starts and stops.
 //
 // The rate-verify task only spawns on an in-place rate change: tracking must
@@ -96,7 +97,7 @@ void skywatcher_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& 
     guard([&] { scope.set_tracking(true); });
     guard([&] { scope.set_guide_rate({0.004, 0.004}); });
     const double ra_rate = (g_rate_toggle.fetch_add(1) % 2 == 0) ? 0.25 : 0.0;
-    // in-place change spawns rate_verify_thread_ (#248)
+    // in-place change starts the rate-verify slot (#248)
     guard([&] { scope.set_right_ascension_rate(ra_rate); });
 
     guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
@@ -183,8 +184,8 @@ TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rat
         // destroying an idle object.
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         // Tracking on, then a non-zero rate on a fresh driver (stored rate
-        // 0.0) while the axes are still free: the in-place path spawns
-        // rate_verify_thread_. After the slew below the setter would only
+        // 0.0) while the axes are still free: the in-place path starts
+        // the rate-verify slot. After the slew below the setter would only
         // store the rate.
         try {
             driver->set_tracking(true);
