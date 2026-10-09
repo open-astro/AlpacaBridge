@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 
 # Read version from workspace VERSION file: project() takes the numeric part
 # (ALPACABRIDGE_BASE_VERSION), the version defines below keep the full string

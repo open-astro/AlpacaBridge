@@ -618,6 +618,7 @@ jobs:
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
 
