@@ -691,6 +691,53 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     driver->set_connected(false);
 }
 
+TEST_CASE("QHY Camera Driver - malformed SDK frame never publishes ImageReady and recovers", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 0;
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+    const int array_error = error_code_of([&] { (void)driver->get_image_array(); });
+    INFO("ImageArray error=" << array_error << "; camera state=" << static_cast<int>(driver->get_camera_state()));
+    CHECK(array_error == alpacacore::AlpacaError::DriverException);
+
+    fake.frame_width.reset();
+    fake.frame_bpp = 12;
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+
+    fake.frame_bpp.reset();
+    fake.mem_length_override = 1;
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+
+    fake.mem_length_override.reset();
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
+    const auto image = driver->get_image_array();
+    CHECK(image.rank == 2);
+    CHECK(image.width > 0);
+    CHECK(image.height > 0);
+    CHECK(image.data.size() == static_cast<std::size_t>(image.width) * image.height);
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and ImageArray without CameraState",
           "[qhy][camera][unit]") {
     std::atomic<bool> in_frame{false};

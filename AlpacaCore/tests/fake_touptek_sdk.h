@@ -15,14 +15,17 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -79,6 +82,9 @@ public:
         if (!hold) sync_->wait_cv.notify_all();
     }
     void release_wait_image() { hold_wait_image(false); }
+    bool deliver_frame = false;
+    std::optional<std::pair<unsigned, unsigned>> delivered_dimensions;
+    std::vector<std::uint8_t> frame_bytes;
     // Thread-safe view of `calls` (the driver's background threads hit the
     // fake concurrently with the test body).
     int call_count(const char* fn) const {
@@ -166,7 +172,7 @@ public:
         hit("trigger");
         require_open(h);
     }
-    bool wait_image(HToupcam h, unsigned timeout_ms, void*, int, int, unsigned& actual_width,
+    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int, int row_pitch, unsigned& actual_width,
                     unsigned& actual_height) override {
         hit("wait_image");
         require_open(h);
@@ -174,9 +180,18 @@ public:
             std::unique_lock<std::mutex> lock(sync_->wait_mutex);
             sync_->wait_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !sync_->wait_hold; });
         }
-        actual_width = 0;
-        actual_height = 0;
-        return false;  // "timeout" — exposure tests belong to the poll-loop issue (#105)
+        if (!deliver_frame) {
+            actual_width = 0;
+            actual_height = 0;
+            return false;
+        }
+        actual_width = delivered_dimensions ? delivered_dimensions->first : roi_.width;
+        actual_height = delivered_dimensions ? delivered_dimensions->second : roi_.height;
+        const std::size_t required = static_cast<std::size_t>(row_pitch) * actual_height;
+        if (buffer != nullptr && !frame_bytes.empty()) {
+            std::memcpy(buffer, frame_bytes.data(), std::min(required, frame_bytes.size()));
+        }
+        return true;
     }
 
     ToupExpRange get_exposure_range(HToupcam h) override {

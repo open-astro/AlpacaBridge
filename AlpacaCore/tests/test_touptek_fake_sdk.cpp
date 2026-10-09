@@ -236,3 +236,58 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
     driver->set_connected(false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
 }
+
+TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid frame recovers",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+
+    auto wait_until = [](const std::function<bool()>& pred) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return pred();
+    };
+
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    auto error_code_of = [](const std::function<void()>& call) {
+        try {
+            call();
+            return 0;
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+    };
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
+
+    fake.frame_bytes = {1, 0, 2, 0, 3, 0, 4, 0};
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{1, 2};
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+
+    fake.delivered_dimensions.reset();
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const AlpacaException&) {
+            return false;
+        }
+    }));
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 2);
+    CHECK(image.height == 2);
+    CHECK(image.rank == 2);
+    CHECK(image.data == std::vector<std::int32_t>{1, 2, 3, 4});
+    driver->set_connected(false);
+}

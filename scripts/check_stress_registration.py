@@ -302,9 +302,7 @@ def strip_comments(text):
 # Remove an entry the same PR that adds its [stress] coverage -- a
 # still-covered entry left behind is itself a failure (see main()), so
 # nothing here can silently go stale.
-ALLOWLIST = {
-    ("qhy", "camera"),
-}
+ALLOWLIST = set()
 
 
 # Registration files that do NOT yet wrap their operate callbacks in

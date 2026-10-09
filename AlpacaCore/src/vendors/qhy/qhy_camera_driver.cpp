@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
@@ -923,7 +924,16 @@ public:
             throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
         }
         if (exposure_status_ == QHYExposureStatus::Success) {
-            return build_image_array_locked();
+            try {
+                ImageArray image = build_image_array_locked();
+                alpacacore::util::validate_image_array(image);
+                return image;
+            } catch (const AlpacaException& e) {
+                exposure_status_ = QHYExposureStatus::Failed;
+                exposure_failure_ = e.what();
+                image_ready_ = false;
+                throw;
+            }
         }
         if (exposure_status_ == QHYExposureStatus::Failed) {
             throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
@@ -1754,14 +1764,57 @@ public:
             if (exposure_status_ != QHYExposureStatus::Working) {
                 return;
             }
+            std::string invalid_frame;
             if (ok) {
-                exposure_buffer_ = std::move(local_buf);
-                exposure_width_    = w;
-                exposure_height_   = h;
-                exposure_bpp_      = bpp;
-                exposure_channels_ = channels;
-                exposure_status_   = QHYExposureStatus::Success;
-                image_ready_       = true;
+                if (w == 0 || h == 0 || w < static_cast<uint32_t>(num_x_) || h < static_cast<uint32_t>(num_y_)) {
+                    invalid_frame =
+                        "Camera returned invalid image data: frame dimensions are smaller than the requested ROI";
+                } else if ((bpp != 8 && bpp != 16) || (channels != 1 && channels != 3) || (channels == 3 && bpp != 8)) {
+                    invalid_frame = "Camera returned invalid image data: unsupported frame format";
+                } else if (static_cast<std::size_t>(w) > std::numeric_limits<std::size_t>::max() / h) {
+                    invalid_frame = "Camera returned invalid image data: frame dimensions overflow the buffer size";
+                } else {
+                    const std::size_t pixels = static_cast<std::size_t>(w) * h;
+                    const std::size_t samples_per_pixel = static_cast<std::size_t>(channels);
+                    const std::size_t bytes_per_sample = bpp / 8;
+                    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+                    if (pixels > kMaxSize / samples_per_pixel ||
+                        pixels * samples_per_pixel > kMaxSize / bytes_per_sample) {
+                        invalid_frame = "Camera returned invalid image data: frame dimensions overflow the buffer size";
+                    } else {
+                        const std::size_t required_bytes = pixels * samples_per_pixel * bytes_per_sample;
+                        if (required_bytes > local_buf.size()) {
+                            invalid_frame =
+                                "Camera returned invalid image data: frame exceeds reported buffer capacity";
+                        }
+                    }
+                }
+                if (!invalid_frame.empty()) {
+                    exposure_status_ = QHYExposureStatus::Failed;
+                    exposure_failure_ = std::move(invalid_frame);
+                    image_ready_ = false;
+                    exposure_buffer_.clear();
+                } else {
+                    exposure_buffer_ = std::move(local_buf);
+                    exposure_width_ = w;
+                    exposure_height_ = h;
+                    exposure_bpp_ = bpp;
+                    exposure_channels_ = channels;
+                    try {
+                        ImageArray expected_shape;
+                        expected_shape.width = num_x_;
+                        expected_shape.height = num_y_;
+                        expected_shape.rank = channels == 3 ? 3 : 2;
+                        alpacacore::util::validate_image_shape(expected_shape);
+                        exposure_status_ = QHYExposureStatus::Success;
+                        image_ready_ = true;
+                    } catch (const std::exception& e) {
+                        exposure_status_ = QHYExposureStatus::Failed;
+                        exposure_failure_ = e.what();
+                        image_ready_ = false;
+                        exposure_buffer_.clear();
+                    }
+                }
             } else {
                 exposure_status_ = QHYExposureStatus::Failed;
                 exposure_failure_ = "The camera failed to deliver the frame";
@@ -2619,14 +2672,29 @@ private:
         image.height = num_y_;
 
         if (image.width <= 0 || image.height <= 0 || exposure_buffer_.empty()) {
-            image.rank = 0;
-            return image;
+            alpacacore::util::throw_invalid_camera_image("invalid QHY dimensions or empty frame buffer");
         }
 
         const uint32_t eff_w = exposure_width_  > 0 ? exposure_width_  : static_cast<uint32_t>(num_x_);
         const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(num_y_);
         const uint32_t bpp   = exposure_bpp_;
         const uint32_t ch    = exposure_channels_;
+
+        if (eff_w == 0 || eff_h == 0 || (bpp != 8 && bpp != 16) || (ch != 1 && ch != 3) || (ch == 3 && bpp != 8)) {
+            alpacacore::util::throw_invalid_camera_image("unsupported QHY frame layout");
+        }
+        constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+        if (static_cast<std::size_t>(eff_w) > kMaxSize / eff_h) {
+            alpacacore::util::throw_invalid_camera_image("QHY frame dimensions overflow the buffer size");
+        }
+        const std::size_t frame_pixels = static_cast<std::size_t>(eff_w) * eff_h;
+        const std::size_t samples_per_pixel = ch;
+        const std::size_t bytes_per_sample = bpp / 8;
+        if (frame_pixels > kMaxSize / samples_per_pixel ||
+            frame_pixels * samples_per_pixel > kMaxSize / bytes_per_sample ||
+            frame_pixels * samples_per_pixel * bytes_per_sample > exposure_buffer_.size()) {
+            alpacacore::util::throw_invalid_camera_image("QHY frame buffer is shorter than its dimensions");
+        }
 
         // Color (3-channel) output
         if (ch == 3) {

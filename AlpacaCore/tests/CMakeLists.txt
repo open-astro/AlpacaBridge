@@ -31,6 +31,7 @@ set(TEST_SOURCES
     test_error_handling.cpp
     test_fake_pty_write.cpp
     test_host_clock.cpp
+    test_image_validation.cpp
     test_motion_limits.cpp
     test_poll_settle.cpp
     test_rotator_sync_offset_store.cpp
@@ -62,6 +63,7 @@ endif()
 
 if(TARGET alpacacore_qhy)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
+    list(APPEND TEST_SOURCES qhy_camera_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
     # Contract tests for the fault-injectable QHY SDK seam (issue #321), which
     # is what lets the two files above reach the connect path at all -- the

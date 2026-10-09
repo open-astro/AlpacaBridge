@@ -17,6 +17,7 @@
 #include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacahttp/config.h>
@@ -1028,43 +1029,10 @@ void for_each_xy_blocked(std::size_t width, std::size_t height, Visitor&& visit)
     }
 }
 
-[[noreturn]] void throw_invalid_camera_image(const char* reason) {
-    throw alpacacore::AlpacaException(std::string("Camera returned invalid image data: ") + reason,
-                                      alpacacore::AlpacaError::DriverException);
-}
-
-struct ImageShape {
-    std::size_t width;
-    std::size_t height;
-    std::size_t channels;
-    std::size_t element_count;
-};
-
-ImageShape validate_image_shape(const alpacacore::ImageArray& image) {
-    if ((image.rank != 2 && image.rank != 3) || image.width <= 0 || image.height <= 0) {
-        throw_invalid_camera_image("invalid rank or dimensions");
-    }
-
-    const auto width = static_cast<std::size_t>(image.width);
-    const auto height = static_cast<std::size_t>(image.height);
-    const std::size_t channels = image.rank == 3 ? 3 : 1;
-    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
-    if (width > kMaxSize / height) {
-        throw_invalid_camera_image("dimensions overflow the payload size");
-    }
-    const std::size_t pixels = width * height;
-    if (pixels > kMaxSize / channels) {
-        throw_invalid_camera_image("dimensions overflow the payload size");
-    }
-    const std::size_t element_count = pixels * channels;
-    return {width, height, channels, element_count};
-}
-
-void validate_image_data_length(const alpacacore::ImageArray& image, const ImageShape& shape) {
-    if (shape.element_count != image.data.size()) {
-        throw_invalid_camera_image("data length does not match dimensions");
-    }
-}
+using ImageShape = alpacacore::util::ImageShape;
+using alpacacore::util::throw_invalid_camera_image;
+using alpacacore::util::validate_image_data_length;
+using alpacacore::util::validate_image_shape;
 
 std::vector<std::int32_t> transpose_xy(const std::vector<std::int32_t>& data, std::size_t width, std::size_t height,
                                        std::size_t channels) {
