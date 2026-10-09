@@ -269,8 +269,19 @@ counts as a client step: `ClockSource` reads `client` afterwards.
 `/sys/class/rtc/rtc*` device whose `hctosys` reads 1, whose `since_epoch` is
 after 2020-01-01 (a battery-less Raspberry Pi 5 RTC reads 2000-01-01 and does
 not count). It is a statement about where the clock came from, not about how
-accurate it is: nothing on an NTP-less host verifies or rewrites the RTC, so
-it may still be wrong or drifting, and the telescope connect line says so.
+accurate it is: nothing on an NTP-less host verifies the RTC, so it may still
+be wrong or drifting, and the telescope connect line says so.
+
+After the service steps the system clock (a client's `UTCDate` write or a Sync
+Time press) it writes the new system time into that same RTC
+(`ioctl(RTC_SET_TIME)`, UTC, like `hwclock --systohc`), so the correction
+survives a power cycle, and re-reads the RTC so a battery-less RTC that held
+2000-01-01 reports `rtc` instead of `none`. A step that was skipped or failed
+writes nothing, and a host with no RTC the kernel booted from is left alone.
+The package ships a udev rule (`/usr/lib/udev/rules.d/60-alpacabridge.rules`)
+that gives the `alpacabridge` group write access to `/dev/rtc*`; without it the
+write fails once with a WARN naming the errno and the clock stays corrected for
+that session only. From a source install, set the device group by hand.
 A working RTC reads `none` whenever the kernel was not the one that loaded it:
 a userspace `hwclock --hctosys` under a non-systemd init, or a kernel without
 `CONFIG_RTC_HCTOSYS`. `rtc` is a new value on a published field, so an older
