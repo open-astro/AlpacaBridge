@@ -41,9 +41,18 @@ namespace {
 // re-probed.
 enum class Probe : std::uint8_t { NoDevice, Implausible, Ok };
 
+std::mutex g_root_mutex;
+std::string g_sysfs_root = "/sys/class/rtc";  // tests point it at a temp tree
+
+std::string sysfs_root() {
+    const std::lock_guard<std::mutex> lock(g_root_mutex);
+    return g_sysfs_root;
+}
+
 // The rtcN name of the device with hctosys = 1, or "" when there is none.
 std::string boot_rtc_name() {
-    const std::unique_ptr<DIR, int (*)(DIR*)> dir(::opendir("/sys/class/rtc"), &::closedir);
+    const std::string root = sysfs_root();
+    const std::unique_ptr<DIR, int (*)(DIR*)> dir(::opendir(root.c_str()), &::closedir);
     if (dir == nullptr) {
         return {};
     }
@@ -52,7 +61,7 @@ std::string boot_rtc_name() {
         if (name.rfind("rtc", 0) != 0) {
             continue;
         }
-        std::ifstream hctosys("/sys/class/rtc/" + name + "/hctosys");
+        std::ifstream hctosys(root + "/" + name + "/hctosys");
         int used = 0;
         if (hctosys.is_open() && (hctosys >> used) && used == 1) {
             return name;
@@ -66,7 +75,7 @@ Probe probe_boot_rtc() {
     if (name.empty()) {
         return Probe::NoDevice;
     }
-    const std::string device = "/sys/class/rtc/" + name;
+    const std::string device = sysfs_root() + "/" + name;
     std::ifstream since_epoch(device + "/since_epoch");
     long long epoch = 0;
     if (!since_epoch.is_open() || !(since_epoch >> epoch)) {
@@ -87,6 +96,11 @@ std::chrono::steady_clock::time_point g_last_probe{};
 
 }  // namespace
 
+void HostClock::set_sysfs_root_for_test(const std::string& root) {
+    const std::lock_guard<std::mutex> lock(g_root_mutex);
+    g_sysfs_root = root.empty() ? "/sys/class/rtc" : root;
+}
+
 void HostClock::invalidate_rtc_probe() {
     const std::lock_guard<std::mutex> lock(g_probe_mutex);
     g_settled = false;
@@ -105,7 +119,10 @@ HostClock::RtcWrite HostClock::kernel_write_rtc(std::string& device, std::string
             error = std::string("open failed: ") + std::strerror(errno) + " (errno " + std::to_string(errno) + ")";
             return RtcWrite::Failed;
         }
-        const std::time_t now = std::time(nullptr);
+        // Nearest second: time() truncates, which would leave the RTC up to 999 ms slow.
+        timespec ts{};
+        ::clock_gettime(CLOCK_REALTIME, &ts);
+        const std::time_t now = ts.tv_sec + (ts.tv_nsec >= 500000000 ? 1 : 0);
         struct tm utc {};
         gmtime_r(&now, &utc);
         struct rtc_time rt {};
@@ -131,6 +148,12 @@ HostClock::RtcWrite HostClock::kernel_write_rtc(std::string& device, std::string
 }
 
 void HostClock::write_rtc_after_step(const Hooks& hooks, std::optional<std::chrono::milliseconds> delta) {
+    {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        if (!enabled_) {
+            return;  // the sync_system_clock_from_clients opt-out covers the RTC too
+        }
+    }
     std::string device;
     std::string error;
     RtcWrite result = RtcWrite::Failed;
@@ -165,8 +188,9 @@ void HostClock::write_rtc_after_step(const Hooks& hooks, std::optional<std::chro
     }
     ALPACA_LOG_INFO("HostClock", "Wrote the corrected system time to the hardware clock " + device +
                                      (delta ? " (step " + std::to_string(delta->count()) + " ms)" : std::string()));
+    // The server's RTC probe loop re-reads on its next tick; not here, so a
+    // stepping request pays one RTC write and no second I2C transaction.
     invalidate_rtc_probe();
-    refresh_rtc();
 }
 
 bool HostClock::host_booted_from_rtc() {

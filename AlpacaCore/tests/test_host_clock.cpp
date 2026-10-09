@@ -13,9 +13,12 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/logging.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -568,10 +571,8 @@ TEST_CASE("ClientUtcWarning - a null probe restores the kernel one", "[util][hos
 TEST_CASE("HostClock - a client step writes the system time to the RTC (#296)", "[util][hostclock][unit]") {
     Fake f;
     auto c = f.clock();
-    const int probes_before = f.rtc_probes;
     CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
     CHECK(f.rtc_writes == 1);
-    CHECK(f.rtc_probes == probes_before + 1);  // the settled probe was invalidated and re-read
 }
 
 TEST_CASE("HostClock - Sync Time (mark_stepped) writes the RTC (#296)", "[util][hostclock][unit]") {
@@ -629,7 +630,37 @@ TEST_CASE("HostClock - no boot RTC means no probe invalidation (#296)", "[util][
     Fake f;
     f.rtc_result = HostClock::RtcWrite::NoDevice;
     auto c = f.clock();
-    const int probes_before = f.rtc_probes;
     CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
-    CHECK(f.rtc_probes == probes_before);
+    CHECK(f.rtc_writes == 1);  // attempted, but NoDevice: nothing to invalidate
+}
+
+TEST_CASE("HostClock - Sync Time with the opt-out off does not write the RTC (#296)", "[util][hostclock][unit]") {
+    Fake f;
+    auto c = f.clock();
+    c.set_enabled(false);
+    c.mark_stepped();
+    CHECK(f.rtc_writes == 0);
+}
+
+TEST_CASE("HostClock - a successful RTC write invalidates the settled probe (#296)", "[util][hostclock][unit]") {
+    namespace fs = std::filesystem;
+    const fs::path root = fs::temp_directory_path() / ("hostclock_rtc_" + std::to_string(::getpid()));
+    fs::create_directories(root / "rtc0");
+    const auto put = [&](const char* file, const char* text) { std::ofstream(root / "rtc0" / file) << text; };
+    put("hctosys", "1");
+    put("since_epoch", "946684800");  // battery-less RTC: 2000-01-01
+    HostClock::set_sysfs_root_for_test(root.string());
+    HostClock::invalidate_rtc_probe();
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // settles "implausible"
+    put("since_epoch", "1900000000");
+    CHECK_FALSE(HostClock::host_booted_from_rtc());  // still settled
+
+    Fake f;
+    auto c = f.clock();
+    CHECK(c.step_from_client(kNow + seconds(120), kNow).outcome == Outcome::Stepped);
+    CHECK(HostClock::host_booted_from_rtc());  // invalidated, re-read
+
+    HostClock::set_sysfs_root_for_test("");
+    HostClock::invalidate_rtc_probe();
+    fs::remove_all(root);
 }

@@ -184,7 +184,8 @@ public:
     // loaded the clock from a hardware RTC at boot -- open-astro#292), or
     // "none". The RTC answer is a cached atomic read since open-astro#314,
     // never a bus transaction: the probe runs on the server's timer thread,
-    // so neither this nor step_from_client() can queue behind an I2C RTC.
+    // so this cannot queue behind an I2C RTC. (A stepping step_from_client()
+    // or mark_stepped() does pay one RTC write, #296.)
     std::string source() const {
         if (synchronized()) {
             return "ntp";
@@ -201,7 +202,8 @@ public:
     // True when the kernel loaded system time from a hardware RTC at boot and
     // that RTC is not obviously dead. This is a statement about where the
     // clock CAME FROM, not about how accurate it is: nothing on an NTP-less
-    // host verifies or rewrites the RTC, so it may still be wrong or drifting.
+    // host verifies the RTC (it is rewritten only after a client or Sync Time
+    // step), so it may still be wrong or drifting.
     // Reporting only -- the stepping decision never looks at it.
     //
     // open-astro#314: a memory read in every case. The underlying probe reads
@@ -216,8 +218,8 @@ public:
     /**
      * Re-run the RTC probe and cache the answer. Called once at construction
      * and thereafter only from off the request path: the server's dedicated
-     * RTC probe thread (open-astro#314), and, when it lands, after this process writes
-     * the RTC itself (open-astro#307).
+     * RTC probe thread (open-astro#314). A step's RTC write only invalidates the
+     * settled probe (open-astro#307); that thread re-reads on its next tick.
      *
      * Cheap and safe to call when the answer has already settled: the probe
      * itself short-circuits, and it is rate-limited to once per
@@ -238,6 +240,10 @@ public:
     // settled "implausible" and would otherwise read ClockSource "none" for
     // the life of the process (open-astro#307).
     static void invalidate_rtc_probe();
+
+    // Test seam: read the RTC sysfs tree from `root` instead of
+    // /sys/class/rtc ("" restores it).
+    static void set_sysfs_root_for_test(const std::string& root);
 
     // ioctl(RTC_SET_TIME) with the current UTC system time on the /dev/rtcN
     // whose /sys/class/rtc/rtcN/hctosys reads 1. Never throws.

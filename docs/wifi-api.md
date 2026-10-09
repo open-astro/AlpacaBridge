@@ -275,9 +275,11 @@ be wrong or drifting, and the telescope connect line says so.
 After the service steps the system clock (a client's `UTCDate` write or a Sync
 Time press) it writes the new system time into that same RTC
 (`ioctl(RTC_SET_TIME)`, UTC, like `hwclock --systohc`), so the correction
-survives a power cycle, and re-reads the RTC so a battery-less RTC that held
-2000-01-01 reports `rtc` instead of `none`. A step that was skipped or failed
-writes nothing, and a host with no RTC the kernel booted from is left alone.
+survives a power cycle, and forgets the settled probe so the next periodic
+re-read lets a battery-less RTC that held 2000-01-01 report `rtc` instead of
+`none`. The write is rounded to the nearest second. A step that was skipped or
+failed writes nothing, and so does either path while `sync_system_clock_from_clients`
+is off, and a host with no RTC the kernel booted from is left alone.
 The package ships a udev rule (`/usr/lib/udev/rules.d/60-alpacabridge.rules`)
 that gives the `alpacabridge` group write access to `/dev/rtc*`; without it the
 write fails once with a WARN naming the errno and the clock stays corrected for
