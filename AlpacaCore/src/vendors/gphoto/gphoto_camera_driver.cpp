@@ -989,7 +989,8 @@ public:
             active_handle = handle_;
             // A body in B mode lists only "bulb" for its shutter speed, so there is no native
             // speed to fall back on: every duration takes the bulb path.
-            use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") || duration > max_native_shutter_seconds_ + 1e-9);
+            use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
+                                     duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
             shutter_widget_name = shutter_widget_name_;
 
