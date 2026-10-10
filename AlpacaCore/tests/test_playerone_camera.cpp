@@ -34,8 +34,8 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 }
 
 template <typename Predicate>
-bool eventually(Predicate&& predicate) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+bool eventually(Predicate&& predicate, std::chrono::seconds timeout = std::chrono::seconds(2)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         if (predicate()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -176,6 +176,12 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
     require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
                          alpacacore::AlpacaError::DriverException);
 
+    sdk.set_returned_size(12, 8);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually(failed));
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
+                         alpacacore::AlpacaError::DriverException);
+
     sdk.set_returned_size(16, 8);
     sdk.set_frame_data({0x34, 0x12});
     driver->start_exposure(0.001, true);
@@ -204,6 +210,45 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
     CHECK(image.data.front() == 0x1234);
     driver->set_connected(false);
     CHECK(sdk.open_count() == sdk.close_count());
+}
+
+TEST_CASE("Player One Camera Driver - Rejects exposure format readback mismatch", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    sdk.set_returned_format(alpacacore::vendor::playerone::PlayerOneImageFormat::Raw8);
+
+    driver->start_exposure(0.001, true);
+    const auto failed = [&] {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    };
+    REQUIRE(eventually(failed));
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
+                         alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - Watchdog discards a late frame", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_data_delay(std::chrono::seconds(18));
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.001, true);
+
+    REQUIRE(eventually([&] { return sdk.image_data_started(); }));
+    REQUIRE(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; },
+                       std::chrono::seconds(17)));
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_ready()); },
+                         alpacacore::AlpacaError::DriverException);
+    REQUIRE(eventually([&] { return sdk.image_data_finished(); }, std::chrono::seconds(5)));
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
+                         alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
 }
 
 TEST_CASE("Player One Camera Driver - Rejects unsupported SDK formats", "[playerone][camera][unit]") {

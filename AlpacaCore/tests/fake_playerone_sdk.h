@@ -94,7 +94,7 @@ public:
 
     ImageFormat get_image_format(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return format_;
+        return returned_format_.value_or(format_);
     }
     void set_image_format(int, ImageFormat format) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -127,9 +127,15 @@ public:
     }
     bool image_ready(int) override { return ready_; }
     bool get_image_data(int, std::uint8_t* buffer, std::size_t buffer_size, int) override {
+        image_data_started_.store(true);
+        std::this_thread::sleep_for(image_data_delay_);
         std::lock_guard<std::mutex> lock(mutex_);
-        if (frame_data_.size() < buffer_size) return false;
+        if (frame_data_.size() < buffer_size) {
+            image_data_finished_.store(true);
+            return false;
+        }
         std::copy_n(frame_data_.begin(), buffer_size, buffer);
+        image_data_finished_.store(true);
         return true;
     }
 
@@ -152,6 +158,10 @@ public:
         returned_width_ = width;
         returned_height_ = height;
     }
+    void set_returned_format(ImageFormat format) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        returned_format_ = format;
+    }
     void set_supported_formats(std::vector<ImageFormat> formats) {
         std::lock_guard<std::mutex> lock(mutex_);
         camera_.supported_formats = std::move(formats);
@@ -165,6 +175,7 @@ public:
         no_cameras_ = no_cameras;
     }
     void set_open_delay(std::chrono::milliseconds delay) { open_delay_ = delay; }
+    void set_image_data_delay(std::chrono::milliseconds delay) { image_data_delay_ = delay; }
     void set_frame_data(std::vector<std::uint8_t> data) {
         std::lock_guard<std::mutex> lock(mutex_);
         frame_data_ = std::move(data);
@@ -172,6 +183,8 @@ public:
     int open_count() const { return open_count_.load(); }
     int close_count() const { return close_count_.load(); }
     int pulse_off_count() const { return pulse_off_count_.load(); }
+    bool image_data_started() const { return image_data_started_.load(); }
+    bool image_data_finished() const { return image_data_finished_.load(); }
 
 private:
     CameraInfo camera_copy() const {
@@ -185,12 +198,16 @@ private:
     bool no_cameras_{false};
     std::chrono::milliseconds open_delay_{0};
     ImageFormat format_{ImageFormat::Raw16};
+    std::optional<ImageFormat> returned_format_;
     int width_{16};
     int height_{8};
     std::optional<int> returned_width_;
     std::optional<int> returned_height_;
     std::vector<std::uint8_t> frame_data_ = std::vector<std::uint8_t>(16 * 8 * 2, 0);
+    std::chrono::milliseconds image_data_delay_{0};
     std::atomic<bool> ready_{true};
+    std::atomic<bool> image_data_started_{false};
+    std::atomic<bool> image_data_finished_{false};
     std::atomic<long> gain_{10};
     std::atomic<int> open_count_{0};
     std::atomic<int> close_count_{0};
