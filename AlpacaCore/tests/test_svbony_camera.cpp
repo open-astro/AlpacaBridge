@@ -191,7 +191,7 @@ TEST_CASE("SVBONY Camera Driver - exposure delivers the fake frame", "[svbony][c
     driver->set_connected(false);
 }
 
-TEST_CASE("LockedSVBSDK - forwards every entry point to the inner SDK", "[svbony][unit][fake-sdk]") {
+TEST_CASE("FakeSVBSDK behind LockedSVBSDK - forwards every entry point", "[svbony][unit][fake-sdk]") {
     using namespace alpacacore::vendor::svbony;
     alpacacore::test::FakeSVBSDK fake;
     alpacacore::test::LockedSVBSDK sdk(fake);
