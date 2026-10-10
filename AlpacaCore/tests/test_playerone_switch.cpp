@@ -14,7 +14,12 @@
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -138,4 +143,135 @@ TEST_CASE("Player One Switch Driver - Connect fails on invalid camera index", "[
 
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---- open-astro#294: one status burst per DeviceState, static members free ----
+
+namespace {
+
+struct FakeThermalSdk final : alpacacore::vendor::playerone::PlayerOneThermalSdk {
+    std::atomic<int> reads{0};
+    std::atomic<bool> fail_reads{false};
+    int heater{40};
+    int fan{70};
+
+    std::vector<alpacacore::vendor::playerone::PlayerOneCameraInfo> enumerate_cameras() override {
+        alpacacore::vendor::playerone::PlayerOneCameraInfo info;
+        info.camera_id = 7;
+        info.name = "Fake Poseidon";
+        info.serial_number = "FAKE1";
+        return {info};
+    }
+    void open_camera(int) override {}
+    void init_camera(int) override {}
+    void close_camera(int) override {}
+    alpacacore::vendor::playerone::PlayerOneConfigCaps probe_config_caps(int) override {
+        alpacacore::vendor::playerone::PlayerOneConfigCaps caps;
+        caps.has_heater_power = true;
+        caps.heater_power_writable = true;
+        caps.heater_power_max = 100;
+        caps.has_fan_power = true;
+        caps.fan_power_writable = true;
+        caps.fan_power_max = 100;
+        return caps;
+    }
+    int get_heater_power_percent(int) override {
+        ++reads;
+        if (fail_reads) {
+            throw alpacacore::AlpacaException("usb gone", alpacacore::AlpacaError::DriverException);
+        }
+        return heater;
+    }
+    int get_fan_power_percent(int) override {
+        ++reads;
+        if (fail_reads) {
+            throw alpacacore::AlpacaException("usb gone", alpacacore::AlpacaError::DriverException);
+        }
+        return fan;
+    }
+    void set_heater_power_percent(int, int percent) override { heater = percent; }
+    void set_fan_power_percent(int, int percent) override { fan = percent; }
+};
+
+void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+
+}  // namespace
+
+TEST_CASE("Player One Switch Driver - DeviceState reads the camera once per status frame",
+          "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_switch_value(0) == 40.0);
+    CHECK(driver->get_switch_value(1) == 70.0);
+    CHECK(driver->get_switch(0));
+    const int after_values = sdk.reads;
+    // One refill reads each element once; before the cache this was 2 reads per switch per getter.
+    CHECK(after_values == 2);
+
+    const auto state = driver->get_device_state();
+    CHECK_FALSE(state.empty());
+    CHECK(sdk.reads == after_values);
+
+    wait_past_status_ttl();
+    (void)driver->get_device_state();
+    CHECK(sdk.reads == after_values + 2);
+}
+
+TEST_CASE("Player One Switch Driver - static members cost no camera reads", "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_max_switch() == 2);
+        CHECK(driver->get_switch_name(0) == "DewHeater");
+        CHECK_FALSE(driver->get_switch_description(1).empty());
+        CHECK(driver->get_min_switch_value(0) == 0.0);
+        CHECK(driver->get_max_switch_value(0) == 100.0);
+        CHECK(driver->get_switch_step(0) == 1.0);
+        CHECK(driver->get_can_write(1));
+    }
+    CHECK(sdk.reads == 0);
+}
+
+TEST_CASE("Player One Switch Driver - a write and a reconnect drop the cached frame", "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 40.0);
+
+    driver->set_switch_value(0, 10.0);
+    CHECK(driver->get_switch_value(0) == 10.0);
+
+    sdk.heater = 55;
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 55.0);
+}
+
+TEST_CASE("Player One Switch Driver - a dead link is not served from the cache", "[playerone][switch][unit]") {
+    FakeThermalSdk sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_switch(0, 0, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 40.0);
+
+    sdk.fail_reads = true;
+    wait_past_status_ttl();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS_AS(driver->get_switch_value(0), alpacacore::AlpacaException);
+    }
+    // Latched: the error names the compromised link, and the old frame is gone.
+    try {
+        (void)driver->get_switch_value(0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
+    CHECK(driver->get_connected());
+
+    sdk.fail_reads = false;
+    CHECK(driver->get_switch_value(0) == 40.0);
 }

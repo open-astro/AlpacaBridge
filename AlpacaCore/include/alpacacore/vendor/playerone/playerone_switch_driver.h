@@ -13,8 +13,10 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
 #include <memory>
+#include <vector>
 
 namespace alpacacore::vendor::playerone {
 
@@ -30,5 +32,31 @@ namespace alpacacore::vendor::playerone {
  * @param camera_index Player One SDK camera index (0-based, enumeration order)
  */
 std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index);
+
+/**
+ * @brief The SDK calls the thermal switch makes, as a driver-local seam so a
+ *        test can count device reads without hardware (open-astro#294).
+ *
+ * Production uses the PlayerOneSDKWrapper singleton. Not a general SDK seam:
+ * it lists only what this driver calls.
+ */
+class PlayerOneThermalSdk {
+public:
+    virtual std::vector<PlayerOneCameraInfo> enumerate_cameras() = 0;
+    virtual void open_camera(int camera_id) = 0;
+    virtual void init_camera(int camera_id) = 0;
+    virtual void close_camera(int camera_id) = 0;
+    virtual PlayerOneConfigCaps probe_config_caps(int camera_id) = 0;
+    virtual int get_heater_power_percent(int camera_id) = 0;
+    virtual int get_fan_power_percent(int camera_id) = 0;
+    virtual void set_heater_power_percent(int camera_id, int percent) = 0;
+    virtual void set_fan_power_percent(int camera_id, int percent) = 0;
+
+protected:
+    ~PlayerOneThermalSdk() = default;
+};
+
+/// Test overload: the driver keeps a reference, `sdk` must outlive it.
+std::unique_ptr<SwitchDriver> create_playerone_switch(int device_number, int camera_index, PlayerOneThermalSdk& sdk);
 
 }  // namespace alpacacore::vendor::playerone

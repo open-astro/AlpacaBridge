@@ -14,7 +14,12 @@
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
+#include <chrono>
 #include <functional>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -114,4 +119,117 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Disconnected DeviceState", "[zwo][swit
         const auto state = driver->get_device_state();
         REQUIRE(state.empty());
     }
+}
+
+// ---- open-astro#294: one status read per DeviceState, static members free ----
+
+namespace {
+
+struct FakeDewSdk final : alpacacore::vendor::zwo::ZWODewHeaterSdk {
+    std::atomic<int> reads{0};
+    std::atomic<bool> fail_reads{false};
+    long heater{40};
+
+    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override { return {}; }
+    bool get_camera_info_by_id(int, alpacacore::vendor::zwo::ZWOCameraInfo&) override { return false; }
+    void open_camera(int) override {}
+    void init_camera(int) override {}
+    void close_camera(int) override {}
+    std::vector<alpacacore::vendor::zwo::ZWOControlCaps> get_control_caps(int) override {
+        alpacacore::vendor::zwo::ZWOControlCaps cap;
+        cap.type = alpacacore::vendor::zwo::ZWOControlType::AntiDewHeater;
+        cap.max_value = 100;
+        cap.is_writable = true;
+        return {cap};
+    }
+    bool get_control_value(int, alpacacore::vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
+        ++reads;
+        if (fail_reads) {
+            return false;
+        }
+        value = heater;
+        is_auto = false;
+        return true;
+    }
+    void set_control_value(int, alpacacore::vendor::zwo::ZWOControlType, long value, bool) override { heater = value; }
+    std::string get_serial_number(int) override { return "FAKE1"; }
+};
+
+void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+
+}  // namespace
+
+TEST_CASE("ZWO Dew Heater Switch Driver - DeviceState reads the camera once per status frame", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_switch_value(0) == 40.0);
+    CHECK(driver->get_switch(0));
+    // Before the cache each of these was its own SDK read.
+    CHECK(sdk.reads == 1);
+
+    const auto state = driver->get_device_state();
+    CHECK_FALSE(state.empty());
+    CHECK(sdk.reads == 1);
+
+    wait_past_status_ttl();
+    (void)driver->get_device_state();
+    CHECK(sdk.reads == 2);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - static members cost no camera reads", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_max_switch() == 1);
+        CHECK(driver->get_switch_name(0) == "DewHeater");
+        CHECK_FALSE(driver->get_switch_description(0).empty());
+        CHECK(driver->get_min_switch_value(0) == 0.0);
+        CHECK(driver->get_max_switch_value(0) == 100.0);
+        CHECK(driver->get_switch_step(0) == 1.0);
+        CHECK(driver->get_can_write(0));
+    }
+    CHECK(sdk.reads == 0);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - a write and a reconnect drop the cached frame", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 40.0);
+
+    driver->set_switch_value(0, 10.0);
+    CHECK(driver->get_switch_value(0) == 10.0);
+
+    sdk.heater = 55;
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 55.0);
+}
+
+TEST_CASE("ZWO Dew Heater Switch Driver - a dead link is not served from the cache", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_switch_value(0) == 40.0);
+
+    sdk.fail_reads = true;
+    wait_past_status_ttl();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS_AS(driver->get_switch_value(0), alpacacore::AlpacaException);
+    }
+    try {
+        (void)driver->get_switch_value(0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
+    CHECK(driver->get_connected());
+
+    sdk.fail_reads = false;
+    CHECK(driver->get_switch_value(0) == 40.0);
 }

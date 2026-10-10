@@ -13,11 +13,13 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <optional>
@@ -29,6 +31,38 @@ namespace {
 
 constexpr int kDewHeaterSwitchId = 0;
 
+constexpr std::chrono::milliseconds kStatusTtl{100};
+
+struct DewStatus {
+    long value{};
+};
+
+// Production SDK access: forwards to the process-wide wrapper.
+class SingletonDewHeaterSdk final : public ZWODewHeaterSdk {
+public:
+    static SingletonDewHeaterSdk& instance() {
+        static SingletonDewHeaterSdk sdk;
+        return sdk;
+    }
+    std::vector<ZWOCameraInfo> enumerate_cameras() override { return ZWOSDKWrapper::instance().enumerate_cameras(); }
+    bool get_camera_info_by_id(int id, ZWOCameraInfo& info) override {
+        return ZWOSDKWrapper::instance().get_camera_info_by_id(id, info);
+    }
+    void open_camera(int id) override { ZWOSDKWrapper::instance().open_camera(id); }
+    void init_camera(int id) override { ZWOSDKWrapper::instance().init_camera(id); }
+    void close_camera(int id) override { ZWOSDKWrapper::instance().close_camera(id); }
+    std::vector<ZWOControlCaps> get_control_caps(int id) override {
+        return ZWOSDKWrapper::instance().get_control_caps(id);
+    }
+    bool get_control_value(int id, ZWOControlType type, long& value, bool& is_auto) override {
+        return ZWOSDKWrapper::instance().get_control_value(id, type, value, is_auto);
+    }
+    void set_control_value(int id, ZWOControlType type, long value, bool is_auto) override {
+        ZWOSDKWrapper::instance().set_control_value(id, type, value, is_auto);
+    }
+    std::string get_serial_number(int id) override { return ZWOSDKWrapper::instance().get_serial_number(id); }
+};
+
 } // namespace
 
 class ZWODewHeaterSwitchDriver : public SwitchDriver, protected alpacacore::AsyncConnectable {
@@ -36,8 +70,11 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index)
+    ZWODewHeaterSwitchDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index,
+                             ZWODewHeaterSdk& sdk)
         : AsyncConnectable("ZWO"),
+          sdk_(sdk),
+          status_cache_("ZWO dew heater", kStatusTtl, 3, "ZWO"),
           device_number_(device_number),
           camera_id_(camera_id),
           camera_index_(camera_index),
@@ -125,7 +162,7 @@ public:
             return;
         }
 
-        auto& sdk = ZWOSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             int resolved_id = resolve_camera_id_locked();
             sdk.open_camera(resolved_id);
@@ -138,6 +175,7 @@ public:
                 sdk.close_camera(resolved_id);
                 throw;
             }
+            status_cache_.reset();
             connected_.store(true);
             return;
         }
@@ -154,6 +192,7 @@ public:
             serial_number_.clear();
         }
         dew_caps_.reset();
+        status_cache_.reset();
         connected_.store(false);
         if (close_id.has_value()) {
             sdk.close_camera(close_id.value());
@@ -226,12 +265,18 @@ public:
         validate_switch_id(id);
         ensure_connected();
         dew_caps_or_throw();
-        bool is_auto = false;
-        long value = 0;
-        if (!ZWOSDKWrapper::instance().get_control_value(camera_id_value(), ZWOControlType::AntiDewHeater, value, is_auto)) {
-            throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
-        }
-        return static_cast<double>(value);
+        const int camera_id = camera_id_value();
+        return static_cast<double>(
+            status_cache_
+                .get([this, camera_id] {
+                    bool is_auto = false;
+                    DewStatus fresh;
+                    if (!sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto)) {
+                        throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
+                    }
+                    return fresh;
+                })
+                .value);
     }
 
     void set_switch_value(int id, double value) override {
@@ -250,7 +295,8 @@ public:
         if (value_long < caps.min_value || value_long > caps.max_value) {
             throw AlpacaException("Dew heater value out of range", AlpacaError::InvalidValue);
         }
-        ZWOSDKWrapper::instance().set_control_value(camera_id_value(), ZWOControlType::AntiDewHeater, value_long, false);
+        sdk_.set_control_value(camera_id_value(), ZWOControlType::AntiDewHeater, value_long, false);
+        status_cache_.invalidate();
     }
 
     void set_async_value(int id, double /*value*/) override {
@@ -330,7 +376,7 @@ private:
 
     int resolve_camera_id_locked() {
         if (camera_index_.has_value()) {
-            auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (cameras.empty()) {
                 ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
                 throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
@@ -355,14 +401,14 @@ private:
 
     void refresh_camera_name_locked(int camera_id) {
         ZWOCameraInfo info;
-        if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id, info) && !info.name.empty()) {
+        if (sdk_.get_camera_info_by_id(camera_id, info) && !info.name.empty()) {
             camera_name_ = info.name;
         }
     }
 
     void load_dew_caps_locked(int camera_id) {
         dew_caps_.reset();
-        auto caps = ZWOSDKWrapper::instance().get_control_caps(camera_id);
+        auto caps = sdk_.get_control_caps(camera_id);
         for (const auto& cap : caps) {
             if (cap.type == ZWOControlType::AntiDewHeater) {
                 dew_caps_ = cap;
@@ -380,6 +426,8 @@ private:
         return camera_id_.value();
     }
 
+    ZWODewHeaterSdk& sdk_;
+    mutable util::TtlStatusCache<DewStatus> status_cache_;
     int device_number_;
     std::optional<int> camera_id_;
     std::optional<int> camera_index_;
@@ -393,11 +441,17 @@ private:
 };
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt);
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt,
+                                                      SingletonDewHeaterSdk::instance());
+}
+
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk) {
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, sdk);
 }
 
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index) {
-    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index);
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index,
+                                                      SingletonDewHeaterSdk::instance());
 }
 
 } // namespace alpacacore::vendor::zwo
