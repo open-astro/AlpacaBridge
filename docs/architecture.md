@@ -289,7 +289,7 @@ Use these names in issues, PRs and records. Domain terms are defined in
 | HTTP route bundles | The router's per-device-type routes, one bundle per Alpaca device type; the common `dispatch_device_method` stays in the router | Planned |
 | Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); no driver on it yet; [decision 0005](decisions/0005-task-clock.md) |
 | Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); no driver on it yet; [decision 0006](decisions/0006-async-operation-ownership.md) (proposed) |
-| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Planned; decision record written as proposed with the pilot |
+| State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Utility landed (#998); no driver on it yet; [decision 0010](decisions/0010-snapshot-served-state.md) (proposed) |
 | SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | In place for QHY, ToupTek and gphoto (rules in [AGENTS.md](../AGENTS.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-and-gphoto--extend-to-other-vendors)) |
 
 ## Threading model

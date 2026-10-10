@@ -34,6 +34,7 @@ set(TEST_SOURCES
     test_motion_limits.cpp
     test_poll_settle.cpp
     test_rotator_sync_offset_store.cpp
+    test_state_snapshot.cpp
     test_task_clock.cpp
     test_async_operation.cpp
     test_connection_resolver.cpp

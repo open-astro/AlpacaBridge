@@ -11,8 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the Astroasis Oasis
-// Focuser (issue #101). No fake seam exists for the hidapi-backed protocol
-// wrapper, so this connects against the deliberately-nonexistent
+// Focuser (issue #101). This registration does not use the HID transport fake; it runs the
+// hidapi-backed protocol wrapper and connects against the deliberately-nonexistent
 // "/dev/hidraw-alpacabridge-absent" (not the unit tests' "/dev/hidraw0",
 // which can exist on a dev box and would risk hid_open_path matching an
 // unrelated HID device -- hid_open_path does not check VID:PID). Every

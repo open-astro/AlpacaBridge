@@ -352,6 +352,12 @@ Use the [`/driver-build` skill](#driver-build--guided-driver-implementation) for
 
 For production use, prefer the apt package from [apt.openastro.net](https://apt.openastro.net).
 
+## Dependency graph
+
+GitHub's dependency graph parses only the workflow action pins. `.github/workflows/dependency-submission.yml` also submits, on every push to `main`, a snapshot built by `scripts/dependency_snapshot.py` from `debian/control` (Build-Depends as development, Depends as runtime; the first package of an `a | b` alternative; a version only for an exact `(= X)` pin), the CMake `FetchContent_Declare` entries in `AlpacaHTTP/CMakeLists.txt` (`pkg:github`), and the vendored SDKs listed in `scripts/dependency_sdk_versions.json` (`pkg:generic`; `version` is `null` where the tree holds no version). The `deb` and `generic` entries document what ships and raise no Dependabot alerts. `${shlibs:Depends}` is resolved only at package build time and is not reported.
+
+When you add, remove or bump a directory under `AlpacaCore/external/`, edit `scripts/dependency_sdk_versions.json`: an SDK or library goes in `sdks` (path, name, version, where the version came from), a directory of documents or udev rules only goes in `doc_only`. The `docs-drift` CI job runs `python3 scripts/dependency_snapshot.py --check` and names the path to add or remove. Run `python3 scripts/dependency_snapshot.py` to print the snapshot; the VM never submits it.
+
 ## Packaging
 
 The Debian package is built from the `debian/` directory. It installs:

@@ -703,6 +703,14 @@ jobs:
         # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
 
+      - name: Self-test and check the dependency snapshot inventory
+        # dependency-submission.yml reports debian/control, the CMake fetches
+        # and AlpacaCore/external/ to the dependency graph. --check fails a
+        # directory under AlpacaCore/external/ that
+        # scripts/dependency_sdk_versions.json does not list, so a new SDK
+        # cannot reach the graph unreported.
+        run: python3 scripts/dependency_snapshot.py --self-test && python3 scripts/dependency_snapshot.py --check
+
       - name: Self-test the release-notes extractor
         # release.yml runs this too, but only on a tag push; here a broken
         # heading slug or section extractor fails the PR that caused it

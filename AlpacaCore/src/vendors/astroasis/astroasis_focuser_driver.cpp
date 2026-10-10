@@ -14,11 +14,13 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 
@@ -30,13 +32,15 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     AstroasisFocuserDriver(int device_number, std::string hid_path,
-                           util::ConnectionResolver<std::string> connection_resolver = {})
+                           util::ConnectionResolver<std::string> connection_resolver = {},
+                           std::unique_ptr<AstroasisHidTransport> transport = nullptr)
         : AsyncConnectable("Astroasis"),
           device_number_(device_number),
           hid_path_(std::move(hid_path)),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          protocol_() {}
+          protocol_(std::move(transport)),
+          status_cache_("Astroasis focuser", kStatusTtl, 3, "Astroasis") {}
 
     ~AstroasisFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -86,13 +90,10 @@ public:
         // concurrent by-index enumeration's bus scan (bounded; see accepted
         // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
         // connected_ is stored false before it, so the flip never waits on
-        // THAT lock. It can still wait on this driver's mutex_, behind an
-        // in-flight get_status() HID transaction (up to kDefaultTimeoutMs) or
-        // a connect handshake -- that wait predates this file's hid_global_mutex(),
-        // but is now strictly larger: an in-flight connect can itself be queued
-        // on hid_global_mutex() behind a concurrent enumeration's bus scan, which
-        // widens how long disconnect() can wait on mutex_ before it ever reaches
-        // the close.
+        // THAT lock. It can still wait on this driver's mutex_ behind a connect
+        // handshake, which can itself be queued on hid_global_mutex() behind a
+        // concurrent enumeration's bus scan. Getters no longer take mutex_; a
+        // status refill holds the cache mutex and Impl::mutex_ instead.
         stop_connection_thread();
         try {
             set_connected(false);
@@ -137,6 +138,16 @@ public:
                     }
                 },
                 "Astroasis");
+            // MaxStep is a device setting that does not change while connected:
+            // read it once here so the getters and move() never go to the device
+            // for it. A failure here must not leave the handle open.
+            try {
+                max_step_.store(protocol_.get_max_step());
+            } catch (...) {
+                protocol_.disconnect();
+                throw;
+            }
+            status_cache_.reset();
             connected_.store(true);
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
@@ -144,6 +155,8 @@ public:
             // checklist): a throwing close must not leave the driver
             // half-connected.
             connected_.store(false);
+            max_step_.store(0);
+            status_cache_.reset();
             protocol_.disconnect();
             ALPACA_LOG_INFO("Astroasis", "Focuser disconnected");
         }
@@ -173,29 +186,19 @@ public:
 
     bool get_absolute() const override { return true; }
 
-    bool get_is_moving() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status().moving;
-    }
+    bool get_is_moving() const override { return read_status().moving; }
 
     int get_max_step() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return max_step_locked();
+        return max_step_.load();
     }
 
     int get_max_increment() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return max_step_locked();
+        return max_step_.load();
     }
 
-    int get_position() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status().position;
-    }
+    int get_position() const override { return read_status().position; }
 
     double get_step_size() const override {
         // No mutex_: touches nothing it guards -- ensure_connected() is
@@ -230,9 +233,7 @@ public:
     }
 
     double get_temperature() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected();
-        auto status = const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status();
+        const auto status = read_status();
         if (status.temperature_external_valid) {
             return status.temperature_external;
         }
@@ -242,20 +243,32 @@ public:
     void halt() override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        protocol_.stop_move();
+        try {
+            protocol_.stop_move();
+        } catch (...) {
+            status_cache_.invalidate();
+            throw;
+        }
+        status_cache_.invalidate();  // a frame up to one TTL old would still say "moving"
     }
 
     void move(int position) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        int max_step = max_step_locked();
+        const int max_step = max_step_.load();
         // ConformU requires graceful clamping, not exceptions.
         if (position < 0) {
             position = 0;
         } else if (position > max_step) {
             position = max_step;
         }
-        protocol_.move_to(position);
+        try {
+            protocol_.move_to(position);
+        } catch (...) {
+            status_cache_.invalidate();
+            throw;
+        }
+        status_cache_.invalidate();  // the next IsMoving/Position read must see the move
     }
 
 private:
@@ -265,9 +278,15 @@ private:
         }
     }
 
-    // Caller must hold mutex_. Single source for the SDK call so
-    // get_max_step()/get_max_increment()/move() can't drift apart.
-    int max_step_locked() const { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_max_step(); }
+    static constexpr std::chrono::milliseconds kStatusTtl{100};
+
+    // One 0x32 transaction fills position, moving and temperature for every
+    // getter within the TTL (open-astro#294). The refill takes the wrapper's
+    // own mutex, never mutex_, so a getter is not queued behind a connect.
+    AstroasisProtocolWrapper::Status read_status() const {
+        ensure_connected();
+        return status_cache_.get([this] { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status(); });
+    }
 
     int device_number_;
     std::string hid_path_;
@@ -278,11 +297,19 @@ private:
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     AstroasisProtocolWrapper protocol_;
+    std::atomic<int> max_step_{0};  // read at connect, cleared at disconnect
+    mutable util::TtlStatusCache<AstroasisProtocolWrapper::Status> status_cache_;
     mutable std::mutex mutex_;
 };
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path) {
     return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path);
+}
+
+std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
+                                                        std::unique_ptr<AstroasisHidTransport> transport) {
+    return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path, util::ConnectionResolver<std::string>{},
+                                                    std::move(transport));
 }
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_deferred(int device_number,

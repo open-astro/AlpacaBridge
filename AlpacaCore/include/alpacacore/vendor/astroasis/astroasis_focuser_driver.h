@@ -14,6 +14,7 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/vendor/astroasis/astroasis_hid_transport.h>
 
 #include <memory>
 #include <string>
@@ -28,6 +29,10 @@ namespace alpacacore::vendor::astroasis {
  * @return Unique pointer to focuser driver
  */
 std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path);
+
+/// Test seam: as create_astroasis_focuser(), over an injected HID transport (open-astro#294).
+std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
+                                                        std::unique_ptr<AstroasisHidTransport> transport);
 
 /**
  * @brief Create an Astroasis Oasis Focuser driver by auto-detecting the USB HID device.
