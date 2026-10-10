@@ -17,6 +17,8 @@
 
 namespace alpacacore::vendor::svbony {
 
+class SVBSDK;
+
 /**
  * @brief Create an SVBONY camera driver by camera index (enumeration order).
  *
@@ -25,5 +27,8 @@ namespace alpacacore::vendor::svbony {
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index);
+
+// Test seam. `sdk` is non-owning and must outlive the driver.
+std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk);
 
 } // namespace alpacacore::vendor::svbony

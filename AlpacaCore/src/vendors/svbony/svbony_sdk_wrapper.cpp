@@ -39,7 +39,7 @@ SVBImageType from_svb_image_type(SVB_IMG_TYPE type) {
     case SVB_IMG_RGB32:
         return SVBImageType::Rgb32;
     default:
-        return SVBImageType::Raw8;
+        return SVBImageType::Unknown;
     }
 }
 
@@ -57,6 +57,8 @@ SVB_IMG_TYPE to_svb_image_type(SVBImageType type) {
         return SVB_IMG_RGB24;
     case SVBImageType::Rgb32:
         return SVB_IMG_RGB32;
+    case SVBImageType::Unknown:
+        return SVB_IMG_END;
     }
     return SVB_IMG_RAW8;
 }

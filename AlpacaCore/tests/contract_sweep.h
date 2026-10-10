@@ -869,6 +869,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
+    {"svbony", "camera", "fake_svbony_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},

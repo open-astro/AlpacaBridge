@@ -116,6 +116,11 @@
 
 #include "fake_playerone_sdk.h"
 #endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+
+#include "fake_svbony_sdk.h"
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
@@ -1223,6 +1228,30 @@ Tier2Host tier2_host_playerone_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_SVBONY
+Tier2Host tier2_host_svbony_camera() {
+    Tier2Host h{"svbony_camera", "svbony", "camera", "fake_svbony_sdk.h", DeviceType::Camera, "svbony_camera", {},
+                false,           {},       ""};
+    h.connectable = [](bool) {
+        return host_over(std::make_shared<alpacacore::test::FakeSVBSDK>(),
+                         [](alpacacore::test::FakeSVBSDK& sdk) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+                         });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeSVBSDK>();
+        sdk->set_camera_present(false);
+        return host_over(sdk, [](alpacacore::test::FakeSVBSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+        });
+    };
+    h.connecting_unobservable =
+        "the fake's SDK calls complete immediately, so Connect may settle before the first "
+        "Connecting sample; the async lifecycle is still exercised";
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GPHOTO
 struct GPhotoSdkHold {
     alpacacore::test::FakeGPhotoSDK fake;
@@ -1417,6 +1446,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_PLAYERONE(X)
 #endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+#define CS2_SVBONY(X) X(svbony_camera, NPR)
+#else
+#define CS2_SVBONY(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #define CS2_GPHOTO(X) X(gphoto_camera, NPR)
 #else
@@ -1438,6 +1472,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
     CS2_PLAYERONE(X) \
+    CS2_SVBONY(X) \
     CS2_GPHOTO(X) \
     CS2_WANDERERASTRO(X)
 // clang-format on
@@ -1541,6 +1576,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
     CS2_ENABLED("playerone")
+#endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+    CS2_ENABLED("svbony")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
     CS2_ENABLED("gphoto")
