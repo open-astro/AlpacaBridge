@@ -10,9 +10,10 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
-#include <alpacacore/util/error_handling.h>
 #include <SVBCameraSDK.h>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
+
 #include <chrono>
 #include <iomanip>
 #include <mutex>
