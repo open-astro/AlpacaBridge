@@ -1,0 +1,45 @@
+# Close the issues a merged PR into stable/** names with a closing keyword.
+# GitHub closes linked issues only for a PR merged into the default branch, and
+# beta-channel fixes merge into stable/X.Y (docs/beta-channel.md).
+#
+# pull_request_target: our PRs come from a fork, where pull_request gets a
+# read-only token. That trigger runs with write access, so this job checks out
+# the base ref only (never the PR head) and passes the untrusted PR body to
+# scripts/close_linked_issues.py through the environment, never through a
+# `${{ }}` expansion in `run:`.
+
+name: Close linked issues
+
+on:
+  pull_request_target:
+    types: [closed]
+    branches: ['stable/**']
+
+permissions: {}
+
+jobs:
+  close-issues:
+    name: close-issues (stable PR)
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Checkout base ref
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          persist-credentials: false
+
+      - name: Close issues named by the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          python3 scripts/close_linked_issues.py --repo "${REPO}" --pr "${PR_NUMBER}" \
+            --base "${BASE_REF}" --sha "${MERGE_SHA}"
