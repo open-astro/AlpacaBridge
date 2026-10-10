@@ -42,8 +42,10 @@ Pick the mode from the argument and the branch (ask when unclear):
   fragments (Step 2.1 wrote `VERSION` `X.Y.0` first; `--release` takes a bare `X.Y.Z` only and
   refuses a `~betaN`, so it cannot consume the fragments during a beta), Step 6 tags
   `vX.Y.Z` on `stable/X.Y`, then run the **Merge down**. Check the promotion criteria first: 14
-  days since the last beta tag with no open regression, a full maintainer rig session on the final
-  beta, ConformU re-run for every driver touched in the beta. A hotfix needs no beta round.
+  days since the last beta tag with no open regression (and, for a major `X.0.0`, 28 days since
+  its first beta tag), a full maintainer rig session on the final beta, ConformU re-run for every
+  driver touched in the beta, and no open issue in the `X.Y.0 promotion` milestone. A hotfix
+  needs no beta round.
 - **Plain release from `main`** is no longer the normal path; use it only when the maintainer says so
   (a stable tag is not branch-checked by `release.yml`; a beta tag must sit on its own `stable/X.Y` or the
   workflow refuses it).

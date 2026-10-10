@@ -114,8 +114,14 @@ newest build of either kind.
 All three hold before promoting:
 
 - At least 14 days since the last beta tag with no open regression labelled for that release.
+  A major release (`X.0.0`) also needs at least 28 days since its first beta tag, so a major
+  release spends at least four weeks in beta even when its last beta came out quickly.
 - At least one full rig session by the maintainer on the final beta build.
 - A ConformU re-run on the rig for every driver touched during the beta.
+
+Track the hardware work in a GitHub milestone named `X.Y.0 promotion`: one issue for each
+ConformU run or hardware check the release waits on. A release is ready to promote when that
+milestone has no open issues and the criteria above hold.
 
 ## Who does what
 
