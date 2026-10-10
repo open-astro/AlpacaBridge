@@ -132,8 +132,7 @@ TEST_CASE("SkyWatcher link loss - serial: a fault past the staleness bound loses
     run_staleness_scenario(t, clock);
 }
 
-TEST_CASE("SkyWatcher link loss - a fault that clears inside the bound is not a loss",
-          "[skywatcher][linkloss][udp]") {
+TEST_CASE("SkyWatcher link loss - a fault that clears inside the bound is not a loss", "[skywatcher][linkloss][udp]") {
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());

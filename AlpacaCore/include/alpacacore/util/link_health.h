@@ -174,7 +174,8 @@ public:
     /// True when a latched fault has stood, without a good reply, for at least
     /// `bound` on the task clock. False when not latched or latched without a
     /// stamp.
-    bool fault_stale(std::chrono::steady_clock::time_point now, std::chrono::nanoseconds bound = kLinkStalenessBound) const {
+    bool fault_stale(std::chrono::steady_clock::time_point now,
+                     std::chrono::nanoseconds bound = kLinkStalenessBound) const {
         return !fault_.empty() && fault_since_ && (now - *fault_since_) >= bound;
     }
 

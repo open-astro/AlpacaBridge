@@ -159,8 +159,8 @@ public:
      * hardware and never starts an exchange (it reads the latch a driver
      * already keeps, issue #237 / #505). `Connected` stays true while a link is
      * faulted and younger than the staleness bound (decision 0009; a driver
-     * that adopted it keeps the last text after the link is lost), so the management listing reports this beside it and the web
-     * UI shows a connected-but-silent device as red rather than green.
+     * that adopted it keeps the last text after the link is lost), so the management listing reports this beside it and
+     * the web UI shows a connected-but-silent device as red rather than green.
      */
     virtual std::string get_link_fault() const { return {}; }
 
