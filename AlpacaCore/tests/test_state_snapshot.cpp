@@ -61,6 +61,7 @@ TEST_CASE("StateSnapshot - write-through is visible before the next poll", "[sta
     FakeTaskClock clock;
     StateSnapshot<Pointing> snap(clock, 2s);
     REQUIRE(snap.publish(snap.begin_poll(), Pointing{1.0, 2.0}));
+    const auto published_at = clock.now();
 
     clock.advance(500ms);
     snap.write([](Pointing& p) { p.ra = 9.0; });
@@ -68,7 +69,7 @@ TEST_CASE("StateSnapshot - write-through is visible before the next poll", "[sta
     auto r = snap.read();
     CHECK(r->value.ra == 9.0);
     CHECK(r->value.dec == 2.0);  // untouched fields keep the polled value
-    CHECK(r->measured_at == clock.now());
+    CHECK(r->measured_at == published_at);  // a write is not a measurement
 }
 
 TEST_CASE("StateSnapshot - a late publish does not overwrite a newer write", "[state_snapshot][unit]") {
@@ -86,4 +87,42 @@ TEST_CASE("StateSnapshot - a late publish does not overwrite a newer write", "[s
     // The next poll, started after the write, publishes normally.
     CHECK(snap.publish(snap.begin_poll(), Pointing{9.0, 2.5}));
     CHECK(snap.read()->value.dec == 2.5);
+}
+
+TEST_CASE("StateSnapshot - a write before the first publish is not served", "[state_snapshot][unit]") {
+    FakeTaskClock clock;
+    StateSnapshot<Pointing> snap(clock, 2s);
+
+    snap.write([](Pointing& p) { p.ra = 9.0; });
+    CHECK_FALSE(snap.read().has_value());
+
+    REQUIRE(snap.publish(snap.begin_poll(), Pointing{1.0, 2.0}));
+    snap.reset();
+    snap.write([](Pointing& p) { p.ra = 9.0; });
+    CHECK_FALSE(snap.read().has_value());
+}
+
+TEST_CASE("StateSnapshot - a write does not refresh measured_at", "[state_snapshot][unit]") {
+    FakeTaskClock clock;
+    StateSnapshot<Pointing> snap(clock, 2s);
+    REQUIRE(snap.publish(snap.begin_poll(), Pointing{1.0, 2.0}));
+    const auto published_at = clock.now();
+
+    clock.advance(10min);
+    snap.write([](Pointing& p) { p.ra = 9.0; });
+
+    auto r = snap.read();
+    CHECK(r->stale);
+    CHECK(r->measured_at == published_at);
+    CHECK(r->value.ra == 9.0);
+}
+
+TEST_CASE("StateSnapshot - a poll in flight across reset is dropped", "[state_snapshot][unit]") {
+    FakeTaskClock clock;
+    StateSnapshot<Pointing> snap(clock, 2s);
+
+    const auto token = snap.begin_poll();
+    snap.reset();
+    CHECK_FALSE(snap.publish(token, Pointing{1.0, 2.0}));
+    CHECK_FALSE(snap.read().has_value());
 }
