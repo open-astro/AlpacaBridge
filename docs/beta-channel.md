@@ -26,6 +26,12 @@ update card never offers a beta. With the URL alone it offers a beta that apt ca
 
 The URL names `binary-arm64` on purpose: AlpacaBridge ships for arm64 only.
 
+**Without the apt line**, install one beta by hand: every beta pre-release on GitHub carries
+`alpacabridge_X.Y.Z-beta.N_arm64.deb` and its `.sha256` under Assets. Download both, check the
+file with `sha256sum -c alpacabridge_X.Y.Z-beta.N_arm64.deb.sha256`, then run
+`sudo apt install ./alpacabridge_X.Y.Z-beta.N_arm64.deb`. apt does not offer the next beta to a
+build installed this way; repeat the download for each beta, or opt in as above.
+
 **Opt out** by removing `beta` from the apt line and restoring the default
 `update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
 on the beta build until the stable release overtakes it.
@@ -50,8 +56,9 @@ newest build of either kind.
    `vX.Y.0-beta.N`. The `changelog.d/` fragments are not consumed. A legacy
    `## [A.B.C] - UNRELEASED` heading in `CHANGELOG.md` is renamed to `X.Y.0` (heading only), so
    the `.deb` build does not warn that it disagrees with `VERSION`.
-2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file. The `.deb` is
-   published to the apt `beta` component only (outside this repository).
+2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
+   `.deb` in a Debian trixie container and attaches it with a `.sha256` (job `beta-deb`). The `.deb`
+   is also published to the apt `beta` component (outside this repository).
 3. **Fix.** A bug found in beta is fixed by a PR against `stable/X.Y`. It is not fixed on `main`
    first and cherry-picked. A fix for code the branch does not have goes to `main` as usual.
 4. **Re-beta and merge down.** Each batch of fixes becomes the next beta tag. After every beta

@@ -25,6 +25,7 @@
 #include <chrono>
 #include <cmath>
 #include <ctime>
+#include <functional>
 #include <mutex>
 #include <numbers>
 #include <optional>
@@ -999,12 +1000,28 @@ public:
         check_connected();
         check_not_parked_locked("AbortSlew");
         auto& protocol = OnStepProtocolWrapper::instance();
-        protocol.abort_slew();
-        for (int dir = 0; dir < 4; ++dir) {
+        // Try every stop on its own, so one lost command cannot skip the others (#781).
+        std::string stop_error;
+        const auto try_stop = [&stop_error](const std::function<void()>& stop) {
             try {
-                protocol.move_axis_stop(dir);
-            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                stop();
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) {
+                    stop_error = ex.what();
+                }
+            } catch (...) {
+                if (stop_error.empty()) {
+                    stop_error = "unknown exception";
+                }
             }
+        };
+        try_stop([&protocol]() { protocol.abort_slew(); });
+        for (int dir = 0; dir < 4; ++dir) {
+            try_stop([&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
+        if (!stop_error.empty()) {
+            // The mount may still be moving: leave Slewing as it was.
+            throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();

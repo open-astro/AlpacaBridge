@@ -236,7 +236,8 @@ git push origin vX.Y.0-beta.N
 ```
 
 Before the first beta tag of a branch, dry-run the workflow against the merged branch and read
-its "Build release notes" step; it stops before publishing anything. Dispatch it with
+its "Build release notes" step and the `beta-deb` job's "Build the .deb" step (an all-vendors
+build in a `debian:trixie` container, several minutes); it stops before publishing anything. Dispatch it with
 `--ref stable/X.Y` and no other ref: a dry run has no tag, so the branch check tests the tip of the
 dispatched branch, and from any other branch it fails even when the eventual tag would pass:
 
@@ -246,7 +247,10 @@ sleep 10   # the new run is not listed at once; the filters keep an older tag ru
 gh run watch "$(gh run list --workflow=release.yml --event workflow_dispatch --branch stable/X.Y --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
-Then wait for the `Release` workflow (it is text-only and finishes in under a minute):
+Then wait for the `Release` workflow. A stable tag runs only the text-only `release` job and
+finishes in under a minute. A beta tag also runs `beta-deb`, which builds the `.deb` and attaches
+it with its `.sha256` after the pre-release is already published; that takes several minutes, and
+`gh run watch` waits for it:
 
 ```bash
 gh run list --workflow=release.yml --limit 1
@@ -254,14 +258,36 @@ gh run watch "$(gh run list --workflow=release.yml --limit 1 --json databaseId -
 gh release view vX.Y.Z --json name,body --jq '.name, (.body | .[0:400])'
 ```
 
-The body must start with the plain-language notes, not the CHANGELOG bullets. If the workflow
+The body must start with the plain-language notes, not the CHANGELOG bullets.
+
+Beta mode: also confirm the assets before announcing the beta, because its notes tell testers to
+download them:
+
+```bash
+gh release view vX.Y.0-beta.N --json assets --jq '.assets[].name'
+# alpacabridge_X.Y.0-beta.N_arm64.deb
+# alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
+```
+
+If `beta-deb` failed, the pre-release stands with notes and no `.deb`: fix the cause, then re-run
+the failed job (`gh run rerun <run-id> --failed`; the upload uses `--clobber`).
+
+If the workflow
 failed (tag/VERSION mismatch, an undated CHANGELOG section), fix the cause on a new PR, delete and re-push
 the tag after it merges (`git tag -d vX.Y.Z && git push origin :refs/tags/vX.Y.Z`), and verify
 again. If the workflow never ran, the tag landed on a commit without `release.yml`; create the
 Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`
 (beta: `gh release create vX.Y.0-beta.N --prerelease --notes-file docs/releases/X.Y.0-beta.N.md
 --verify-tag`; without `--prerelease` the beta would become the Latest release above the current
-stable).
+stable). A beta Release created by hand carries no `.deb`, and its notes point testers at one:
+build it on a Debian trixie arm64 host and attach it under the tag spelling:
+
+```bash
+scripts/build_deb.sh
+cp ../alpacabridge_X.Y.0~betaN_arm64.deb alpacabridge_X.Y.0-beta.N_arm64.deb
+sha256sum alpacabridge_X.Y.0-beta.N_arm64.deb > alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
+gh release upload vX.Y.0-beta.N alpacabridge_X.Y.0-beta.N_arm64.deb alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
+```
 
 ## Step 7 — Wrap up
 

@@ -434,6 +434,24 @@ private:
             load_readout_modes_locked(id);
 
             reset_exposure_state_locked();
+
+            // Seed the cached CCD temperature with one CURTEMP read so
+            // CCDTemperature works before the telemetry worker's first poll
+            // (open-astro#941). Runs before that worker starts, so the two
+            // cannot race on the cache. A failed read is not an error and
+            // never substitutes a value: the property keeps reporting one.
+            telemetry_temp_valid_ = false;
+            telemetry_temp_unsupported_ = false;
+            if (camera_info_valid_ && camera_info_.has_cooler) {
+                try {
+                    if (sdk_.is_control_available(id, control::CURTEMP)) {
+                        telemetry_ccd_temp_c_ = sdk_.get_param(id, control::CURTEMP);
+                        telemetry_temp_valid_ = true;
+                    }
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_DEBUG("QHY", "Connect-time CURTEMP seed failed: " + std::string(e.what()));
+                }
+            }
         } catch (...) {
             try {
                 sdk_.close_camera(id);

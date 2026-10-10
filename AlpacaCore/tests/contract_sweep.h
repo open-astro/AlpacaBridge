@@ -242,7 +242,12 @@ inline constexpr const char* kSrcAgentsAxis =
 inline ContractEntry contract_entry_zwo_camera() {
     return make_entry(
         "zwo_camera", "zwo", "camera", DeviceType::Camera,
-        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::zwo::create_zwo_camera_by_index(n, 0); },
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::zwo::ZwoCameraBinding binding;
+            binding.identity.camera_index = 0;
+            binding.unique_id = vendor::zwo::generate_zwo_unique_id();
+            return vendor::zwo::create_zwo_camera_bound(n, binding);
+        },
         kSrcAgents);
 }
 inline ContractEntry contract_entry_zwo_telescope() {

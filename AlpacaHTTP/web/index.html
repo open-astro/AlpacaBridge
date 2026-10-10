@@ -837,6 +837,13 @@
                             <input type="number" id="camera-id" name="cameraId" min="0">
                             <small>If set, overrides the camera index.</small>
                         </div>
+                        <!-- Identity the server learned (#914). Carried through an edit,
+                             which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
+                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial">
+                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName">
+                        <input type="hidden" id="zwo-camera-unique-id" name="zwoCameraUniqueId">
+                        <input type="hidden" id="zwo-camera-loaded-index">
+                        <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
 
                     <div id="zwo-filterwheel-fields" style="display: none;">

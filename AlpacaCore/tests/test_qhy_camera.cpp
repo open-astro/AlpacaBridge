@@ -439,6 +439,37 @@ TEST_CASE("QHY Camera Driver - a populated SDK version is surfaced in both place
     CHECK(*driver->get_device_sdk_version() == "fake-qhy-1.0");
 }
 
+TEST_CASE("QHY Camera Driver - CCDTemperature is readable right after connect", "[qhy][camera][unit]") {
+    // open-astro#941. The telemetry worker's first CURTEMP poll lands after
+    // Connected=true returns, so a read in that window failed with
+    // InvalidOperation. Connect now seeds the cache with one CURTEMP read.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_ccd_temperature() == Catch::Approx(-5.0));
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - a failed connect-time CURTEMP read keeps CCDTemperature an error",
+          "[qhy][camera][unit]") {
+    // open-astro#941. The seed read failing must neither fail the connect nor
+    // be replaced by the setpoint or a fixed number.
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    fake.throw_from.insert("get_param");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK_THROWS_AS(driver->get_ccd_temperature(), alpacacore::AlpacaException);
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - disconnect does not wait out the telemetry sleep", "[qhy][camera][unit]") {
     // open-astro#323. The telemetry worker polls CURTEMP once a second and
     // used a bare sleep_for, which is not interruptible, so setting the stop

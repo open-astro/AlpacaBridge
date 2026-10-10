@@ -13,7 +13,12 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/vendor/zwo/zwo_camera_identity.h>
+
 #include <memory>
+#include <set>
+#include <string>
+#include <vector>
 
 namespace alpacacore::vendor::zwo {
 
@@ -34,5 +39,26 @@ std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index);
+
+/**
+ * @brief What a ZWO camera config entry binds a driver to.
+ *
+ * \p identity is resolved against a fresh enumeration on every connect
+ * (serial first, then model name, then the id/index hints), so a camera
+ * re-plugged under another index still binds by serial. \p unique_id is the
+ * stored UniqueID a serial-less body reports; \p claimed_serials are the
+ * serials other config entries bind, which a serial-less entry skips.
+ */
+struct ZwoCameraBinding {
+    ZwoConfiguredIdentity identity;
+    std::string unique_id;
+    std::set<std::string> claimed_serials;
+};
+
+/// Every connected camera with its serial (opens each one briefly).
+std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_model_name = {});
+
+/// Create a camera driver for a config entry. See ZwoCameraBinding.
+std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding);
 
 } // namespace alpacacore::vendor::zwo

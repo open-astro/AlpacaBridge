@@ -51,7 +51,26 @@ TEST_CASE("ZWO Camera Driver - Device metadata", "[zwo][camera][unit]") {
     CHECK(driver->get_driver_info() == "AlpacaCore ZWO Camera Driver");
     CHECK(driver->get_driver_version() == alpacacore::kVersion);
     CHECK(driver->get_interface_version() == 4);  // ICameraV4 (Platform 7)
-    CHECK(driver->get_unique_id() == "ZWO_3");
+    // Not derived from the device number or the enumeration index (#914).
+    CHECK(driver->get_unique_id().rfind("ZWO_UID_", 0) == 0);
+    CHECK(driver->get_unique_id() == driver->get_unique_id());
+}
+
+TEST_CASE("ZWO Camera Driver - UniqueID follows the config entry, not the device number", "[zwo][camera][unit]") {
+    alpacacore::vendor::zwo::ZwoCameraBinding serial_less;
+    serial_less.identity.camera_name = "ZWO ASI120MM Mini";
+    serial_less.unique_id = "ZWO_UID_00112233445566ff";
+    alpacacore::vendor::zwo::ZwoCameraBinding with_serial;
+    with_serial.identity.serial = "0c190e111d020900";
+    with_serial.unique_id = "ZWO_UID_ignored";
+
+    // Same stored value on two starts and under two device numbers.
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(0, serial_less)->get_unique_id() ==
+          "ZWO_UID_00112233445566ff");
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(1, serial_less)->get_unique_id() ==
+          "ZWO_UID_00112233445566ff");
+    CHECK(alpacacore::vendor::zwo::create_zwo_camera_bound(1, with_serial)->get_unique_id() ==
+          "ZWO_SN_0c190e111d020900");
 }
 
 TEST_CASE("ZWO Camera Driver - DeviceState is empty when disconnected", "[zwo][camera][unit]") {

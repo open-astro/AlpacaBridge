@@ -251,6 +251,11 @@ function resetDeviceForm() {
     // setEditMode(false)); call it explicitly too so this helper is
     // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
+    // Hidden inputs keep script-set values through form.reset().
+    for (const id of ['zwo-camera-serial', 'zwo-camera-name', 'zwo-camera-unique-id',
+        'zwo-camera-loaded-index', 'zwo-camera-loaded-id']) {
+        setFormValue(id, '');
+    }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
     updateVendorOptions();
@@ -705,6 +710,42 @@ function setEditMode(isEditing) {
             updateAutoNumbering();
         }
     }
+}
+
+// The serial, model name and UniqueID the server learned for a ZWO camera
+// (#914). An edit removes the entry and adds it again, so the form resends
+// them; only while the index and id are the ones the form loaded. A changed
+// index or id points the entry at another body, which then learns its own.
+function zwoCameraIdentityFields(formData) {
+    const loadedIndex = String(document.getElementById('zwo-camera-loaded-index')?.value ?? '');
+    const loadedId = String(document.getElementById('zwo-camera-loaded-id')?.value ?? '');
+    const indexValue = String(formData.get('cameraIndex') ?? '');
+    const idValue = String(formData.get('cameraId') ?? '');
+    const fields = {};
+    // Only an edit of that entry resends them; an add never inherits the
+    // hidden values of a camera edited earlier.
+    const form = document.getElementById('device-form');
+    if (!form || form.dataset.editing !== 'true') {
+        return fields;
+    }
+    if (loadedIndex === '' && loadedId === '') {
+        return fields;
+    }
+    if (indexValue !== loadedIndex || idValue !== loadedId) {
+        return fields;
+    }
+    const pairs = [
+        ['serialNumber', 'zwoCameraSerial'],
+        ['cameraName', 'zwoCameraName'],
+        ['uniqueId', 'zwoCameraUniqueId'],
+    ];
+    for (const [key, name] of pairs) {
+        const value = formData.get(name);
+        if (typeof value === 'string' && value !== '') {
+            fields[key] = value;
+        }
+    }
+    return fields;
 }
 
 function setFormValue(elementId, value) {
@@ -1202,6 +1243,14 @@ function startEditDevice(device) {
     }
     setFormValue('camera-index', config.cameraIndex);
     setFormValue('camera-id', config.cameraId);
+    // #914: remember the identity the server learned for a ZWO camera, and the
+    // index/id the form loaded it with, so the submit can resend it unchanged.
+    const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
+    setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
+    setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
+    setFormValue('zwo-camera-unique-id', keepZwoIdentity ? config.uniqueId : '');
+    setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
+    setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
     setFormValue('filterwheel-index', config.filterwheelIndex);
     setFormValue('filterwheel-id', config.filterwheelId);
     const filterNamesField = document.getElementById('filterwheel-names');
@@ -4071,6 +4120,9 @@ document.getElementById('device-form').addEventListener('submit', async function
                 if (!Number.isNaN(cameraId)) {
                     deviceData.cameraId = cameraId;
                 }
+            }
+            if (normalizedType === 'camera') {
+                Object.assign(deviceData, zwoCameraIdentityFields(formData));
             }
         }
         if (normalizedType === 'filterwheel') {

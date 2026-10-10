@@ -27,6 +27,7 @@
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 namespace alpacacore::vendor::zwo {
 
@@ -62,11 +63,11 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOCameraDriver(int device_number, std::optional<int> camera_id, std::optional<int> camera_index)
+    ZWOCameraDriver(int device_number, ZwoCameraBinding binding)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),
-          camera_id_(camera_id),
-          camera_index_(camera_index),
+          binding_(std::move(binding)),
+          camera_id_(binding_.identity.camera_id),
           serial_number_(),
           camera_info_(),
           camera_info_valid_(false),
@@ -126,10 +127,9 @@ public:
 
     std::string get_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!serial_number_.empty()) {
-            return "ZWO_SN_" + serial_number_;
-        }
-        return "ZWO_" + std::to_string(device_number_);
+        // Never derived from the device number or the enumeration index: both
+        // move between starts, and the ASCOM UniqueID must not.
+        return zwo_unique_id(serial_number_.empty() ? binding_.identity.serial : serial_number_, binding_.unique_id);
     }
 
     std::string get_description() const override {
@@ -254,12 +254,7 @@ public:
         // driver half-connected — same order as the switch/EFW/CAA/EAF
         // siblings, per the AGENTS.md disconnect rule (issue #116).
         const std::optional<int> close_id = camera_id_;
-        if (camera_index_.has_value()) {
-            camera_id_.reset();
-            camera_info_ = {};
-            camera_info_valid_ = false;
-            serial_number_.clear();
-        }
+        serial_number_.clear();
         reset_exposure_state_locked();
         connected_.store(false);
         if (close_id.has_value()) {
@@ -976,8 +971,8 @@ public:
 
 private:
     int device_number_;
+    ZwoCameraBinding binding_;
     std::optional<int> camera_id_;
-    std::optional<int> camera_index_;
     std::string serial_number_;
     ZWOCameraInfo camera_info_;
     bool camera_info_valid_;
@@ -1285,31 +1280,20 @@ private:
     }
 
     int resolve_camera_id_locked() {
-        if (camera_index_.has_value()) {
-            auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
-            if (cameras.empty()) {
-                ALPACA_LOG_WARN("ZWO", "No ZWO cameras detected by SDK");
-                throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
-            }
-            int index = camera_index_.value();
-            if (index < 0 || index >= static_cast<int>(cameras.size())) {
-                ALPACA_LOG_WARN("ZWO", "Camera index out of range: " + std::to_string(index) + " (count=" + std::to_string(cameras.size()) + ")");
-                throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
-            }
-
-            const auto& info = cameras[static_cast<std::size_t>(index)];
-            ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(index) + ": " + info.name + " (ID " + std::to_string(info.camera_id) + ")");
-            camera_id_ = info.camera_id;
-            camera_info_ = info;
-            camera_info_valid_ = true;
-            return camera_id_.value();
+        const auto found =
+            ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name));
+        const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
+        if (!result.camera.has_value()) {
+            ALPACA_LOG_WARN("ZWO", result.message);
+            throw AlpacaException(result.message, result.failure == ZwoResolveFailure::IndexOutOfRange
+                                                      ? AlpacaError::InvalidValue
+                                                      : AlpacaError::NotConnected);
         }
-
-        if (camera_id_.has_value()) {
-            return camera_id_.value();
-        }
-
-        throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
+        const auto& camera = result.camera.value();
+        ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(camera.index) + ": " + camera.name + " (ID " +
+                                   std::to_string(camera.camera_id) + ")");
+        camera_id_ = camera.camera_id;
+        return camera.camera_id;
     }
 
     void refresh_camera_info_locked(int camera_id) {
@@ -1332,15 +1316,6 @@ private:
                 if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id_.value(), info)) {
                     camera_info_ = info;
                     camera_info_valid_ = true;
-                    return;
-                }
-            } else if (camera_index_.has_value()) {
-                auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
-                int index = camera_index_.value();
-                if (index >= 0 && index < static_cast<int>(cameras.size())) {
-                    camera_info_ = cameras[static_cast<std::size_t>(index)];
-                    camera_info_valid_ = true;
-                    camera_id_ = camera_info_.camera_id;
                 }
             }
         } catch (const std::exception& e) {
@@ -1354,48 +1329,21 @@ private:
         }
 
         std::optional<int> camera_id;
-        std::optional<int> camera_index;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             camera_id = camera_id_;
-            camera_index = camera_index_;
         }
 
+        // By id only, and cheap (no camera is opened): the name is shown on
+        // every management poll. The id is a hint; the next connect resolves
+        // the camera again by serial, so a stale id is never rebound here.
         try {
-            bool refreshed = false;
             if (camera_id.has_value()) {
                 ZWOCameraInfo info;
                 if (ZWOSDKWrapper::instance().get_camera_info_by_id(camera_id.value(), info)) {
                     std::lock_guard<std::mutex> lock(mutex_);
                     camera_info_ = info;
                     camera_info_valid_ = true;
-                    refreshed = true;
-                } else if (camera_index.has_value()) {
-                    // Only an id resolved from the index is re-resolved; an id
-                    // from the config is kept, or the next connect fails with
-                    // "Camera ID not specified" (issue #738).
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    camera_id_.reset();
-                    serial_number_.clear();
-                }
-            }
-
-            if (refreshed) {
-                return;
-            }
-
-            if (camera_index.has_value()) {
-                auto cameras = ZWOSDKWrapper::instance().enumerate_cameras();
-                int index = camera_index.value();
-                if (index >= 0 && index < static_cast<int>(cameras.size())) {
-                    const auto& info = cameras[static_cast<std::size_t>(index)];
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (!camera_id_.has_value() || camera_id_.value() != info.camera_id) {
-                        serial_number_.clear();
-                    }
-                    camera_info_ = info;
-                    camera_info_valid_ = true;
-                    camera_id_ = info.camera_id;
                 }
             }
         } catch (const std::exception& e) {
@@ -1709,11 +1657,25 @@ private:
 };
 
 std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id) {
-    return std::make_unique<ZWOCameraDriver>(device_number, camera_id, std::nullopt);
+    ZwoCameraBinding binding;
+    binding.identity.camera_id = camera_id;
+    binding.unique_id = generate_zwo_unique_id();
+    return create_zwo_camera_bound(device_number, binding);
 }
 
 std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index) {
-    return std::make_unique<ZWOCameraDriver>(device_number, std::nullopt, camera_index);
+    ZwoCameraBinding binding;
+    binding.identity.camera_index = camera_index;
+    binding.unique_id = generate_zwo_unique_id();
+    return create_zwo_camera_bound(device_number, binding);
+}
+
+std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding) {
+    return std::make_unique<ZWOCameraDriver>(device_number, binding);
+}
+
+std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_model_name) {
+    return ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(only_model_name));
 }
 
 } // namespace alpacacore::vendor::zwo

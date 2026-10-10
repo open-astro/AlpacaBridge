@@ -299,8 +299,14 @@ private:
     // anyway and left for the driver's connect-time guard to refuse.
     enum class ConfigSource : std::uint8_t { Api, Persisted };
 
+    //
+    // \p learned_config, when given, receives the keys the registration worked
+    // out about the device that the entry does not yet carry (a ZWO camera's
+    // serialNumber, cameraName and uniqueId, #914). The caller stores them
+    // with the entry: this function never writes the persisted list itself,
+    // because the API path has not added the entry to it yet.
     bool register_device_from_config(const nlohmann::json& config, std::string& error_message,
-                                     ConfigSource source = ConfigSource::Api);
+                                     ConfigSource source = ConfigSource::Api, nlohmann::json* learned_config = nullptr);
 
     // Issue #380, generalising the rule #353 introduced for the Sky-Watcher
     // site-coordinate check: what a validation failure inside

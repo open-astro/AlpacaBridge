@@ -32,6 +32,7 @@
 #include <cstddef>
 #include <ctime>
 #include <exception>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -1740,14 +1741,27 @@ public:
                 // The wrapper serializes transactions, so a GOTO already in flight
                 // must finish (or time out) before these stops can reach the mount.
                 auto& protocol = SynScanProtocolWrapper::instance();
-                protocol.cancel_goto();
-                protocol.move_axis_fixed_rate(0, 0);
-                protocol.move_axis_fixed_rate(1, 0);
-                if (tracking_mode_cached_ > 0) {
-                    // Stopping an RA guide pulse also stops sidereal tracking.
-                    // AbortSlew owns this stop, so restore the currently
-                    // requested mode only after both axes have stopped.
-                    protocol.set_tracking_mode(tracking_mode_cached_);
+                // Try every stop on its own, so one lost command cannot skip the others (#781).
+                std::string stop_error;
+                const auto try_stop = [&stop_error](const std::function<void()>& stop) {
+                    try {
+                        stop();
+                    } catch (const std::exception& ex) {
+                        if (stop_error.empty()) {
+                            stop_error = ex.what();
+                        }
+                    } catch (...) {
+                        if (stop_error.empty()) {
+                            stop_error = "unknown exception";
+                        }
+                    }
+                };
+                try_stop([&protocol]() { protocol.cancel_goto(); });
+                try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });
+                try_stop([&protocol]() { protocol.move_axis_fixed_rate(1, 0); });
+                if (!stop_error.empty()) {
+                    // The mount may still be moving: leave Slewing and the slew state as they were.
+                    throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
                 }
                 parking_ = false;  // an aborted park never reaches AtPark
                 ++motion_generation_;
@@ -1761,6 +1775,14 @@ public:
                 position_override_until_ = util::TaskClock::clock::time_point::min();
                 manual_axis_slewing_[0] = false;
                 manual_axis_slewing_[1] = false;
+                if (tracking_mode_cached_ > 0) {
+                    // Stopping an RA guide pulse also stops sidereal tracking.
+                    // AbortSlew owns this stop, so restore the currently
+                    // requested mode only after both axes have stopped. The motion
+                    // state is already clear, so a throwing write cannot leave
+                    // Slewing true over stopped axes (#830).
+                    protocol.set_tracking_mode(tracking_mode_cached_);
+                }
             }
         } catch (...) {
             reap_slew_task();

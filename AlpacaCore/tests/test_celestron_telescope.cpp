@@ -17,6 +17,7 @@
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -582,6 +583,60 @@ TEST_CASE("Celestron Telescope Driver - non-finite slew and sync coordinates are
     }
     SECTION("SyncToCoordinates Declination") {
         require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    }
+
+    driver->set_connected(false);
+}
+
+// #781: AbortSlew ran the cancel and both axis stops bare, so a throw from the
+// first skipped the other two, and a stop lost on a dead link was reported as a
+// clean abort. Every stop is tried, a failure throws DriverException afterwards
+// and Slewing is left alone; the success path is unchanged.
+TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not send", "[celestron][telescope][unit]") {
+    auto log = std::make_shared<std::vector<std::string>>();
+    auto log_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([log, log_mutex](const std::string& command) {
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        log->push_back(command);
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->move_axis(0, 1.0);
+    REQUIRE(driver->get_slewing());
+
+    SECTION("success clears Slewing and sends the cancel and both axis stops") {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->clear();
+        }
+        REQUIRE_NOTHROW(driver->abort_slew());
+        CHECK_FALSE(driver->get_slewing());
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        CHECK(std::count(log->begin(), log->end(), std::string("M")) == 1);
+        const auto axis_stops = std::count_if(log->begin(), log->end(), [](const std::string& c) {
+            return c.size() >= 5 && c[0] == 'P' && c[1] == '\x02' && (c[3] == '\x24' || c[3] == '\x25') && c[4] == '\0';
+        });
+        CHECK(axis_stops == 4);  // each axis gets both stop directions
+    }
+
+    SECTION("a dropped link throws DriverException and leaves Slewing true") {
+        REQUIRE(server.drop_connections());
+        try {
+            driver->abort_slew();
+            FAIL("AbortSlew returned success although the stops could not be sent");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+        }
+        CHECK(driver->get_slewing());
     }
 
     driver->set_connected(false);

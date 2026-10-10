@@ -297,6 +297,44 @@ std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
     return result;
 }
 
+std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(const std::string& only_model_name) {
+    std::vector<ZwoEnumeratedCamera> result;
+    const auto cameras = enumerate_cameras();
+    result.reserve(cameras.size());
+    int index = 0;
+    for (const auto& info : cameras) {
+        ZwoEnumeratedCamera camera;
+        camera.index = index++;
+        camera.camera_id = info.camera_id;
+        camera.name = info.name;
+        if (!only_model_name.empty() && trim_zwo_name(info.name) != only_model_name) {
+            // Not the model the entry names: leave this body alone, another
+            // process may hold it.
+            result.push_back(std::move(camera));
+            continue;
+        }
+        bool opened = false;
+        try {
+            open_camera(info.camera_id);
+            opened = true;
+            camera.serial = get_serial_number(info.camera_id);
+        } catch (const std::exception&) {
+            // A body that will not open or read has no usable serial.
+            camera.serial.clear();
+        }
+        if (opened) {
+            try {
+                close_camera(info.camera_id);
+            } catch (const std::exception&) {
+                // The serial is already read; a throwing close is not ours to report.
+                opened = false;
+            }
+        }
+        result.push_back(std::move(camera));
+    }
+    return result;
+}
+
 bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
     // Not ASIGetCameraPropertyByID: it answers only for an opened camera
     // (ASI_ERROR_CAMERA_CLOSED otherwise, SDK 1.41 on the Pi rig, issue #738),

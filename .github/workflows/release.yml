@@ -1,9 +1,12 @@
 # Publish a GitHub Release for every version tag.
 #
-# Binaries are NOT attached here. The install channel is the OpenAstro APT
+# Stable releases attach NO binaries. The install channel is the OpenAstro APT
 # repository (https://apt.openastro.net); a Release exists so a shipped build
 # has a name, a source archive (GitHub attaches the zip/tarball itself), and
-# its release notes. Nothing is compiled, so this runs in seconds.
+# its release notes. The release job compiles nothing, so it runs in seconds.
+# Beta pre-releases are the exception: the beta-deb job builds the arm64 .deb
+# in a Debian trixie container and attaches it with a .sha256, so a tester can
+# install a named beta without building it.
 #
 # Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
 # dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
@@ -19,7 +22,8 @@
 #
 # Dry run: `gh workflow run release.yml --ref <branch> -f tag=vX.Y.Z-beta.N`
 # runs the mapping, the VERSION check and the notes build for that tag against
-# the branch's checkout and stops before anything is published. /bump-release
+# the branch's checkout (for a beta tag also the .deb build) and stops before
+# anything is published. /bump-release
 # does this before the first beta tag of a stable branch.
 
 name: Release
@@ -37,17 +41,22 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   release:
     name: Create GitHub Release (CHANGELOG or beta notes)
+    permissions:
+      contents: write   # gh release create/edit
     runs-on: ubuntu-24.04-arm   # text-only; kept on arm64 for a single-arch fleet
     timeout-minutes: 10
     env:
       # The pushed tag, or the tag a dry run names. Read only through this
       # variable so the two paths cannot drift.
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    outputs:
+      prerelease: ${{ steps.tag.outputs.prerelease }}
+      notes_name: ${{ steps.tag.outputs.notes_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
@@ -199,3 +208,65 @@ jobs:
             gh release create "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
               --title "${RELEASE_TAG}" --notes-file release-notes.md --verify-tag --prerelease="${PRERELEASE}"
           fi
+
+  beta-deb:
+    # Betas only: until the apt `beta` component carries a beta, the .deb on
+    # its pre-release is how a tester installs it. Stable releases stay
+    # notes-only; their .deb ships through apt.openastro.net alone.
+    name: Attach the .deb to a beta pre-release
+    permissions:
+      contents: write   # gh release upload
+    needs: release
+    if: needs.release.outputs.prerelease == 'true'
+    runs-on: ubuntu-24.04-arm
+    # Built on the target distribution so dpkg-shlibdeps derives trixie
+    # package names (libgpiod3 and friends), not the runner's Ubuntu ones.
+    container: debian:trixie
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      NOTES_NAME: ${{ needs.release.outputs.notes_name }}
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Build the .deb
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          version="$(tr -d '[:space:]' < VERSION)"
+          deb="../alpacabridge_${version}_arm64.deb"
+          # The asset takes the tag spelling: the Debian `~` in the file name
+          # is not one GitHub keeps. dpkg reads the version from the package,
+          # not the file name, so `apt install ./<file>` is unaffected.
+          mkdir -p dist
+          cp "${deb}" "dist/alpacabridge_${NOTES_NAME}_arm64.deb"
+          (cd dist && sha256sum "alpacabridge_${NOTES_NAME}_arm64.deb" > "alpacabridge_${NOTES_NAME}_arm64.deb.sha256")
+          dpkg-deb --info "dist/alpacabridge_${NOTES_NAME}_arm64.deb" | sed -n '/Package:/,/Depends:/p'
+          ls -l dist
+
+      - name: Attach to the pre-release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # --clobber: a re-run of the tag replaces the assets instead of failing.
+          gh release upload "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            "dist/alpacabridge_${NOTES_NAME}_arm64.deb" \
+            "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256"

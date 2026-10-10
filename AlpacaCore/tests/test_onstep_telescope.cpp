@@ -17,13 +17,17 @@
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #ifndef _WIN32
@@ -514,6 +518,72 @@ TEST_CASE("OnStep Telescope Driver - MoveAxis at rate 0 reports a stop it could 
         CHECK(std::string(ex.what()).rfind("MoveAxis stop failed: ", 0) == 0);
     }
     CHECK(driver->get_slewing());  // the mount may still be moving
+
+    driver->set_connected(false);
+}
+
+// #781: AbortSlew swallowed every direction stop and then cleared Slewing, so a
+// stop lost on a dead link read as a clean abort while the mount kept moving.
+// A failed stop must surface as DriverException after every stop was tried, and
+// must leave Slewing alone; the success path keeps clearing it.
+TEST_CASE("OnStep Telescope Driver - AbortSlew reports a stop it could not send", "[onstep][telescope][unit]") {
+    auto log = std::make_shared<std::vector<std::string>>();
+    auto log_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([log, log_mutex](const std::string& chunk) {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->push_back(chunk);
+        }
+        if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
+            return std::string("1");
+        }
+        if (chunk.rfind(":GU", 0) == 0) {
+            return std::string("nNp#");
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    driver->move_axis(0, 1.0);
+    REQUIRE(driver->get_slewing());
+
+    SECTION("success clears Slewing and sends the abort and all four stops") {
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex);
+            log->clear();
+        }
+        REQUIRE_NOTHROW(driver->abort_slew());
+        CHECK_FALSE(driver->get_slewing());
+        std::lock_guard<std::mutex> lock(*log_mutex);
+        const auto count = [&](const char* needle) {
+            return std::count_if(log->begin(), log->end(),
+                                 [&](const std::string& c) { return c.find(needle) != std::string::npos; });
+        };
+        CHECK(count(":Q#") == 1);
+        CHECK(count(":Qe#") >= 1);
+        CHECK(count(":Qw#") >= 1);
+        CHECK(count(":Qn#") >= 1);
+        CHECK(count(":Qs#") >= 1);
+    }
+
+    SECTION("a dropped link throws DriverException and leaves Slewing true") {
+        REQUIRE(server.drop_connections());
+        try {
+            driver->abort_slew();
+            FAIL("AbortSlew returned success although the stops could not be sent");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+        }
+        CHECK(driver->get_slewing());
+    }
 
     driver->set_connected(false);
 }
