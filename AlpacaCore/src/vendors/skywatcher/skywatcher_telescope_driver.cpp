@@ -4944,7 +4944,26 @@ private:
         } catch (...) {
             std::lock_guard<std::mutex> lock(mutex_);
             rollback_locked();
+            stop_axes_after_refused_start_locked();
             throw;
+        }
+    }
+
+    // The claim before a refused start() already told the body in flight it is
+    // Superseded, so it skips its own stop and nothing else will halt the axes
+    // it was driving. Best effort, like stop_axes_if_cancelled_locked().
+    void stop_axes_after_refused_start_locked() {
+        if (!connected_) {
+            return;
+        }
+        try {
+            protocol_->instant_stop(kAxisRa);
+            protocol_->instant_stop(kAxisDec);
+            cmd_axis_rate_deg_s_[0] = 0.0;
+            cmd_axis_rate_deg_s_[1] = 0.0;
+            invalidate_position_cache_locked();
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Best effort; a dead link is reported by the link-health path.
         }
     }
 

@@ -4850,4 +4850,59 @@ TEST_CASE("SkyWatcher UDP - silence is a timeout that latches a fault, a late da
     proto.disconnect();
 }
 
+namespace {
+
+// Starts a goto, then issues `second` while the slot's thread factory refuses
+// (EAGAIN). The claim has by then superseded the running body, which skips its
+// own stop, so the refusal path has to stop the axes itself.
+void refused_slot_start_stops_axes(const std::function<void(alpacacore::TelescopeDriver&)>& second) {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+
+    const double lst = driver->get_sidereal_time();
+    driver->slew_to_coordinates_async(std::fmod(lst - 3.0 + 24.0, 24.0), 20.0);
+    REQUIRE(run_clock_until(
+        clock, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::milliseconds(5000)));
+
+    sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS_AS(second(*driver), alpacacore::AlpacaException);
+
+    // Let the superseded body unwind on the virtual clock.
+    for (int i = 0; i < 20; ++i) {
+        clock.advance(std::chrono::milliseconds(500));
+        clock.wait_for_woken_settled(kRendezvous);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_at_park());
+    CHECK_FALSE(driver->get_at_home());
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher slot - a refused goto start leaves the axes stopped when it replaced a goto",
+          "[skywatcher][async][slot]") {
+    refused_slot_start_stops_axes([](alpacacore::TelescopeDriver& d) {
+        d.slew_to_coordinates_async(std::fmod(d.get_sidereal_time() - 1.0 + 24.0, 24.0), 35.0);
+    });
+}
+
+TEST_CASE("SkyWatcher slot - a refused park start leaves the axes stopped when it replaced a goto",
+          "[skywatcher][async][slot]") {
+    refused_slot_start_stops_axes([](alpacacore::TelescopeDriver& d) { d.park(); });
+}
+
+TEST_CASE("SkyWatcher slot - a refused FindHome start leaves the axes stopped when it replaced a goto",
+          "[skywatcher][async][slot]") {
+    refused_slot_start_stops_axes([](alpacacore::TelescopeDriver& d) { d.find_home(); });
+}
+
 #endif  // _WIN32
