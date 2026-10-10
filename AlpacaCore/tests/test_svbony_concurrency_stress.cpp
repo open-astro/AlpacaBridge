@@ -36,8 +36,8 @@ TEST_CASE("SVBONY camera - concurrent connect/disconnect/operate stress", "[svbo
 
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only get_camera_state() was ever storm-tested.
-    // Connected registration: a start_exposure racing a running exposure is InvalidOperation, and the fake camera has
-    // no temperature sensor, so get_ccd_temperature() is PropertyNotImplemented.
+    // Connected registration: set_gain() racing a running exposure is InvalidOperation (ensure_not_exposing_locked),
+    // and the fake camera has no temperature sensor, so get_ccd_temperature() is PropertyNotImplemented.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation,
                                             alpacacore::AlpacaError::PropertyNotImplemented};

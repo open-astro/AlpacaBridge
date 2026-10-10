@@ -16,6 +16,7 @@
 #include <chrono>
 #include <iomanip>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
