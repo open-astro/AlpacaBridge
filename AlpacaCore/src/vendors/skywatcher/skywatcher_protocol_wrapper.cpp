@@ -823,18 +823,20 @@ public:
         }
         // open-astro#505: this is the one place both transports converge, so
         // the consecutive-failure latch lives here and covers serial and UDP
-        // alike (UDP has no other health signal at all — link_alive() reports
-        // the flag as-is there).
+        // alike (link_alive() applies the staleness bound to the latched
+        // fault on both).
         //
         // The latch detects SILENCE, so ONLY a genuine no-reply timeout counts.
         // Any frame from the board — mis-paired, malformed, stale or over-long
         // — proves it is alive and talking, which is exactly the condition this
         // must NOT fire on, so it RESETS the counter and leaves the
         // protocol-level problem to the machinery that already owns it (the
-        // dirty/settle/resync path and send_command's shape check). A write or
-        // socket error is neither: it says nothing about whether the board is
-        // answering, so it is left uncounted rather than read as evidence
-        // either way.
+        // dirty/settle/resync path and send_command's shape check). A serial write
+        // error is neither: it says nothing about whether the board is
+        // answering, so it is left uncounted. A UDP send/receive error is
+        // reachability evidence and counts as a no-reply exchange
+        // (udp_socket_error_locked), except EBADF/ENOTSOCK/ENOTCONN, which
+        // lose the link at once.
         exchange_saw_frame_ = false;
         exchange_timed_out_ = false;
         try {
@@ -1029,6 +1031,13 @@ private:
             throw AlpacaException(what);
         }
         ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.host + "; network link closed");
+        {
+            // Decision 0009 point 5: keep the last fault text after the loss.
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (link_health_.faulted()) {
+                lost_fault_ = link_health_.fault();
+            }
+        }
         note_link_lost();
         link_lost_.store(true);
         disconnect_locked();
