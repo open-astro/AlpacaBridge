@@ -2335,7 +2335,8 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     // The pulse's restore stops the RA axis for the duty regime; the worker
     // then bursts it on its own period.
     const int starts = mount.start_count(1);
-    REQUIRE(run_clock_until(clock, [&] { return mount.start_count(1) >= starts + 2; }, std::chrono::milliseconds(9000)));
+    REQUIRE(
+        run_clock_until(clock, [&] { return mount.start_count(1) >= starts + 2; }, std::chrono::milliseconds(9000)));
 
     driver->set_right_ascension_rate(0.0);
     driver->set_tracking(false);
