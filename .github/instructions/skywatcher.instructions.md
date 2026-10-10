@@ -176,11 +176,15 @@ datagrams before each send so replies cannot get off-by-one.
   pulse task (the window is deducted from the pulse; shorter pulses rely on the kick alone,
   or on 0x09 on the bare `:I`);
   the `RightAscensionRate`/`TrackingRate` setters cannot wait 450 ms inside a property call,
-  so they spawn a one-shot background task (`rate_verify_thread_`, open-astro #248). That
-  task never takes `mutex_`, which is what lets every RA-taking path reap it WITH `mutex_`
-  held (setters, Tracking off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew,
-  disconnect) — a lock-free reap would leave a window for a setter to spawn one between an
-  initiator's reap and its lock, and the resend would land mid-pulse or on a stopped axis.
+  so they start a one-shot body on the `rate_verify_` slot (open-astro #248). Every RA-taking
+  path ends it WITH `mutex_` held through `cancel_rate_verify_locked()` (setters, Tracking
+  off, `stop_axis_and_wait_locked`, pulse dispatch, AbortSlew; disconnect cancels and joins
+  the slot): `cancel()` never joins, so the body takes `mutex_` for its resend and sends
+  it only while the epoch it was started with (`rate_verify_epoch_`, bumped under `mutex_`
+  by every start and cancel) still matches. A cancel landing between the body's last wait
+  and its resend therefore cannot put `:I`+`:J` into an axis a pulse or a stop now owns.
+  The pulse body's own post-dispatch and post-restore checks resend the same way, gated on
+  its slot context.
 - **EQ-AL55i Pro motor-board firmware release notes** (Sky-Watcher's own changelog, copied
   verbatim; append each new version here). Both versions on record ran on the same mount.
   3.48 lists no motor-control change, so motor behaviour measured on either version is
