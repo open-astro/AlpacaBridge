@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::zwo {
@@ -34,5 +36,19 @@ std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int foc
  * @return Unique pointer to focuser driver
  */
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index);
+
+/**
+ * @brief Test seam: as create_zwo_eaf_focuser(), over an injected EAF SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk);
+
+/**
+ * @brief Test seam: as create_zwo_eaf_focuser_by_index(), over an injected EAF SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk);
 
 } // namespace alpacacore::vendor::zwo

@@ -2526,3 +2526,189 @@ TEST_CASE("Builtin catalog - ToupTek sanitize keeps the declared fields per devi
     CHECK((*kept_ports)[0].has("pwm"));
     CHECK_FALSE((*kept_ports)[0].has("bogusKey"));
 }
+
+// ---------------------------------------------------------------------------
+// Gemini focuser, flat panel and Power & Data Hub switch. The focuser, flat
+// panel and hub auto-detect factories construct without a scan (#659), so no
+// port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kGeminiFocuserKey{"gemini", DeviceType::Focuser};
+const DeviceKey kGeminiPanelKey{"gemini", DeviceType::CoverCalibrator};
+const DeviceKey kGeminiSwitchKey{"gemini", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the Gemini devices in every build",
+          "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kGeminiFocuserKey, kGeminiPanelKey, kGeminiSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_GEMINI");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kGeminiFocuserKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "focuserIndex"});
+    CHECK(keys_of(find_view(views, kGeminiPanelKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "flatPanelModel", "panelIndex"});
+    CHECK(keys_of(find_view(views, kGeminiSwitchKey)) ==
+          std::vector<std::string>{"switchType", "connectionType", "portPath", "baudRate", "hubIndex"});
+
+    // The hub's serial default differs from the focuser's and the panel's.
+    CHECK(same_scalar(find_field(find_view(views, kGeminiFocuserKey)->fields, "baudRate")->default_value,
+                      std::int64_t{9600}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiPanelKey)->fields, "baudRate")->default_value,
+                      std::int64_t{9600}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiSwitchKey)->fields, "baudRate")->default_value,
+                      std::int64_t{19200}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiPanelKey)->fields, "flatPanelModel")->default_value,
+                      std::string{"lite"}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiSwitchKey)->fields, "switchType")->default_value,
+                      std::string{"pdh-adv3"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the Gemini devices available only when built",
+          "[catalog][gemini][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kGeminiFocuserKey, kGeminiPanelKey, kGeminiSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_GEMINI
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when Gemini is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_GEMINI") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_GEMINI
+    // Nothing here opens a port: the by-index paths resolve at connect (#659).
+    auto focuser_auto = catalog.create(kGeminiFocuserKey, DeviceConfig{}, 3);
+    REQUIRE(focuser_auto != nullptr);
+    CHECK(focuser_auto->get_device_type() == DeviceType::Focuser);
+    CHECK(focuser_auto->get_device_number() == 3);
+    CHECK_FALSE(focuser_auto->get_connected());
+
+    DeviceConfig focuser_serial;
+    focuser_serial.set("connectionType", std::string{"serial"});
+    focuser_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+    REQUIRE(catalog.create(kGeminiFocuserKey, focuser_serial, 4) != nullptr);
+    // Serial with no port falls back to auto-detect, as the router arm did.
+    DeviceConfig focuser_no_port;
+    focuser_no_port.set("connectionType", std::string{"serial"});
+    REQUIRE(catalog.create(kGeminiFocuserKey, focuser_no_port, 5) != nullptr);
+
+    for (const char* model : {"lite", "v2", "pro", "unknown"}) {
+        INFO(model);
+        DeviceConfig panel;
+        panel.set("flatPanelModel", std::string{model});
+        auto by_index = catalog.create(kGeminiPanelKey, panel, 6);
+        REQUIRE(by_index != nullptr);
+        CHECK(by_index->get_device_type() == DeviceType::CoverCalibrator);
+        panel.set("connectionType", std::string{"serial"});
+        panel.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+        REQUIRE(catalog.create(kGeminiPanelKey, panel, 7) != nullptr);
+    }
+
+    auto hub_auto = catalog.create(kGeminiSwitchKey, DeviceConfig{}, 8);
+    REQUIRE(hub_auto != nullptr);
+    CHECK(hub_auto->get_device_type() == DeviceType::Switch);
+    DeviceConfig hub_serial;
+    hub_serial.set("connectionType", std::string{"serial"});
+    hub_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+    REQUIRE(catalog.create(kGeminiSwitchKey, hub_serial, 9) != nullptr);
+
+    // A saved config normalize could only warn about is refused here, never
+    // built into a hub that would auto-detect behind the user's back.
+    DeviceConfig hub_no_port;
+    hub_no_port.set("connectionType", std::string{"serial"});
+    CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_no_port, 10), AlpacaException);
+    DeviceConfig hub_bad_type;
+    hub_bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_bad_type, 11), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - Gemini switch normalize refuses a bad switchType, a missing port or a negative hubIndex",
+          "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    CHECK_FALSE(catalog.normalize(kGeminiSwitchKey, DeviceConfig{}, Source::Api).rejection.has_value());
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    const auto bad = catalog.normalize(kGeminiSwitchKey, bad_type, Source::Api);
+    REQUIRE(bad.rejection.has_value());
+    CHECK(*bad.rejection == "Unknown Gemini switchType: not-a-backend (supported: pdh-adv3)");
+
+    DeviceConfig no_port;
+    no_port.set("connectionType", std::string{"serial"});
+    const auto no_port_api = catalog.normalize(kGeminiSwitchKey, no_port, Source::Api);
+    REQUIRE(no_port_api.rejection.has_value());
+    CHECK(*no_port_api.rejection == "portPath is required when connectionType is 'serial' (or use 'auto').");
+    // A saved config is kept and warned about, so it stays editable.
+    const auto no_port_saved = catalog.normalize(kGeminiSwitchKey, no_port, Source::Persisted);
+    CHECK_FALSE(no_port_saved.rejection.has_value());
+    REQUIRE(no_port_saved.warnings.size() == 1);
+
+    DeviceConfig negative;
+    negative.set("hubIndex", std::int64_t{-1});
+    const auto negative_api = catalog.normalize(kGeminiSwitchKey, negative, Source::Api);
+    REQUIRE(negative_api.rejection.has_value());
+    CHECK(*negative_api.rejection == "hubIndex must be >= 0.");
+    negative.set("hubIndex", std::int64_t{0});
+    CHECK_FALSE(catalog.normalize(kGeminiSwitchKey, negative, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - Gemini sanitize keeps the declared fields per device type", "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig panel;
+    panel.set("connectionType", std::string{"serial"});
+    panel.set("portPath", std::string{"/dev/ttyUSB3"});
+    panel.set("baudRate", std::int64_t{19200});
+    panel.set("flatPanelModel", std::string{"pro"});
+    panel.set("panelIndex", std::int64_t{2});
+    panel.set("focuserIndex", std::int64_t{5});  // a focuser key, not a panel one
+    panel.set("hubIndex", std::int64_t{1});      // a switch key, not a panel one
+    const DeviceConfig kept_panel = catalog.sanitize(kGeminiPanelKey, panel);
+    CHECK(kept_panel.entries().size() == 5);
+    CHECK_FALSE(kept_panel.has("focuserIndex"));
+    CHECK_FALSE(kept_panel.has("hubIndex"));
+    CHECK(string_at(kept_panel, "flatPanelModel") == "pro");
+
+    DeviceConfig hub;
+    hub.set("switchType", std::string{"pdh-adv3"});
+    hub.set("connectionType", std::string{"auto"});
+    hub.set("hubIndex", std::int64_t{1});
+    hub.set("portPath", std::string{"/dev/ttyUSB3"});
+    hub.set("panelIndex", std::int64_t{2});
+    const DeviceConfig kept_hub = catalog.sanitize(kGeminiSwitchKey, hub);
+    CHECK(kept_hub.has("switchType"));
+    CHECK(kept_hub.has("hubIndex"));
+    CHECK(kept_hub.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
+    CHECK_FALSE(kept_hub.has("panelIndex"));
+
+    DeviceConfig focuser;
+    focuser.set("focuserIndex", std::int64_t{1});
+    focuser.set("flatPanelModel", std::string{"v2"});
+    const DeviceConfig kept_focuser = catalog.sanitize(kGeminiFocuserKey, focuser);
+    CHECK(kept_focuser.has("focuserIndex"));
+    CHECK_FALSE(kept_focuser.has("flatPanelModel"));
+}

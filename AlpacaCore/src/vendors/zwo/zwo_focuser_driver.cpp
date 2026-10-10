@@ -13,12 +13,14 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -30,15 +32,18 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOEAFFocuserDriver(int device_number, std::optional<int> focuser_id, std::optional<int> focuser_index)
+    ZWOEAFFocuserDriver(int device_number, std::optional<int> focuser_id, std::optional<int> focuser_index,
+                        ZWOEAFSDK& sdk)
         : AsyncConnectable("ZWO"),
+          sdk_(sdk),
           device_number_(device_number),
           focuser_id_(focuser_id),
           focuser_index_(focuser_index),
           serial_number_(),
           focuser_info_(),
           focuser_info_valid_(false),
-          connected_(false) {}
+          connected_(false),
+          status_cache_("ZWO EAF", kStatusTtl, 3, "ZWO") {}
 
     ~ZWOEAFFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -93,7 +98,7 @@ public:
     // Vendor SDK (library) version, surfaced in the web UI only (never in
     // DriverInfo). EAFGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = ZWOEAFSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         // get_sdk_version() returns the literal "unknown" when EAFGetSDKVersion()
         // yields nullptr — suppress the row rather than show "unknown".
         if (version.empty() || version == "unknown") {
@@ -134,12 +139,20 @@ public:
             return;
         }
 
-        auto& sdk = ZWOEAFSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             int resolved_id = resolve_focuser_id_locked();
             sdk.open_focuser(resolved_id);
             try {
                 refresh_focuser_info_locked(resolved_id);
+                // Static members are read once here, so the getters never go back to the device.
+                max_step_ = sdk.get_max_step(resolved_id);
+                try {
+                    step_range_ = sdk.get_step_range(resolved_id);
+                } catch (const std::exception&) {
+                    step_range_ = 0;  // unavailable: MaxIncrement falls back to MaxStep
+                }
+                status_cache_.reset();
                 try {
                     serial_number_ = sdk.get_serial_number(resolved_id);
                 } catch (const std::exception& e) {
@@ -158,6 +171,9 @@ public:
         // device unplugged) the error still surfaces, but the driver must not
         // stay half-connected.
         const std::optional<int> close_id = focuser_id_;
+        max_step_ = 0;
+        step_range_ = 0;
+        status_cache_.reset();
         if (focuser_index_.has_value()) {
             focuser_id_.reset();
             focuser_info_ = {};
@@ -199,33 +215,24 @@ public:
         return true;
     }
 
-    bool get_is_moving() const override {
-        ensure_connected();
-        return ZWOEAFSDKWrapper::instance().is_moving(focuser_id_value());
-    }
+    bool get_is_moving() const override { return read_status().moving; }
 
     int get_max_step() const override {
         ensure_connected();
-        return ZWOEAFSDKWrapper::instance().get_max_step(focuser_id_value());
+        std::lock_guard<std::mutex> lock(mutex_);
+        return max_step_;
     }
 
     int get_max_increment() const override {
         ensure_connected();
-        int max_step = get_max_step();
-        try {
-            int range = ZWOEAFSDKWrapper::instance().get_step_range(focuser_id_value());
-            if (range > 0) {
-                return range > max_step ? max_step : range;
-            }
-        } catch (const std::exception&) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (step_range_ > 0) {
+            return step_range_ > max_step_ ? max_step_ : step_range_;
         }
-        return max_step;
+        return max_step_;
     }
 
-    int get_position() const override {
-        ensure_connected();
-        return ZWOEAFSDKWrapper::instance().get_position(focuser_id_value());
-    }
+    int get_position() const override { return read_status().position; }
 
     double get_step_size() const override {
         // open-astro#309: connection check before the not-implemented throw,
@@ -256,13 +263,18 @@ public:
     }
 
     double get_temperature() const override {
-        ensure_connected();
-        return ZWOEAFSDKWrapper::instance().get_temperature(focuser_id_value());
+        const auto status = read_status();
+        if (!status.temperature.has_value()) {
+            throw AlpacaException("Focuser temperature is not available: " + status.temperature_error,
+                                  status.temperature_error_code);
+        }
+        return *status.temperature;
     }
 
     void halt() override {
         ensure_connected();
-        ZWOEAFSDKWrapper::instance().stop(focuser_id_value());
+        sdk_.stop(focuser_id_value());
+        status_cache_.invalidate();
     }
 
     void move(int position) override {
@@ -271,10 +283,45 @@ public:
         if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
-        ZWOEAFSDKWrapper::instance().move(focuser_id_value(), position);
+        sdk_.move(focuser_id_value(), position);
+        status_cache_.invalidate();
     }
 
 private:
+    // One frame of the live readings; a single refill fills all of it (open-astro#294).
+    struct Status {
+        bool moving{};
+        int position{};
+        std::optional<double> temperature;                         // absent when the SDK would not report it
+        std::string temperature_error;                             // why, for the Temperature getter
+        int temperature_error_code{AlpacaError::DriverException};  // the wrapper's mapped code
+    };
+
+    static constexpr std::chrono::milliseconds kStatusTtl{100};
+
+    Status read_status() const {
+        ensure_connected();
+        const int id = focuser_id_value();
+        // The refill runs under the cache's own mutex and must not take mutex_
+        // (lock order: driver mutex_ before the cache mutex).
+        return status_cache_.get([this, id] {
+            Status fresh;
+            fresh.moving = sdk_.is_moving(id);
+            fresh.position = sdk_.get_position(id);
+            try {
+                fresh.temperature = sdk_.get_temperature(id);
+            } catch (const AlpacaException& e) {
+                // Temperature is optional: moving/position still answer. Keep the
+                // wrapper's mapped code (NotImplemented, NotConnected, ...).
+                fresh.temperature_error = e.what();
+                fresh.temperature_error_code = e.error_code();
+            } catch (const std::exception& e) {
+                fresh.temperature_error = e.what();
+            }
+            return fresh;
+        });
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
@@ -283,7 +330,7 @@ private:
 
     int resolve_focuser_id_locked() {
         if (focuser_index_.has_value()) {
-            auto focusers = ZWOEAFSDKWrapper::instance().enumerate_focusers();
+            auto focusers = sdk_.enumerate_focusers();
             if (focusers.empty()) {
                 ALPACA_LOG_WARN("ZWO", "No ZWO EAF focusers detected by SDK");
                 throw AlpacaException("No ZWO EAF focusers detected", AlpacaError::NotConnected);
@@ -310,7 +357,7 @@ private:
 
     void refresh_focuser_info_locked(int focuser_id) {
         ZWOEAFFocuserInfo info;
-        if (ZWOEAFSDKWrapper::instance().get_focuser_info_by_id(focuser_id, info)) {
+        if (sdk_.get_focuser_info_by_id(focuser_id, info)) {
             focuser_info_ = info;
             focuser_info_valid_ = true;
             return;
@@ -326,22 +373,34 @@ private:
         return focuser_id_.value();
     }
 
+    ZWOEAFSDK& sdk_;
     int device_number_;
     std::optional<int> focuser_id_;
     std::optional<int> focuser_index_;
     std::string serial_number_;
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
+    int max_step_{0};
+    int step_range_{0};
     std::atomic<bool> connected_;
     mutable std::mutex mutex_;
+    mutable util::TtlStatusCache<Status> status_cache_;
 };
 
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index, sdk);
+}
+
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt);
+    return create_zwo_eaf_focuser(device_number, focuser_id, ZWOEAFSDKWrapper::instance());
 }
 
 std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index);
+    return create_zwo_eaf_focuser_by_index(device_number, focuser_index, ZWOEAFSDKWrapper::instance());
 }
 
 } // namespace alpacacore::vendor::zwo

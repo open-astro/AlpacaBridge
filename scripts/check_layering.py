@@ -77,7 +77,7 @@ SOURCE_GLOBS = ("*.cpp", "*.h", "*.hpp")
 # Lowered by each vendor descriptor slice of ADR 0004 in the PR that deletes
 # that vendor's includes from AlpacaHTTP/src/http/router.cpp; the last slice
 # sets it to 0. Never raise it.
-MAX_ALPACAHTTP_VENDOR_INCLUDES = 20
+MAX_ALPACAHTTP_VENDOR_INCLUDES = 17
 # ADR 0004: <vendor>_schema.cpp compiles in every build and includes no vendor
 # header. Never rises.
 MAX_CATALOG_SCHEMA_VENDOR_INCLUDES = 0
