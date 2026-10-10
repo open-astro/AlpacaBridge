@@ -1,0 +1,35 @@
+# Submits the C++ build's dependencies (debian/control, CMake fetches, vendored
+# SDKs) to GitHub's dependency graph, which otherwise sees only the workflow
+# action pins. Snapshot built by scripts/dependency_snapshot.py; see
+# docs/development.md "Dependency graph". No pull_request trigger: the drift
+# check runs in ci.yml's docs-drift job.
+
+name: Dependency submission
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  submit:
+    name: Submit dependency snapshot
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: write   # the Dependency Submission API requires it
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build snapshot
+        run: python3 scripts/dependency_snapshot.py --check && python3 scripts/dependency_snapshot.py --output snapshot.json
+
+      - name: Submit snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots" --input snapshot.json
