@@ -799,6 +799,7 @@ public:
             // poll, the in-flight exchange's own node check, or a relink all
             // retry the close; nothing is lost, but until one of those runs
             // the stale fd stays open with Connected already reading false.
+            keep_fault_text();
             note_link_lost();
             std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
             if (lock.owns_lock() && connected_.load()) {
@@ -915,6 +916,16 @@ public:
 
     void set_task_clock(util::TaskClock& clock) { clock_.store(&clock); }
 
+    // Decision 0009 point 5: a loss keeps the latched fault text for
+    // get_link_fault() until the next connect or disconnect. Call before
+    // note_link_lost() on every loss path.
+    void keep_fault_text() {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        if (link_health_.faulted()) {
+            lost_fault_ = link_health_.fault();
+        }
+    }
+
     bool fault_stale() {
         std::lock_guard<std::mutex> lock(health_mutex_);
         return link_health_.fault_stale(clock().now());
@@ -924,12 +935,7 @@ public:
     // link_alive() and exchange() report NotConnected even when an exchange in
     // flight holds io_mutex_ and the close has to wait for it.
     void lose_stale_link() {
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (link_health_.faulted()) {
-                lost_fault_ = link_health_.fault();
-            }
-        }
+        keep_fault_text();
         note_link_lost();
         link_lost_.store(true);
         std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
@@ -1031,13 +1037,7 @@ private:
             throw AlpacaException(what);
         }
         ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.host + "; network link closed");
-        {
-            // Decision 0009 point 5: keep the last fault text after the loss.
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (link_health_.faulted()) {
-                lost_fault_ = link_health_.fault();
-            }
-        }
+        keep_fault_text();
         note_link_lost();
         link_lost_.store(true);
         disconnect_locked();
@@ -1051,6 +1051,7 @@ private:
     // generic transport error on a link that still claims to be up.
     [[noreturn]] void lose_serial_link_locked(const std::string& what) {
         ALPACA_LOG_WARN("SkyWatcher", what + " on " + info_.port_path + "; serial link closed");
+        keep_fault_text();
         note_link_lost();
         disconnect_locked();
         throw AlpacaException(what + "; serial link to the motor controller lost", AlpacaError::NotConnected);

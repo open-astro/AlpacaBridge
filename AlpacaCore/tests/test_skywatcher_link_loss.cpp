@@ -263,3 +263,48 @@ TEST_CASE("SkyWatcher link loss - UDP: an unusable socket loses the link at once
     CHECK(*lost_at == clock.now());
     driver->set_connected(false);
 }
+
+namespace {
+
+struct SeveredSerial {
+    FakeTaskClock clock;
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper* protocol = nullptr;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    SeveredSerial() {
+        sw::ConnectionInfo info;
+        info.type = sw::ConnectionType::Serial;
+        info.port_path = board.slave_path();
+        info.baud_rate = 9600;
+        info.response_timeout_ms = 100;
+        auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
+        protocol = owned.get();
+        driver = sw::create_skywatcher_telescope(0, info, 39.7, -104.9, 1609.0, std::move(owned), {}, clock);
+        driver->set_connected(true);
+        board.set_muted(true);
+        for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol->inquire_position(sw::kAxisRa));
+        REQUIRE(protocol->link_faulted());
+        board.sever_link();
+    }
+};
+
+}  // namespace
+
+TEST_CASE("SkyWatcher link loss - serial: an exchange on a severed link keeps the fault text",
+          "[skywatcher][linkloss][serial]") {
+    SeveredSerial s;
+    require_not_connected([&] { s.protocol->inquire_position(sw::kAxisRa); });
+    CHECK(s.driver->get_link_fault().find("consecutive failures") != std::string::npos);
+    s.driver->set_connected(false);
+    CHECK(s.driver->get_link_fault().empty());
+}
+
+TEST_CASE("SkyWatcher link loss - serial: a polled severed link keeps the fault text",
+          "[skywatcher][linkloss][serial]") {
+    SeveredSerial s;
+    CHECK_FALSE(s.driver->get_connected());
+    CHECK(s.driver->get_link_fault().find("consecutive failures") != std::string::npos);
+    s.driver->set_connected(false);
+    CHECK(s.driver->get_link_fault().empty());
+}
