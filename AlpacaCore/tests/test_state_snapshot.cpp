@@ -69,7 +69,7 @@ TEST_CASE("StateSnapshot - write-through is visible before the next poll", "[sta
     auto r = snap.read();
     CHECK(r->value.ra == 9.0);
     CHECK(r->value.dec == 2.0);  // untouched fields keep the polled value
-    CHECK(r->measured_at == published_at);  // a write is not a measurement
+    CHECK(r->measured_at == published_at);
 }
 
 TEST_CASE("StateSnapshot - a late publish does not overwrite a newer write", "[state_snapshot][unit]") {
