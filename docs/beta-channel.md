@@ -97,6 +97,11 @@ newest build of either kind.
   install failures, regressions from the previous stable, and docs fixes for the release itself.
   No features, no refactors, no new drivers.
 - Fixes land on the stable branch and reach `main` through the merge down. No cherry-picks.
+- GitHub closes `Closes #N` issues only for a PR merged into `main`, so a merged PR into `stable/**`
+  closes its issues through `.github/workflows/close-linked-issues.yml` (`scripts/close_linked_issues.py`):
+  every issue of this repository named with a closing keyword (`Closes`, `Fixes`, `Resolves` and their
+  other forms) in the PR body is closed as completed with a comment naming the PR and merge commit.
+  `Refs #N`, other repositories and pull-request numbers are ignored.
 - Fix PRs target `stable/X.Y` (`/submit-pr --base stable/X.Y`), run the same CI and review bot, and
   each adds its `changelog.d/` fragment as usual; the fragment travels to `main` in the merge down
   and is consumed at promotion.
