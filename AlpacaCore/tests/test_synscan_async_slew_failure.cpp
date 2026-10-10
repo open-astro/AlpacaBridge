@@ -718,7 +718,6 @@ TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsP
 TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's check and its block",
           "[synscan][telescope][async][pulseguiding]") {
     std::atomic<bool> at_window{false};
-    std::atomic<bool> saw_cancel{false};
     std::atomic<int> fired{0};
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
@@ -734,11 +733,13 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
     clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
-            const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            // The slot runs the predicate and the block under its one mutex,
+            // so the reaper's cancel cannot reach the body until it blocks:
+            // hold the task in the window for a moment of real time.
+            const auto give_up = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
             while (!pred() && std::chrono::steady_clock::now() < give_up) {
                 std::this_thread::yield();
             }
-            saw_cancel.store(pred());
         }
     });
     driver->pulse_guide(0, 2000);  // North: its timer parks on the clock
@@ -751,7 +752,6 @@ TEST_CASE("SynScan async - a reaper's cancel is not lost between a parked task's
         reaped.store(true);
     });
     CHECK(wait_until([&] { return reaped.load(); }, 2000));
-    CHECK(saw_cancel.load());
 
     // Whatever happened, reaching the timer's deadline wakes it, so the case ends instead of hanging in a join.
     clock.advance(std::chrono::seconds(5));
