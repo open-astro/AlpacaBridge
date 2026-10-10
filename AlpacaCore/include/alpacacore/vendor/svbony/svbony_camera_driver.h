@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/vendor/svbony/svbony_sdk.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::svbony {
@@ -25,5 +27,12 @@ namespace alpacacore::vendor::svbony {
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index);
+
+/**
+ * @brief Test seam: as create_svbony_camera(), over an injected SVBONY SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk);
 
 } // namespace alpacacore::vendor::svbony
