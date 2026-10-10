@@ -45,6 +45,19 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+// The fake mount reports pier W at longitude 0, and the driver takes a forced
+// meridian flip (two passthrough GOTOs, never the plain one) whenever the target's
+// hour angle is negative. A fixed RA made that depend on the wall clock, so the
+// cases failed for about half of every UTC day. One hour west of the local
+// sidereal time (HA = +1 h, the driver's own GMST formula) never flips.
+double no_flip_ra_hours() {
+    const double days =
+        std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() / 86400.0;
+    const double d = 2440587.5 + days - 2451545.0;
+    const double lst_hours = std::fmod(std::fmod(280.46061837 + 360.98564736629 * d, 360.0) + 360.0, 360.0) / 15.0;
+    return std::fmod(lst_hours - 1.0 + 24.0, 24.0);
+}
+
 struct FakeCelestronState {
     // The GOTO timer reads this clock. A case that steps the driver on a
     // FakeTaskClock points it there, so the slew runs in virtual time too.
@@ -218,7 +231,7 @@ TEST_CASE("Celestron async - a GOTO the hand controller never acknowledges surfa
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     st->reject_goto.store(true);
-    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     // True: published before the task ran. Threw: the task won mutex_ first
     // and its dispatch already failed -- never a silent False.
     const SlewingRead first = read_slewing(*driver);
@@ -232,7 +245,7 @@ TEST_CASE("Celestron async - a GOTO the hand controller never acknowledges surfa
 
     // A retried initiator against a responsive controller clears it.
     st->reject_goto.store(false);
-    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
@@ -248,7 +261,7 @@ TEST_CASE("Celestron async - AbortSlew clears a stored slew failure (#575)",
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     st->reject_goto.store(true);
-    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
 
     REQUIRE_NOTHROW(driver->abort_slew());
@@ -265,7 +278,7 @@ TEST_CASE("Celestron async - AbortSlew fences a pending GOTO", "[celestron][tele
 
     for (int i = 0; i < 50; ++i) {
         const int before = st->goto_count.load();
-        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
         REQUIRE_NOTHROW(driver->abort_slew());
         const int at_abort_return = st->goto_count.load();
         // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
@@ -290,7 +303,7 @@ TEST_CASE("Celestron AbortSlew - a stop failure still reaps the cancelled slew t
     REQUIRE_NOTHROW(driver->set_connected(false));
     REQUIRE_NOTHROW(driver->set_connected(true));
     const int before = st->goto_count.load();
-    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     CHECK(wait_until([&] { return st->goto_count.load() > before; }, 5000));
     driver->set_connected(false);
 }
@@ -318,7 +331,7 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    driver->slew_to_coordinates_async(5.5, 20.0);
+    driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
     REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5000));
     REQUIRE(driver->get_slewing());
     const int cancels_before = st->command_count('M');
@@ -418,7 +431,7 @@ TEST_CASE("Celestron slot - a refused goto start on an idle mount cancels nothin
     const int cancels_before = st->command_count('M');
 
     refuse_slot_threads(*driver);
-    CHECK_THROWS_AS(driver->slew_to_coordinates_async(5.5, 20.0), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
 
     CHECK(st->command_count('M') == cancels_before);  // nothing was in flight: nothing to stop
@@ -442,7 +455,7 @@ TEST_CASE("Celestron async - MoveAxis owns motion after superseding an async sle
     driver->set_tracking(true);
 
     const int before = st->goto_count.load();
-    driver->slew_to_coordinates_async(5.5, 20.0);
+    driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
     REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
     driver->move_axis(0, 0.5);
     const int tracking_writes_after_move = st->command_count('T');
@@ -469,7 +482,7 @@ TEST_CASE("Celestron sync - a blocking slew reaps a prior async slew task",
     const int tracking_writes_before = st->command_count('T');
 
     const int before = st->goto_count.load();
-    driver->slew_to_coordinates_async(5.5, 20.0);
+    driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
     REQUIRE(wait_until([&] { return st->goto_count.load() > before; }, 3000));
     std::atomic<bool> sync_done{false};
     std::thread syncer([&] {
@@ -759,10 +772,10 @@ TEST_CASE("Celestron PulseGuide - an operation that reaps the pulse clears IsPul
         REQUIRE(driver->get_is_pulse_guiding());
         switch (op) {
             case Op::SlewToCoordinates:
-                driver->slew_to_coordinates(5.5, 20.0);
+                driver->slew_to_coordinates(no_flip_ra_hours(), 20.0);
                 break;
             case Op::SlewToCoordinatesAsync:
-                driver->slew_to_coordinates_async(5.5, 20.0);
+                driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0);
                 break;
             case Op::FindHome:
                 driver->find_home();
