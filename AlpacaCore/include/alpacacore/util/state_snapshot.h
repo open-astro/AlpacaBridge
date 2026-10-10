@@ -48,8 +48,8 @@ public:
 
     struct Reading {
         T value;
-        clock::time_point measured_at;
-        bool stale;
+        clock::time_point measured_at{};
+        bool stale = false;
     };
 
     StateSnapshot(const TaskClock& task_clock, std::chrono::nanoseconds max_age)
