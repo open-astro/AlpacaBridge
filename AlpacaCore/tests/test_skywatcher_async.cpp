@@ -4926,4 +4926,37 @@ TEST_CASE("SkyWatcher slot - a refused goto start on an idle tracking mount keep
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher slot - a refused start that displaced an undispatched goto ends a pending RightAscensionRate check",
+          "[skywatcher][async][slot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    // Negative: a stopped axis must not read as "took" for the check.
+    driver->set_right_ascension_rate(-0.5);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its settle
+
+    SlotGate gate;
+    gate.close();
+    sw::set_slew_spawn_for_testing(*driver, gate.spawn());
+    driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 35.0);
+
+    sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+    gate.release();
+
+    const int starts_before = mount.start_count(1);
+    for (int i = 0; i < 20; ++i) {
+        clock.advance(std::chrono::milliseconds(500));
+        clock.wait_for_woken_settled(kRendezvous);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(driver->get_tracking() == mount.axis_running(1));
+    CHECK(mount.start_count(1) == starts_before);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

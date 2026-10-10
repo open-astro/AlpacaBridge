@@ -4969,6 +4969,9 @@ private:
         if (!connected_) {
             return;
         }
+        // The RA axis is taken here, so a pending rate-applied check ends first
+        // (it would resend :I/:J and restart RA while Tracking reads false).
+        cancel_rate_verify_locked();
         try {
             protocol_->instant_stop(kAxisRa);
             protocol_->instant_stop(kAxisDec);
