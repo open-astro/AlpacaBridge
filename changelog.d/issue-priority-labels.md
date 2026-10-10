@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Issue priority is a `P1`-`P5` label, not a title prefix** (docs/agents/issue-tracker.md, AGENTS.md): every open issue carries one priority label, set at creation and changed with `--remove-label`/`--add-label`; the priority scale itself is unchanged. The 44 open issues that had a `[Pn]` prefix were relabelled and their titles cleaned on 2026-10-10, and the six without one were triaged; closed issues keep their old prefix.
