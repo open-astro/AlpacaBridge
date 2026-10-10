@@ -126,3 +126,13 @@ TEST_CASE("StateSnapshot - a poll in flight across reset is dropped", "[state_sn
     CHECK_FALSE(snap.publish(token, Pointing{1.0, 2.0}));
     CHECK_FALSE(snap.read().has_value());
 }
+
+TEST_CASE("StateSnapshot - a write on an empty frame drops a poll in flight", "[state_snapshot][unit]") {
+    FakeTaskClock clock;
+    StateSnapshot<Pointing> snap(clock, 2s);
+
+    const auto token = snap.begin_poll();
+    snap.write([](Pointing& p) { p.ra = 9.0; });
+    CHECK_FALSE(snap.publish(token, Pointing{1.0, 2.0}));
+    CHECK_FALSE(snap.read().has_value());
+}

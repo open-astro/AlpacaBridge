@@ -77,17 +77,17 @@ public:
     /// Write-through: `apply` changes the held frame in place; `measured_at`
     /// stays at the last publish, because a client write is not a measurement.
     /// With no frame held (before the first publish, after reset()) the write
-    /// is not retained and `apply` does not run: the next poll measures the
-    /// device. `apply` runs under the snapshot mutex: it must not block or do
-    /// device I/O.
+    /// is not retained and `apply` does not run, but it still drops a poll in
+    /// flight: the next poll measures the device. `apply` runs under the
+    /// snapshot mutex: it must not block or do device I/O.
     template <typename Apply>
     void write(Apply&& apply) {
         std::lock_guard<std::mutex> lock(mutex_);
+        ++write_epoch_;
         if (!value_.has_value()) {
             return;
         }
         apply(*value_);
-        ++write_epoch_;
     }
 
     /// The held frame, or nullopt before the first publish or after reset().
