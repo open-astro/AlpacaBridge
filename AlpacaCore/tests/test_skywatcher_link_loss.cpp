@@ -23,6 +23,11 @@
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
 
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -82,6 +87,8 @@ void run_staleness_scenario(const Transport& t, FakeTaskClock& clock) {
     const auto lost_at = protocol->consume_link_lost_at();
     REQUIRE(lost_at.has_value());
     CHECK(*lost_at == clock.now());
+    // The transport is closed (best effort): no fd to the board is left open.
+    CHECK_FALSE(protocol->is_connected());
     // The last fault text stays, so the listing shows why.
     CHECK(driver->get_link_fault().find("consecutive failures") != std::string::npos);
 
@@ -155,5 +162,105 @@ TEST_CASE("SkyWatcher link loss - a fault that clears inside the bound is not a 
     clock.advance(std::chrono::seconds(60));
     CHECK(driver->get_connected());
     CHECK_FALSE(protocol->consume_link_lost_at().has_value());
+    driver->set_connected(false);
+}
+
+namespace {
+
+// The wrapper's connected UDP socket to the fake: found by its peer port.
+int find_udp_fd(int peer_port) {
+    for (int fd = 3; fd < 1024; ++fd) {
+        int type = 0;
+        socklen_t len = sizeof(type);
+        if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &type, &len) != 0 || type != SOCK_DGRAM) continue;
+        sockaddr_in peer{};
+        socklen_t plen = sizeof(peer);
+        if (getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &plen) == 0 && ntohs(peer.sin_port) == peer_port) {
+            return fd;
+        }
+    }
+    return -1;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher link loss - UDP: a reachability error stays a fault until the bound",
+          "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    auto mount = std::make_unique<FakeSkyWatcherMount>(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount->ok());
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount->port();
+    info.response_timeout_ms = 100;
+    auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
+    auto* protocol = owned.get();
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7, -104.9, 1609.0, std::move(owned), {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // The fake's socket goes away: loopback answers ICMP port-unreachable and
+    // the next recv fails ECONNREFUSED. That is not a loss.
+    mount.reset();
+    for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol->inquire_position(sw::kAxisRa));
+    CHECK(driver->get_connected());
+    REQUIRE(protocol->link_faulted());
+    clock.advance(alpacacore::util::kLinkStalenessBound - std::chrono::seconds(1));
+    CHECK(driver->get_connected());
+
+    // The board comes back on the same port inside the bound: the next good
+    // reply clears the fault, no loss.
+    mount = std::make_unique<FakeSkyWatcherMount>(alpacacore::test::FakeMountProfile::wave_100i(), clock,
+                                                   info.udp_port);
+    if (mount->ok()) {
+        CHECK(protocol->inquire_position(sw::kAxisRa) != 0);
+        CHECK_FALSE(protocol->link_faulted());
+        CHECK(driver->get_connected());
+        CHECK_FALSE(protocol->consume_link_lost_at().has_value());
+        mount.reset();
+        for (int i = 0; i < 3; ++i) CHECK_THROWS(protocol->inquire_position(sw::kAxisRa));
+    }
+
+    // Past the bound the silence is a loss.
+    clock.advance(alpacacore::util::kLinkStalenessBound);
+    CHECK_FALSE(driver->get_connected());
+    require_not_connected([&] { driver->get_right_ascension(); });
+    const auto lost_at = protocol->consume_link_lost_at();
+    REQUIRE(lost_at.has_value());
+    CHECK(*lost_at == clock.now());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher link loss - UDP: an unusable socket loses the link at once", "[skywatcher][linkloss][udp]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount.port();
+    info.response_timeout_ms = 100;
+    auto owned = std::make_unique<sw::SkyWatcherProtocolWrapper>();
+    auto* protocol = owned.get();
+    auto driver = sw::create_skywatcher_telescope(0, info, 39.7, -104.9, 1609.0, std::move(owned), {}, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // Turn the wrapper's socket fd into a non-socket: send fails ENOTSOCK.
+    const int fd = find_udp_fd(mount.port());
+    REQUIRE(fd >= 0);
+    const int devnull = ::open("/dev/null", O_RDWR);
+    REQUIRE(devnull >= 0);
+    REQUIRE(::dup2(devnull, fd) == fd);
+    ::close(devnull);
+
+    require_not_connected([&] { protocol->inquire_position(sw::kAxisRa); });
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(protocol->is_connected());
+    require_not_connected([&] { driver->get_right_ascension(); });
+    const auto lost_at = protocol->consume_link_lost_at();
+    REQUIRE(lost_at.has_value());
+    CHECK(*lost_at == clock.now());
     driver->set_connected(false);
 }

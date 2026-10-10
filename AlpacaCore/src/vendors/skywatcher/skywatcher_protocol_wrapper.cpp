@@ -932,7 +932,8 @@ public:
         link_lost_.store(true);
         std::unique_lock<std::mutex> lock(io_mutex_, std::try_to_lock);
         if (lock.owns_lock() && connected_.load()) {
-            ALPACA_LOG_WARN("SkyWatcher", "Motor controller link lost: " + lost_fault_ + "; link closed");
+            const std::string reason = link_fault();
+            ALPACA_LOG_WARN("SkyWatcher", "Motor controller link lost: " + reason + "; link closed");
             disconnect_locked();
         }
     }
@@ -1004,6 +1005,20 @@ private:
             link_health_.reset();
         }
         connected_ = false;
+    }
+
+    // Decision 0009 point 2: a socket errno is lost-at-once only when it says
+    // the socket itself is unusable. Every other one (EHOSTUNREACH after a
+    // failed neighbour lookup, ECONNREFUSED while the board's UDP stack
+    // reboots, ENETUNREACH while the interface is down) reports reachability,
+    // which a Wi-Fi drop or a board reboot restores: it counts as a no-reply
+    // exchange for the latch and the staleness bound decides.
+    [[noreturn]] void udp_socket_error_locked(const std::string& what, int err) {
+        if (err == EBADF || err == ENOTSOCK || err == ENOTCONN) {
+            lose_socket_link_locked(what);
+        }
+        exchange_timed_out_ = true;
+        throw AlpacaException(what);
     }
 
     // Decision 0009 point 3 for a UDP socket that failed hard (send/receive
@@ -1515,7 +1530,7 @@ private:
                     ALPACA_LOG_WARN("SkyWatcher",
                                     "UDP socket went stale (interface address changed); rebuilt and resent");
                 } else {
-                    lose_socket_link_locked("UDP send failed: " + util::errno_string(errno));
+                    udp_socket_error_locked("UDP send failed: " + util::errno_string(errno), errno);
                 }
             }
             auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
@@ -1565,7 +1580,7 @@ private:
                 }
                 if (n < 0) {
                     link_dirty_ = true;
-                    lose_socket_link_locked("UDP receive failed: " + util::errno_string(errno));
+                    udp_socket_error_locked("UDP receive failed: " + util::errno_string(errno), errno);
                 }
             }
             link_dirty_ = true;
