@@ -40,6 +40,9 @@ namespace alpacacore::util {
  *   publishes normally.
  *
  * The mutex is held only for the copy in and out, never across device I/O.
+ * read() copies T under the lock, so T should be a small frame (a few
+ * scalars and flags), not a buffer. The TaskClock passed to the constructor
+ * must outlive the snapshot.
  */
 template <typename T>
 class StateSnapshot {
@@ -79,7 +82,8 @@ public:
     /// With no frame held (before the first publish, after reset()) the write
     /// is not retained and `apply` does not run, but it still drops a poll in
     /// flight: the next poll measures the device. `apply` runs under the
-    /// snapshot mutex: it must not block or do device I/O.
+    /// snapshot mutex: it must not block, do device I/O or throw (a throw
+    /// part-way leaves a partial change that read() serves).
     template <typename Apply>
     void write(Apply&& apply) {
         std::lock_guard<std::mutex> lock(mutex_);
