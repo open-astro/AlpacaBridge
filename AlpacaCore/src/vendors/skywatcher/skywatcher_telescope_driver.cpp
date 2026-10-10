@@ -2406,6 +2406,11 @@ public:
                 return;
             }
             manual_axis_slewing_[axis] = false;
+            // A getter may have filled the position cache while the axis still
+            // ramped down; the mount coasted on after it. The next motion from
+            // rest seeds its limit-guard baseline from the cache, and a stale
+            // inside position would read a reverse MoveAxis as a crossing.
+            invalidate_position_cache_locked();
             if (!stopped) {
                 ALPACA_LOG_WARN("SkyWatcher", "MoveAxis stop: axis " + std::to_string(channel) +
                                                   " still reported running at timeout");
