@@ -49,7 +49,7 @@ using Clock = std::chrono::steady_clock;
 // meridian flip (two passthrough GOTOs, never the plain one) whenever the target's
 // hour angle is negative. A fixed RA made that depend on the wall clock, so the
 // cases failed for about half of every UTC day. One hour west of the local
-// sidereal time (the driver's own GMST formula) never flips.
+// sidereal time (HA = +1 h, the driver's own GMST formula) never flips.
 double no_flip_ra_hours() {
     const double days =
         std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count() / 86400.0;
