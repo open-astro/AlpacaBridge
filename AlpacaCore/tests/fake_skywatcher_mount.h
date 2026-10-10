@@ -151,8 +151,11 @@ public:
     /// @param clock the clock the axis model integrates motion against.
     /// Real by default; a FakeTaskClock makes motion virtual (see the file
     /// comment). The clock must outlive the mount.
+    /// @param bind_port 0 for an ephemeral port; a number to come back on the
+    /// port of a mount that went away (link-loss recovery cases).
     explicit FakeSkyWatcherMount(FakeMountProfile profile = FakeMountProfile::wave_100i(),
-                                 alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock())
+                                 alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock(),
+                                 int bind_port = 0)
         : kCpr(profile.cpr),
           kCprDec(profile.cpr_dec != 0 ? profile.cpr_dec : profile.cpr),
           kTimerFreq(profile.timer_freq),
@@ -169,7 +172,7 @@ public:
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        addr.sin_port = 0;
+        addr.sin_port = htons(static_cast<uint16_t>(bind_port));
         if (::bind(fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
             ::close(fd_);
             fd_ = -1;

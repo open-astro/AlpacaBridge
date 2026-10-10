@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -129,6 +131,9 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    // Decision 0009: the clock the staleness bound and the link-lost stamp run
+    // on. Real by default; the driver passes its own TaskClock.
+    void set_task_clock(util::TaskClock& clock);
     // open-astro#445: is_connected() without I/O and without waiting on an
     // exchange, that also notices a serial device which has gone away (and
     // closes the dead link when it can). Safe to call from a Connected poll.
@@ -141,7 +146,10 @@ public:
     // fault instead. Non-empty fault means the caller must refuse to serve its
     // CACHE (DriverException "communications compromised"), never that it
     // should stop talking: on a polled link the reads are the only traffic
-    // that can clear the latch. Connected stays true throughout, per #237.
+    // that can clear the latch. Connected stays true while the fault is younger
+    // than util::kLinkStalenessBound (30 s); past it the link is LOST
+    // (decision 0009): link_alive() reads false, the transport is closed and
+    // the last fault text stays here until the next connect or disconnect.
     // Cheap and lock-free enough for a read path (own leaf mutex, no I/O).
     virtual std::string link_fault();
     virtual bool link_faulted();

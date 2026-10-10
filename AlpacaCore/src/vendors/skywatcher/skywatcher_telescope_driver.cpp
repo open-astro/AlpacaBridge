@@ -292,6 +292,9 @@ public:
           dec_axis_sense_setting_(dec_axis_sense_setting) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
+        // Decision 0009: the staleness bound and link-lost stamp run on the
+        // driver's task clock.
+        protocol_->set_task_clock(clock_);
     }
 
     ~SkyWatcherTelescopeDriver() override {
@@ -402,7 +405,7 @@ public:
             }
         }
         if (session_open_.load() && !protocol_->link_alive()) {
-            return "serial link to the motor controller lost; reconnect";
+            return "link to the motor controller lost; reconnect";
         }
         return {};
     }
@@ -2518,7 +2521,7 @@ private:
     void adopt_surviving_motion_locked(std::unique_lock<std::mutex>& lock, const AxisStatus (&entry_status)[2]) {
         (void)lock;  // held by the caller for the whole connect
         const auto lost_at = protocol_->consume_link_lost_at();
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         // A stop is only justified when we have POSITIVE evidence of a long,
         // unmonitored outage (a recorded link-loss timestamp old enough to
         // clear the preserve window). No stamp is NOT that evidence: it also
@@ -2531,14 +2534,9 @@ private:
         // perfectly healthy tracking mount on every fresh connect where the
         // axis was already running.
         //
-        // Consequence worth knowing before relying on the stop branch: only
-        // the SERIAL loss paths stamp link_lost_at_ (the device-node presence
-        // check and lose_serial_link_locked, both serial-only). A network
-        // (UDP) mount therefore never records an outage, so lost_at is always
-        // empty for it and it ALWAYS takes the preserve branch, however long
-        // it was gone. That follows the "no positive evidence => preserve"
-        // rule rather than violating it, but it means the stop branch is in
-        // practice serial-only today (review of #553).
+        // Every loss path stamps link_lost_at on the task clock, serial and
+        // UDP alike (decision 0009): the node check, an fd or socket error,
+        // and a fault that outlived util::kLinkStalenessBound.
         const bool long_unmonitored_outage =
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
 
