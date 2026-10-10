@@ -19,6 +19,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
@@ -1156,77 +1157,28 @@ public:
         start_slew_body(
             [this, park_ra, park_dec](util::OperationContext& ctx) {
                 std::unique_lock<std::mutex> lock(mutex_);
-                if (!connected_ || ctx.stop_reason() != util::StopReason::None || !parking_) {
-                    parking_ = false;
-                    return;
-                }
-                try {
-                    do_slew_to_coordinates_locked(park_ra, park_dec);
-                } catch (const std::exception& ex) {
-                    fail_park_locked(std::string("Park slew dispatch failed: ") + ex.what());
-                    return;
-                } catch (...) {
-                    fail_park_locked("Park slew dispatch failed with unknown exception");
-                    return;
-                }
-                // Poll for completion with mutex_ released between polls so the
-                // HTTP getters (Slewing, RightAscension, ...) stay responsive.
-                const auto timeout = std::chrono::seconds(120);
-                const auto start = clock_.now();
-                const auto start_grace = std::chrono::seconds(2);
-                bool saw_slewing = false;
-                while (true) {
-                    lock.unlock();
-                    const bool keep_going = ctx.wait_for(std::chrono::milliseconds(250));
-                    lock.lock();
-                    // Cancelled (disconnect / destruction / superseding slew),
-                    // aborted, or unparked meanwhile: the canceller owns the state.
-                    if (!keep_going || !connected_ || !parking_) {
-                        parking_ = false;
-                        return;
-                    }
-                    const bool slewing = poll_hardware_slewing_locked();
-                    if (slewing) {
-                        saw_slewing = true;
-                    } else {
-                        if (!saw_slewing && (clock_.now() - start) < start_grace) {
-                            continue;
-                        }
-                        break;
-                    }
-                    if (clock_.now() - start > timeout) {
-                        fail_park_locked("Park slew timed out after 120s");
-                        return;
-                    }
-                }
-                if (slew_settle_time_seconds_ > 0) {
-                    lock.unlock();
-                    const bool keep_going = ctx.wait_for(std::chrono::seconds(slew_settle_time_seconds_));
-                    lock.lock();
-                    if (!keep_going || !connected_ || !parking_) {
-                        parking_ = false;
-                        return;
-                    }
-                }
-                try {
+                util::ParkSlewHooks hooks;
+                hooks.still_parking = [this] { return connected_ && parking_; };
+                hooks.abandon = [this] { parking_ = false; };
+                hooks.dispatch = [&] { do_slew_to_coordinates_locked(park_ra, park_dec); };
+                hooks.poll_slewing = [this] { return poll_hardware_slewing_locked(); };
+                hooks.stop_tracking = [this] {
                     CelestronProtocolWrapper::instance().set_tracking_mode(0);
                     tracking_mode_cached_ = 0;
                     tracking_mode_valid_ = true;
-                } catch (const std::exception& ex) {
-                    fail_park_locked(std::string("Park: stopping tracking failed: ") + ex.what());
-                    return;
-                } catch (...) {
-                    fail_park_locked("Park: stopping tracking failed with unknown exception");
-                    return;
-                }
-                slewing_cached_ = false;
-                slew_force_until_ = util::TaskClock::clock::time_point::min();
-                equatorial_cache_valid_ = false;
-                altaz_cache_valid_ = false;
-                flip_in_progress_ = false;
-                // AtPark and Slewing flip in the same locked step.
-                parked_ = true;
-                parking_ = false;
+                };
+                hooks.fail = [this](const std::string& message) { fail_park_locked(message); };
+                hooks.complete = [this] {
+                    slewing_cached_ = false;
+                    slew_force_until_ = util::TaskClock::clock::time_point::min();
+                    equatorial_cache_valid_ = false;
+                    altaz_cache_valid_ = false;
+                    flip_in_progress_ = false;
+                    // AtPark and Slewing flip in the same locked step.
+                    parked_ = true;
+                    parking_ = false;
+                };
+                util::run_park_slew(ctx, lock, clock_, slew_settle_time_seconds_, hooks);
             },
             displaced,
             [&] {
@@ -1245,27 +1197,7 @@ public:
     // is tried on its own so one failure does not skip the others. Returns
     // the first failure's message, or an empty string when every stop was
     // answered (#742). mutex_ must be held.
-    std::string stop_park_slew_locked() {
-        auto& protocol = CelestronProtocolWrapper::instance();
-        std::string first_error;
-        const auto try_stop = [&first_error](auto&& stop) {
-            try {
-                stop();
-            } catch (const std::exception& ex) {
-                if (first_error.empty()) {
-                    first_error = ex.what();
-                }
-            } catch (...) {
-                if (first_error.empty()) {
-                    first_error = "unknown exception";
-                }
-            }
-        };
-        try_stop([&protocol] { protocol.cancel_goto(); });
-        try_stop([&protocol] { protocol.move_axis_fixed_rate(0, 0); });
-        try_stop([&protocol] { protocol.move_axis_fixed_rate(1, 0); });
-        return first_error;
-    }
+    std::string stop_park_slew_locked() { return util::stop_goto_and_axes(CelestronProtocolWrapper::instance()); }
 
     // Park task failure path: stop the hardware so the reported idle state
     // (Slewing false, AtPark false) matches reality, then drop the parking

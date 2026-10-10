@@ -335,7 +335,7 @@ choreography, not a driver fault — verify by checking that every slew lands on
 
 ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
 target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
-The proven shape (SkyWatcher, then SynScan / Celestron in issue #208; Bisque pending on `fix/bisque-async-park`): reap the
+The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): reap the
 slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
 `parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
 task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and

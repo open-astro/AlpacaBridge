@@ -18,8 +18,10 @@
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::synscan {
 
@@ -45,6 +47,11 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
     std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
     SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto,
     util::TaskClock& clock = util::default_task_clock());
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can make a body's start fail. Call only while no start is in flight.
+/// `driver` must come from the factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
