@@ -226,7 +226,8 @@ TEST_CASE("SynScan slot - a refused park start keeps a MoveAxis in motion report
     refused_start_keeps_move_axis([](alpacacore::TelescopeDriver& d) { d.park(); });
 }
 
-TEST_CASE("SynScan slot - a refused pulse timer start stops the axis and clears the pulse", "[synscan][telescope][async][slot]") {
+TEST_CASE("SynScan slot - a refused pulse timer start stops the axis and clears the pulse",
+          "[synscan][telescope][async][slot]") {
     Rig rig;
     const int passthrough_before = rig.st->command_count('P');
 
