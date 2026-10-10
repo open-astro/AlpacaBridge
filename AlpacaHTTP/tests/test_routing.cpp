@@ -4513,32 +4513,32 @@ int main() {
             R"({"rotatorIndex":1,"rotatorId":2})");
         add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
             R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})");
-        // ports/pwmFrequencyHz survive for the three ASIAIR variants; gpioChip
-        // only for the libgpiod two, devicePath only for the RK3568.
+        // Declared fields survive whatever the switchType (ADR 0004).
         add("zwo", "switch", "Switch", "asiair",
             R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
             R"("ports":[{"gpio":12,"name":"Mount","pwm":false},{"gpio":13,"name":"Dew","pwm":true}]})",
-            R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":200,)"
+            R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
             R"("ports":[{"gpio":12,"name":"Mount","pwm":false},{"gpio":13,"name":"Dew","pwm":true}]})");
         add("zwo", "switch", "Switch", "asiair-plus-picm4",
             R"({"switchType":"asiair-plus-picm4","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
             R"("ports":[{"gpio":12,"name":"Mount","pwm":false}]})",
-            R"({"switchType":"asiair-plus-picm4","gpioChip":"/dev/gpiochip0","pwmFrequencyHz":200,)"
+            R"({"switchType":"asiair-plus-picm4","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
             R"("ports":[{"gpio":12,"name":"Mount","pwm":false}]})");
         add("zwo", "switch", "Switch", "asiair-plus-rk3568",
             R"({"switchType":"asiair-plus-rk3568","gpioChip":"/dev/gpiochip0","devicePath":"/dev/pwm-gpio-misc",)"
             R"("pwmFrequencyHz":50,"ports":[{"name":"DC1","pwm":true}]})",
-            R"({"switchType":"asiair-plus-rk3568","devicePath":"/dev/pwm-gpio-misc","pwmFrequencyHz":50,)"
+            R"({"switchType":"asiair-plus-rk3568","gpioChip":"/dev/gpiochip0","devicePath":"/dev/pwm-gpio-misc",)"
+            R"("pwmFrequencyHz":50,)"
             R"("ports":[{"name":"DC1","pwm":true}]})");
         // zwo / telescope had no round-trip case at all before #647.
         add("zwo", "telescope", "Telescope", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":9600,"host":"h","tcpPort":1,"cameraIndex":9})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":9600,"cameraIndex":9})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":9600,"host":"h","tcpPort":1})");
         add("zwo", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.4.1","tcpPort":4030,"portPath":"/dev/x","baudRate":9600})",
-            R"({"connectionType":"network","host":"192.168.4.1","tcpPort":4030})");
+            R"({"connectionType":"network","host":"192.168.4.1","tcpPort":4030,"portPath":"/dev/x","baudRate":9600})");
         add("zwo", "telescope", "Telescope", "auto", R"({"connectionType":"auto","portPath":"/dev/x"})",
-            R"({"connectionType":"auto"})");
+            R"({"connectionType":"auto","portPath":"/dev/x"})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_QHY
@@ -4913,7 +4913,7 @@ int main() {
         mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, false});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, true});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -7225,8 +7225,8 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek, WandererAstro and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is
-    // false.
+    // ToupTek, WandererAstro, WeeWX and ZWO (non-camera) descriptors plus the "zzz" test descriptor, schema only, so
+    // its `available` is false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7236,7 +7236,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 27);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 32);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7321,6 +7321,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "wandererastro") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "zwo") {
+#ifdef ALPACACORE_ENABLE_ZWO
                 entry["available"] = true;
 #else
                 entry["available"] = false;
