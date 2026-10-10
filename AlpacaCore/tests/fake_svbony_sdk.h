@@ -42,6 +42,9 @@ namespace alpacacore::test {
  * Not thread-hardened: wrap it in LockedSVBSDK for any test that drives the
  * driver from more than one thread. KNOWN PARITY GAP: the real SDK fails
  * set_control_value on a closed camera; this fake accepts it.
+ * KNOWN PARITY GAP: the real SDK fails get_video_data on a short read or
+ * timeout and set_roi_format on a geometry the sensor rejects; this fake
+ * always fills the buffer and accepts any geometry.
  *
  * LIFETIME: drivers hold a plain SVBSDK&; the fake MUST outlive every driver
  * built on it.

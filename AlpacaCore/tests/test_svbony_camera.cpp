@@ -240,7 +240,7 @@ TEST_CASE("FakeSVBSDK behind LockedSVBSDK - forwards every entry point", "[svbon
 
 TEST_CASE("SVBONY Camera Driver - default factory still works without an SDK argument",
           "[svbony][camera][unit][fake-sdk]") {
-    // The two-argument factory binds the real wrapper singleton; construction touches no hardware.
+    // The two-argument factory binds the real wrapper singleton; the driver reaches the SDK only on connect.
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(2, 0);
     REQUIRE(driver != nullptr);
     CHECK(driver->get_device_number() == 2);
