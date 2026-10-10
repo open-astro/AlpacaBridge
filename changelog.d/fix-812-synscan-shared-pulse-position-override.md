@@ -1,0 +1,2 @@
+### Fixed
+- **SynScan PulseGuide keeps the position estimate for the longest pulse** (SynScan, issue #990): a short pulse on one axis no longer shortens the hold of a longer pulse still running on the other, so RA/Dec reads no longer fall back to the live mount position mid-pulse (test `short Dec pulse keeps the position override of a long RA pulse` in `test_synscan_async_slew_failure.cpp`, fix in `synscan_telescope_driver.cpp` `pulse_guide`).
