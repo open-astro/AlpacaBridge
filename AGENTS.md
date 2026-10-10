@@ -338,7 +338,7 @@ target and completes it by polling `AtPark`/`Slewing`. Never block through a par
 The proven shape (SkyWatcher, then SynScan / Celestron in issue #208; Bisque pending on `fix/bisque-async-park`): reap the
 slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
 `parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
-task thread, releasing the mutex between polls (`task_wait_for`, cancellable). `AtPark` and
+task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
