@@ -226,4 +226,18 @@ TEST_CASE("SynScan slot - a refused park start keeps a MoveAxis in motion report
     refused_start_keeps_move_axis([](alpacacore::TelescopeDriver& d) { d.park(); });
 }
 
+TEST_CASE("SynScan slot - a refused pulse timer start stops the axis and clears the pulse", "[synscan][telescope][async][slot]") {
+    Rig rig;
+    const int passthrough_before = rig.st->command_count('P');
+
+    alpacacore::vendor::synscan::set_pulse_spawn_for_testing(*rig.driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS_AS(rig.driver->pulse_guide(0, 2000), alpacacore::AlpacaException);
+
+    CHECK(rig.st->command_count('P') >= passthrough_before + 2);  // the rate command, then the stop
+    CHECK_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
 #endif  // _WIN32

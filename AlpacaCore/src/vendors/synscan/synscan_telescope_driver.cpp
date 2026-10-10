@@ -1229,8 +1229,8 @@ public:
                                       AlpacaError::InvalidOperation);
             }
         }
-        // The pulse body takes mutex_ only on its failure paths and joining here
-        // holds none, so cancelling and joining it cannot deadlock.
+        // The pulse body takes mutex_ (after an RA stop, to restore tracking, and
+        // on failure), so the join must run without it.
         pulse_ops_[axis].cancel_all_and_join();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1867,6 +1867,12 @@ private:
 public:
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
+    }
+
+    // Reaches the pulse slots only: the slew seam above cannot refuse a pulse start.
+    void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_ops_[0].set_spawn_for_testing(spawn);
+        pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
     }
 
 private:
@@ -2528,6 +2534,12 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_pulse_spawn_for_testing(std::move(spawn));
     }
 }
 
