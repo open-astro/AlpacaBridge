@@ -13,8 +13,8 @@ evidence) are defined in [CONTEXT.md](CONTEXT.md); module names are in
 [the architecture overview](docs/architecture.md#modules).
 
 Issues live in GitHub Issues on `open-astro/AlpacaBridge`, via the `gh` CLI —
-see `docs/agents/issue-tracker.md` for conventions, including the `[P1]`-`[P5]`
-priority prefix every issue title carries.
+see `docs/agents/issue-tracker.md` for conventions, including the `P1`-`P5`
+priority label every open issue carries.
 
 ## Load the complete instructions before working
 
