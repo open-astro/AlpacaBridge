@@ -8,6 +8,7 @@
 // with an additional permission allowing combination with proprietary
 // device-vendor SDKs. See the LICENSE file in this repository for the full
 // license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // StateSnapshot (decision record docs/decisions/0010-snapshot-served-state.md)
 // under the virtual FakeTaskClock: no real sleeps.
