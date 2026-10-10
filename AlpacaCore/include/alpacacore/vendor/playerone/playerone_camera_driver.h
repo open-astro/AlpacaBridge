@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
 #include <memory>
 
@@ -26,5 +27,9 @@ namespace alpacacore::vendor::playerone {
  * @return Unique pointer to camera driver
  */
 std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index);
+
+// Injectable SDK overload for hardware-free camera-driver tests. `sdk` must
+// outlive the returned driver.
+std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index, PlayerOneSDK& sdk);
 
 } // namespace alpacacore::vendor::playerone
