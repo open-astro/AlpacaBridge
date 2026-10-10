@@ -730,6 +730,11 @@ jobs:
         # tested by the PR that makes it, whatever that PR's head is named.
         run: python3 scripts/merge_down.py --self-test
 
+      - name: Self-test the stable-PR issue closer
+        # close-linked-issues.yml runs the script only on a merged stable PR;
+        # here a change to its keyword parser fails the PR that makes it.
+        run: python3 scripts/close_linked_issues.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
