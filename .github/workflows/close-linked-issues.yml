@@ -4,9 +4,9 @@
 #
 # pull_request_target: our PRs come from a fork, where pull_request gets a
 # read-only token. That trigger runs with write access, so this job checks out
-# the base ref only (never the PR head) and passes the untrusted PR body to
-# scripts/close_linked_issues.py through the environment, never through a
-# `${{ }}` expansion in `run:`.
+# the default branch only (never the PR head; the stable branch lacks the
+# script) and passes the untrusted PR body to scripts/close_linked_issues.py
+# through the environment, never through a `${{ }}` expansion in `run:`.
 
 name: Close linked issues
 
@@ -26,10 +26,10 @@ jobs:
     permissions:
       issues: write
     steps:
-      - name: Checkout base ref
+      - name: Checkout default branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.ref }}
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Close issues named by the PR
