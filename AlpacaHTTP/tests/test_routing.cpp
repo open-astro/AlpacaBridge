@@ -4513,8 +4513,6 @@ int main() {
             R"({"rotatorIndex":1,"rotatorId":2})");
         add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
             R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})");
-        // ports/pwmFrequencyHz survive for the three ASIAIR variants; gpioChip
-        // only for the libgpiod two, devicePath only for the RK3568.
         // Declared fields survive whatever the switchType (ADR 0004).
         add("zwo", "switch", "Switch", "asiair",
             R"({"switchType":"asiair","gpioChip":"/dev/gpiochip0","devicePath":"/dev/x","pwmFrequencyHz":200,)"
