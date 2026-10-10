@@ -11,7 +11,7 @@
 name: Close linked issues
 
 on:
-  pull_request_target:
+  pull_request_target:  # zizmor: ignore[dangerous-triggers] -- merged PRs only; checks out the default branch, never the head; PR body via env only
     types: [closed]
     branches: ['stable/**']
 
