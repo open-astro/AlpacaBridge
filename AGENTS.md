@@ -1026,7 +1026,9 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 
 9. **Config save→load round-trip** in `AlpacaHTTP/tests/test_routing.cpp` — `configuredevice` then read back `configureddevices` and assert **every persisted field survives** (index/id, filter names, PWM/port config, etc.). The automated catch for the two silent-data-loss classes described in [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors). Model it on the existing ToupTek AFW filter-wheel round-trip test. This is an `AlpacaHTTP`-level integration test, additional to the 8 vendor unit tests above, not a substitute for cases 6-8.
 
-### Hardware-free driver tests via the SDK seam (ToupTek, QHY and gphoto — extend to other vendors)
+### Hardware-free driver tests via the SDK seam (ToupTek, QHY, gphoto and SVBONY camera — extend to other vendors)
+
+The SVBONY camera has the same seam (`SVBSDK` in `svbony_sdk.h`, `FakeSVBSDK`, `LockedSVBSDK`, issue #1010).
 
 The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
 (`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`

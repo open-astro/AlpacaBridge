@@ -544,7 +544,8 @@ when it does not.
 
 The pattern this repo actually uses is an **abstract interface** that the driver holds by
 reference, with the real wrapper implementing it and a scripted fake standing in for it in
-tests. QHY and ToupTek have it; ZWO, Player One and SVBONY do not yet (their hardware-free
+tests. QHY, ToupTek and SVBONY (`svbony_sdk.h`, `tests/fake_svbony_sdk.h`,
+`tests/locked_svbony_sdk.h`) have it; ZWO and Player One do not yet (their hardware-free
 tests cannot reach any connected path: the unit files such as `tests/test_zwo_camera.cpp`
 never connect, and the `[stress]` registrations reach only the connect-failure path; see
 issue #362).

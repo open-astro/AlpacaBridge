@@ -45,6 +45,9 @@ namespace alpacacore::test {
  * KNOWN PARITY GAP: the real SDK fails get_video_data on a short read or
  * timeout and set_roi_format on a geometry the sensor rejects; this fake
  * always fills the buffer and accepts any geometry.
+ * KNOWN PARITY GAP: get_control_value returns false for a control never
+ * written (the driver's get_gain then throws DriverException); the real SDK
+ * reports the camera's default value.
  *
  * LIFETIME: drivers hold a plain SVBSDK&; the fake MUST outlive every driver
  * built on it.
