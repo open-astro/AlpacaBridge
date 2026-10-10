@@ -1268,6 +1268,7 @@ public:
             }
         }
         stop_pulse_ops();
+        bool displaced = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1278,7 +1279,7 @@ public:
             if (at_home_ && !get_hardware_slewing_locked(true)) {
                 return;  // already at home
             }
-            claim_slew_slot_locked();
+            displaced = claim_slew_slot_locked();
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
@@ -1335,6 +1336,7 @@ public:
                     ALPACA_LOG_WARN("SkyWatcher", "FindHome failed with unknown exception");
                 }
             },
+            displaced,
             [this] {
                 homing_ = false;
                 slewing_cached_ = false;
@@ -1364,6 +1366,7 @@ public:
         stop_pulse_ops();
         double target_ra_axis = 0.0;
         double target_dec_axis = 0.0;
+        bool displaced = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1378,7 +1381,7 @@ public:
             }
             target_ra_axis = park_ra_axis_deg_;
             target_dec_axis = park_dec_axis_deg_;
-            claim_slew_slot_locked();
+            displaced = claim_slew_slot_locked();
             invalidate_position_cache_locked();
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
@@ -1425,6 +1428,7 @@ public:
                     ALPACA_LOG_WARN("SkyWatcher", "Park failed with unknown exception");
                 }
             },
+            displaced,
             [this] {
                 parking_ = false;
                 slewing_cached_ = false;
@@ -4923,7 +4927,10 @@ private:
     // Caller holds mutex_, immediately before it sets the new operation's flags.
     // The body being replaced is Superseded from here on, so it will not clear
     // its own phase flag; clear both here (the initiator sets its own after).
-    void claim_slew_slot_locked() {
+    // Returns whether a body was in flight (now superseded): only then is there
+    // a motion nobody will stop if the start is refused.
+    bool claim_slew_slot_locked() {
+        const bool displaced = slew_.running();
         slew_generation_.bump();
         ++motion_generation_;
         parking_ = false;
@@ -4932,20 +4939,54 @@ private:
         // (FindHome never passes wait_for_slew_complete, which would end it);
         // an initiator that wants a window sets its own after the claim.
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        return displaced;
     }
 
     // Call without mutex_ held. Starts the body on the slew slot; when the slot
     // refuses (stale bound, or no thread), `rollback_locked` undoes the flags
     // the initiator published and the AlpacaException goes to the caller.
+    // `displaced` is claim_slew_slot_locked()'s result: a refused start that
+    // replaced nothing cancels nothing (a tracking mount keeps tracking).
     template <typename Rollback>
-    void start_slew_body(std::function<void(util::OperationContext&)> body, Rollback&& rollback_locked) {
+    void start_slew_body(std::function<void(util::OperationContext&)> body, bool displaced,
+                         Rollback&& rollback_locked) {
         try {
             slew_.start(std::move(body));
         } catch (...) {
             std::lock_guard<std::mutex> lock(mutex_);
             rollback_locked();
+            if (displaced) {
+                stop_axes_after_refused_start_locked();
+            }
             throw;
         }
+    }
+
+    // The claim before a refused start() already told the body in flight it is
+    // Superseded, so it skips its own stop and nothing else will halt the axes
+    // it was driving. Best effort, like stop_axes_if_cancelled_locked().
+    void stop_axes_after_refused_start_locked() {
+        if (!connected_) {
+            return;
+        }
+        // The RA axis is taken here, so a pending rate-applied check ends first
+        // (it would resend :I/:J and restart RA while Tracking reads false).
+        cancel_rate_verify_locked();
+        try {
+            protocol_->instant_stop(kAxisRa);
+            protocol_->instant_stop(kAxisDec);
+            cmd_axis_rate_deg_s_[0] = 0.0;
+            cmd_axis_rate_deg_s_[1] = 0.0;
+            invalidate_position_cache_locked();
+        } catch (...) {  // NOLINT(bugprone-empty-catch)
+            // Best effort; a dead link is reported by the link-health path.
+        }
+        // Same published state as AbortSlew: the drive is stopped, so neither
+        // Tracking nor a pending tracking restore may claim otherwise.
+        goto_in_progress_ = false;
+        restoring_tracking_ = false;
+        restore_tracking_after_slew_ = false;
+        tracking_ = false;
     }
 
     // A Park or FindHome body that failed or was stopped: end its phase flag
@@ -5017,7 +5058,7 @@ private:
         if (!body) {
             return lock;
         }
-        claim_slew_slot_locked();
+        const bool displaced = claim_slew_slot_locked();
         invalidate_position_cache_locked();
         slewing_cached_ = true;
         // open-astro#575: a fresh initiator is a clean start -- a client
@@ -5042,7 +5083,7 @@ private:
         lock.unlock();
         std::function<void(util::OperationContext&)> run =
             [body = std::move(body), slew_epoch](util::OperationContext& ctx) { body(ctx, slew_epoch); };
-        start_slew_body(std::move(run), [this] {
+        start_slew_body(std::move(run), displaced, [this] {
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
         });
