@@ -360,7 +360,6 @@ void refused_start_keeps_move_axis(const std::function<void(alpacacore::Telescop
     driver->set_connected(false);
 }
 
-
 }  // namespace
 
 TEST_CASE("Celestron slot - a refused goto start keeps a MoveAxis in motion reported",
@@ -373,8 +372,7 @@ TEST_CASE("Celestron slot - a refused park start keeps a MoveAxis in motion repo
     refused_start_keeps_move_axis([](alpacacore::TelescopeDriver& d) { d.park(); });
 }
 
-TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome",
-          "[celestron][telescope][async][slot]") {
+TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome", "[celestron][telescope][async][slot]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeCelestronState>();
     st->clock = &clock;
