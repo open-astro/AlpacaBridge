@@ -825,6 +825,41 @@ TEST_CASE("SkyWatcher limits - a MoveAxis Dec stop does not restore the Dec rate
     driver->set_connected(false);
 }
 
+// A position getter fills the cache while an axis still ramps down after
+// MoveAxis(axis, 0); the mount coasts past the floor and the stop completes
+// inside the cache lifetime. The next MoveAxis from rest must seed its guard
+// baseline from the board, not from that pre-coast cache: a reverse move that
+// drives back inside would otherwise read the outside first sample as a
+// crossing and stop itself.
+TEST_CASE("SkyWatcher limits - a reverse MoveAxis after a stop does not seed from a mid-ramp cache",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+
+    mount.set_stop_ramp_ms(800);
+    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    driver->move_axis(1, 0.0);
+    REQUIRE(driver->get_slewing());
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.5);  // fills the cache mid-ramp
+
+    mount.set_stop_ramp_ms(0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 3000));
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // coasted about 4 deg past the floor
+
+    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);  // back inside
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // four 250 ms polls
+    CHECK(mount.axis_running(2));
+    CHECK(driver->get_slewing());
+    driver->move_axis(1, 0.0);
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher limits - with no limit set the guard never starts", "[skywatcher][telescope][limits][guard]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());

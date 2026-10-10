@@ -1,0 +1,2 @@
+### Fixed
+- **Sky-Watcher: a MoveAxis started right after a MoveAxis stop no longer seeds its limit-guard baseline from a position cached mid-ramp** (issue #989): the stop task now discards the position cache when the axis is confirmed stopped, so the next motion from rest reads the board; covered by "SkyWatcher limits - a reverse MoveAxis after a stop does not seed from a mid-ramp cache" in `test_skywatcher_motion_limits.cpp`.
