@@ -325,7 +325,10 @@ datagrams before each send so replies cannot get off-by-one.
     `cancel_all_and_join()` run without `mutex_`; `cancel()` may run with it.
   - `start()` raises `AlpacaException` when the stale bound does not clear
     (`InvalidOperation`) or the OS refuses a thread (`DriverException`); both change
-    nothing in the slot, and the initiator rolls its published flags back.
+    nothing in the slot, and the initiator rolls its published flags back. When the claim had replaced a
+    body in flight, that body skips its stop, so the refusal also stops both axes
+    and publishes the AbortSlew state (`tracking_` and the tracking restore
+    cleared); a refusal that replaced nothing cancels nothing.
 - Debug technique: a watchdog loop that `pkill`s ConformU at the FIRST logged
   issue preserves the exact journal window and stops the mount from grinding
   through a failed run.

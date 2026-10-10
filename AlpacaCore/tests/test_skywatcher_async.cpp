@@ -4883,6 +4883,8 @@ void refused_slot_start_stops_axes(const std::function<void(alpacacore::Telescop
     CHECK_FALSE(mount.axis_running(2));
     CHECK_FALSE(driver->get_at_park());
     CHECK_FALSE(driver->get_at_home());
+    // Stopped like AbortSlew: Tracking must not claim a drive that is not running.
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
 }
 
@@ -4903,6 +4905,25 @@ TEST_CASE("SkyWatcher slot - a refused park start leaves the axes stopped when i
 TEST_CASE("SkyWatcher slot - a refused FindHome start leaves the axes stopped when it replaced a goto",
           "[skywatcher][async][slot]") {
     refused_slot_start_stops_axes([](alpacacore::TelescopeDriver& d) { d.find_home(); });
+}
+
+TEST_CASE("SkyWatcher slot - a refused goto start on an idle tracking mount keeps it tracking",
+          "[skywatcher][async][slot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    REQUIRE(mount.axis_running(1));
+
+    sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK_THROWS_AS(driver->slew_to_coordinates_async(std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0), 35.0),
+                    alpacacore::AlpacaException);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32
