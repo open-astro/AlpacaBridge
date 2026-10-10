@@ -1,0 +1,2 @@
+### Fixed (docs)
+- **Issue tracker: the create-an-issue example carries the priority label** (docs/agents/issue-tracker.md): the Conventions example now passes `--label P<n>` and names the type labels, so an issue filed by copying it is not left without a priority. The unreleased priority-scale changelog entry no longer says every title carries a `[Pn]` prefix, which contradicted the switch to labels.
