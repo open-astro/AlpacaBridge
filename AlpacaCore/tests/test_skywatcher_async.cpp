@@ -4743,12 +4743,16 @@ TEST_CASE("SkyWatcher async - AutoHome gives up waiting for the axes to stop at 
 
 namespace {
 // A wrapper that reports the link as lost long ago, so a reconnect takes the
-// stop branch (a UDP link never records an outage on its own).
+// stop branch. The stamp is on the driver's task clock (decision 0009).
 class LongOutageWrapper : public sw::SkyWatcherProtocolWrapper {
 public:
+    explicit LongOutageWrapper(const FakeTaskClock& clock) : clock_(clock) {}
     std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() override {
-        return std::chrono::steady_clock::time_point(std::chrono::steady_clock::duration(1));
+        return clock_.now() - std::chrono::hours(1);
     }
+
+private:
+    const FakeTaskClock& clock_;
 };
 }  // namespace
 
@@ -4774,7 +4778,7 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
     });
 
     auto second = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0,
-                                                  std::make_unique<LongOutageWrapper>(), {}, clock);
+                                                  std::make_unique<LongOutageWrapper>(clock), {}, clock);
     const auto started = clock.now();
     REQUIRE(call_on_clock(clock, [&] { second->set_connected(true); }, std::chrono::milliseconds(20000)));
     const auto elapsed = clock.now() - started;
