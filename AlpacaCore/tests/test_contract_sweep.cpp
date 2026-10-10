@@ -56,6 +56,8 @@
 
 #ifdef ALPACACORE_ENABLE_ZWO
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
+
+#include "fake_zwo_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -800,6 +802,29 @@ Tier2Host tier2_host_zwo_telescope() {
             return zwo::create_zwo_telescope(0, info);
         });
 }
+
+Tier2Host tier2_host_zwo_camera() {
+    Tier2Host h{"zwo_camera", "zwo", "camera", "fake_zwo_sdk.h", DeviceType::Camera, "zwo_camera", {}, true, {}, ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
+        if (hold) {
+            sdk->before_call = [](const std::string& name) {
+                if (name == "open_camera") std::this_thread::sleep_for(kHold);
+            };
+        }
+        return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeZWOSDK>();
+        sdk->fail_open = true;
+        return host_over(sdk, [](alpacacore::test::FakeZWOSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, fake);
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
@@ -1397,7 +1422,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 // with no such probe (invalid_probe_reason_for() in contract_sweep.h states why; the guard case pins it).
 // clang-format off
 #ifdef ALPACACORE_ENABLE_ZWO
-#define CS2_ZWO(X) X(zwo_telescope, TEL)
+#define CS2_ZWO(X) X(zwo_telescope, TEL) X(zwo_camera, NPR)
 #else
 #define CS2_ZWO(X)
 #endif

@@ -33,7 +33,7 @@ ZWOImageType from_asi_image_type(ASI_IMG_TYPE type) {
     case ASI_IMG_Y8:
         return ZWOImageType::Y8;
     default:
-        return ZWOImageType::Raw8;
+        return ZWOImageType::Unknown;
     }
 }
 
@@ -47,8 +47,10 @@ ASI_IMG_TYPE to_asi_image_type(ZWOImageType type) {
         return ASI_IMG_RAW16;
     case ZWOImageType::Y8:
         return ASI_IMG_Y8;
+    case ZWOImageType::Unknown:
+        throw AlpacaException("Unsupported ZWO image format", AlpacaError::DriverException);
     }
-    return ASI_IMG_RAW8;
+    throw AlpacaException("Unsupported ZWO image format", AlpacaError::DriverException);
 }
 
 ZWOBayerPattern from_asi_bayer_pattern(ASI_BAYER_PATTERN pattern) {
