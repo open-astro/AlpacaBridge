@@ -241,9 +241,8 @@ public:
  * unit (including the per-vendor static libraries) without a link-order
  * dependency on the core library.
  */
-inline std::string device_state_timestamp() {
+inline std::string device_state_timestamp(std::chrono::system_clock::time_point now) {
     using clock = std::chrono::system_clock;
-    const auto now = clock::now();
     const std::time_t secs = clock::to_time_t(now);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
 
@@ -261,5 +260,8 @@ inline std::string device_state_timestamp() {
     std::snprintf(out, sizeof(out), "%s.%03lldZ", date_buf, static_cast<long long>(ms));
     return out;
 }
+
+/// The request-time form: the TimeStamp of a state taken now.
+inline std::string device_state_timestamp() { return device_state_timestamp(std::chrono::system_clock::now()); }
 
 } // namespace alpacacore

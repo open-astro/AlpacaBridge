@@ -102,7 +102,7 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
         test_skywatcher_pointing.cpp
-        test_skywatcher_link_loss.cpp)
+        test_skywatcher_link_loss.cpp test_skywatcher_snapshot.cpp)
     # Altitude floor / meridian limit: goto target check over the fake mount
     # (open-astro#436).
     list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)

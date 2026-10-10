@@ -75,6 +75,9 @@ public:
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the
+        // TimeStamp names when it was measured (decision 0010).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -94,7 +97,10 @@ public:
         add("SiderealTime", [this] { return get_sidereal_time(); });
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        state.push_back({"TimeStamp", age ? device_state_timestamp(
+                                                std::chrono::system_clock::now() -
+                                                std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                                          : device_state_timestamp()});
         return state;
     }
 
@@ -769,6 +775,14 @@ public:
      * @param azimuth Azimuth in degrees
      */
     virtual void sync_to_alt_az(double altitude, double azimuth) = 0;
+
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves
+    /// it from a snapshot (decision 0010): the TimeStamp is then the time the
+    /// state was measured. nullopt (the default) stamps the request time. The
+    /// age, not a time point, crosses this hook so a driver's steady task
+    /// clock is never mixed with wall time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
 
 private:
     // open-astro#547. Atomics, not a mutex: note_client_activity() is

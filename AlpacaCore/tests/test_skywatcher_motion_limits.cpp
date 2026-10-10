@@ -88,6 +88,15 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
+// Lets the status poll (decision 0010) sample the mount at least once after a
+// test moved its axes behind the driver's back: two whole polls, so one that was
+// already in flight when the jump landed is followed by one that was not. Each
+// poll asks ':j' once per axis.
+void settle_status_poll(FakeSkyWatcherMount& mount) {
+    const int anchors = mount.frames_seen('j');
+    REQUIRE(mount.wait_for_frames('j', anchors + 4, std::chrono::milliseconds(3000)));
+}
+
 // A target half a degree from the pole at HA +5.5 h: altitude ~39-40 deg at
 // this latitude whatever the time of day, and a short goto from home.
 double near_pole_ra(const alpacacore::TelescopeDriver& driver) {
@@ -721,6 +730,7 @@ TEST_CASE("SkyWatcher limits - a motion started from rest takes no baseline from
 
     driver->set_tracking(false);
     mount.jump_axis_degrees(1, 95.0);  // 20 min past the meridian
+    settle_status_poll(mount);         // the status poll takes the jump into the model
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // two 2 s polls
@@ -744,6 +754,7 @@ TEST_CASE("SkyWatcher limits - a MoveAxis started from rest takes no baseline fr
 
     driver->set_tracking(false);
     mount.jump_axis_degrees(1, 95.0);
+    settle_status_poll(mount);
     driver->move_axis(1, kMaxMoveAxisRate / 10.0);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // four 250 ms polls

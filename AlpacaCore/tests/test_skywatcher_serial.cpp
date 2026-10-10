@@ -410,6 +410,17 @@ std::unique_ptr<alpacacore::TelescopeDriver> serial_driver(const std::string& pa
     return sw::create_skywatcher_telescope(0, serial_info(path), -37.0, 175.0, 50.0);
 }
 
+bool wait_until_true(const std::function<bool()>& pred, int timeout_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
 void require_not_connected_error(const std::function<void()>& fn) {
     try {
         fn();
@@ -459,8 +470,10 @@ TEST_CASE("SkyWatcher serial - Connected drops when the adapter is pulled, with 
     CHECK(driver->get_link_fault().find("lost") != std::string::npos);
     // The stale descriptor is what kept the kernel from handing the returning
     // adapter its old name (/dev/ttyUSB0 -> ttyUSB1); noticing the loss
-    // releases it, and the port's registry claim with it.
-    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(key));
+    // releases it, and the port's registry claim with it. The status poll may
+    // hold the link in an exchange at that moment, and that exchange then
+    // finishes the close (decision 0009, point 3).
+    CHECK(wait_until_true([&] { return !alpacacore::util::is_serial_port_in_use(key); }, 3000));
     require_not_connected_error([&] { driver->get_right_ascension(); });
 
     // An explicit disconnect of the dead link still completes cleanly, and
@@ -807,32 +820,22 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     const double ra_before = driver->get_right_ascension();
 
     board.set_muted(true);
-    // Wait out the position cache's TTL so the next read actually asks the
-    // board; inside the TTL a read is legitimately served from cache.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-
-    // The first attempts fail but are still within the pre-existing stale
-    // window, so they answer from cache — that window is what the hardware run
-    // measured at about nine seconds of plausible-looking data.
-    for (int i = 0; i < 2; ++i) {
-        try {
-            driver->get_right_ascension();
-        } catch (const alpacacore::AlpacaException&) {
-        }
-    }
-    // By the threshold the fault latches, and from then on the cache is not an
-    // answer at any age.
+    // Getters never ask the board (decision 0010): the status poll finds the
+    // silence. Until it latches the fault the frame is served; once latched the
+    // frame is not an answer at any age.
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
     require_driver_error([&] { driver->get_right_ascension(); }, "communications compromised");
     require_driver_error([&] { driver->get_declination(); }, "communications compromised");
     CHECK(driver->get_connected());  // DriverException, not NotConnected
     CHECK_FALSE(driver->get_link_fault().empty());  // surfaced to the management listing
 
     board.set_muted(false);
-    // Recovery is automatic: no reconnect, no client action.
+    // Recovery is automatic: no reconnect, no client action; the poll's first
+    // good reply clears the latch.
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
     const double ra_after = driver->get_right_ascension();
     CHECK(std::abs(ra_after - ra_before) < 0.01);
     CHECK(driver->get_connected());
-    CHECK(driver->get_link_fault().empty());
     driver->set_connected(false);
 }
 
@@ -840,7 +843,7 @@ TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is
           "[skywatcher][serial][linkhealth]") {
     // The hardware run's sharpest finding (EQM-35 Pro, 2026-09-17): after a
     // mains power cycle the board answered every frame normally while ":f1"
-    // read "=100" — initialization cleared — and ":j2" read the bare home
+    // read "=100" - initialization cleared - and ":j2" read the bare home
     // count. The driver only sends ":F" at connect, so it would have gone on
     // serving reset registers as a position for the rest of the session, and
     // the board would have refused every motion command.
@@ -851,17 +854,13 @@ TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is
     REQUIRE_NOTHROW(driver->get_right_ascension());
 
     board.set_muted(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-    for (int i = 0; i < 4; ++i) {
-        try {
-            driver->get_right_ascension();
-        } catch (const alpacacore::AlpacaException&) {
-        }
-    }
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
 
-    // The board comes back — but it is not the board we set up.
+    // The board comes back - but it is not the board we set up. The status
+    // poll's first good reply finds out.
     board.set_init_done(false);
     board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6000));
     require_driver_error([&] { driver->get_right_ascension(); }, "restarted");
     // Terminal for the session: the latch cleared on that good reply, so
     // nothing else would ever raise this again.
@@ -890,14 +889,9 @@ TEST_CASE("SkyWatcher serial - a board that merely went quiet resumes with its s
     REQUIRE(driver->get_connected());
 
     board.set_muted(true);
-    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
-    for (int i = 0; i < 4; ++i) {
-        try {
-            driver->get_right_ascension();
-        } catch (const alpacacore::AlpacaException&) {
-        }
-    }
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
     board.set_muted(false);  // init_done left true: same session, still aligned
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK(driver->get_connected());
     driver->set_connected(false);
@@ -1035,9 +1029,9 @@ TEST_CASE("SkyWatcher serial - a GOTO-mode axis that survived the outage is repo
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(replugged->axis_running(sw::kAxisDec));
-    // GOTO-mode motion needs no reconstructed flag: Slewing is re-derived from
-    // the board on every read, which is why this half was already visible on
-    // hardware while the speed-mode half was not.
+    // GOTO-mode motion needs no reconstructed flag: Slewing is served from the
+    // status frame polled off the board (seeded at connect), which is why this
+    // half was already visible on hardware while the speed-mode half was not.
     CHECK(driver->get_slewing());
     driver->set_connected(false);
 }

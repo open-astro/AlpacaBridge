@@ -123,6 +123,10 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
 // that misses it is this slice's RED reason: the driver's task waits are not
 // on the injected clock, so nothing ever parks on it.
 constexpr auto kRendezvous = std::chrono::milliseconds(2000);
+// A connected driver keeps its status poll (decision 0010) parked on the clock
+// between polls: one waiter that is always there, counted before any task a
+// case is waiting for.
+constexpr std::size_t kPollerWaiter = 1;
 constexpr auto kClockStep = std::chrono::milliseconds(50);
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount, FakeTaskClock& clock,
@@ -142,7 +146,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 // would stamp its next deadline from a later now than the mount saw, and the
 // mount's motion is what the cases measure.
 bool step_clock(FakeTaskClock& clock, std::chrono::milliseconds step) {
-    if (!clock.wait_for_waiters(1, kRendezvous)) {
+    if (!clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous)) {
         return false;
     }
     clock.advance(step);
@@ -169,7 +173,7 @@ bool run_clock_until(FakeTaskClock& clock, const std::function<bool()>& pred, st
         // Rendezvous: a parked waiter, or the predicate turning true while
         // the thread the last step woke is still reacting in real time.
         const auto give_up = std::chrono::steady_clock::now() + kRendezvous;
-        while (!clock.wait_for_waiters(1, std::chrono::milliseconds(20))) {
+        while (!clock.wait_for_waiters(kPollerWaiter + 1, std::chrono::milliseconds(20))) {
             if (pred()) {
                 return true;
             }
@@ -211,7 +215,7 @@ bool call_on_clock(FakeTaskClock& clock, const std::function<void()>& call, std:
     });
     bool ok = true;
     for (std::chrono::milliseconds done{0}; !finished.load() && done < budget; done += kClockStep) {
-        if (clock.wait_for_waiters(1, std::chrono::milliseconds(20))) {
+        if (clock.wait_for_waiters(kPollerWaiter + 1, std::chrono::milliseconds(20))) {
             clock.advance(kClockStep);
             clock.wait_for_woken_settled(kRendezvous);  // the call reacts before the next step
         }
@@ -363,7 +367,7 @@ TEST_CASE("SkyWatcher async - a pulse that supersedes another still reports IsPu
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 2000);                     // North
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     driver->pulse_guide(0, 2000);                     // supersedes the first mid-pulse
     REQUIRE(advance_through(clock, std::chrono::milliseconds(300)));
     CHECK(mount.axis_running(2));
@@ -406,7 +410,7 @@ TEST_CASE("SkyWatcher async - a reconnect after a mid-pulse disconnect leaves no
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 2000);                     // North
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(mount.axis_running(2));
     REQUIRE(call_on_clock(clock, [&] { driver->set_connected(false); }, std::chrono::milliseconds(5000)));
     REQUIRE_FALSE(driver->get_connected());
@@ -462,10 +466,10 @@ TEST_CASE("SkyWatcher async - an RA pulse does not leave a running Dec pulse's a
     mount.jump_axis_degrees(2, 45.0);  // east-pointing branch (a2 > 0)
 
     driver->pulse_guide(0, 3000);                     // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     driver->pulse_guide(2, 300);                      // RA East, 300 ms -- concurrent, different axis
-    REQUIRE(clock.wait_for_waiters(2, kRendezvous));  // both holds parked
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // both holds parked
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
     INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " Slewing=" << driver->get_slewing());
     CHECK_FALSE(mount.axis_running(2));
@@ -494,7 +498,7 @@ TEST_CASE("SkyWatcher async - a Dec pulse does not leave a running RA pulse's ax
     // Through the dispatch rate check (settle + window) and into the hold.
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     driver->pulse_guide(0, 300);                      // Dec North, 300 ms -- concurrent, different axis
-    REQUIRE(clock.wait_for_waiters(2, kRendezvous));  // both holds parked
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // both holds parked
     // The RA pulse ends with its restore and the post-stop rate check.
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(5000)));
     INFO("IsPulseGuiding=" << driver->get_is_pulse_guiding() << " step_period(1)=" << mount.step_period(1)
@@ -550,7 +554,7 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, 0) with no manual motion leaves a run
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     driver->move_axis(0, 0.0);              // RA, no manual motion: commands nothing
@@ -571,7 +575,7 @@ TEST_CASE("SkyWatcher async - MoveAxis(RA, rate) leaves a running Dec pulse to e
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     driver->move_axis(0, 1.0);              // RA jog: commands RA only
@@ -596,7 +600,7 @@ TEST_CASE("SkyWatcher async - MoveAxis(Dec, 0) with no manual motion leaves a ru
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     driver->move_axis(1, 0.0);              // Dec, no manual motion: commands nothing
@@ -617,7 +621,7 @@ TEST_CASE("SkyWatcher async - SyncToCoordinates during a Dec pulse succeeds and 
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     REQUIRE_NOTHROW(driver->sync_to_coordinates(driver->get_right_ascension(), driver->get_declination()));
@@ -638,7 +642,7 @@ TEST_CASE("SkyWatcher async - a refused SyncToCoordinates during a Dec pulse lea
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     expect_alpaca_error([&] { driver->sync_to_coordinates(25.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
@@ -659,7 +663,7 @@ TEST_CASE("SkyWatcher async - a refused MoveAxis(Dec) during a Dec pulse leaves 
     mount.jump_axis_degrees(2, 45.0);
 
     driver->pulse_guide(0, 3000);  // Dec North, 3 s
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     CHECK(mount.axis_running(2));
     // Above the advertised AxisRates maximum (800x sidereal, ~3.34 deg/s).
@@ -956,9 +960,9 @@ TEST_CASE("SkyWatcher async - a reaper's cancel is not lost between a parked tas
     driver->set_tracking(true);
     mount.jump_axis_degrees(2, 45.0);
 
-    // Nothing is parked on the clock yet, so the pulse task below is the
-    // first thread to reach the hook.
-    REQUIRE(clock.waiter_count() == 0);
+    // Only the status poll is parked on the clock (it sets no hook below and
+    // is not woken), so the pulse task below is the first thread to reach it.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter, kRendezvous));
     clock.set_before_block([&](const std::function<bool()>& pred) {
         if (fired.fetch_add(1) == 0) {
             at_window.store(true);
@@ -1613,7 +1617,7 @@ TEST_CASE("SkyWatcher async - Dec pulse guide restores an active DeclinationRate
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
 
     driver->pulse_guide(0, 600);                      // North pulse pre-empts the offset motion
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(2000)));
 
     // The offset motion must resume by itself after the pulse ends.
@@ -1699,7 +1703,7 @@ TEST_CASE("SkyWatcher async - duty burst end does not truncate a concurrent Dec 
     driver->pulse_guide(0, 1500);  // North, 1.5 s at the 0.5x default rate
     REQUIRE(driver->get_is_pulse_guiding());
     // Mid-pulse (after the burst's off-timer has fired) the axis must still run.
-    REQUIRE(clock.wait_for_waiters(2, kRendezvous));  // the duty tick and the pulse hold
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));  // the duty tick and the pulse hold
     REQUIRE(advance_through(clock, std::chrono::milliseconds(1000)));
     REQUIRE(driver->get_is_pulse_guiding());
     REQUIRE(mount.axis_running(2));
@@ -3146,7 +3150,7 @@ TEST_CASE("SkyWatcher async - a RightAscensionRate write sends no :J re-latch on
 
         driver->set_right_ascension_rate(0.5);  // continuous, same direction: live ":I"
         REQUIRE(mount.step_period(1) != sidereal_preset);
-        REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its settle
+        REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the check is parked in its settle
         // Run the background rate-applied check to its verdict (two ":j"
         // samples across its settle and window, both on the clock); the fake
         // applies the bare ":I", so it must not resend.
@@ -3223,7 +3227,7 @@ TEST_CASE("SkyWatcher async - a RightAscensionRate stall that survives the :J ki
     const double setter_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     // The property call must not absorb the ~450 ms sample window.
     REQUIRE(setter_ms < 200.0);
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its settle
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the check is parked in its settle
 
     // The setter's kick, then the background check's re-kick after its
     // settle and sample window on the clock -- and never a stop/restart, the
@@ -3257,7 +3261,7 @@ TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tr
     mount.stall_live_rate_writes(1, 1);
     mount.ignore_start_relatches(1, 1);
     driver->set_right_ascension_rate(0.5);
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its sample window
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the check is parked in its sample window
     driver->set_tracking(false);                      // lands inside that window
     REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
     // Give a leaked check its whole window and then some: nothing may
@@ -3274,7 +3278,7 @@ TEST_CASE("SkyWatcher async - a pending RightAscensionRate check is reaped by Tr
     mount.stall_live_rate_writes(1, 1);
     mount.ignore_start_relatches(1, 1);
     driver->set_right_ascension_rate(0.0);            // live change back to sidereal: spawns a check
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // parked in its settle
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // parked in its settle
     const auto t0 = std::chrono::steady_clock::now();
     driver->set_connected(false);
     const double disconnect_ms =
@@ -3301,7 +3305,7 @@ TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend af
     mount.stall_live_rate_writes(1, 1);
     mount.ignore_start_relatches(1, 1);
     driver->set_right_ascension_rate(0.5);
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its settle
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the check is parked in its settle
 
     // Every reply now takes 150 ms of wall time. The check reads the position
     // twice around its window, then sends ":f"; stop the clock-driving once
@@ -4638,7 +4642,7 @@ TEST_CASE("SkyWatcher async - Tracking=true during a non-restoring RA pulse keep
     REQUIRE_FALSE(mount.axis_running(1));
 
     driver->pulse_guide(2, 2000);                     // East, 2 s, Tracking off: software-timed
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // its hold is parked on the clock
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // its hold is parked on the clock
     REQUIRE(advance_through(clock, std::chrono::milliseconds(500)));
     driver->set_tracking(true);
     REQUIRE(driver->get_tracking());
@@ -4664,18 +4668,27 @@ TEST_CASE("SkyWatcher async - Tracking=true during a non-restoring RA pulse keep
 namespace {
 
 // A wait that polls ':f' every 250 ms of clock time must still be polling
-// `limit` - 5 s into the wait and must have given up by `limit` + 10 s: the
-// ':f' frames stop. Virtual time is measured from the caller's start of wait.
+// `limit` - 5 s into the wait and must have given up by `limit` + 10 s. The
+// status poll (decision 0010) also asks ':f' once per step of this clock, so
+// the wait's own polls are what a step adds on top of that: the rate of ':f'
+// frames per step must be higher while it waits than once it gave up, when
+// only the status poll is left asking. Virtual time is measured from the
+// caller's start of wait.
 void check_wait_gives_up_at(FakeTaskClock& clock, FakeSkyWatcherMount& mount, std::chrono::seconds limit) {
     constexpr auto kPollStep = std::chrono::milliseconds(250);
+    constexpr int kWaitingSteps = 20;  // 5 s
+    constexpr int kGaveUpSteps = 40;   // 10 s
     REQUIRE(advance_through(clock, limit - std::chrono::seconds(10), kPollStep));
     const int polls_before = mount.frames_seen('f');
     REQUIRE(advance_through(clock, std::chrono::seconds(5), kPollStep));
-    CHECK(mount.frames_seen('f') > polls_before);  // still waiting just short of the deadline
+    const double waiting_rate = static_cast<double>(mount.frames_seen('f') - polls_before) / kWaitingSteps;
     elapse(clock, std::chrono::seconds(15), kPollStep);
     const int polls_after = mount.frames_seen('f');
     elapse(clock, std::chrono::seconds(10), kPollStep);
-    CHECK(mount.frames_seen('f') == polls_after);  // gave up: nothing polls any more
+    const double gave_up_rate = static_cast<double>(mount.frames_seen('f') - polls_after) / kGaveUpSteps;
+    INFO("':f' frames per step: waiting " << waiting_rate << ", after giving up " << gave_up_rate);
+    CHECK(waiting_rate > gave_up_rate + 0.5);  // the wait polled up to its deadline
+    CHECK(gave_up_rate > 0.0);                 // and the status poll is still the one asking after it
 }
 
 // Moves virtual time until the first ':J' of a dispatched goto has reached `axis`.
@@ -4940,7 +4953,7 @@ TEST_CASE(
     driver->set_tracking(true);
     // Negative: a stopped axis must not read as "took" for the check.
     driver->set_right_ascension_rate(-0.5);
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // the check is parked in its settle
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));  // the check is parked in its settle
 
     SlotGate gate;
     gate.close();

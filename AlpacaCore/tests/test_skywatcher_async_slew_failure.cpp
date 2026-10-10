@@ -57,6 +57,10 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 
 constexpr auto kClockStep = std::chrono::milliseconds(50);
 constexpr auto kRendezvous = std::chrono::milliseconds(2000);
+// A connected driver keeps its status poll (decision 0010) parked on the clock
+// between polls: one waiter that is always there, counted before any task a
+// case is waiting for.
+constexpr std::size_t kPollerWaiter = 1;
 
 // Moves the shared fake clock forward in steps, once a driver thread is parked
 // on it, until pred() holds; false when `budget` of virtual time passes first.
@@ -68,7 +72,7 @@ bool run_clock_until(alpacacore::test::FakeTaskClock& clock, const std::function
         if (pred()) {
             return true;
         }
-        if (clock.wait_for_waiters(1, kRendezvous)) {
+        if (clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous)) {
             clock.advance(kClockStep);
             clock.wait_for_woken_settled(kRendezvous);
         }
@@ -174,7 +178,7 @@ TEST_CASE("SkyWatcher async - AbortSlew's own cancellation is not reported as a 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
     REQUIRE(read_slewing(*driver) == SlewingRead::True);
     // The slew task is parked on the clock (its goto dispatch / polls).
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
     clock.advance(std::chrono::milliseconds(400));
     clock.wait_for_woken_settled(kRendezvous);
     driver->abort_slew();  // joins the slew task: its catch block has run by now

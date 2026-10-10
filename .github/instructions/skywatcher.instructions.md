@@ -270,6 +270,23 @@ datagrams before each send so replies cannot get off-by-one.
 - ConformU 4.5 **physically measures pulse-guide displacement** (Dec moved,
   RA unchanged) -- a driver that freezes reads during the pulse fails with
   "The declination axis did not move".
+- **Getters and `DeviceState` are served from a polled snapshot, never from the board**
+  (open-astro#1011, [decision 0010](../../docs/decisions/0010-snapshot-served-state.md)). One
+  status poll runs for the life of the connection (100 ms start to start, on the task clock) and
+  fills `util::StateSnapshot<PolledFrame>`; position, pier side and hardware Slewing read it, and
+  `DeviceState` stamps `TimeStamp` with the frame's measurement time through
+  `TelescopeDriver::device_state_age()`. A new position or status getter calls
+  `serve_position_locked()` / `served_frame_locked()`, never `refresh_position_cache_locked()`:
+  that is the control-path direct read (goto planning, the stop waits, `get_hardware_slewing_locked(false)`
+  for landing detection) and the limit guard's fallback while the frame is stale (over 200 ms).
+  Anything that changes what the last poll measured (a re-anchor, a sync, the end of a slew)
+  must drop the poll in flight and mark the status flags not current
+  (`note_model_write_locked()`, `set_slewing_cached_false_locked()`); do not assign
+  `slewing_cached_ = false` directly. Past [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)'s
+  30 s bound the link is lost (`NotConnected`, `Connected` false); a stale frame younger than
+  that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
+  one waiter that is always parked (`kPollerWaiter`), or pauses it with
+  `set_status_poll_paused_for_testing()`.
 - **Slewing must be a STATE FLAG spanning the whole goto + landing refinement**
   (`goto_in_progress_`, same pattern as `parking_`/`homing_`), never a timed
   hold: the 3 s `slew_force_until_` expired during a slow refine iteration
