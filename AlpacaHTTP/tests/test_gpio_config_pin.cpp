@@ -193,6 +193,7 @@ int main() {
     EXPECT(status == 200);
     EXPECT(registered(router, 9714));
     {
+        // case: RK3568 null port entry keeps its position
         const auto max_json = nlohmann::json::parse(route(router, "GET", "/api/v1/switch/9714/maxswitch", "").body());
         EXPECT(max_json.value("ErrorNumber", -1) == 0);
         EXPECT(max_json.value("Value", -1) == 2);
