@@ -192,6 +192,10 @@ def self_test() -> int:
         errs = check_drift(r)
         assert len(errs) == 1 and f"{EXTERNAL}/New is not in {TABLE}" in errs[0], errs
         (r / EXTERNAL / "New").rmdir()
+        (r / EXTERNAL / "Q/new").mkdir()
+        errs = check_drift(r)
+        assert len(errs) == 1 and f"{EXTERNAL}/Q/new is not in {TABLE}" in errs[0], errs
+        (r / EXTERNAL / "Q/new").rmdir()
         (r / EXTERNAL / "B").rmdir()
         errs = check_drift(r)
         assert len(errs) == 1 and "stale entry" in errs[0], errs

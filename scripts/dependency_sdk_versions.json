@@ -5,7 +5,7 @@
     {"path": "AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3", "name": "playerone-filterwheel-sdk", "version": "1.2.3", "source": "directory name"},
     {"path": "AlpacaCore/external/QHY/sdk_linux_arm64_26.06.04", "name": "qhy-sdk", "version": "26.06.04", "source": "directory name"},
     {"path": "AlpacaCore/external/ToupTek/toupcamsdk.20260128", "name": "toupcam-sdk", "version": "20260128", "source": "directory name"},
-    {"path": "AlpacaCore/external/ZWO/ASI_Camera_SDK", "name": "zwo-asi-camera-sdk", "version": "1.40", "source": "ASI_Camera_SDK/README.md"},
+    {"path": "AlpacaCore/external/ZWO/ASI_Camera_SDK", "name": "zwo-asi-camera-sdk", "version": "1.40", "source": "ASI_Camera_SDK/README.md, static libASICamera2.a 1.40; the shipped libASICamera2.so is 1.41"},
     {"path": "AlpacaCore/external/ZWO/EAF", "name": "zwo-eaf-sdk", "version": "1.7.7", "source": "lib/armv8/libEAFFocuser.so.1.7.7"},
     {"path": "AlpacaCore/external/ZWO/EFW", "name": "zwo-efw-sdk", "version": "1.8.4", "source": "lib/armv8/libEFWFilter.so.1.8.4"},
     {"path": "AlpacaCore/external/ZWO/CAA", "name": "zwo-caa-sdk", "version": "1.5.9", "source": "lib/armv8/libCAA.so.1.5.9"},
