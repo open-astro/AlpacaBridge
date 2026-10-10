@@ -333,7 +333,68 @@ void refused_slot_start_stops_mount(const std::function<void(alpacacore::Telesco
     driver->set_connected(false);
 }
 
+// A refused start that replaced nothing in the slot must put back every field
+// the initiator's locked block wrote, not only Slewing: a MoveAxis in motion
+// stays reported as Slewing (no stop is sent, so the axis is still driven).
+void refused_start_keeps_move_axis(const std::function<void(alpacacore::TelescopeDriver&)>& second) {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->move_axis(0, 0.5);
+    REQUIRE(read_slewing(*driver) == SlewingRead::True);
+    const int cancels_before = st->command_count('M');
+    const int passthrough_before = st->command_count('P');
+
+    refuse_slot_threads(*driver);
+    CHECK_THROWS_AS(second(*driver), alpacacore::AlpacaException);
+
+    CHECK(st->command_count('M') == cancels_before);  // nothing in the slot: nothing to cancel
+    CHECK(st->command_count('P') == passthrough_before);
+    CHECK(read_slewing(*driver) == SlewingRead::True);  // axis 0 is still driven
+    driver->set_connected(false);
+}
+
+
 }  // namespace
+
+TEST_CASE("Celestron slot - a refused goto start keeps a MoveAxis in motion reported",
+          "[celestron][telescope][async][slot]") {
+    refused_start_keeps_move_axis([](alpacacore::TelescopeDriver& d) { d.slew_to_coordinates_async(6.5, 25.0); });
+}
+
+TEST_CASE("Celestron slot - a refused park start keeps a MoveAxis in motion reported",
+          "[celestron][telescope][async][slot]") {
+    refused_start_keeps_move_axis([](alpacacore::TelescopeDriver& d) { d.park(); });
+}
+
+TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome",
+          "[celestron][telescope][async][slot]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeCelestronState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope_with_site(
+        0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->find_home();
+    REQUIRE(read_slewing(*driver) == SlewingRead::False);  // the poll completes the homing
+    REQUIRE(driver->get_at_home());
+
+    refuse_slot_threads(*driver);
+    CHECK_THROWS_AS(driver->park(), alpacacore::AlpacaException);
+
+    CHECK(driver->get_at_home());
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
 
 TEST_CASE("Celestron slot - a refused goto start stops the mount when it replaced a goto",
           "[celestron][telescope][async][slot]") {

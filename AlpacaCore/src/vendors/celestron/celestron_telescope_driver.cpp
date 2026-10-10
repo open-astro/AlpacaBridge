@@ -1106,6 +1106,9 @@ public:
         cancel_async_tasks();
         bool prev_slewing = false;
         bool prev_homing = false;
+        bool prev_at_home = false;
+        bool prev_manual[2] = {false, false};
+        auto prev_override = util::TaskClock::clock::time_point::min();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1126,6 +1129,13 @@ public:
             // still throws from Park (as the blocking implementation did)
             // rather than silently never reaching AtPark.
             check_slew_safety_locked("Park");
+            // Snapshot what the block below overwrites, for a refused start.
+            prev_slewing = slewing_cached_;
+            prev_homing = homing_;
+            prev_at_home = at_home_;
+            prev_manual[0] = manual_axis_slewing_[0];
+            prev_manual[1] = manual_axis_slewing_[1];
+            prev_override = position_override_until_;
             // Publish the slewing state before the task starts so a poller
             // never sees Slewing false between Park returning and dispatch.
             slewing_cached_ = true;
@@ -1133,8 +1143,6 @@ public:
             position_override_until_ = util::TaskClock::clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
-            prev_slewing = slewing_cached_;
-            prev_homing = homing_;
             homing_ = false;
             at_home_ = false;
             // open-astro#575: a fresh initiator is a clean start -- a client
@@ -1225,6 +1233,10 @@ public:
                 parking_ = false;
                 slewing_cached_ = prev_slewing;
                 homing_ = prev_homing;
+                at_home_ = prev_at_home;
+                manual_axis_slewing_[0] = prev_manual[0];
+                manual_axis_slewing_[1] = prev_manual[1];
+                position_override_until_ = prev_override;
                 slew_force_until_ = util::TaskClock::clock::time_point::min();
             });
     }
@@ -1466,6 +1478,8 @@ public:
         cancel_async_tasks();
         bool prev_slewing = false;
         bool prev_at_home = false;
+        bool prev_manual[2] = {false, false};
+        auto prev_override = util::TaskClock::clock::time_point::min();
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1503,6 +1517,9 @@ public:
             altaz_cache_valid_ = false;
             prev_slewing = slewing_cached_;
             prev_at_home = at_home_;
+            prev_manual[0] = manual_axis_slewing_[0];
+            prev_manual[1] = manual_axis_slewing_[1];
+            prev_override = position_override_until_;
             slewing_cached_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
@@ -1626,6 +1643,9 @@ public:
             [&] {
                 slewing_cached_ = prev_slewing;
                 at_home_ = prev_at_home;
+                manual_axis_slewing_[0] = prev_manual[0];
+                manual_axis_slewing_[1] = prev_manual[1];
+                position_override_until_ = prev_override;
                 slew_force_until_ = util::TaskClock::clock::time_point::min();
                 flip_in_progress_ = false;
             });
