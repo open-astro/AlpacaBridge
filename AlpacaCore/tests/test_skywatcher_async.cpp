@@ -4926,8 +4926,9 @@ TEST_CASE("SkyWatcher slot - a refused goto start on an idle tracking mount keep
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher slot - a refused start that displaced an undispatched goto ends a pending RightAscensionRate check",
-          "[skywatcher][async][slot]") {
+TEST_CASE(
+    "SkyWatcher slot - a refused start that displaced an undispatched goto ends a pending RightAscensionRate check",
+    "[skywatcher][async][slot]") {
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
