@@ -4759,7 +4759,7 @@ int main() {
         // wandererastro covercalibrator and filterwheel had no roundtrip_config() case before #647.
         add("wandererastro", "covercalibrator", "CoverCalibrator", "auto",
             R"({"connectionType":"auto","coverIndex":1,"portPath":"/dev/x"})",
-            R"({"connectionType":"auto","coverIndex":1})");
+            R"({"connectionType":"auto","coverIndex":1,"portPath":"/dev/x"})");  // declared fields survive (ADR 0004)
         add("wandererastro", "covercalibrator", "CoverCalibrator", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB1","baudRate":19200,"coverIndex":1})");
@@ -5053,10 +5053,17 @@ int main() {
             {"config normalized: " + kPortRequired}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        drop_pin("wandererastro", "covercalibrator", "CoverCalibrator", kPortRequired);
-        drop_pin("wandererastro", "rotator", "Rotator", kPortRequired);
-        drop_pin("wandererastro", "filterwheel", "FilterWheel", kPortRequired);
-        drop_pin("wandererastro", "switch", "Switch", kPortRequired);
+        // The catalog turns each refusal into a normalize warning for a saved config, and the factory
+        // then throws the same text, so the device is dropped as before.
+        for (const auto& [device_type, alpaca_type] :
+             {std::pair<std::string, std::string>{"covercalibrator", "CoverCalibrator"},
+              {"rotator", "Rotator"},
+              {"filterwheel", "FilterWheel"},
+              {"switch", "Switch"}}) {
+            pin("serial with empty portPath is DROPPED (#508 item 1)", "wandererastro", device_type, alpaca_type,
+                R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+                {"config normalized: " + kPortRequired}, {});
+        }
 #endif
 
         // #508 item 1, the arms that fall through to by-index auto-detect on an
@@ -7218,7 +7225,8 @@ int main() {
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
     // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
-    // ToupTek and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
+    // ToupTek, WandererAstro and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is
+    // false.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema(router.catalog());
@@ -7228,7 +7236,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 23);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 27);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7306,6 +7314,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "gemini") {
 #ifdef ALPACACORE_ENABLE_GEMINI
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "wandererastro") {
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
                 entry["available"] = true;
 #else
                 entry["available"] = false;

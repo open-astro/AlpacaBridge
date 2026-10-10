@@ -2712,3 +2712,187 @@ TEST_CASE("Builtin catalog - Gemini sanitize keeps the declared fields per devic
     CHECK(kept_focuser.has("focuserIndex"));
     CHECK_FALSE(kept_focuser.has("flatPanelModel"));
 }
+
+// ---------------------------------------------------------------------------
+// WandererAstro cover calibrator, rotator, filter wheel and WandererBox switch.
+// Every auto-detect factory constructs without a scan (#659), so no port is
+// opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kWandererCoverKey{"wandererastro", DeviceType::CoverCalibrator};
+const DeviceKey kWandererRotatorKey{"wandererastro", DeviceType::Rotator};
+const DeviceKey kWandererWheelKey{"wandererastro", DeviceType::FilterWheel};
+const DeviceKey kWandererBoxKey{"wandererastro", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the WandererAstro devices in every build",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kWandererCoverKey, kWandererRotatorKey, kWandererWheelKey, kWandererBoxKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_WANDERERASTRO");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+        CHECK(same_scalar(find_field(v->fields, "baudRate")->default_value, std::int64_t{19200}));
+    }
+    CHECK(keys_of(find_view(views, kWandererCoverKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "coverIndex"});
+    CHECK(keys_of(find_view(views, kWandererRotatorKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "rotatorIndex"});
+    CHECK(
+        keys_of(find_view(views, kWandererWheelKey)) ==
+        std::vector<std::string>{"connectionType", "portPath", "baudRate", "wandererFilterwheelIndex", "filterNames"});
+    CHECK(keys_of(find_view(views, kWandererBoxKey)) ==
+          std::vector<std::string>{"switchType", "connectionType", "portPath", "baudRate", "boxIndex"});
+
+    // filterNames is a declared string list, so the catalog (not the router) rejects a wrong type.
+    CHECK(find_field(find_view(views, kWandererWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
+    CHECK(same_scalar(find_field(find_view(views, kWandererBoxKey)->fields, "switchType")->default_value,
+                      std::string{"wandererbox-pro-v3"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the WandererAstro devices available only when built",
+          "[catalog][wandererastro][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kWandererCoverKey, kWandererRotatorKey, kWandererWheelKey, kWandererBoxKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when WandererAstro is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_WANDERERASTRO") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    const std::pair<DeviceKey, DeviceType> keys[] = {{kWandererCoverKey, DeviceType::CoverCalibrator},
+                                                     {kWandererRotatorKey, DeviceType::Rotator},
+                                                     {kWandererWheelKey, DeviceType::FilterWheel},
+                                                     {kWandererBoxKey, DeviceType::Switch}};
+    for (const auto& [key, type] : keys) {
+        // Nothing here opens a port: the by-index paths resolve at connect (#659).
+        auto auto_mode = catalog.create(key, DeviceConfig{}, 3);
+        REQUIRE(auto_mode != nullptr);
+        CHECK(auto_mode->get_device_type() == type);
+        CHECK(auto_mode->get_device_number() == 3);
+        CHECK_FALSE(auto_mode->get_connected());
+
+        DeviceConfig serial;
+        serial.set("connectionType", std::string{"serial"});
+        serial.set("portPath", std::string{"/dev/ttyUSB-no-such-wanderer"});
+        REQUIRE(catalog.create(key, serial, 4) != nullptr);
+
+        // Serial mode means an explicit port: no silent auto-detect.
+        DeviceConfig no_port;
+        no_port.set("connectionType", std::string{"serial"});
+        CHECK_THROWS_AS(catalog.create(key, no_port, 5), AlpacaException);
+    }
+
+    DeviceConfig names;
+    names.set("filterNames", std::vector<std::string>{"L", "R", "G", "B", "Ha", "OIII", "SII", "Dark"});
+    auto wheel = catalog.create(kWandererWheelKey, names, 6);
+    REQUIRE(wheel != nullptr);
+    CHECK(wheel->get_device_type() == DeviceType::FilterWheel);
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kWandererBoxKey, bad_type, 7), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - WandererAstro normalize refuses a missing port, a negative index or a bad switchType",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const std::pair<DeviceKey, const char*> indexed[] = {{kWandererCoverKey, "coverIndex"},
+                                                         {kWandererRotatorKey, "rotatorIndex"},
+                                                         {kWandererWheelKey, "wandererFilterwheelIndex"},
+                                                         {kWandererBoxKey, "boxIndex"}};
+    for (const auto& [key, index_key] : indexed) {
+        INFO(index_key);
+        CHECK_FALSE(catalog.normalize(key, DeviceConfig{}, Source::Api).rejection.has_value());
+
+        DeviceConfig no_port;
+        no_port.set("connectionType", std::string{"serial"});
+        const auto no_port_api = catalog.normalize(key, no_port, Source::Api);
+        REQUIRE(no_port_api.rejection.has_value());
+        CHECK(*no_port_api.rejection == "portPath is required when connectionType is 'serial' (or use 'auto').");
+        // A saved config is kept and warned about, so it stays editable.
+        const auto no_port_saved = catalog.normalize(key, no_port, Source::Persisted);
+        CHECK_FALSE(no_port_saved.rejection.has_value());
+        REQUIRE(no_port_saved.warnings.size() == 1);
+
+        DeviceConfig negative;
+        negative.set(index_key, std::int64_t{-1});
+        const auto negative_api = catalog.normalize(key, negative, Source::Api);
+        REQUIRE(negative_api.rejection.has_value());
+        CHECK(*negative_api.rejection == std::string(index_key) + " must be >= 0.");
+        negative.set(index_key, std::int64_t{0});
+        CHECK_FALSE(catalog.normalize(key, negative, Source::Api).rejection.has_value());
+    }
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    const auto bad = catalog.normalize(kWandererBoxKey, bad_type, Source::Api);
+    REQUIRE(bad.rejection.has_value());
+    CHECK(*bad.rejection == "Unknown WandererAstro switchType: not-a-backend (supported: wandererbox-pro-v3)");
+
+    // filterNames of the wrong type is rejected by the declared StringList field.
+    DeviceConfig wrong_names;
+    wrong_names.set("filterNames", std::string{"L,R,G,B"});
+    CHECK(catalog.normalize(kWandererWheelKey, wrong_names, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - WandererAstro sanitize keeps the declared fields per device type",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig cover;
+    cover.set("connectionType", std::string{"auto"});
+    cover.set("coverIndex", std::int64_t{1});
+    cover.set("rotatorIndex", std::int64_t{2});  // a rotator key, not a cover one
+    cover.set("filterNames", std::vector<std::string>{"L"});
+    const DeviceConfig kept_cover = catalog.sanitize(kWandererCoverKey, cover);
+    CHECK(kept_cover.has("coverIndex"));
+    CHECK_FALSE(kept_cover.has("rotatorIndex"));
+    CHECK_FALSE(kept_cover.has("filterNames"));
+
+    DeviceConfig wheel;
+    wheel.set("wandererFilterwheelIndex", std::int64_t{1});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    wheel.set("filterwheelIndex", std::int64_t{5});  // the ZWO key, not a Wanderer one
+    wheel.set("boxIndex", std::int64_t{2});
+    const DeviceConfig kept_wheel = catalog.sanitize(kWandererWheelKey, wheel);
+    CHECK(kept_wheel.has("wandererFilterwheelIndex"));
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("filterwheelIndex"));
+    CHECK_FALSE(kept_wheel.has("boxIndex"));
+
+    DeviceConfig box;
+    box.set("switchType", std::string{"wandererbox-pro-v3"});
+    box.set("boxIndex", std::int64_t{1});
+    box.set("portPath", std::string{"/dev/ttyUSB4"});
+    box.set("coverIndex", std::int64_t{3});
+    const DeviceConfig kept_box = catalog.sanitize(kWandererBoxKey, box);
+    CHECK(kept_box.has("switchType"));
+    CHECK(kept_box.has("boxIndex"));
+    CHECK(kept_box.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
+    CHECK_FALSE(kept_box.has("coverIndex"));
+}
