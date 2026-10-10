@@ -21,12 +21,12 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | Driver | Probe at connect | Rejects a different unit of the same family? | Follow-up |
 | --- | --- | --- | --- |
 | Sky-Watcher | `:e1` firmware/board query, board check after recovery | No: a different Sky-Watcher board passes | none, reference driver |
-| SynScan | `K`+byte echo | No: any handset speaking the protocol passes | ticket at post-merge |
-| Celestron | NexStar version/model queries | No identity check found in the wrapper | ticket at post-merge |
-| OnStep | `:GVP#` identity string | Rejects a non-OnStep device only | ticket at post-merge |
-| iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a different model, not a second unit of the same one | ticket at post-merge |
-| Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | ticket at post-merge |
-| QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | ticket at post-merge |
+| SynScan | `K`+byte echo | No: any handset speaking the protocol passes | planned follow-up |
+| Celestron | NexStar version/model queries | No identity check found in the wrapper | planned follow-up |
+| OnStep | `:GVP#` identity string | Rejects a non-OnStep device only | planned follow-up |
+| iOptron | `:MountInfo#` / `:DeviceInfo#` model | Rejects a different model, not a second unit of the same one | planned follow-up |
+| Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | planned follow-up |
+| QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
 
 ## Alternatives rejected
 
@@ -44,13 +44,15 @@ Revert the PR. The bound is one constant, so "never lost by silence" is a one-li
 | Driver family | Behaviour today | Owner |
 | --- | --- | --- |
 | Sky-Watcher (serial, UDP) | Decision applied | this record |
-| WandererAstro (cover, filter wheel, box, rotator) | Stream latch; `Connected` stays true | state-snapshot ticket ALP-2068..ALP-2073 (rule 3) |
-| Gemini PDH, flat panel, focuser | Polled latch; `Connected` stays true | ALP-2068..ALP-2073 |
-| iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | ALP-2068..ALP-2073 |
-| QHY Q-Focuser | `link_lost_` latch on the next transaction (#527) | ALP-2083 |
-| SynScan, Celestron, OnStep, Bisque | No latch; transport errors only | ticket at post-merge |
-| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One, Astroasis, GPhoto) | SDK error on the next call | ticket at post-merge |
-| WeeWX | HTTP fetch staleness | ticket at post-merge |
+| WandererAstro (cover, filter wheel, box, rotator) | Stream latch; `Connected` stays true | planned follow-up |
+| Gemini PDH, flat panel, focuser | Polled latch; `Connected` stays true | planned follow-up |
+| iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | planned follow-up |
+| QHY Q-Focuser | `link_lost_` latch on the next transaction (#527) | planned follow-up |
+| SynScan, Celestron, OnStep, Bisque | No latch; transport errors only | planned follow-up |
+| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One, Astroasis, GPhoto) | SDK error on the next call | planned follow-up |
+| WeeWX | HTTP fetch staleness | planned follow-up |
+
+Drivers adopt this record in their own later changes; the telescope state-snapshot slices apply point 3 when they land.
 
 ## Links
 
