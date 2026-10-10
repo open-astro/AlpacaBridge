@@ -758,7 +758,7 @@ two, so every existing caller is unchanged. `set_site_latitude()` decides each h
 separately: re-apply the RA drive unless RA is busy, re-apply the Dec offset unless Dec
 is busy, and skip entirely only when both are. A sub-floor RA rate is pre-armed into
 `ra_duty_rate_deg_s_` when RA is busy, the way `set_right_ascension_rate()`'s busy branch
-already does, because the duty worker resumes from that stored rate and no restore path
+already does, because the duty body resumes from that stored rate and no restore path
 re-derives it. Two loopback regressions (`test_skywatcher_async.cpp`) drive the
 declination-pulse and declination-`MoveAxis` variants and were confirmed to fail on the
 pre-fix setter with the RA axis still counting the old way.

@@ -74,7 +74,7 @@ std::unique_ptr<alpacacore::TelescopeDriver> make_driver(const FakeSkyWatcherMou
 // stop slots (MoveAxis stops issued close together — the exact
 // shape of the 2026-09-06 "superseded MoveAxis stop task strands Slewing"
 // bug in .github/instructions/skywatcher.instructions.md), the rate-verify slot (open-astro #248) and the
-// duty_thread_ that set_tracking starts and stops.
+// duty-cycle slot that set_tracking starts and stops.
 //
 // The rate-verify task only spawns on an in-place rate change: tracking must
 // be on (otherwise the setter stores the value and returns), the new rate

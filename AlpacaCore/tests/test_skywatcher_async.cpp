@@ -2312,6 +2312,36 @@ TEST_CASE("SkyWatcher - a RightAscensionRate write during a long East pulse surv
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resumes duty-cycling after it",
+          "[skywatcher][async]") {
+    // PR #221 continuity: a deferred RightAscensionRate write pre-arms the RA
+    // duty rate with no hardware touch while a pulse owns the RA axis; the
+    // duty body idles on the axis-ownership recheck at burst start, and takes
+    // over once the pulse releases the axis.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+
+    driver->pulse_guide(2, 2000);  // East, 2 s: the pulse owns the RA axis
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(300)));
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_right_ascension_rate(0.995);  // deferred; ~0.075 arcsec/s, below the EQM-35 floor
+    REQUIRE(driver->get_right_ascension_rate() == 0.995);
+
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::milliseconds(4000)));
+    // The pulse's restore stops the RA axis for the duty regime; the worker
+    // then bursts it on its own period.
+    const int starts = mount.start_count(1);
+    REQUIRE(run_clock_until(clock, [&] { return mount.start_count(1) >= starts + 2; }, std::chrono::milliseconds(9000)));
+
+    driver->set_right_ascension_rate(0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, not stranded",
           "[skywatcher][telescope][hemisphere]") {
     // Round-3 review finding, and the third instance of the same guard: the

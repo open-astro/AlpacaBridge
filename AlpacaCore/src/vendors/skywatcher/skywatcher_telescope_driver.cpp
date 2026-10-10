@@ -770,7 +770,7 @@ public:
                 return;  // idempotent rewrite: leave the running motion alone
             }
         }
-        reap_duty_task();
+        stop_duty_worker();
         bool need_duty = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -802,7 +802,7 @@ public:
             need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
-            start_duty_thread();
+            start_duty_worker();
         }
     }
 
@@ -839,26 +839,28 @@ public:
             started = tracking_;
         }
         if (need_duty) {
-            start_duty_thread();
+            start_duty_worker();
         }
         if (started) {
             start_limit_guard();
         }
     }
 
-    // (Re)start the duty-cycle worker for a sub-floor DeclinationRate. Call
-    // with no mutexes held. The whole reap+create sequence is serialized by
-    // duty_lifecycle_mutex_ so two concurrent setters can never reassign a
-    // still-joinable std::thread (std::terminate). The join itself must NOT
-    // happen under task_mutex_ — the worker's task_wait_for reacquires it on
-    // wake, so joining while holding it deadlocks; the lifecycle mutex is
-    // never taken by the worker, only by setters.
-    void start_duty_thread() {
-        std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
-        reap_duty_locked_lifecycle();
-        std::lock_guard<std::mutex> tlock(task_mutex_);
-        duty_thread_ = std::thread([this]() { duty_loop(); });
+    // (Re)start the duty-cycle worker (sub-floor RA and/or Dec offsets) as one
+    // long-lived periodic body on the duty_ slot: it ticks every 50 ms until
+    // both duty rates return to zero. Call with no mutexes held (AsyncOperation
+    // rule 10). The old body is cancelled and joined first, so its safety stop
+    // runs before the new body bursts; two setters racing past that point
+    // supersede one another instead, and a superseded body stops only a burst
+    // it still owns (see duty_loop()).
+    void start_duty_worker() {
+        duty_.cancel_all_and_join();
+        duty_.start([this](util::OperationContext& ctx) { duty_loop(ctx); });
     }
+
+    // Stop the duty worker and wait for it (the setters call this before they
+    // re-derive the duty rates). Call with no mutexes held.
+    void stop_duty_worker() { duty_.cancel_all_and_join(); }
 
     double get_focal_length() const override { return focal_length_m_; }
 
@@ -935,7 +937,7 @@ public:
                 // operation's restore re-derives the same regime.
                 ra_duty_rate_deg_s_ = eff;
                 lock.unlock();
-                start_duty_thread();
+                start_duty_worker();
             }
             return;
         }
@@ -949,7 +951,7 @@ public:
         }
         if (need_duty) {
             lock.unlock();
-            start_duty_thread();
+            start_duty_worker();
         }
     }
 
@@ -1064,7 +1066,7 @@ public:
                 return;
             }
         }
-        reap_duty_task();
+        stop_duty_worker();
         bool need_duty = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1094,7 +1096,7 @@ public:
                 }
             }
             // Unconditional, exactly as set_declination_rate() computes it:
-            // reap_duty_task() above JOINED the worker, so a still_crossing
+            // stop_duty_worker() above JOINED the worker, so a still_crossing
             // that went false in the window (a goto or park taking both axes
             // while the mutex was released) would otherwise leave a live
             // sub-floor rate with no worker until the next rate write or
@@ -1102,7 +1104,7 @@ public:
             need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
         }
         if (need_duty) {
-            start_duty_thread();
+            start_duty_worker();
         }
     }
 
@@ -3314,8 +3316,8 @@ private:
     // common thread across the three live-rate-change call sites (PulseGuide
     // dispatch/restore, RightAscensionRate). Must run with mutex_ NOT held
     // (see stop_axis_and_wait_locked) — it sleeps across the sample window,
-    // via task_wait_for on the OWNING task's cancel flag (pulse task or the
-    // one-shot rate-verify task) so a reap aborts it promptly instead of
+    // via the OWNING body's slot context (pulse or the one-shot
+    // rate-verify body) so a cancel aborts it promptly instead of
     // stalling teardown.
     // Did a live step-period change take? Classify the observed rate by which
     // of the two commanded rates it is closer to, so the check stays
@@ -3694,7 +3696,7 @@ private:
     // — a near-stationary satellite can need both at once). Exits when both
     // duty rates return to zero; idles an axis while tracking is off or a
     // slew/park/home/pulse/manual motion owns the axes.
-    void duty_loop() {
+    void duty_loop(util::OperationContext& ctx) {
         constexpr auto kDutyPeriod = std::chrono::milliseconds(3000);
         struct AxisDuty {
             bool bursting = false;
@@ -3704,7 +3706,7 @@ private:
             std::chrono::steady_clock::time_point next_start = std::chrono::steady_clock::time_point::min();
         };
         AxisDuty ax[2];
-        while (!duty_cancel_.load()) {
+        while (ctx.stop_reason() == util::StopReason::None) {
             bool any_rate = false;
             try {
                 std::unique_lock<std::mutex> lock(mutex_);
@@ -3783,16 +3785,25 @@ private:
             if (!any_rate) {
                 break;
             }
-            if (!task_wait_for(std::chrono::milliseconds(50), duty_cancel_)) {
+            if (!ctx.wait_for(std::chrono::milliseconds(50))) {
                 break;
             }
         }
         // Never leave an axis creeping on exit. A zeroed duty rate means
         // whoever cleared it already stopped the axis; only a cancel with the
-        // rate still set (disconnect mid-burst) needs the safety stop.
+        // rate still set (disconnect mid-burst) needs the safety stop. A
+        // superseded body (a concurrent restart) stops only a burst it still
+        // owns: the replacement's own bursts carry a newer motion generation.
+        const bool superseded = ctx.stop_reason() == util::StopReason::Superseded;
         try {
             std::unique_lock<std::mutex> lock(mutex_);
             for (int channel = 1; channel <= 2; ++channel) {
+                if (superseded) {
+                    if (ax[channel - 1].bursting && motion_generation_ == ax[channel - 1].gen && connected_) {
+                        static_cast<void>(stop_axis_and_wait_locked(lock, channel, ax[channel - 1].gen));
+                    }
+                    continue;
+                }
                 if (duty_rate_locked(channel) != 0.0 && connected_) {
                     const uint64_t gen = ++motion_generation_;
                     static_cast<void>(stop_axis_and_wait_locked(lock, channel, gen));
@@ -3804,27 +3815,6 @@ private:
 
     double duty_rate_locked(int channel) const {
         return channel == kAxisRa ? ra_duty_rate_deg_s_ : dec_duty_rate_deg_s_;
-    }
-
-    void reap_duty_task() {
-        std::lock_guard<std::mutex> lifecycle(duty_lifecycle_mutex_);
-        reap_duty_locked_lifecycle();
-    }
-
-    // Requires duty_lifecycle_mutex_. Moves the thread slot out under
-    // task_mutex_ and joins with only the lifecycle mutex held.
-    void reap_duty_locked_lifecycle() {
-        duty_cancel_.store(true);
-        notify_task_waiters();
-        std::thread prev;
-        {
-            std::lock_guard<std::mutex> tlock(task_mutex_);
-            prev = std::move(duty_thread_);
-        }
-        if (prev.joinable()) {
-            prev.join();
-        }
-        duty_cancel_.store(false);
     }
 
     // Re-command the RA axis after a rate change. In-place step-period writes
@@ -4843,25 +4833,6 @@ private:
         }
     }
 
-    // ── Background task threads (async slew, pulse stop) ────────────────────
-
-    // Wakes every task parked in task_wait_for after its cancel flag is stored.
-    // Passing through task_mutex_ first publishes the store to a waiter that has
-    // read its flag as false but not yet blocked: without it the notify is lost,
-    // and the waiter sleeps out its whole wait (on a FakeTaskClock, until the next
-    // advance()), holding up the reaper's join. The caller must not hold
-    // task_mutex_ (it is not recursive).
-    void notify_task_waiters() {
-        { std::lock_guard<std::mutex> publish(task_mutex_); }
-        task_cv_.notify_all();
-    }
-
-    bool task_wait_for(std::chrono::milliseconds d, std::atomic<bool>& cancel) const {
-        std::unique_lock<std::mutex> tlock(task_mutex_);
-        clock_.wait_for(tlock, task_cv_, d, [&] { return cancel.load(); });
-        return !cancel.load();
-    }
-
     // A slew/park/home task that dies CANCELLED may have launched its goto
     // before the cancel landed (abort in the pre-dispatch window): the goto
     // must not keep running. Best effort — an aborting reaper re-commands or
@@ -4894,16 +4865,14 @@ private:
         pulse_ops_[0].cancel();
         pulse_ops_[1].cancel();
         rate_verify_.cancel();
+        duty_.cancel();
         slew_.cancel_all_and_join();
         pulse_ops_[0].cancel_all_and_join();
         pulse_ops_[1].cancel_all_and_join();
         stop_ops_[0].cancel_all_and_join();
         stop_ops_[1].cancel_all_and_join();
         rate_verify_.cancel_all_and_join();
-        // The duty worker goes through the lifecycle mutex like every other
-        // reap+create path, so a disconnect racing a setter serializes with
-        // it instead of joining a freshly-started worker out from under it.
-        reap_duty_task();
+        stop_duty_worker();
     }
 
     // ── Slew and stop slots ─────────────────────────────────────────────────
@@ -4920,8 +4889,8 @@ private:
 
     // The slot context of the body running on this thread; null on every other
     // thread (a synchronous SlewToCoordinates on its HTTP thread, the pulse and
-    // duty workers). The wait and cancellation helpers below consult it, so
-    // the same helpers serve a body and a synchronous caller.
+    // duty bodies, which take no BodyScope). The wait and cancellation helpers
+    // below consult it, so the same helpers serve a body and a synchronous caller.
     static inline thread_local util::OperationContext* body_ctx_ = nullptr;
 
     struct BodyScope {
@@ -5306,9 +5275,6 @@ private:
     double ra_duty_rate_deg_s_ = 0.0;            // sub-floor effective RA rate (duty-cycled)
     double dec_duty_rate_deg_s_ = 0.0;           // sub-floor Dec rate (duty-cycled)
     bool dec_offset_running_ = false;
-    std::thread duty_thread_;
-    std::atomic<bool> duty_cancel_{false};
-    std::mutex duty_lifecycle_mutex_;                     // serializes duty-worker reap+create
     mutable double cmd_axis_rate_deg_s_[2] = {0.0, 0.0};  // dead-reckoning rates
     uint64_t motion_generation_ = 0;                      // bumped by every motion command; guards unlocked stop-waits
     bool park_position_set_ = false;
@@ -5323,15 +5289,11 @@ private:
     EpsSource eps_source_ = EpsSource::None;
     std::string firmware_cache_;
 
-    // Background task threads; task_mutex_ only guards handles + cv, never
-    // held across protocol I/O.
     // Serializes the async initiators (park, slew_to_coordinates_async,
     // pulse_guide -- open-astro#620) so their check -> reap -> spawn
     // sequences cannot interleave. Never held by the task threads and never
     // taken while mutex_ is held.
     std::mutex initiator_mutex_;
-    mutable std::mutex task_mutex_;
-    mutable std::condition_variable task_cv_;
     // Guarded by mutex_: bumped by every rate-applied check start and cancel.
     std::uint64_t rate_verify_epoch_ = 0;
 
@@ -5364,6 +5326,12 @@ private:
     util::OperationGeneration stop_generation_[2];
     util::AsyncOperation stop_ops_[2] = {{"SkyWatcher MoveAxis stop (RA)", stop_generation_[0], clock_},
                                          {"SkyWatcher MoveAxis stop (Dec)", stop_generation_[1], clock_}};
+    // The sub-floor duty-cycle worker (both axes, 50 ms tick). A generation of
+    // its own: starting or replacing it must not supersede a slew, pulse or
+    // stop body, and their preemption of the axes is judged per axis inside
+    // the body, as before. Declared last, so it is destroyed (and joins) first.
+    util::OperationGeneration duty_generation_;
+    util::AsyncOperation duty_{"SkyWatcher duty cycle", duty_generation_, clock_};
 };
 
 namespace detail {
