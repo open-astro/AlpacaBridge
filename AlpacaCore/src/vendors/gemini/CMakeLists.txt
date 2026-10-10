@@ -7,6 +7,7 @@ set(GEMINI_SOURCES
     gemini_flatpanel_driver.cpp
     gemini_pdh_protocol_wrapper.cpp
     gemini_pdh_switch_driver.cpp
+    gemini_catalog.cpp
 )
 
 add_library(alpacacore_gemini STATIC ${GEMINI_SOURCES})

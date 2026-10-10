@@ -521,7 +521,7 @@ inline ContractEntry contract_entry_gemini_covercalibrator() {
         },
         kSrcAgents);
 }
-// Second and third backends behind the same (gemini, covercalibrator) router pair: the Flat Panel v2 and
+// Second and third backends behind the same (gemini, covercalibrator) catalog pair: the Flat Panel v2 and
 // the Motorized Flat Panel V3 (Pro). The entry above is the Cover Lite (create_gemini_flatpanel).
 inline ContractEntry contract_entry_gemini_covercalibrator_v2() {
     return make_entry(

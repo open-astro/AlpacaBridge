@@ -77,11 +77,6 @@
 #include <alpacacore/vendor/zwo/zwo_asiair_switch_driver.h>
 #include <alpacacore/vendor/zwo/zwo_asiair_plus_switch_driver.h>
 #endif
-#ifdef ALPACACORE_ENABLE_GEMINI
-#include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
-#include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
-#include <alpacacore/vendor/gemini/gemini_pdh_switch_driver.h>
-#endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
 #include <alpacacore/vendor/wandererastro/wandererastro_box_switch_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
@@ -9002,141 +8997,6 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
 #endif
     }
 
-    if (vendor == "gemini" && device_type_str == "focuser") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::FocuserDriver> focuser;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // No port specified with serial mode — fall through to auto-detect
-                int focuser_index = config_get(config, "focuserIndex", 0);
-                focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
-            } else {
-                int baud_rate = config_get(config, "baudRate", 9600);
-                focuser = alpacacore::vendor::gemini::create_gemini_focuser(device_number, port_path, baud_rate);
-            }
-        } else {
-            // "auto" or unset — auto-detect
-            int focuser_index = config_get(config, "focuserIndex", 0);
-            focuser = alpacacore::vendor::gemini::create_gemini_focuser_by_index(device_number, focuser_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(focuser)))) {
-            util::log_info("Registered Gemini focuser");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gemini" && device_type_str == "covercalibrator") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        std::string conn_type = config_get(config, "connectionType", "auto");
-        // "lite" (default, back-compat) = Astro Flat Panel Cover Lite (light-only);
-        // "v2" = Astro Automatic FlatPanel v2 (motorized cover);
-        // "pro" = Motorized Flat Panel V3 (INDI "Pro" firmware, motorized cover).
-        std::string model = config_get(config, "flatPanelModel", "lite");
-        bool is_v2 = (model == "v2");
-        bool is_pro = (model == "pro");
-
-        auto make_by_index = [&](int panel_index) {
-            if (is_pro)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro_by_index(device_number, panel_index);
-            if (is_v2)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2_by_index(device_number, panel_index);
-            return alpacacore::vendor::gemini::create_gemini_flatpanel_by_index(device_number, panel_index);
-        };
-        auto make_serial = [&](const std::string& port_path, int baud_rate) {
-            if (is_pro)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_pro(device_number, port_path, baud_rate);
-            if (is_v2)
-                return alpacacore::vendor::gemini::create_gemini_flatpanel_v2(device_number, port_path, baud_rate);
-            return alpacacore::vendor::gemini::create_gemini_flatpanel(device_number, port_path, baud_rate);
-        };
-
-        std::unique_ptr<alpacacore::CoverCalibratorDriver> panel;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // No port specified with serial mode — fall through to auto-detect
-                panel = make_by_index(config_get(config, "panelIndex", 0));
-            } else {
-                panel = make_serial(port_path, config_get(config, "baudRate", 9600));
-            }
-        } else {
-            // "auto" or unset — auto-detect
-            panel = make_by_index(config_get(config, "panelIndex", 0));
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(panel)))) {
-            util::log_info(is_pro  ? "Registered Gemini Motorized Flat Panel V3"
-                           : is_v2 ? "Registered Gemini Flat Panel v2"
-                                   : "Registered Gemini Flat Panel");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
-    if (vendor == "gemini" && device_type_str == "switch") {
-#ifdef ALPACACORE_ENABLE_GEMINI
-        // switchType discriminates the vendor's switch backends. Only the
-        // Power & Data Hubs Advanced 3 exists today; the PowerBox Mini 2 is a
-        // candidate second backend under the same vendor/device-type pair.
-        std::string switch_type = config_get(config, "switchType", "pdh-adv3");
-        if (switch_type != "pdh-adv3") {
-            error_message = "Unknown Gemini switchType: " + switch_type + " (supported: pdh-adv3)";
-            return false;
-        }
-
-        std::string conn_type = config_get(config, "connectionType", "auto");
-
-        std::unique_ptr<alpacacore::SwitchDriver> hub;
-        if (conn_type == "serial") {
-            std::string port_path = config_get(config, "portPath", "");
-            if (port_path.empty()) {
-                // Serial mode means an explicit port. Don't silently auto-detect
-                // behind the user's back -- surface a clear validation error.
-                error_message = "portPath is required when connectionType is 'serial' (or use 'auto').";
-                return false;
-            }
-            int baud_rate = config_get(config, "baudRate", 19200);
-            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch(device_number, port_path, baud_rate);
-        } else {
-            // "auto" or unset -- auto-detect
-            int hub_index = config_get(config, "hubIndex", 0);
-            if (hub_index < 0) {
-                error_message = "hubIndex must be >= 0.";
-                return false;
-            }
-            hub = alpacacore::vendor::gemini::create_gemini_pdh_switch_by_index(device_number, hub_index);
-        }
-
-        if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(hub)))) {
-            util::log_info("Registered Gemini Power & Data Hubs Advanced 3");
-            return true;
-        }
-
-        error_message = "Failed to register device. Device may already exist.";
-        return false;
-#else
-        error_message = "Gemini support not enabled. Rebuild with -DALPACACORE_ENABLE_GEMINI=ON";
-        return false;
-#endif
-    }
-
     if (vendor == "wandererastro" && device_type_str == "covercalibrator") {
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
         std::string conn_type = config_get(config, "connectionType", "auto");
@@ -9474,21 +9334,6 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) cons
         copy_if_present("focuserId");
         copy_if_present("rotatorIndex");
         copy_if_present("rotatorId");
-    } else if (vendor == "gemini") {
-        copy_if_present("connectionType");
-        copy_if_present("focuserIndex");
-        copy_if_present("panelIndex");
-        copy_if_present(
-            "flatPanelModel");  // "lite" (Cover Lite), "v2" (Automatic FlatPanel v2) or "pro" (Motorized Flat Panel V3)
-        if (device_type == "switch") {
-            copy_if_present("switchType");  // backend selector (pdh-adv3)
-            copy_if_present("hubIndex");    // Power & Data Hub auto-detect index
-        }
-        std::string connection_type = config_get(config, "connectionType", "auto");
-        if (connection_type == "serial") {
-            copy_if_present("portPath");
-            copy_if_present("baudRate");
-        }
     } else if (vendor == "wandererastro") {
         copy_if_present("connectionType");
         copy_if_present("coverIndex");

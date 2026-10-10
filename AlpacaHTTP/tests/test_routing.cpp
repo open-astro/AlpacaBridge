@@ -4527,9 +4527,12 @@ int main() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_GEMINI
+        // The catalog sanitize keeps the declared fields of each type (ADR 0004): the focuser and the
+        // switch no longer keep each other's index keys, and a declared portPath/baudRate survives
+        // connectionType "auto".
         add("gemini", "focuser", "Focuser", "serial",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1,"panelIndex":2})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB7","baudRate":19200,"focuserIndex":1})");
         add("gemini", "focuser", "Focuser", "auto", R"({"connectionType":"auto","focuserIndex":1})",
             R"({"connectionType":"auto","focuserIndex":1})");  // #659
         add("gemini", "covercalibrator", "CoverCalibrator", "lite",
@@ -4540,10 +4543,10 @@ int main() {
             R"({"flatPanelModel":"v2","connectionType":"serial","portPath":"/dev/ttyUSB9","baudRate":19200,"panelIndex":3})");
         add("gemini", "covercalibrator", "CoverCalibrator", "pro",
             R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1,"portPath":"/dev/x","baudRate":9})",
-            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1})");
+            R"({"flatPanelModel":"pro","connectionType":"auto","panelIndex":1,"portPath":"/dev/x","baudRate":9})");
         add("gemini", "switch", "Switch", "pdh-adv3 auto",
             R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})",
-            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1,"focuserIndex":4})");
+            R"({"switchType":"pdh-adv3","connectionType":"auto","hubIndex":1})");
         add("gemini", "switch", "Switch", "pdh-adv3 serial",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})",
             R"({"switchType":"pdh-adv3","connectionType":"serial","portPath":"/dev/ttyUSB3","baudRate":19200,"hubIndex":1})");
@@ -4836,7 +4839,11 @@ int main() {
             {"config normalized: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-        drop_pin("gemini", "switch", "Switch", kPortRequired);
+        // The catalog turns the refusal into a normalize warning for a saved config, and the factory
+        // then throws the same text, so the device is dropped as before.
+        pin("serial with empty portPath is DROPPED (#508 item 1)", "gemini", "switch", "Switch",
+            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+            {"config normalized: " + kPortRequired}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
         drop_pin("wandererastro", "covercalibrator", "CoverCalibrator", kPortRequired);
@@ -7003,7 +7010,7 @@ int main() {
     // catalog in the management envelope. The shape is pinned by the committed
     // fixture tests/fixtures/devicecatalog.json (a fixture change is a
     // deliberate commit). The catalog under test holds the built-in Astroasis
-    // and the Bisque, Celestron, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
+    // and the Bisque, Celestron, Gemini, gphoto, OnStep, Player One, SkyWatcher (open-astro#744), QHY, SVBONY, SynScan,
     // ToupTek and WeeWX descriptors plus the "zzz" test descriptor, schema only, so its `available` is false.
     {
         alpacahttp::Router router;
@@ -7014,7 +7021,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 20);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 23);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7085,6 +7092,13 @@ int main() {
             }
             if (entry.value("vendor", "") == "svbony") {
 #ifdef ALPACACORE_ENABLE_SVBONY
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "gemini") {
+#ifdef ALPACACORE_ENABLE_GEMINI
                 entry["available"] = true;
 #else
                 entry["available"] = false;
