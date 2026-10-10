@@ -14,7 +14,10 @@
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <stdexcept>
+#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
@@ -29,6 +32,78 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
         REQUIRE(ex.error_code() == expected_code);
     }
 }
+
+// Scripted EAF SDK: one focuser (id 3), single-threaded tests only.
+class FakeEAFSDK final : public alpacacore::vendor::zwo::ZWOEAFSDK {
+public:
+    using Info = alpacacore::vendor::zwo::ZWOEAFFocuserInfo;
+
+    int id{3};
+    int max_step{60000};
+    int step_range{1000};
+    int position{500};
+    bool moving{false};
+    double temperature{12.5};
+    bool fail_reads{false};
+    bool fail_temperature{false};
+    bool temperature_not_supported{false};
+    int moving_calls{0};
+    int position_calls{0};
+    int temperature_calls{0};
+    int max_step_calls{0};
+    int step_range_calls{0};
+
+    std::vector<Info> enumerate_focusers() override { return {Info{id, "EAF", max_step}}; }
+    bool get_focuser_info_by_id(int focuser_id, Info& info) override {
+        if (focuser_id != id) {
+            return false;
+        }
+        info = Info{id, "EAF", max_step};
+        return true;
+    }
+    bool get_focuser_info_by_index(int, Info& info) override { return get_focuser_info_by_id(id, info); }
+    void open_focuser(int) override {}
+    void close_focuser(int) override {}
+    bool is_moving(int) override {
+        ++moving_calls;
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return moving;
+    }
+    int get_position(int) override {
+        ++position_calls;
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return position;
+    }
+    void move(int, int target) override { position = target; }
+    void stop(int) override { moving = false; }
+    int get_max_step(int) override {
+        ++max_step_calls;
+        return max_step;
+    }
+    int get_step_range(int) override {
+        ++step_range_calls;
+        return step_range;
+    }
+    double get_temperature(int) override {
+        ++temperature_calls;
+        if (temperature_not_supported) {
+            throw alpacacore::AlpacaException("EAF temperature not supported", alpacacore::AlpacaError::NotImplemented);
+        }
+        if (fail_temperature) {
+            throw std::runtime_error("temp sensor down");
+        }
+        return temperature;
+    }
+    std::string get_serial_number(int) override { return "EAF-SN-1"; }
+    std::string get_firmware_version(int) override { return "1.0"; }
+    std::string get_sdk_version() override { return "1, 7, 0, 0"; }
+};
+
+void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
 
 } // namespace
 
@@ -113,4 +188,143 @@ TEST_CASE("ZWO EAF Focuser Driver - Unique IDs", "[zwo][focuser][unit]") {
     REQUIRE(!driver_a->get_unique_id().empty());
     REQUIRE(!driver_b->get_unique_id().empty());
     CHECK(driver_a->get_unique_id() != driver_b->get_unique_id());
+}
+
+// open-astro#294: DeviceState used to round-trip the device once per property.
+// Falsified by: zwo_focuser_driver.cpp read_status() calling the SDK on every
+// read instead of through status_cache_.get() (position_calls 2, not 1).
+TEST_CASE("ZWO EAF Focuser Driver - DeviceState is one device read, served from the TTL cache",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_device_state().size() == 4);  // IsMoving, Position, Temperature, TimeStamp
+    CHECK(sdk.moving_calls == 1);
+    CHECK(sdk.position_calls == 1);
+    CHECK(sdk.temperature_calls == 1);
+
+    (void)driver->get_device_state();
+    CHECK(driver->get_position() == 500);
+    CHECK(sdk.position_calls == 1);  // inside the TTL: no device I/O
+
+    wait_past_status_ttl();
+    (void)driver->get_device_state();
+    CHECK(sdk.position_calls == 2);
+}
+
+// Falsified by: zwo_focuser_driver.cpp get_max_step() calling sdk_.get_max_step()
+// instead of returning max_step_ (max_step_calls 3 after the reads, not 1).
+TEST_CASE("ZWO EAF Focuser Driver - Static members are read at connect and reset on disconnect",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(sdk.max_step_calls == 1);
+    CHECK(sdk.step_range_calls == 1);
+
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_max_step() == 60000);
+        CHECK(driver->get_max_increment() == 1000);
+        CHECK(driver->get_name() == "EAF");
+    }
+    CHECK(sdk.max_step_calls == 1);
+    CHECK(sdk.step_range_calls == 1);
+
+    driver->set_connected(false);
+    sdk.max_step = 30000;
+    driver->set_connected(true);
+    CHECK(driver->get_max_step() == 30000);
+    CHECK(driver->get_max_increment() == 1000);
+    CHECK(sdk.max_step_calls == 2);
+
+    driver->move(100);  // range check uses the cached MaxStep
+    require_alpaca_error([&]() { driver->move(30001); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+// Falsified by: zwo_focuser_driver.cpp move() dropping its
+// status_cache_.invalidate() (Position keeps the pre-move 500 for a TTL).
+TEST_CASE("ZWO EAF Focuser Driver - A move invalidates the cached frame", "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 500);
+    driver->move(900);
+    CHECK(driver->get_position() == 900);
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw
+// (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ZWO EAF Focuser Driver - A dead link refuses reads instead of serving the cache",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);
+
+    sdk.fail_reads = true;
+    wait_past_status_ttl();
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(driver->get_position());
+    }
+    try {
+        (void)driver->get_position();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+
+    sdk.fail_reads = false;
+    CHECK(driver->get_position() == 500);
+}
+
+// Falsified by: zwo_focuser_driver.cpp halt() dropping its
+// status_cache_.invalidate() (IsMoving keeps answering true for a TTL).
+TEST_CASE("ZWO EAF Focuser Driver - Halt drops the cached frame", "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.moving = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_is_moving() == true);
+    driver->halt();
+    CHECK(driver->get_is_moving() == false);
+}
+
+// Falsified by: zwo_focuser_driver.cpp read_status() letting the temperature
+// failure escape the refill (Position stops answering) or dropping the SDK text.
+TEST_CASE("ZWO EAF Focuser Driver - A temperature failure leaves Position answering",
+          "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.fail_temperature = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 500);
+    try {
+        (void)driver->get_temperature();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("temp sensor down") != std::string::npos);
+    }
+}
+
+TEST_CASE("ZWO EAF Focuser Driver - A temperature error keeps its mapped code", "[zwo][focuser][unit][fake-sdk]") {
+    FakeEAFSDK sdk;
+    sdk.temperature_not_supported = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 500);
+    try {
+        (void)driver->get_temperature();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotImplemented);
+    }
 }

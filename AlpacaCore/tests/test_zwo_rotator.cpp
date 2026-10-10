@@ -15,8 +15,11 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <cmath>
 #include <functional>
+#include <stdexcept>
+#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
@@ -49,6 +52,11 @@ public:
     int close_calls{0};
     double last_move_absolute{-1.0};
     double last_move_mechanical{-1.0};
+    int motion_calls{0};
+    int degree_calls{0};
+    int reverse_calls{0};
+    bool fail_reads{false};
+    bool moving{false};
 
     std::vector<Info> enumerate_rotators() override { return {Info{id, "CAA", max_degree}}; }
     bool get_rotator_info_by_id(int rotator_id, Info& info) override {
@@ -61,8 +69,20 @@ public:
     bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
     void open_rotator(int) override { ++open_calls; }
     void close_rotator(int) override { ++close_calls; }
-    alpacacore::vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override { return {}; }
-    double get_degree(int) override { return degree; }
+    alpacacore::vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override {
+        ++motion_calls;
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return {moving, false};
+    }
+    double get_degree(int) override {
+        ++degree_calls;
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return degree;
+    }
     void move_relative(int, double angle) override { degree += angle; }
     void move_absolute(int, double angle) override {
         last_move_absolute = angle;
@@ -72,11 +92,14 @@ public:
         last_move_mechanical = angle;
         degree = reverse ? 360.0 - angle : angle;
     }
-    void stop(int) override {}
+    void stop(int) override { moving = false; }
     void sync_degree(int, double angle) override { degree = angle; }
     double get_max_degree(int) override { return max_degree; }
     double get_temperature(int) override { return 20.0; }
-    bool get_reverse(int) override { return reverse; }
+    bool get_reverse(int) override {
+        ++reverse_calls;
+        return reverse;
+    }
     void set_reverse(int, bool value) override { reverse = value; }
     std::string get_serial_number(int) override { return serial; }
     std::string get_firmware_version(int) override { return "1.0"; }
@@ -267,4 +290,186 @@ TEST_CASE("ZWO CAA Rotator Driver - Failed connect closes the handle", "[zwo][ro
     CHECK(driver->get_connected() == false);
     CHECK(sdk.open_calls == 1);
     CHECK(sdk.close_calls == 1);
+}
+
+// open-astro#294: DeviceState and the position getters used to round-trip the
+// device once per property. One refill now serves them all for a short TTL.
+namespace {
+void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+}  // namespace
+
+// Falsified by: zwo_rotator_driver.cpp read_status() calling the SDK on every
+// read instead of through status_cache_.get() (degree_calls 3, not 1).
+TEST_CASE("ZWO CAA Rotator Driver - DeviceState is one device read, served from the TTL cache",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.motion_calls = sdk.degree_calls = sdk.reverse_calls = 0;
+
+    CHECK(driver->get_device_state().size() == 4);  // IsMoving, MechanicalPosition, Position, TimeStamp
+    CHECK(sdk.motion_calls == 1);
+    CHECK(sdk.degree_calls == 1);
+    CHECK(sdk.reverse_calls == 0);
+
+    (void)driver->get_device_state();
+    CHECK(sdk.degree_calls == 1);  // inside the TTL: no device I/O
+
+    wait_past_status_ttl();
+    (void)driver->get_device_state();
+    CHECK(sdk.motion_calls == 2);
+    CHECK(sdk.degree_calls == 2);
+}
+
+// Falsified by: zwo_rotator_driver.cpp get_reverse() calling sdk_.get_reverse()
+// instead of returning reverse_ (reverse_calls 3, not 0).
+TEST_CASE("ZWO CAA Rotator Driver - Reverse is read once at connect, not per getter",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.reverse = true;
+    sdk.degree = 100.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.reverse_calls = 0;
+
+    CHECK(driver->get_reverse() == true);
+    CHECK(driver->get_mechanical_position() == 260.0);
+    CHECK(driver->get_mechanical_position() == 260.0);
+    CHECK(sdk.reverse_calls == 0);
+
+    // Disconnect clears it; the reconnect reads the device again.
+    driver->set_connected(false);
+    sdk.reverse = false;
+    driver->set_connected(true);
+    CHECK(sdk.reverse_calls == 1);
+    CHECK(driver->get_reverse() == false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp move_absolute() dropping its
+// status_cache_.invalidate() (Position keeps the pre-move 10 for a TTL).
+TEST_CASE("ZWO CAA Rotator Driver - A move invalidates the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 10.0);
+    driver->move_absolute(90.0);
+    CHECK(driver->get_position() == 90.0);
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw
+// (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ZWO CAA Rotator Driver - A dead link refuses reads instead of serving the cache",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+
+    sdk.fail_reads = true;
+    wait_past_status_ttl();
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(driver->get_position());
+    }
+    // Third consecutive failure latches the fault: the message names it.
+    try {
+        (void)driver->get_position();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+
+    // Reverse is a writable setting held in memory: it refuses too while latched.
+    try {
+        (void)driver->get_reverse();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+
+    // Recovery needs no reconnect.
+    sdk.fail_reads = false;
+    CHECK(driver->get_position() == 10.0);
+    CHECK(driver->get_reverse() == false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp sync() dropping its pre-read
+// status_cache_.invalidate() (the offset is taken against the cached 10, giving 40).
+TEST_CASE("ZWO CAA Rotator Driver - Sync takes its offset from the live angle", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 50.0;
+    driver->sync(0.0);
+    wait_past_status_ttl();  // the offset must hold against the live angle, not the cached frame
+    CHECK(driver->get_position() == 0.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp set_reverse() dropping its
+// status_cache_.invalidate() (Position keeps the pre-reverse 10).
+TEST_CASE("ZWO CAA Rotator Driver - Reverse change drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 350.0;
+    driver->set_reverse(true);
+    CHECK(driver->get_position() == 350.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp move() dropping its pre-read
+// status_cache_.invalidate() (the target is built from the cached 10, giving 20).
+TEST_CASE("ZWO CAA Rotator Driver - Relative move starts from the live angle", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    sdk.degree = 50.0;
+    driver->move(10.0);
+    CHECK(sdk.last_move_absolute == 60.0);
+}
+
+// Falsified by: zwo_rotator_driver.cpp halt() dropping its
+// status_cache_.invalidate() (IsMoving keeps answering true for a TTL).
+TEST_CASE("ZWO CAA Rotator Driver - Halt drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.moving = true;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_is_moving() == true);
+    driver->halt();
+    CHECK(driver->get_is_moving() == false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp move_mechanical() dropping its
+// status_cache_.invalidate() (Position keeps the pre-move angle for a TTL).
+TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 10.0);
+    driver->move_mechanical(120.0);
+    CHECK(driver->get_position() == 120.0);
 }

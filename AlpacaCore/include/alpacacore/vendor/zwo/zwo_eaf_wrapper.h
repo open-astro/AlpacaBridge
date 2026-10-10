@@ -12,41 +12,37 @@
 
 #pragma once
 
+#include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
 
-struct ZWOEAFFocuserInfo {
-    int focuser_id{};
-    std::string name;
-    int max_step{};
-};
-
-class ZWOEAFSDKWrapper {
+class ZWOEAFSDKWrapper final : public ZWOEAFSDK {
 public:
     static ZWOEAFSDKWrapper& instance();
 
-    std::vector<ZWOEAFFocuserInfo> enumerate_focusers();
-    bool get_focuser_info_by_id(int focuser_id, ZWOEAFFocuserInfo& info);
-    bool get_focuser_info_by_index(int focuser_index, ZWOEAFFocuserInfo& info);
+    std::vector<ZWOEAFFocuserInfo> enumerate_focusers() override;
+    bool get_focuser_info_by_id(int focuser_id, ZWOEAFFocuserInfo& info) override;
+    bool get_focuser_info_by_index(int focuser_index, ZWOEAFFocuserInfo& info) override;
 
-    void open_focuser(int focuser_id);
-    void close_focuser(int focuser_id);
+    void open_focuser(int focuser_id) override;
+    void close_focuser(int focuser_id) override;
 
-    bool is_moving(int focuser_id);
-    int get_position(int focuser_id);
-    void move(int focuser_id, int position);
-    void stop(int focuser_id);
+    bool is_moving(int focuser_id) override;
+    int get_position(int focuser_id) override;
+    void move(int focuser_id, int position) override;
+    void stop(int focuser_id) override;
 
-    int get_max_step(int focuser_id);
-    int get_step_range(int focuser_id);
+    int get_max_step(int focuser_id) override;
+    int get_step_range(int focuser_id) override;
 
-    double get_temperature(int focuser_id);
-    std::string get_serial_number(int focuser_id);
-    std::string get_firmware_version(int focuser_id);
-    std::string get_sdk_version();
+    double get_temperature(int focuser_id) override;
+    std::string get_serial_number(int focuser_id) override;
+    std::string get_firmware_version(int focuser_id) override;
+    std::string get_sdk_version() override;
 
 private:
     class Impl;
