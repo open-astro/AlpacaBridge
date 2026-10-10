@@ -549,7 +549,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   ("<device> communications compromised: <reason>", the iOptron `device_faulted_` vocabulary),
   *commanded values included*: "what we last asked for" is no more trustworthy than the stale
   frame once the device is unreachable. Use `DriverException`, not `NotConnected`: `Connected`
-  stays true (the client decides whether to reconnect) so `NotConnected` would contradict it.
+  stays true while the fault is young (past `util::kLinkStalenessBound` a driver that adopted [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md) drops it) so `NotConnected` would contradict it.
   Where ASCOM has a word for "unknown" (`CoverState`/`CalibratorState::Unknown`) return it
   instead of throwing on the read; commands still throw.
 - **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
