@@ -22,7 +22,6 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
-
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -211,8 +210,8 @@ TEST_CASE("SkyWatcher link loss - UDP: a reachability error stays a fault until 
 
     // The board comes back on the same port inside the bound: the next good
     // reply clears the fault, no loss.
-    mount = std::make_unique<FakeSkyWatcherMount>(alpacacore::test::FakeMountProfile::wave_100i(), clock,
-                                                   info.udp_port);
+    mount =
+        std::make_unique<FakeSkyWatcherMount>(alpacacore::test::FakeMountProfile::wave_100i(), clock, info.udp_port);
     if (mount->ok()) {
         CHECK(protocol->inquire_position(sw::kAxisRa) != 0);
         CHECK_FALSE(protocol->link_faulted());
