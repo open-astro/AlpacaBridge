@@ -2014,6 +2014,9 @@ public:
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock = start_goto("SlewToCoordinates", ra, dec, nullptr);
         uint64_t owner_generation = motion_generation_;
+        // A slew with no slot bumps the slot generation itself: its flags are
+        // its own until a newer goto, Park or FindHome claims the slot.
+        const uint64_t slew_owner = slew_generation_.bump();
         goto_in_progress_ = false;
         restoring_tracking_ = false;
         try {
@@ -2031,8 +2034,12 @@ public:
                 throw AlpacaException("Slew superseded by a concurrent motion command", AlpacaError::InvalidOperation);
             }
         } catch (...) {
-            if (motion_generation_ == owner_generation) {
+            // Failed, or superseded by a non-slew command (MoveAxis, Tracking,
+            // Sync): no getter clears these flags (decision 0010), and one left
+            // set keeps the axes busy and the limit guard exempt.
+            if (slew_generation_.current() == slew_owner) {
                 goto_in_progress_ = false;
+                set_slewing_cached_false_locked();
                 // An abandoned goto never reaches the landing that consumes this
                 // stamp, and a Park/FindHome landing within the next 30 s would
                 // otherwise fold the abandoned interval into goto_overhead_seconds_.
@@ -3374,6 +3381,8 @@ private:
     // A frame older than the link-loss bound with no latch: the poll stopped
     // answering the clock. Lost like a pulled adapter: Connected false, every
     // getter and setter NotConnected, DeviceState empty (decision 0010).
+    // Any publish moves measured_at, a control-path read's too: a stopped poll
+    // shows once those reads stop. Writes dropping every poll age the frame out.
     bool frame_lost_locked() const {
         // A latched fault is decision 0009's own clock (the poll cannot publish
         // while it lasts), so only an unlatched link ages the frame out.

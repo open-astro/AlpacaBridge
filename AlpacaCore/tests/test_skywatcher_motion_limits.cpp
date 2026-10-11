@@ -574,6 +574,69 @@ TEST_CASE("SkyWatcher limits - a stale frame is not served to the guard and it r
     driver->set_connected(false);
 }
 
+// No getter clears the slewing flag (decision 0010): a synchronous slew that a
+// MoveAxis supersedes clears it, or the guard lets the MoveAxis cross the floor.
+TEST_CASE("SkyWatcher limits - a MoveAxis that supersedes a synchronous slew is guarded",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+    const double ra = driver->get_right_ascension();  // same hour angle: a Dec-only goto that raises the tube
+    std::atomic<int> result{-1};
+    std::jthread sync_slew([&] {
+        try {
+            driver->slew_to_coordinates(ra, 80.0);
+            result.store(0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            result.store(ex.error_code());
+        } catch (...) {
+            result.store(-2);
+        }
+    });
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 5000));
+
+    driver->move_axis(1, kMaxMoveAxisRate);
+    sync_slew.join();
+    CHECK(result.load() == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(wait_until([&] { return !mount.axis_running(2); }, 10000));
+    CHECK(driver->get_altitude() < kGuardAltitudeDeg - 1.5);
+    driver->set_connected(false);
+}
+
+// Tracking off supersedes the slew without touching its flags, so the slew ends
+// them itself, or Slewing reads true for the rest of the session.
+TEST_CASE("SkyWatcher limits - Tracking off that supersedes a synchronous slew lets Slewing end",
+          "[skywatcher][telescope][limits]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    mount.jump_axis_degrees(2, 20.0);
+    driver->set_tracking(true);
+    const double ra = near_pole_ra(*driver);
+    std::atomic<int> result{-1};
+    std::jthread sync_slew([&] {
+        try {
+            driver->slew_to_coordinates(ra, kNearPoleDec);
+            result.store(0);
+        } catch (const alpacacore::AlpacaException& ex) {
+            result.store(ex.error_code());
+        } catch (...) {
+            result.store(-2);
+        }
+    });
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 5000));  // the goto: Dec does not track
+
+    driver->set_tracking(false);
+    sync_slew.join();
+    CHECK(result.load() == alpacacore::AlpacaError::InvalidOperation);
+    REQUIRE(wait_until([&] { return !mount.axis_running(2); }, 15000));  // the board ends the Dec goto
+    settle_status_poll(mount);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // The mount crosses the floor between the position the driver last knew and
 // the guard's first sample (the cache still holds the inside position, the
 // board is already outside). The baseline must come from before the dispatch,

@@ -284,8 +284,8 @@ datagrams before each send so replies cannot get off-by-one.
   end of a slew) must also mark the status flags not current (`note_model_write_locked()`,
   `set_slewing_cached_false_locked()`); do not assign `slewing_cached_ = false` directly. No
   getter re-reads the board to clear that flag any more, so every operation that sets it clears
-  it when it ends, AutoHome included: a flag left set keeps the axes busy (rate offsets
-  deferred, the limit guard exempt). An
+  it when it ends, AutoHome and a failed or superseded synchronous slew included: a flag left
+  set keeps the axes busy (rate offsets deferred, the limit guard exempt). An
   asynchronous initiator (Park, FindHome, `SlewToCoordinatesAsync`, MoveAxis) never waits on a
   position read: it invalidates with `read_back` false, MoveAxis anchors the model where it
   changes a rate (`advance_model_anchor_locked()`), and the next poll re-measures. A poll sample
