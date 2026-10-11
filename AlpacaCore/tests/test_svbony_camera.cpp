@@ -16,7 +16,9 @@
 
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_svbony_sdk.h"
@@ -64,7 +66,7 @@ TEST_CASE("SVBONY Camera Driver - Not connected throws", "[svbony][camera][unit]
     CHECK_THROWS_AS(driver->set_gain(100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_offset(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->start_exposure(1.0, true), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->stop_exposure(), alpacacore::AlpacaException);
+    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
     CHECK_THROWS_AS(driver->abort_exposure(), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->pulse_guide(0, 100), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_image_array(), alpacacore::AlpacaException);
@@ -77,7 +79,7 @@ TEST_CASE("SVBONY Camera Driver - Disconnected state", "[svbony][camera][unit]")
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
-    CHECK(driver->get_can_stop_exposure() == true);
+    CHECK(driver->get_can_stop_exposure() == false);
     CHECK(driver->get_can_asymmetric_bin() == false);
     CHECK(driver->get_has_shutter() == false);
 }
@@ -103,12 +105,18 @@ TEST_CASE("SVBONY Camera Driver - Sub-exposure not supported", "[svbony][camera]
 TEST_CASE("SVBONY Camera Driver - ASCOM Error Codes", "[svbony][camera][unit]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
 
+    require_alpaca_error([&]() { driver->start_exposure(-1.0, true); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->start_exposure(std::numeric_limits<double>::quiet_NaN(), true); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->start_exposure(std::numeric_limits<double>::infinity(), true); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->start_exposure(1e30, true); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_gain(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->set_gain(100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->start_exposure(1.0, true); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::MethodNotImplemented);
     require_alpaca_error([&]() { driver->abort_exposure(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_array(); }, alpacacore::AlpacaError::NotConnected);
@@ -121,7 +129,7 @@ TEST_CASE("SVBONY Camera Driver - State Machine Contracts", "[svbony][camera][un
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
-    REQUIRE(driver->get_can_stop_exposure() == true);
+    REQUIRE(driver->get_can_stop_exposure() == false);
 }
 
 // --- SDK seam: driver over FakeSVBSDK / LockedSVBSDK --------------------------
@@ -131,35 +139,36 @@ TEST_CASE("SVBONY Camera Driver - connects over an injected SDK", "[svbony][came
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
 
     // The version comes from the injected SDK, not the singleton.
-    REQUIRE(driver->get_device_sdk_version().value_or("") == "1.13.0-fake");
+    REQUIRE(driver->get_device_sdk_version().value_or("") == "fake-svbony-sdk");
     CHECK_FALSE(driver->get_device_firmware().has_value());
 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    CHECK(fake.open_count[7] == 1);
-    CHECK(driver->get_device_firmware().value_or("") == "1.2.3");
-    CHECK(driver->get_camera_x_size() == 64);
-    CHECK(driver->get_camera_y_size() == 48);
+    CHECK(fake.open_count() == 1);
+    CHECK(driver->get_device_firmware().value_or("") == "fake-firmware");
+    CHECK(driver->get_camera_x_size() == 16);
+    CHECK(driver->get_camera_y_size() == 8);
 
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
-    CHECK(fake.close_count[7] == 1);
+    CHECK(fake.open_count() == 0);
+    CHECK(fake.call_count("close_camera") == 1);
 }
 
 TEST_CASE("SVBONY Camera Driver - failed connect closes the opened camera", "[svbony][camera][unit][fake-sdk]") {
     alpacacore::test::FakeSVBSDK fake;
-    fake.throw_from.insert("get_serial_number");
+    fake.fail_next("get_serial_number");
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
 
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::DriverException);
     CHECK_FALSE(driver->get_connected());
-    CHECK(fake.open_count[7] == 1);
-    CHECK(fake.close_count[7] == 1);
+    CHECK(fake.open_count() == 0);
+    CHECK(fake.call_count("close_camera") == 1);
 }
 
 TEST_CASE("SVBONY Camera Driver - no camera detected refuses the connect", "[svbony][camera][unit][fake-sdk]") {
     alpacacore::test::FakeSVBSDK fake;
-    fake.cameras.clear();
+    fake.set_camera_present(false);
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
 
     require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
@@ -198,33 +207,34 @@ TEST_CASE("FakeSVBSDK behind LockedSVBSDK - forwards every entry point", "[svbon
     SVBCameraInfo info;
     long value = 0;
     bool is_auto = true;
-    std::uint8_t buf[4] = {};
+    std::vector<std::uint8_t> buf(32);
+    constexpr int camera_id = 17;
 
     CHECK(sdk.enumerate_cameras().size() == 1);
     CHECK(sdk.get_camera_info_by_index(0, info));
     CHECK_FALSE(sdk.get_camera_info_by_index(3, info));
-    sdk.open_camera(7);
-    sdk.close_camera(7);
-    CHECK(sdk.get_control_caps(7).size() == 2);
-    sdk.set_control_value(7, SVBControlType::Gain, 42, false);
-    CHECK(sdk.get_control_value(7, SVBControlType::Gain, value, is_auto));
+    sdk.open_camera(camera_id);
+    CHECK(sdk.get_control_caps(camera_id).size() == 4);
+    sdk.set_control_value(camera_id, SVBControlType::Gain, 42, false);
+    CHECK(sdk.get_control_value(camera_id, SVBControlType::Gain, value, is_auto));
     CHECK(value == 42);
-    sdk.set_roi_format(7, 0, 0, 32, 24, 2);
-    CHECK(sdk.get_roi_format(7).width == 32);
-    sdk.set_output_image_type(7, SVBImageType::Raw8);
-    CHECK(sdk.get_output_image_type(7) == SVBImageType::Raw8);
-    sdk.start_video_capture(7);
-    sdk.get_video_data(7, buf, 4, 10);
-    sdk.stop_video_capture(7);
-    CHECK(buf[0] == fake.fill_byte);
-    sdk.pulse_guide(7, SVBGuideDirection::North, 10);
-    CHECK(sdk.get_sensor_pixel_size(7) > 3.0F);
-    CHECK(sdk.get_serial_number(7) == "SVB-FAKE-0001");
-    CHECK(sdk.get_sdk_version() == "1.13.0-fake");
-    CHECK(sdk.get_firmware_version(7) == "1.2.3");
-    sdk.set_camera_mode_normal(7);
-    sdk.set_auto_save_param(7, false);
-    sdk.restore_default_param(7);
+    sdk.set_roi_format(camera_id, 0, 0, 8, 4, 2);
+    CHECK(sdk.get_roi_format(camera_id).width == 8);
+    sdk.set_output_image_type(camera_id, SVBImageType::Raw8);
+    CHECK(sdk.get_output_image_type(camera_id) == SVBImageType::Raw8);
+    sdk.start_video_capture(camera_id);
+    CHECK(sdk.get_video_data(camera_id, buf.data(), static_cast<long>(buf.size()), 10) == SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(camera_id);
+    CHECK(buf[0] == 0);
+    sdk.pulse_guide(camera_id, SVBGuideDirection::North, 10);
+    CHECK(sdk.get_sensor_pixel_size(camera_id) > 3.0F);
+    CHECK(sdk.get_serial_number(camera_id) == "fake-17");
+    CHECK(sdk.get_sdk_version() == "fake-svbony-sdk");
+    CHECK(sdk.get_firmware_version(camera_id) == "fake-firmware");
+    sdk.set_camera_mode_normal(camera_id);
+    sdk.set_auto_save_param(camera_id, false);
+    sdk.restore_default_param(camera_id);
+    sdk.close_camera(camera_id);
 
     for (const char* name :
          {"enumerate_cameras",   "get_camera_info_by_index", "open_camera",           "close_camera",

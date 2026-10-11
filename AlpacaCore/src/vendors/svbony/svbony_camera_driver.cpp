@@ -12,8 +12,10 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
+#include <alpacacore/vendor/svbony/svbony_frame_validation.h>
 #include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
 #include <alpacacore/version.h>
 
@@ -22,6 +24,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
@@ -91,7 +95,8 @@ public:
           last_exposure_valid_(false),
           exposure_active_(false),
           pulse_guiding_(false),
-          pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
+          pulse_guiding_end_(std::chrono::steady_clock::time_point{}),
+          exposure_failure_() {
         preload_camera_info_locked();
     }
 
@@ -99,7 +104,7 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        stop_exposure_thread();
+        (void)stop_exposure_thread();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -189,6 +194,11 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
+        std::shared_ptr<const ImageArray> retired_image;
+        // Serialize the synchronous ASCOM setter across the complete SDK
+        // transition. AsyncConnectable coordinates async requests, but it
+        // cannot see a sync disconnect that arrives while this slow open runs.
+        std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         std::unique_lock<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_, std::defer_lock);
         if (!connected) {
             // Join the exposure thread BEFORE taking mutex_ and closing the camera,
@@ -200,7 +210,8 @@ public:
             // from before the join through the close, so a concurrent start_exposure
             // can neither spawn a fresh thread in the join→close gap nor race this
             // join with its thread-assignment (join vs operator= on the same
-            // std::thread is UB). Lock order: exposure_lifecycle_mutex_ -> mutex_.
+            // std::thread is UB). Lock order: transition_mutex_ ->
+            // exposure_lifecycle_mutex_ -> mutex_.
             lifecycle_lock.lock();
             stop_exposure_thread();
         }
@@ -229,6 +240,9 @@ public:
             int resolved_id = resolve_camera_id_locked();
             ALPACA_LOG_INFO("SVBONY", "SDK version: " + sdk.get_sdk_version());
             sdk.open_camera(resolved_id);
+            // Keep an unconfirmed capture-stop latch across OpenCamera: the
+            // SDK does not stop an already-running capture when opening a camera.
+            // Only a successful stop or close proves that capture ended.
             // Everything from here until connected_ is set true must close the
             // freshly opened camera on failure: the destructor only closes when
             // connected_, so an unguarded throw (set_camera_mode_normal,
@@ -323,7 +337,7 @@ public:
                 throw AlpacaException(std::string("Failed to configure SVBONY camera: ") + e.what(),
                                       AlpacaError::DriverException);
             }
-            reset_exposure_state_locked();
+            reset_exposure_state_locked(retired_image);
             connected_.store(true);
             return;
         }
@@ -347,15 +361,18 @@ public:
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
             firmware_.clear();
         }
-        reset_exposure_state_locked();
+        reset_exposure_state_locked(retired_image);
         connected_.store(false);
         if (close_id >= 0) {
             try {
                 sdk.stop_video_capture(close_id);
+                capture_stop_failed_ = false;
             } catch (const std::exception& e) {
+                capture_stop_failed_ = true;
                 ALPACA_LOG_WARN("SVBONY", "stop_video_capture during disconnect failed: " + std::string(e.what()));
             }
             sdk.close_camera(close_id);
+            capture_stop_failed_ = false;
         }
     }
 
@@ -385,16 +402,22 @@ public:
     }
 
     int get_bayer_offset_x() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || !camera_info_.is_color) {
+        ensure_connected_locked();
+        if (!camera_info_valid_ || !camera_info_.is_color || camera_info_.bayer_pattern == SVBBayerPattern::None ||
+            (image_type_ != SVBImageType::Raw8 && image_type_ != SVBImageType::Raw16)) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer_pattern).first;
     }
 
     int get_bayer_offset_y() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || !camera_info_.is_color) {
+        ensure_connected_locked();
+        if (!camera_info_valid_ || !camera_info_.is_color || camera_info_.bayer_pattern == SVBBayerPattern::None ||
+            (image_type_ != SVBImageType::Raw8 && image_type_ != SVBImageType::Raw16)) {
             throw AlpacaException("Bayer offsets not supported", AlpacaError::PropertyNotImplemented);
         }
         return bayer_offsets(camera_info_.bayer_pattern).second;
@@ -419,33 +442,12 @@ public:
     }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) {
-            return CameraState::Idle;
-        }
-        if (exposure_active_.load()) {
-            // Watchdog: if the exposure thread is hung in an SVBONY SDK call
-            // past the expected deadline, force the state machine back to
-            // Idle so the client (e.g. ConformU) can recover. The thread is
-            // left running and will exit naturally when the SDK call returns
-            // or the camera is disconnected. This is intentional — we cannot
-            // safely cancel a blocked SDK call from outside.
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ &&
-                std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN("SVBONY",
-                    "Exposure deadline exceeded; forcing CameraState=Idle. "
-                    "Exposure thread may still be blocked inside the SVBONY SDK.");
-                exposure_active_.store(false);
-                exposure_deadline_valid_ = false;
-                return CameraState::Idle;
-            }
-            return CameraState::Exposing;
-        }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (image_ready_) {
-            return CameraState::Idle;
-        }
-        return CameraState::Idle;
+        if (!connected_.load()) return CameraState::Idle;
+        latch_exposure_timeout_locked();
+        if (capture_stop_failed_) return CameraState::Error;
+        ensure_capture_stop_confirmed_locked();
+        return exposure_active_.load() ? CameraState::Exposing : CameraState::Idle;
     }
 
     int get_camera_x_size() const override {
@@ -483,9 +485,7 @@ public:
         return can_get_control(SVBControlType::TargetTemperature);
     }
 
-    bool get_can_stop_exposure() const override {
-        return true;
-    }
+    bool get_can_stop_exposure() const override { return false; }
 
     double get_ccd_temperature() const override {
         ensure_connected();
@@ -497,6 +497,8 @@ public:
     bool get_cooler_on() const override {
         ensure_connected();
         if (!can_get_control(SVBControlType::CoolerEnable)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
             return false;
         }
         long value = get_control_value_or_throw(SVBControlType::CoolerEnable);
@@ -506,6 +508,8 @@ public:
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (!can_get_control(SVBControlType::CoolerEnable)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
             if (cooler_on) {
                 throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
             }
@@ -517,6 +521,8 @@ public:
     double get_cooler_power() const override {
         ensure_connected();
         if (!can_get_control(SVBControlType::CoolerPower)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
             return 0.0;
         }
         long value = get_control_value_or_throw(SVBControlType::CoolerPower);
@@ -548,11 +554,10 @@ public:
 
     bool get_fast_readout() const override {
         ensure_connected();
-        if (!can_get_control(SVBControlType::FrameSpeedMode)) {
-            throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
-        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
+            control_caps_or_throw_locked(SVBControlType::FrameSpeedMode);
             if (frame_speed_dirty_) {
                 return pending_frame_speed_ == 2;
             }
@@ -563,17 +568,16 @@ public:
 
     void set_fast_readout(bool fast_readout) override {
         ensure_connected();
-        if (!can_get_control(SVBControlType::FrameSpeedMode)) {
-            throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
-        }
         long desired = fast_readout ? 2 : 0;
-        const auto& caps = get_control_caps_or_throw(SVBControlType::FrameSpeedMode);
-        if (desired < caps.min_value || desired > caps.max_value) {
-            throw AlpacaException("Control value out of range", AlpacaError::InvalidValue);
-        }
         // SVBSetControlValue for FrameSpeedMode takes ~1.1s on some cameras.
         // Defer the actual SDK write to start_exposure to stay within ASCOM timing.
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        const auto& caps = control_caps_or_throw_locked(SVBControlType::FrameSpeedMode);
+        if (desired < caps.min_value || desired > caps.max_value) {
+            throw AlpacaException("Control value out of range", AlpacaError::InvalidValue);
+        }
+        ensure_settings_safe_locked();
         pending_frame_speed_ = desired;
         frame_speed_dirty_ = true;
     }
@@ -594,13 +598,7 @@ public:
 
     void set_gain(int gain) override {
         ensure_connected();
-        // Disable auto-gain first; some SVBONY models reject manual writes
-        // while auto mode is active (SVB_ERROR_GENERAL_ERROR).
-        disable_auto_if_needed(SVBControlType::Gain);
-        // Sensor register: rejected mid-exposure (M15; checked under mutex_
-        // inside, atomically with the write).
-        set_control_value_or_throw(SVBControlType::Gain, gain,
-                                   /*reject_during_exposure=*/true);
+        set_gain_value_or_throw(gain);
     }
 
     int get_gain_max() const override {
@@ -629,17 +627,24 @@ public:
 
     ImageArray get_image_array() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+        std::shared_ptr<const ImageArray> image;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
+            latch_exposure_timeout_locked();
+            ensure_capture_stop_confirmed_locked();
+            throw_exposure_failure_locked();
+            if (!last_exposure_valid_) {
+                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            }
+            if (!image_ready_ || !image_cached_ || !last_image_) {
+                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            }
+            image = last_image_;
         }
-        if (!image_ready_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
-        }
-        if (!image_cached_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
-        }
-        return last_image_;
+        // Keep the published image alive with a cheap immutable snapshot, then
+        // copy its payload for the Alpaca return value outside the state lock.
+        return *image;
     }
 
     std::string get_image_array_variant() const override {
@@ -649,6 +654,10 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
+        latch_exposure_timeout_locked();
+        ensure_capture_stop_confirmed_locked();
+        throw_exposure_failure_locked();
         if (!last_exposure_valid_) {
             return false;
         }
@@ -691,6 +700,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || camera_info_.bit_depth <= 0) {
             return 0;
+        }
+        if (connected_.load() && (image_type_ == SVBImageType::Raw8 || image_type_ == SVBImageType::Y8 ||
+                                  image_type_ == SVBImageType::Rgb24)) {
+            return std::numeric_limits<std::uint8_t>::max();
         }
         return static_cast<int>((1ULL << camera_info_.bit_depth) - 1ULL);
     }
@@ -751,14 +764,12 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) {
-            return 0.0;
-        }
-        if (!exposure_active_.load()) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            return image_ready_ ? 100.0 : 0.0;
-        }
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load()) return 0.0;
+        latch_exposure_timeout_locked();
+        if (capture_stop_failed_) return 0.0;
+        ensure_capture_stop_confirmed_locked();
+        if (!exposure_active_.load()) return image_ready_ ? 100.0 : 0.0;
         if (last_exposure_duration_ <= 0.0) {
             return 0.0;
         }
@@ -784,21 +795,25 @@ public:
     }
 
     int get_readout_mode() const override {
-        if (!can_get_control(SVBControlType::FrameSpeedMode)) {
-            return 0;
+        ensure_connected();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
+            if (control_caps_.find(SVBControlType::FrameSpeedMode) == control_caps_.end()) return 0;
         }
         return get_fast_readout() ? 1 : 0;
     }
 
     void set_readout_mode(int mode) override {
+        if (mode != 0 && mode != 1) {
+            throw AlpacaException("Invalid readout mode", AlpacaError::InvalidValue);
+        }
+        ensure_connected();
         if (!can_get_control(SVBControlType::FrameSpeedMode)) {
             if (mode != 0) {
                 throw AlpacaException("Readout mode not supported", AlpacaError::NotImplemented);
             }
             return;
-        }
-        if (mode != 0 && mode != 1) {
-            throw AlpacaException("Invalid readout mode", AlpacaError::InvalidValue);
         }
         set_fast_readout(mode == 1);
     }
@@ -817,10 +832,29 @@ public:
 
     SensorType get_sensor_type() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || !camera_info_.is_color) {
+        if (!camera_info_valid_) {
             return SensorType::Monochrome;
         }
-        return SensorType::RGGB;
+        switch (image_type_) {
+            case SVBImageType::Rgb24:
+                return SensorType::Color;
+            case SVBImageType::Y8:
+            case SVBImageType::Y16:
+                return SensorType::Monochrome;
+            case SVBImageType::Raw8:
+            case SVBImageType::Raw16:
+                if (!camera_info_.is_color) return SensorType::Monochrome;
+                if (camera_info_.bayer_pattern == SVBBayerPattern::None) {
+                    throw AlpacaException("Bayer sensor pattern is unavailable", AlpacaError::PropertyNotImplemented);
+                }
+                return SensorType::RGGB;
+            case SVBImageType::Rgb32:
+            case SVBImageType::Unknown:
+                throw AlpacaException("Sensor type is unavailable for the selected image format",
+                                      AlpacaError::PropertyNotImplemented);
+        }
+        throw AlpacaException("Sensor type is unavailable for the selected image format",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     double get_set_ccd_temperature() const override {
@@ -831,10 +865,15 @@ public:
     }
 
     void set_set_ccd_temperature(double temperature) override {
+        const double temperature_tenths = temperature * 10.0;
+        if (!std::isfinite(temperature_tenths) ||
+            temperature_tenths < static_cast<double>(std::numeric_limits<long>::min()) ||
+            temperature_tenths >= static_cast<double>(std::numeric_limits<long>::max())) {
+            throw AlpacaException("CCD temperature is out of range", AlpacaError::InvalidValue);
+        }
         ensure_connected();
         // SVBONY target temperature is in 0.1C units
-        set_control_value_or_throw(SVBControlType::TargetTemperature,
-                                   static_cast<long>(std::lround(temperature * 10.0)));
+        set_control_value_or_throw(SVBControlType::TargetTemperature, std::lround(temperature_tenths));
     }
 
     int get_start_x() const override {
@@ -860,7 +899,9 @@ public:
     }
 
     void abort_exposure() override {
-        stop_exposure();
+        ensure_connected();
+        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        abort_exposure_locked_lifecycle();
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -932,12 +973,17 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
+        }
+        const double requested_exposure_us = duration * 1'000'000.0;
+        if (!std::isfinite(requested_exposure_us) ||
+            requested_exposure_us >= static_cast<double>(std::numeric_limits<long>::max())) {
+            throw AlpacaException("Exposure duration is out of range", AlpacaError::InvalidValue);
+        }
+
         ensure_connected();
         (void)light; // SVBONY SDK does not have a dark frame parameter
-
-        if (duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
-        }
 
         // Held through the thread spawn at the end: serialises the spawn against
         // the joins in stop_exposure and the disconnect's join→close (a spawn
@@ -947,7 +993,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
 
         auto caps = get_control_caps_or_throw(SVBControlType::Exposure);
-        long exposure_us = static_cast<long>(std::lround(duration * 1'000'000.0));
+        long exposure_us = std::lround(requested_exposure_us);
         // Clamp to SDK minimum (ASCOM allows duration=0 meaning minimum exposure)
         if (exposure_us < caps.min_value) {
             exposure_us = caps.min_value;
@@ -956,45 +1002,40 @@ public:
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
 
-        int active_camera_id = -1;
+        // Validate the request fully before stopping a previous exposure.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (camera_id_ < 0) {
-                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-            }
-            active_camera_id = camera_id_;
-            if (roi_width_effective_ <= 0 || roi_height_effective_ <= 0) {
-                throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
-            }
-            if (camera_info_valid_) {
-                int max_w = camera_info_.max_width / bin_x_;
-                int max_h = camera_info_.max_height / bin_y_;
-                if (num_x_ > max_w || num_y_ > max_h) {
-                    throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-                }
-                if (start_x_ < 0 || start_y_ < 0 || start_x_ >= max_w || start_y_ >= max_h) {
-                    throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
-                }
-                if (start_x_ + num_x_ > max_w || start_y_ + num_y_ > max_h) {
-                    throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-                }
-            }
-            // Fast register write under the same mutex_ hold as the id read
-            // (shape (a)); the lifecycle lock already excludes a racing
-            // disconnect for the rest of this function.
-            sdk_.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
+            validate_exposure_roi_locked();
         }
 
-        // Stop any previous exposure thread
-        stop_exposure_thread();
+        // The old worker must be fully reaped before changing the camera's
+        // exposure control. Its public watchdog state may already be Idle
+        // while it is still inside SVBGetVideoData.
+        if (!stop_exposure_thread()) {
+            throw AlpacaException(
+                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before another exposure",
+                AlpacaError::DriverException);
+        }
 
+        int active_camera_id = -1;
+        FrameConfig frame_config;
+        std::shared_ptr<const ImageArray> retired_image;
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected_locked();
+            ensure_settings_safe_locked();
+            validate_exposure_roi_locked();
+            active_camera_id = camera_id_;
+            sdk_.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
+
+            frame_config = frame_config_locked();
             last_exposure_duration_ = duration;
             last_exposure_start_ = std::chrono::system_clock::now();
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
+            retired_image = std::move(last_image_);
+            exposure_failure_.clear();
             // Watchdog deadline: exposure time + a generous margin for SDK
             // overhead, deferred ROI / FrameSpeedMode writes, and the
             // SVBGetVideoData poll loop. If the exposure thread is still
@@ -1004,167 +1045,258 @@ public:
                 std::chrono::microseconds(exposure_us) +
                 std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
-            // Publish exposure_active_ under mutex_ — the same lock the
-            // setters hold for ensure_not_exposing_locked() — so a
-            // gain/offset/geometry write can never interleave between the
-            // setter's check and this publish (M15 TOCTOU close). The
-            // false-transitions (worker exit, stop, watchdog) stay lock-free:
-            // a stale-true read there only delays a settings write until
-            // after the frame, which is the safe direction.
+            exposure_worker_running_ = true;
             exposure_active_.store(true);
         }
 
         // Start video capture and grab one frame in a background thread.
         // Deferred SDK writes (ROI, FrameSpeedMode) happen here so that
         // start_exposure returns quickly and ConformU sees fast API timing.
-        exposure_thread_ = std::thread([this, active_camera_id, exposure_us]() {
-            auto& sdk = sdk_;
-            // Deferred-write bookkeeping lives outside the try so the catch can
-            // re-mark ONLY the stage that did not apply (M16): clearing the
-            // dirty flags at snapshot time and never restoring them meant one
-            // transient SVBSetROIFormat/FrameSpeedMode failure silently broke
-            // every later exposure (stale ROI / speed never re-applied).
-            bool need_roi_update = false;
-            bool need_speed_update = false;
-            bool roi_applied = false;
-            bool speed_applied = false;
-            try {
-                // Apply deferred SDK writes outside the mutex so
-                // get_image_ready() polls are not blocked.
-                {
-                    int sx, sy, rw, rh, bx;
-                    SVBImageType img_type;
-                    long speed_value;
+        try {
+            exposure_thread_ = std::thread([this, active_camera_id, exposure_us, frame_config]() {
+                auto finish_worker = [this](void*) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    exposure_worker_running_ = false;
+                };
+                std::unique_ptr<void, decltype(finish_worker)> worker_guard(this, finish_worker);
+                std::shared_ptr<const ImageArray> retired_image;
+                auto& sdk = sdk_;
+                // Deferred-write bookkeeping lives outside the try so the catch can
+                // re-mark ONLY the stage that did not apply (M16): clearing the
+                // dirty flags at snapshot time and never restoring them meant one
+                // transient SVBSetROIFormat/FrameSpeedMode failure silently broke
+                // every later exposure (stale ROI / speed never re-applied).
+                bool need_roi_update = false;
+                bool need_speed_update = false;
+                bool roi_applied = false;
+                bool speed_applied = false;
+                bool capture_start_attempted = false;
+                try {
+                    // Apply deferred SDK writes outside the mutex so
+                    // get_image_ready() polls are not blocked.
+                    {
+                        long speed_value;
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            need_roi_update = roi_dirty_;
+                            need_speed_update = frame_speed_dirty_;
+                            speed_value = pending_frame_speed_;
+                        }
+                        if (need_roi_update && frame_config.roi_width > 0 && frame_config.roi_height > 0) {
+                            sdk.set_roi_format(active_camera_id, frame_config.roi_start_x, frame_config.roi_start_y,
+                                               frame_config.roi_width, frame_config.roi_height, frame_config.bin_x);
+                            sdk.set_output_image_type(active_camera_id, frame_config.image_type);
+                            roi_applied = true;
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            roi_dirty_ = false;
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            if (!exposure_active_.load() || !connected_.load() || camera_id_ != active_camera_id) {
+                                exposure_worker_running_ = false;
+                                return;
+                            }
+                        }
+                        if (need_speed_update) {
+                            long cur_speed = 0;
+                            bool cur_auto = false;
+                            if (!sdk.get_control_value(active_camera_id, SVBControlType::FrameSpeedMode, cur_speed,
+                                                       cur_auto) ||
+                                cur_speed != speed_value) {
+                                sdk.set_control_value(active_camera_id, SVBControlType::FrameSpeedMode, speed_value,
+                                                      false);
+                            }
+                            speed_applied = true;
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            frame_speed_dirty_ = false;
+                        }
+                    }
+
+                    std::size_t buffer_size = 0;
+                    {
+                        const auto frame_roi = sdk.get_roi_format(active_camera_id);
+                        const auto frame_type = sdk.get_output_image_type(active_camera_id);
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (frame_roi.width <= 0 || frame_roi.height <= 0 || frame_roi.bin <= 0 ||
+                            frame_roi.start_x < 0 || frame_roi.start_y < 0) {
+                            util::throw_invalid_camera_image("SVBONY SDK returned invalid ROI metadata");
+                        }
+                        if (frame_roi.start_x != frame_config.roi_start_x ||
+                            frame_roi.start_y != frame_config.roi_start_y ||
+                            frame_roi.width != frame_config.roi_width || frame_roi.height != frame_config.roi_height ||
+                            frame_roi.bin != frame_config.bin_x) {
+                            util::throw_invalid_camera_image(
+                                "SVBONY SDK ROI readback does not match the requested frame");
+                        }
+                        if (frame_type != frame_config.image_type || !is_supported_output_type(frame_type)) {
+                            util::throw_invalid_camera_image("SVBONY SDK returned an unsupported image format");
+                        }
+                        buffer_size = required_frame_storage(frame_config.roi_width, frame_config.roi_height,
+                                                             frame_config.image_type);
+                        if (buffer_size > static_cast<std::size_t>(std::numeric_limits<long>::max())) {
+                            util::throw_invalid_camera_image("SVBONY frame storage exceeds SDK buffer-size range");
+                        }
+                    }
+
+                    if (buffer_size == 0) {
+                        util::throw_invalid_camera_image("SVBONY SDK frame has no storage");
+                    }
+                    {
+                        // Serialize the final cancellation check with Abort,
+                        // replacement and disconnect before starting capture.
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (!exposure_active_.load() || !connected_.load() || camera_id_ != active_camera_id) {
+                            exposure_worker_running_ = false;
+                            return;
+                        }
+                        if (capture_stop_failed_) {
+                            throw AlpacaException(
+                                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect",
+                                AlpacaError::DriverException);
+                        }
+                        capture_start_attempted = true;
+                        sdk.start_video_capture(active_camera_id);
+                    }
+
+                    std::vector<std::uint8_t> buffer(buffer_size);
+
+                    // SVBGetVideoData reports no image before its finite wait as
+                    // TIMEOUT; retry that result while the sensor integrates and
+                    // surface every other SDK error without spinning.
+                    const long exposure_wait_ms = exposure_us / 1000;
+                    const int total_wait_ms = exposure_wait_ms > std::numeric_limits<int>::max() - 10000L
+                                                  ? std::numeric_limits<int>::max()
+                                                  : std::max(10000, static_cast<int>(exposure_wait_ms + 10000L));
+                    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(total_wait_ms);
+                    bool got_frame = false;
+                    int attempts = 0;
+                    while (exposure_active_.load() && std::chrono::steady_clock::now() < deadline) {
+                        try {
+                            if (sdk.get_video_data(active_camera_id, buffer.data(), static_cast<long>(buffer.size()),
+                                                   500) == SVBVideoDataResult::Frame) {
+                                got_frame = true;
+                                break;
+                            }
+                            ++attempts;
+                        } catch (const std::exception& e) {
+                            publish_exposure_failure(e.what());
+                            throw;
+                        }
+                    }
+
+                    try {
+                        sdk.stop_video_capture(active_camera_id);
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        capture_stop_failed_ = false;
+                    } catch (const std::exception& e) {
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            capture_stop_failed_ = true;
+                        }
+                        throw AlpacaException(std::string("SVBONY could not stop video capture: ") + e.what(),
+                                              AlpacaError::DriverException);
+                    }
+
+                    if (!exposure_active_.load()) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        exposure_worker_running_ = false;
+                        return;
+                    }
+                    if (!got_frame) {
+                        ALPACA_LOG_WARN("SVBONY",
+                                        "Exposure failed: no frame after " + std::to_string(attempts) + " attempts");
+                        publish_exposure_failure("SVBONY camera did not deliver a frame before the timeout");
+                        {
+                            std::lock_guard<std::mutex> lock(mutex_);
+                            exposure_worker_running_ = false;
+                        }
+                        return;
+                    }
+
+                    // Convert and validate locally; publish neither data nor ready
+                    // until the entire frame has passed validation.
+                    ImageArray image = build_image_array(buffer, frame_config);
+                    auto published_image = std::make_shared<const ImageArray>(std::move(image));
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
-                        sx = roi_start_x_effective_;
-                        sy = roi_start_y_effective_;
-                        rw = roi_width_effective_;
-                        rh = roi_height_effective_;
-                        bx = bin_x_;
-                        img_type = image_type_;
-                        need_roi_update = roi_dirty_;
-                        roi_dirty_ = false;
-                        need_speed_update = frame_speed_dirty_;
-                        speed_value = pending_frame_speed_;
-                        frame_speed_dirty_ = false;
-                    }
-                    if (need_roi_update && rw > 0 && rh > 0) {
-                        sdk.set_roi_format(active_camera_id, sx, sy, rw, rh, bx);
-                        sdk.set_output_image_type(active_camera_id, img_type);
-                        roi_applied = true;
-                    }
-                    if (need_speed_update) {
-                        long cur_speed = 0;
-                        bool cur_auto = false;
-                        if (!sdk.get_control_value(active_camera_id, SVBControlType::FrameSpeedMode, cur_speed, cur_auto)
-                            || cur_speed != speed_value) {
-                            sdk.set_control_value(active_camera_id, SVBControlType::FrameSpeedMode, speed_value, false);
+                        latch_exposure_timeout_locked();
+                        if (!exposure_active_.load()) {
+                            exposure_worker_running_ = false;
+                            return;
                         }
-                        speed_applied = true;
+                        last_image_ = std::move(published_image);
+                        image_cached_ = true;
+                        image_ready_ = true;
+                        exposure_failure_.clear();
+                        exposure_deadline_valid_ = false;
+                        exposure_active_.store(false);
+                        exposure_worker_running_ = false;
                     }
-                }
-
-                sdk.start_video_capture(active_camera_id);
-
-                std::size_t buffer_size = 0;
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    buffer_size = image_buffer_size_locked();
-                }
-
-                if (buffer_size == 0 || !exposure_active_.load()) {
-                    sdk.stop_video_capture(active_camera_id);
-                    exposure_active_.store(false);
-                    return;
-                }
-
-                std::vector<std::uint8_t> buffer(buffer_size);
-
-                // Poll for frame data like the SDK demo does — SVBGetVideoData
-                // can fail on the first attempts while the sensor integrates.
-                int total_wait_ms = static_cast<int>(exposure_us / 1000) + 10000;
-                if (total_wait_ms < 10000) {
-                    total_wait_ms = 10000;
-                }
-                auto deadline = std::chrono::steady_clock::now()
-                              + std::chrono::milliseconds(total_wait_ms);
-                bool got_frame = false;
-                int attempts = 0;
-                while (exposure_active_.load()
-                       && std::chrono::steady_clock::now() < deadline) {
-                    try {
-                        sdk.get_video_data(active_camera_id, buffer.data(),
-                                           static_cast<long>(buffer.size()), 500);
-                        got_frame = true;
-                        break;
-                    } catch (const std::exception&) {
-                        ++attempts;
+                } catch (const std::exception& e) {
+                    ALPACA_LOG_WARN("SVBONY", "Exposure failed: " + std::string(e.what()));
+                    bool stopped = !capture_start_attempted;
+                    if (capture_start_attempted) {
+                        try {
+                            sdk.stop_video_capture(active_camera_id);
+                            stopped = true;
+                        } catch (const std::exception&) {
+                            // Preserve uncertain capture state until Stop succeeds
+                            // or disconnect closes and reopens the physical handle.
+                        }
                     }
-                }
-
-                sdk.stop_video_capture(active_camera_id);
-
-                if (!got_frame || !exposure_active_.load()) {
-                    ALPACA_LOG_WARN("SVBONY", "Exposure failed: no frame after " +
-                        std::to_string(attempts) + " attempts");
-                    exposure_active_.store(false);
-                    return;
-                }
-
-                // Build image array
-                {
+                    // Re-mark only the deferred stage that did NOT apply, so the
+                    // next exposure retries it instead of running with stale
+                    // ROI/speed forever (M16). Re-marking an applied stage would
+                    // just cost a redundant re-apply, so the split matters only
+                    // for correctness of the failed one.
                     std::lock_guard<std::mutex> lock(mutex_);
-                    last_image_ = build_image_array_locked(buffer);
-                    image_cached_ = true;
-                    image_ready_ = true;
+                    if (stopped)
+                        capture_stop_failed_ = false;
+                    else
+                        capture_stop_failed_ = true;
+                    if (need_roi_update && !roi_applied) roi_dirty_ = true;
+                    if (need_speed_update && !speed_applied) frame_speed_dirty_ = true;
+                    if (exposure_active_.load()) {
+                        exposure_failure_ = e.what();
+                        image_ready_ = false;
+                        image_cached_ = false;
+                        retired_image = std::move(last_image_);
+                        exposure_deadline_valid_ = false;
+                    }
+                    exposure_active_.store(false);
+                    exposure_worker_running_ = false;
                 }
-            } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("SVBONY", "Exposure failed: " + std::string(e.what()));
-                try {
-                    sdk.stop_video_capture(active_camera_id);
-                } catch (const std::exception&) {
-                    // Best-effort stop after a failed exposure; the failure
-                    // already surfaced through exposure_status_ above.
-                }
-                // Re-mark only the deferred stage that did NOT apply, so the
-                // next exposure retries it instead of running with stale
-                // ROI/speed forever (M16). Re-marking an applied stage would
-                // just cost a redundant re-apply, so the split matters only
-                // for correctness of the failed one.
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (need_roi_update && !roi_applied) roi_dirty_ = true;
-                if (need_speed_update && !speed_applied) frame_speed_dirty_ = true;
-            }
+            });
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_worker_running_ = false;
             exposure_active_.store(false);
-        });
+            exposure_deadline_valid_ = false;
+            last_exposure_valid_ = false;
+            throw;
+        }
     }
 
     void stop_exposure() override {
-        ensure_connected();
-        // Serialise this join against start_exposure's spawn and the disconnect's
-        // join+close (join vs thread-assignment on the same std::thread is UB).
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        exposure_active_.store(false);
-        try {
-            with_camera([this](int id) { sdk_.stop_video_capture(id); });
-        } catch (const std::exception&) {
-            // Best-effort wake of the blocking SDK read; the join below is
-            // what guarantees the worker has exited.
-        }
-        // Wait for exposure thread to finish so CameraState returns Idle
-        // immediately after stop/abort.
-        if (exposure_thread_.joinable()) {
-            exposure_thread_.join();
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        image_ready_ = false;
-        image_cached_ = false;
-        exposure_deadline_valid_ = false;
+        throw AlpacaException("SVBONY SDK cannot stop an exposure while preserving its acquired image",
+                              AlpacaError::MethodNotImplemented);
     }
 
 private:
-    SVBSDK& sdk_;  // outlives the driver (the singleton, or a test fake)
+    struct FrameConfig {
+        int width{};
+        int height{};
+        int start_x{};
+        int start_y{};
+        int roi_start_x{};
+        int roi_start_y{};
+        int roi_width{};
+        int roi_height{};
+        int bin_x{};
+        SVBImageType image_type{SVBImageType::Unknown};
+    };
+
+    SVBSDK& sdk_;
     int device_number_;
     int camera_index_;
     int camera_id_;
@@ -1181,6 +1313,7 @@ private:
 
     std::atomic<bool> connected_;
     mutable std::mutex mutex_;
+    std::mutex transition_mutex_;
 
     SVBImageType image_type_;
     int bin_x_;
@@ -1199,7 +1332,7 @@ private:
 
     mutable bool image_ready_;
     mutable bool image_cached_;
-    mutable ImageArray last_image_;
+    mutable std::shared_ptr<const ImageArray> last_image_;
     double last_exposure_duration_;
     std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
@@ -1209,6 +1342,8 @@ private:
     long pending_frame_speed_{0};
 
     mutable std::atomic<bool> exposure_active_;
+    bool exposure_worker_running_{false};      // guarded by mutex_; true until the worker actually exits
+    mutable bool capture_stop_failed_{false};  // guarded by mutex_; blocks reuse until a successful stop/close
     std::thread exposure_thread_;
     // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
     // (stop_exposure, set_connected(false)'s pre-close stop). Join racing the
@@ -1226,6 +1361,7 @@ private:
 
     mutable std::atomic<bool> pulse_guiding_;
     std::chrono::steady_clock::time_point pulse_guiding_end_;
+    mutable std::string exposure_failure_;
     // Serialises pulse_guide against itself (M18 sweep): SVBPulseGuide blocks
     // for the pulse duration, and the flag clear after it must not race a
     // second in-flight pulse's flag/end-time publish. Never held with mutex_.
@@ -1237,18 +1373,84 @@ private:
         }
     }
 
-    void reset_exposure_state_locked() {
+    void reset_exposure_state_locked(std::shared_ptr<const ImageArray>& retired_image) {
         // A disconnect racing an in-flight pulse must not leave
         // IsPulseGuiding=true for a freshly reconnected client.
         pulse_guiding_.store(false);
         pulse_guiding_end_ = {};
         image_ready_ = false;
         image_cached_ = false;
+        retired_image = std::move(last_image_);
+        exposure_failure_.clear();
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
+    }
+
+    void throw_exposure_failure_locked() const {
+        if (!exposure_failure_.empty()) {
+            throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
+        }
+    }
+
+    void latch_exposure_timeout_locked() const {
+        if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+            ALPACA_LOG_WARN("SVBONY", "Exposure exceeded its completion deadline; late frame results will be ignored");
+            exposure_failure_ = "SVBONY camera exposure exceeded its completion deadline";
+            image_ready_ = false;
+            image_cached_ = false;
+            exposure_active_.store(false);
+            exposure_deadline_valid_ = false;
+        }
+    }
+
+    FrameConfig frame_config_locked() const {
+        return FrameConfig{num_x_,
+                           num_y_,
+                           start_x_,
+                           start_y_,
+                           roi_start_x_effective_,
+                           roi_start_y_effective_,
+                           roi_width_effective_,
+                           roi_height_effective_,
+                           bin_x_,
+                           image_type_};
+    }
+
+    void validate_exposure_roi_locked() const {
+        if (camera_id_ < 0) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
+        if (roi_width_effective_ <= 0 || roi_height_effective_ <= 0) {
+            throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
+        }
+        if (!camera_info_valid_) return;
+        const int max_w = camera_info_.max_width / bin_x_;
+        const int max_h = camera_info_.max_height / bin_y_;
+        if (num_x_ > max_w || num_y_ > max_h) {
+            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
+        }
+        if (start_x_ < 0 || start_y_ < 0 || start_x_ >= max_w || start_y_ >= max_h) {
+            throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
+        }
+        if (num_x_ > max_w - start_x_ || num_y_ > max_h - start_y_) {
+            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
+        }
+    }
+
+    void publish_exposure_failure(const std::string& message) {
+        std::shared_ptr<const ImageArray> retired_image;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (exposure_active_.load()) {
+            exposure_failure_ = message;
+            image_ready_ = false;
+            image_cached_ = false;
+            retired_image = std::move(last_image_);
+            exposure_deadline_valid_ = false;
+        }
+        exposure_active_.store(false);
     }
 
     int align_roi_dimension(int value, int multiple) const {
@@ -1264,7 +1466,7 @@ private:
     // the SVBONY divisors (width%8, height%2) so no requested pixel is lost
     // (aligning DOWN dropped up to 7 right columns / 1 bottom row and
     // zero-padded them into the image), and crop back to the requested window
-    // in build_image_array_locked. If padding pushes the span past the sensor
+    // in build_image_array. If padding pushes the span past the sensor
     // edge, shift the SDK origin left/up instead of shrinking, so the requested
     // window stays inside the delivered frame. A request that exceeds even the
     // aligned full frame clamps down; the unreachable edge rows/cols stay
@@ -1279,19 +1481,19 @@ private:
         }
         const int max_w = camera_info_.max_width / bin_x_;
         const int max_h = camera_info_.max_height / bin_y_;
-        int eff_w = num_x_ + ((8 - (num_x_ % 8)) % 8);
-        int eff_h = num_y_ + (num_y_ % 2);
         const int max_w_aligned = align_roi_dimension(max_w, 8);
         const int max_h_aligned = align_roi_dimension(max_h, 2);
-        if (eff_w > max_w_aligned) eff_w = max_w_aligned;
-        if (eff_h > max_h_aligned) eff_h = max_h_aligned;
+        const int pad_w = (8 - (num_x_ % 8)) % 8;
+        const int pad_h = num_y_ % 2;
+        const int eff_w = num_x_ > max_w_aligned - pad_w ? max_w_aligned : num_x_ + pad_w;
+        const int eff_h = num_y_ > max_h_aligned - pad_h ? max_h_aligned : num_y_ + pad_h;
         if (eff_w <= 0 || eff_h <= 0) {
             return;  // start_exposure rejects the ROI as invalid
         }
         int sdk_sx = start_x_;
         int sdk_sy = start_y_;
-        if (sdk_sx + eff_w > max_w) sdk_sx = max_w - eff_w;
-        if (sdk_sy + eff_h > max_h) sdk_sy = max_h - eff_h;
+        if (sdk_sx > max_w - eff_w) sdk_sx = max_w - eff_w;
+        if (sdk_sy > max_h - eff_h) sdk_sy = max_h - eff_h;
         if (sdk_sx < 0) sdk_sx = 0;
         if (sdk_sy < 0) sdk_sy = 0;
         roi_width_effective_ = eff_w;
@@ -1300,10 +1502,78 @@ private:
         roi_start_y_effective_ = sdk_sy;
     }
 
-    void stop_exposure_thread() {
-        exposure_active_.store(false);
+    bool stop_exposure_thread() {
+        int active_camera_id = -1;
+        bool should_stop = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_active_.store(false);
+            exposure_deadline_valid_ = false;
+            active_camera_id = camera_id_;
+            should_stop = active_camera_id >= 0 && (exposure_thread_.joinable() || capture_stop_failed_);
+        }
+        bool stopped = !should_stop;
+        if (should_stop) {
+            try {
+                // Stop before joining to wake acquisition where supported;
+                // get_video_data itself has a finite timeout.
+                sdk_.stop_video_capture(active_camera_id);
+                stopped = true;
+                std::lock_guard<std::mutex> lock(mutex_);
+                capture_stop_failed_ = false;
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                capture_stop_failed_ = true;
+                ALPACA_LOG_WARN("SVBONY", "stop_video_capture failed: " + std::string(e.what()));
+            }
+        }
         if (exposure_thread_.joinable()) {
             exposure_thread_.join();
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_worker_running_ = false;
+            stopped = stopped && !capture_stop_failed_;
+        }
+        return stopped;
+    }
+
+    void abort_exposure_locked_lifecycle() {
+        int active_camera_id = -1;
+        std::shared_ptr<const ImageArray> retired_image;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!exposure_worker_running_ && !exposure_active_.load() && !capture_stop_failed_) return;
+            active_camera_id = camera_id_;
+            exposure_active_.store(false);
+            exposure_deadline_valid_ = false;
+            image_ready_ = false;
+            image_cached_ = false;
+            retired_image = std::move(last_image_);
+        }
+        if (active_camera_id >= 0) {
+            try {
+                sdk_.stop_video_capture(active_camera_id);
+                std::lock_guard<std::mutex> lock(mutex_);
+                capture_stop_failed_ = false;
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                capture_stop_failed_ = true;
+                throw AlpacaException(std::string("AbortExposure could not stop SVBONY video capture: ") + e.what(),
+                                      AlpacaError::DriverException);
+            }
+        }
+        if (exposure_thread_.joinable()) exposure_thread_.join();
+        bool stop_failed = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            exposure_worker_running_ = false;
+            stop_failed = capture_stop_failed_;
+            if (!stop_failed) exposure_failure_.clear();
+        }
+        if (stop_failed) {
+            throw AlpacaException("AbortExposure could not confirm SVBONY video capture stopped",
+                                  AlpacaError::DriverException);
         }
     }
 
@@ -1389,22 +1659,38 @@ private:
 
     void select_default_image_type_locked() {
         if (!camera_info_valid_) {
-            image_type_ = SVBImageType::Raw8;
-            return;
+            util::throw_invalid_camera_image("SVBONY camera information is unavailable");
         }
-        if (supports_format(camera_info_.supported_formats, SVBImageType::Raw16)) {
-            image_type_ = SVBImageType::Raw16;
-            return;
+        constexpr SVBImageType kColorFormats[] = {SVBImageType::Raw16, SVBImageType::Raw8, SVBImageType::Rgb24,
+                                                  SVBImageType::Y16, SVBImageType::Y8};
+        constexpr SVBImageType kMonoFormats[] = {SVBImageType::Raw16, SVBImageType::Y16, SVBImageType::Raw8,
+                                                 SVBImageType::Y8, SVBImageType::Rgb24};
+        const auto& preferred_formats = camera_info_.is_color ? kColorFormats : kMonoFormats;
+        for (const auto type : preferred_formats) {
+            if (supports_format(camera_info_.supported_formats, type)) {
+                image_type_ = type;
+                return;
+            }
         }
-        if (supports_format(camera_info_.supported_formats, SVBImageType::Raw8)) {
-            image_type_ = SVBImageType::Raw8;
-            return;
+        throw AlpacaException(
+            "SVBONY camera reports no supported image format; verify this camera is supported by the installed SVBONY "
+            "SDK",
+            AlpacaError::DriverException);
+    }
+
+    static bool is_supported_output_type(SVBImageType type) {
+        switch (type) {
+            case SVBImageType::Raw8:
+            case SVBImageType::Raw16:
+            case SVBImageType::Y8:
+            case SVBImageType::Y16:
+            case SVBImageType::Rgb24:
+                return true;
+            case SVBImageType::Rgb32:
+            case SVBImageType::Unknown:
+                return false;
         }
-        if (supports_format(camera_info_.supported_formats, SVBImageType::Rgb24)) {
-            image_type_ = SVBImageType::Rgb24;
-            return;
-        }
-        image_type_ = SVBImageType::Raw8;
+        return false;
     }
 
     bool can_get_control(SVBControlType type) const {
@@ -1425,6 +1711,7 @@ private:
     // read once a reconnect reloaded control_caps_ (same audit as issue #116).
     SVBControlCaps get_control_caps_or_throw(SVBControlType type) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         return control_caps_or_throw_locked(type);
     }
 
@@ -1433,10 +1720,8 @@ private:
     // unlocked, racing a concurrent disconnect's close (issue #116).
     long get_control_value_or_throw(SVBControlType type) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         control_caps_or_throw_locked(type);
-        if (camera_id_ < 0) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
         bool is_auto = false;
         long value = 0;
         if (!sdk_.get_control_value(camera_id_, type, value, is_auto)) {
@@ -1445,26 +1730,28 @@ private:
         return value;
     }
 
-    void disable_auto_if_needed(SVBControlType type) const {
+    void set_gain_value_or_throw(long value) const {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (camera_id_ < 0) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        ensure_connected_locked();
+        const auto& caps = control_caps_or_throw_locked(SVBControlType::Gain);
+        if (!caps.is_writable) {
+            throw AlpacaException("Control is read-only", AlpacaError::InvalidOperation);
         }
-        long cur_value = 0;
+        if (value < caps.min_value || value > caps.max_value) {
+            throw AlpacaException("Control value out of range", AlpacaError::InvalidValue);
+        }
+        ensure_settings_safe_locked();
+        long current = 0;
         bool is_auto = false;
-        if (sdk_.get_control_value(camera_id_, type, cur_value, is_auto)) {
-            if (is_auto) {
-                sdk_.set_control_value(camera_id_, type, cur_value, false);
-            }
+        if (sdk_.get_control_value(camera_id_, SVBControlType::Gain, current, is_auto) && is_auto) {
+            sdk_.set_control_value(camera_id_, SVBControlType::Gain, current, false);
         }
+        sdk_.set_control_value(camera_id_, SVBControlType::Gain, value, false);
     }
 
-    // reject_during_exposure=true for sensor registers (gain/offset): the
-    // check runs under the same mutex_ hold as the SDK write, and
-    // start_exposure publishes exposure_active_=true under mutex_ too, so a
-    // register write can never slip between check and publish (M15).
     void set_control_value_or_throw(SVBControlType type, long value, bool reject_during_exposure = false) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         const auto& caps = control_caps_or_throw_locked(type);
         if (!caps.is_writable) {
             throw AlpacaException("Control is read-only", AlpacaError::InvalidOperation);
@@ -1472,23 +1759,40 @@ private:
         if (value < caps.min_value || value > caps.max_value) {
             throw AlpacaException("Control value out of range", AlpacaError::InvalidValue);
         }
+        ensure_capture_stop_confirmed_locked();
         if (reject_during_exposure) {
             ensure_not_exposing_locked();
-        }
-        if (camera_id_ < 0) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
         sdk_.set_control_value(camera_id_, type, value, false);
     }
 
-    // Reject runtime sensor-register / geometry writes while a frame is
-    // integrating: the exposure worker is blocked in SVBGetVideoData holding
-    // no lock, so a mid-exposure write would race the live integration.
+    // Reject runtime sensor-register / geometry writes while the exposure
+    // worker is active: it may be applying deferred SDK settings or acquiring
+    // a frame, and those writes must not race it.
     // Requires mutex_ held — the lock start_exposure publishes
     // exposure_active_=true under (TOCTOU rule, AGENTS.md).
     void ensure_not_exposing_locked() const {
-        if (exposure_active_.load()) {
+        if (exposure_active_.load() || exposure_worker_running_) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
+        }
+    }
+
+    void ensure_connected_locked() const {
+        if (!connected_.load() || camera_id_ < 0) {
+            throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        }
+    }
+
+    void ensure_settings_safe_locked() const {
+        ensure_not_exposing_locked();
+        ensure_capture_stop_confirmed_locked();
+    }
+
+    void ensure_capture_stop_confirmed_locked() const {
+        if (capture_stop_failed_) {
+            throw AlpacaException(
+                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before changing settings",
+                AlpacaError::DriverException);
         }
     }
 
@@ -1525,7 +1829,6 @@ private:
     }
 
     void set_bin_locked(int bin_x, int bin_y) {
-        ensure_connected();
         if (bin_x != bin_y) {
             throw AlpacaException("Asymmetric binning not supported", AlpacaError::InvalidValue);
         }
@@ -1533,9 +1836,10 @@ private:
         if (!camera_info_valid_ || !supports_bin(camera_info_.supported_bins, bin_x)) {
             throw AlpacaException("Bin value not supported", AlpacaError::InvalidValue);
         }
+        ensure_connected_locked();
         // Geometry write: rejected mid-exposure, checked under the same
         // mutex_ hold that start_exposure publishes exposure_active_ (M15).
-        ensure_not_exposing_locked();
+        ensure_settings_safe_locked();
         if (bin_x_ == bin_x && bin_y_ == bin_y) {
             return;
         }
@@ -1548,7 +1852,6 @@ private:
         start_y_ = 0;
         update_effective_roi_locked();
         roi_dirty_ = true;
-        image_cached_ = false;
     }
 
     // width/height (or sx/sy) of std::nullopt means "leave that axis unchanged",
@@ -1556,14 +1859,17 @@ private:
     // concurrent setter for the other axis can no longer be clobbered by a stale
     // pre-lock get_num_x()/get_num_y() snapshot (lost-update TOCTOU).
     void set_roi_size_locked(std::optional<int> width_opt, std::optional<int> height_opt) {
-        ensure_connected();
+        if ((width_opt && *width_opt <= 0) || (height_opt && *height_opt <= 0)) {
+            throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         const int width = width_opt.value_or(num_x_);
         const int height = height_opt.value_or(num_y_);
         if (width <= 0 || height <= 0) {
             throw AlpacaException("ROI size must be positive", AlpacaError::InvalidValue);
         }
-        ensure_not_exposing_locked();  // M15 — see set_bin_locked
+        ensure_settings_safe_locked();
         if (num_x_ == width && num_y_ == height) {
             return;
         }
@@ -1573,18 +1879,20 @@ private:
         // image-build time; NumX/NumY keep the requested values.
         update_effective_roi_locked();
         roi_dirty_ = true;
-        image_cached_ = false;
     }
 
     void set_start_pos_locked(std::optional<int> sx_opt, std::optional<int> sy_opt) {
-        ensure_connected();
+        if ((sx_opt && *sx_opt < 0) || (sy_opt && *sy_opt < 0)) {
+            throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
+        }
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         const int sx = sx_opt.value_or(start_x_);
         const int sy = sy_opt.value_or(start_y_);
         if (sx < 0 || sy < 0) {
             throw AlpacaException("Start position must be non-negative", AlpacaError::InvalidValue);
         }
-        ensure_not_exposing_locked();  // M15 — see set_bin_locked
+        ensure_settings_safe_locked();
         if (start_x_ == sx && start_y_ == sy) {
             return;
         }
@@ -1594,56 +1902,38 @@ private:
         roi_dirty_ = true;
     }
 
-    std::size_t image_buffer_size_locked() const {
-        int width = roi_width_effective_ > 0 ? roi_width_effective_ : num_x_;
-        int height = roi_height_effective_ > 0 ? roi_height_effective_ : num_y_;
-        if (width <= 0 || height <= 0) {
-            return 0;
-        }
-        switch (image_type_) {
-        case SVBImageType::Raw16:
-        case SVBImageType::Y16:
-            return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 2;
-        case SVBImageType::Rgb24:
-            return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 3;
-        case SVBImageType::Rgb32:
-            return static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4;
-        case SVBImageType::Raw8:
-        case SVBImageType::Y8:
-        default:
-            return static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
-        }
-    }
-
-    ImageArray build_image_array_locked(const std::vector<std::uint8_t>& buffer) const {
+    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, const FrameConfig& config) const {
         ImageArray image;
-        image.width = num_x_;
-        image.height = num_y_;
+        image.width = config.width;
+        image.height = config.height;
         if (image.width <= 0 || image.height <= 0) {
-            image.rank = 0;
-            return image;
+            util::throw_invalid_camera_image("SVBONY returned invalid output dimensions");
         }
 
         int out_width = image.width;
         int out_height = image.height;
-        int eff_width = roi_width_effective_ > 0 ? roi_width_effective_ : out_width;
-        int eff_height = roi_height_effective_ > 0 ? roi_height_effective_ : out_height;
+        int eff_width = config.roi_width > 0 ? config.roi_width : out_width;
+        int eff_height = config.roi_height > 0 ? config.roi_height : out_height;
         if (eff_width <= 0 || eff_height <= 0) {
-            image.rank = 0;
-            return image;
+            util::throw_invalid_camera_image("SVBONY returned invalid SDK frame dimensions");
         }
+        if (!is_supported_output_type(config.image_type)) {
+            util::throw_invalid_camera_image("SVBONY returned an unsupported image format");
+        }
+        validate_frame_storage(buffer, eff_width, eff_height, config.image_type);
 
         // The SDK frame is eff_width x eff_height starting at the (possibly
         // shifted) roi_start_*_effective_ origin; the requested window begins
         // crop_x/crop_y pixels into it (update_effective_roi_locked pads the
         // span UP and shifts the origin rather than shrinking, so the window
         // is normally fully covered; any residual uncovered edge stays 0).
-        const int crop_x = std::max(0, start_x_ - roi_start_x_effective_);
-        const int crop_y = std::max(0, start_y_ - roi_start_y_effective_);
+        const int crop_x = std::max(0, config.start_x - config.roi_start_x);
+        const int crop_y = std::max(0, config.start_y - config.roi_start_y);
 
-        if (image_type_ == SVBImageType::Rgb24) {
+        if (config.image_type == SVBImageType::Rgb24) {
             image.rank = 3;
-            image.data.assign(static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height) * 3, 0);
+            const auto output_shape = util::validate_image_shape(image);
+            image.data.assign(output_shape.element_count, 0);
             const std::size_t buffer_stride = static_cast<std::size_t>(eff_width) * 3;
             for (int row = 0; row < out_height; ++row) {
                 const int src_row = row + crop_y;
@@ -1653,7 +1943,6 @@ private:
                     if (src_col >= eff_width) break;
                     const std::size_t j =
                         static_cast<std::size_t>(src_row) * buffer_stride + static_cast<std::size_t>(src_col) * 3;
-                    if (j + 2 >= buffer.size()) break;
                     // SVBONY RGB24 is stored as B,G,R per pixel; transpose to
                     // R,G,B for Alpaca clients (matches the Player One driver).
                     const std::int32_t b = buffer[j];
@@ -1667,15 +1956,15 @@ private:
                     image.data[out_i + 2] = b;
                 }
             }
+            util::validate_image_array(image);
             return image;
         }
 
         image.rank = 2;
-        const std::size_t pixel_count = static_cast<std::size_t>(out_width) *
-                                        static_cast<std::size_t>(out_height);
-        image.data.assign(pixel_count, 0);
+        const auto output_shape = util::validate_image_shape(image);
+        image.data.assign(output_shape.element_count, 0);
 
-        const bool is_16bit = (image_type_ == SVBImageType::Raw16 || image_type_ == SVBImageType::Y16);
+        const bool is_16bit = (config.image_type == SVBImageType::Raw16 || config.image_type == SVBImageType::Y16);
         const std::size_t bpp = is_16bit ? 2 : 1;
         for (int row = 0; row < out_height; ++row) {
             const int src_row = row + crop_y;
@@ -1688,7 +1977,6 @@ private:
                 const std::size_t offset = (static_cast<std::size_t>(src_row) * static_cast<std::size_t>(eff_width) +
                                             static_cast<std::size_t>(src_col)) *
                                            bpp;
-                if (offset + bpp > buffer.size()) break;
                 if (is_16bit) {
                     const std::uint16_t value = static_cast<std::uint16_t>(buffer[offset]) |
                                                 static_cast<std::uint16_t>(buffer[offset + 1] << 8);
@@ -1698,12 +1986,13 @@ private:
                 }
             }
         }
+        util::validate_image_array(image);
         return image;
     }
 };
 
 std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index) {
-    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index, SVBSDKWrapper::instance());
+    return create_svbony_camera(device_number, camera_index, SVBSDKWrapper::instance());
 }
 
 std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk) {

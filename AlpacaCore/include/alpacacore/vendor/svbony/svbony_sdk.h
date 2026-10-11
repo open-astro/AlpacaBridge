@@ -18,11 +18,13 @@
 
 namespace alpacacore::vendor::svbony {
 
-enum class SVBImageType : std::uint8_t { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32 };
+enum class SVBImageType : std::uint8_t { Raw8, Raw16, Y8, Y16, Rgb24, Rgb32, Unknown };
 
 enum class SVBBayerPattern : std::uint8_t { None, RG, BG, GR, GB };
 
 enum class SVBExposureStatus : std::uint8_t { Idle, Working, Success, Failed };
+
+enum class SVBVideoDataResult : std::uint8_t { Frame, Timeout };
 
 enum class SVBGuideDirection : std::uint8_t { North, South, East, West };
 
@@ -109,7 +111,7 @@ public:
 
     virtual void start_video_capture(int camera_id) = 0;
     virtual void stop_video_capture(int camera_id) = 0;
-    virtual void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) = 0;
+    virtual SVBVideoDataResult get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) = 0;
 
     virtual void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) = 0;
 

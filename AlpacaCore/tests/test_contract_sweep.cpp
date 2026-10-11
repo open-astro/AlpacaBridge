@@ -1199,46 +1199,6 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
-#ifdef ALPACACORE_ENABLE_SVBONY
-struct SvbonySdkHold {
-    alpacacore::test::FakeSVBSDK fake;
-    alpacacore::test::LockedSVBSDK sdk{fake};
-};
-
-// Recipe of test_svbony_concurrency_stress.cpp.
-Tier2Host tier2_host_svbony_camera() {
-    Tier2Host h{"svbony_camera",
-                "svbony",
-                "camera",
-                "fake_svbony_sdk.h",
-                DeviceType::Camera,
-                "svbony_camera",
-                {},
-                true,
-                {},
-                ""};
-    h.connectable = [](bool hold) {
-        auto sdk_hold = std::make_shared<SvbonySdkHold>();
-        if (hold) {
-            sdk_hold->fake.before_call = [](const std::string& name) {
-                if (name == "open_camera") std::this_thread::sleep_for(kHold);
-            };
-        }
-        return host_over(sdk_hold, [](SvbonySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
-            return alpacacore::vendor::svbony::create_svbony_camera(0, 0, s.sdk);
-        });
-    };
-    h.failing = []() {
-        auto hold = std::make_shared<SvbonySdkHold>();
-        hold->fake.throw_from.insert("open_camera");  // fake_svbony_sdk.h fault injection
-        return host_over(hold, [](SvbonySdkHold& s) -> std::unique_ptr<AlpacaDriver> {
-            return alpacacore::vendor::svbony::create_svbony_camera(0, 0, s.sdk);
-        });
-    };
-    return h;
-}
-#endif
-
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 Tier2Host tier2_host_playerone_camera() {
     Tier2Host h{"playerone_camera",
@@ -1265,6 +1225,30 @@ Tier2Host tier2_host_playerone_camera() {
             return alpacacore::vendor::playerone::create_playerone_camera(0, 0, fake);
         });
     };
+    return h;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SVBONY
+Tier2Host tier2_host_svbony_camera() {
+    Tier2Host h{"svbony_camera", "svbony", "camera", "fake_svbony_sdk.h", DeviceType::Camera, "svbony_camera", {},
+                false,           {},       ""};
+    h.connectable = [](bool) {
+        return host_over(std::make_shared<alpacacore::test::FakeSVBSDK>(),
+                         [](alpacacore::test::FakeSVBSDK& sdk) -> std::unique_ptr<AlpacaDriver> {
+                             return alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+                         });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakeSVBSDK>();
+        sdk->set_camera_present(false);
+        return host_over(sdk, [](alpacacore::test::FakeSVBSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+        });
+    };
+    h.connecting_unobservable =
+        "the fake's SDK calls complete immediately, so Connect may settle before the first "
+        "Connecting sample; the async lifecycle is still exercised";
     return h;
 }
 #endif
@@ -1596,6 +1580,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
     CS2_ENABLED("playerone")
+#endif
+#ifdef ALPACACORE_ENABLE_SVBONY
+    CS2_ENABLED("svbony")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
     CS2_ENABLED("gphoto")

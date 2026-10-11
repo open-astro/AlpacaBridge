@@ -40,7 +40,7 @@ public:
 
     void start_video_capture(int camera_id) override;
     void stop_video_capture(int camera_id) override;
-    void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) override;
+    SVBVideoDataResult get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) override;
 
     void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) override;
 

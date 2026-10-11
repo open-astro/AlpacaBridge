@@ -41,7 +41,7 @@ SVBImageType from_svb_image_type(SVB_IMG_TYPE type) {
     case SVB_IMG_RGB32:
         return SVBImageType::Rgb32;
     default:
-        return SVBImageType::Raw8;
+        return SVBImageType::Unknown;
     }
 }
 
@@ -59,6 +59,8 @@ SVB_IMG_TYPE to_svb_image_type(SVBImageType type) {
         return SVB_IMG_RGB24;
     case SVBImageType::Rgb32:
         return SVB_IMG_RGB32;
+    case SVBImageType::Unknown:
+        return SVB_IMG_END;
     }
     return SVB_IMG_RAW8;
 }
@@ -389,8 +391,8 @@ void SVBSDKWrapper::close_camera(int camera_id) {
     }
     --it->second.open_count;
     if (it->second.open_count == 0) {
-        throw_on_error(SVBCloseCamera(camera_id), "SVBCloseCamera");
         pimpl_->usage_.erase(it);
+        throw_on_error(SVBCloseCamera(camera_id), "SVBCloseCamera");
     }
 }
 
@@ -494,16 +496,22 @@ void SVBSDKWrapper::stop_video_capture(int camera_id) {
     throw_on_error(SVBStopVideoCapture(camera_id), "SVBStopVideoCapture");
 }
 
-void SVBSDKWrapper::get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) {
+SVBVideoDataResult SVBSDKWrapper::get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) {
     // Do NOT hold the wrapper mutex — SVBGetVideoData can block for the full
     // wait_ms (the exposure worker polls with 500 ms waits), and holding the
     // singleton lock across it would stall every other SVBONY SDK call
-    // (status polls, and the disconnect's SVBStopVideoCapture that unblocks
-    // this very wait). Safe without the lock because the only caller is the
-    // exposure worker, which the driver stop-and-joins (under
+    // (status polls and the disconnect's SVBStopVideoCapture). The SDK header
+    // does not promise StopVideoCapture interrupts this wait, so callers use
+    // a finite iWaitms and still join before close. Safe without the lock
+    // because the only caller is the exposure worker, which the driver joins (under
     // exposure_lifecycle_mutex_) before SVBCloseCamera can run (AGENTS.md
     // blocking-call exemption; matches ToupTek/Player One).
-    throw_on_error(SVBGetVideoData(camera_id, buffer, buffer_size, wait_ms), "SVBGetVideoData");
+    const auto result = SVBGetVideoData(camera_id, buffer, buffer_size, wait_ms);
+    if (result == SVB_ERROR_TIMEOUT) {
+        return SVBVideoDataResult::Timeout;
+    }
+    throw_on_error(result, "SVBGetVideoData");
+    return SVBVideoDataResult::Frame;
 }
 
 void SVBSDKWrapper::pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) {

@@ -6,6 +6,8 @@ applyTo: "AlpacaCore/src/vendors/svbony/**,AlpacaCore/include/alpacacore/vendor/
 
 Devices: Camera.
 
+- The camera driver accepts a non-owning `SVBSDK` seam; any injected SDK must outlive the driver and its joined exposure worker. Extend `fake_svbony_sdk.h` and its connected contract/stress coverage when changing acquisition behavior.
+
 SDK location: `AlpacaCore/external/SVBONY/lib/armv8/`, headers under `external/SVBONY/include/`.
 
 - **SC715C is a rebadged ToupTek G3M715C, NOT served by this driver.** The SVBONY SDK does not recognize the SC715C. Configure it with vendor `touptek` (device type Camera, `ALPACACORE_ENABLE_TOUPTEK`) — the ToupTek SDK enumerates it natively under its own model name `G3M715C`. Same rebadge pattern as the iOptron iCAM cameras being served by the Player One driver (see [iOptron notes](ioptron.instructions.md)) -- but with one difference that matters to the user: the router aliases vendor `ioptron` + camera onto the Player One driver, so an iCAM owner still selects `ioptron`. There is no `svbony` + camera alias (that vendor has its own driver), so the SC715C must be configured as `touptek`. Validated 2026-09-11 on Linux arm64: 0 errors, 0 issues, 0 timing issues (ConformU 4.5.1 — see the [ConformU 4.5.0 arm64 timing bug](../../AGENTS.md#target-architecture) note if an earlier ConformU version shows spurious timing failures). Report saved at `AlpacaCore/conformu/SVBONY/SC715C/Linux-arm64.txt`.

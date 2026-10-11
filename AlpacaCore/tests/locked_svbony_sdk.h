@@ -42,6 +42,7 @@ public:
     using SVBImageType = vendor::svbony::SVBImageType;
     using SVBROIFormat = vendor::svbony::SVBROIFormat;
     using SVBGuideDirection = vendor::svbony::SVBGuideDirection;
+    using SVBVideoDataResult = vendor::svbony::SVBVideoDataResult;
 
     explicit LockedSVBSDK(SVBSDK& inner) : inner_(inner) {}
 
@@ -89,8 +90,8 @@ public:
     void stop_video_capture(int camera_id) override {
         locked([&] { inner_.stop_video_capture(camera_id); });
     }
-    void get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) override {
-        locked([&] { inner_.get_video_data(camera_id, buffer, buffer_size, wait_ms); });
+    SVBVideoDataResult get_video_data(int camera_id, std::uint8_t* buffer, long buffer_size, int wait_ms) override {
+        return locked([&] { return inner_.get_video_data(camera_id, buffer, buffer_size, wait_ms); });
     }
 
     void pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) override {
