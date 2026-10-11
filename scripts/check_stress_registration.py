@@ -4,7 +4,7 @@
 Five rule families, not one:
 
 1. Every vendor (driver, device type) pair needs a `[stress]` TEST_CASE (the
-   ALLOWLIST covers only the drivers that predate this gate, and /driver-build
+   ALLOWLIST is empty now that every pair is registered, and /driver-build
    Step 7b is where a new driver gets its seam and registration).
 2. A `[stress-guard]`-without-`[stress]` case inside a `*_concurrency_stress.cpp`
    file is rejected: that tag is for harness self-tests, and a registration
@@ -75,9 +75,10 @@ DeviceType::CoverCalibrator, so a filename-based guess would be wrong.
 New driver, no stress test yet? Either add the `[stress]` TEST_CASE in a
 `*_concurrency_stress.cpp` file gated behind the vendor's `if(TARGET ...)`
 block (see `test_touptek_concurrency_stress.cpp` for the shape: one factory +
-one operate callback). ALLOWLIST below is only for the drivers that predate
-this gate: it is meant to shrink, not grow, and a new driver has no business
-on it (/driver-build Step 7b says how to build the seam and the registration).
+one operate callback). ALLOWLIST below once held the drivers that predated
+this gate; every one has since been registered, so it is empty. It stays as
+the gate's escape hatch, never grows, and a new driver has no business on it
+(/driver-build Step 7b says how to build the seam and the registration).
 An entry left in place after coverage is added will itself fail the check
 (see below), so there is nothing to remember to clean up by hand.
 """
@@ -302,9 +303,7 @@ def strip_comments(text):
 # Remove an entry the same PR that adds its [stress] coverage -- a
 # still-covered entry left behind is itself a failure (see main()), so
 # nothing here can silently go stale.
-ALLOWLIST = {
-    ("qhy", "camera"),
-}
+ALLOWLIST = set()
 
 
 # Registration files that do NOT yet wrap their operate callbacks in
@@ -766,14 +765,14 @@ def missing_message(vendor, dtype, paths):
 
     A function rather than an inline format so the self-test can pin its
     wording: the message must point at /driver-build Step 7b and must never
-    offer ALLOWLIST as an alternative (that list is for drivers that predate
-    the gate and only shrinks).
+    offer ALLOWLIST as an alternative (that list is empty: every driver that
+    predated the gate is now registered).
     """
     return (
         "MISSING: %s/%s has no [stress] TEST_CASE: %s. Register it in "
         "AlpacaCore/tests/test_%s_concurrency_stress.cpp (/driver-build Step 7b: build "
-        "the seam, then the registration). ALLOWLIST in %s is for drivers that predate "
-        "this gate and must not grow."
+        "the seam, then the registration). ALLOWLIST in %s is empty (every pair is "
+        "registered) and must not grow."
         % (vendor, dtype, ", ".join(paths), vendor, __file__)
     )
 

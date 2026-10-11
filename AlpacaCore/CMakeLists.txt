@@ -141,6 +141,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/touptek/touptek_schema.cpp
     src/vendors/gemini/gemini_schema.cpp
     src/vendors/wandererastro/wandererastro_schema.cpp
+    src/vendors/zwo/zwo_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -152,6 +153,7 @@ if(ALPACACORE_ENABLE_ZWO)
     add_subdirectory(src/vendors/zwo)
     if(TARGET alpacacore_zwo)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_zwo)
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_ZWO)
     endif()
 endif()
 

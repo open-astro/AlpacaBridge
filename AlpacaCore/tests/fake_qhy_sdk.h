@@ -25,6 +25,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -116,6 +117,10 @@ namespace alpacacore::test {
  *   here, while the same change on hardware would flip has_cooler. Set the
  *   struct field (or use default_cooled_camera()) instead. Tracked in
  *   issue #337.
+ * - get_single_frame() sizes its fake copy from bits_, even when frame_bpp
+ *   overrides the returned metadata. This is safe for malformed-format tests
+ *   because the driver rejects the metadata before consuming the frame; don't
+ *   use that override to model a valid frame with different byte packing.
  *
  * ROI UNITS — `roi_` is in BINNED pixels, matching the only caller: the driver
  * passes max_width / bin_x to set_resolution() from set_bin_locked(), and
@@ -200,6 +205,12 @@ public:
     std::deque<int> cfw_position_script;
     bool read_directly = false;  // start_single_frame's return
     bool frame_ok = true;        // get_single_frame's return
+    std::vector<uint8_t> frame_bytes;
+    std::optional<uint32_t> mem_length_override;
+    std::optional<uint32_t> frame_width;
+    std::optional<uint32_t> frame_height;
+    std::optional<uint32_t> frame_bpp;
+    std::optional<uint32_t> frame_channels;
 
     // --- observability -----------------------------------------------------
     //
@@ -525,7 +536,7 @@ public:
         // hardware cannot deliver an image larger than GetQHYCCDMemLength().
         // The contract case "get_single_frame never exceeds get_mem_length"
         // pins that pairing at bin > 1.
-        const uint32_t length = roi_.width * roi_.height * bytes_per_px;
+        const uint32_t length = mem_length_override.value_or(roi_.width * roi_.height * bytes_per_px);
         // open-astro#328: remember what this call promised. get_single_frame()
         // clamps its write to it, so a set_resolution()/set_bits_mode() landing
         // between the driver's get_mem_length() -> allocate -> get_single_frame()
@@ -553,6 +564,10 @@ public:
         height = roi_.height;
         bpp = bits_;
         channels = 1;
+        if (frame_width) width = *frame_width;
+        if (frame_height) height = *frame_height;
+        if (frame_bpp) bpp = *frame_bpp;
+        if (frame_channels) channels = *frame_channels;
         if (frame_ok && buffer != nullptr) {
             const uint32_t bytes_per_px = (bits_ > 8) ? 2U : 1U;
             const uint32_t current = width * height * bytes_per_px;
@@ -570,7 +585,11 @@ public:
             // root-causing an ASan report.
             const uint32_t promised = last_mem_length_;
             const uint32_t safe = (promised == 0) ? current : std::min(current, promised);
-            std::memset(buffer, 0, static_cast<std::size_t>(safe));
+            if (frame_bytes.empty()) {
+                std::memset(buffer, 0, static_cast<std::size_t>(safe));
+            } else {
+                std::memcpy(buffer, frame_bytes.data(), std::min(static_cast<std::size_t>(safe), frame_bytes.size()));
+            }
         }
         return frame_ok;
     }

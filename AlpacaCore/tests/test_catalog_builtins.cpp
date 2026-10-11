@@ -2896,3 +2896,278 @@ TEST_CASE("Builtin catalog - WandererAstro sanitize keeps the declared fields pe
     CHECK(kept_box.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
     CHECK_FALSE(kept_box.has("coverIndex"));
 }
+
+// ---------------------------------------------------------------------------
+// ZWO telescope, EFW filter wheel, EAF focuser, CAA rotator and the switch
+// (dew heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568). The camera is not a
+// catalog descriptor yet. Every factory constructs without touching the SDK or
+// the bus.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kZwoTelescopeKey{"zwo", DeviceType::Telescope};
+const DeviceKey kZwoWheelKey{"zwo", DeviceType::FilterWheel};
+const DeviceKey kZwoFocuserKey{"zwo", DeviceType::Focuser};
+const DeviceKey kZwoRotatorKey{"zwo", DeviceType::Rotator};
+const DeviceKey kZwoSwitchKey{"zwo", DeviceType::Switch};
+
+DeviceConfig zwo_port(std::int64_t gpio) {
+    DeviceConfig port;
+    port.set("gpio", gpio);
+    return port;
+}
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices in every build",
+          "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kZwoTelescopeKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ZWO");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    // The camera is still a router arm.
+    CHECK(find_view(views, DeviceKey{"zwo", DeviceType::Camera}) == nullptr);
+
+    CHECK(keys_of(find_view(views, kZwoWheelKey)) ==
+          std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
+    CHECK(keys_of(find_view(views, kZwoFocuserKey)) == std::vector<std::string>{"focuserIndex", "focuserId"});
+    CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
+    CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
+                                                                               "gpioChip", "devicePath",
+                                                                               "pwmFrequencyHz", "ports"});
+    CHECK(find_field(find_view(views, kZwoWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
+    CHECK(find_field(find_view(views, kZwoSwitchKey)->fields, "ports")->kind == FieldRef::Kind::RecordList);
+    CHECK(same_scalar(find_field(find_view(views, kZwoSwitchKey)->fields, "switchType")->default_value,
+                      std::string{"dewheater"}));
+    CHECK(same_scalar(find_field(find_view(views, kZwoTelescopeKey)->fields, "tcpPort")->default_value,
+                      std::int64_t{4030}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the ZWO devices available only when built",
+          "[catalog][zwo][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kZwoTelescopeKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ZWO
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when ZWO is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_ZWO") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_ZWO
+    // SDK-bound types: an index or an id binds; neither is refused with the arm's text.
+    const std::tuple<DeviceKey, DeviceType, const char*, const char*> bound[] = {
+        {kZwoWheelKey, DeviceType::FilterWheel, "filterwheelIndex", "filterwheelId"},
+        {kZwoFocuserKey, DeviceType::Focuser, "focuserIndex", "focuserId"},
+        {kZwoRotatorKey, DeviceType::Rotator, "rotatorIndex", "rotatorId"}};
+    for (const auto& [key, type, index_key, id_key] : bound) {
+        INFO(index_key);
+        CHECK_THROWS_AS(catalog.create(key, DeviceConfig{}, 1), AlpacaException);
+        DeviceConfig by_index;
+        by_index.set(index_key, std::int64_t{0});
+        auto a = catalog.create(key, by_index, 2);
+        REQUIRE(a != nullptr);
+        CHECK(a->get_device_type() == type);
+        CHECK(a->get_device_number() == 2);
+        CHECK_FALSE(a->get_connected());
+        DeviceConfig by_id;
+        by_id.set(id_key, std::int64_t{3});
+        REQUIRE(catalog.create(key, by_id, 3) != nullptr);
+    }
+
+    DeviceConfig scope;
+    scope.set("connectionType", std::string{"serial"});
+    scope.set("portPath", std::string{"/dev/ttyUSB-no-such-zwo"});
+    auto telescope = catalog.create(kZwoTelescopeKey, scope, 4);
+    REQUIRE(telescope != nullptr);
+    CHECK(telescope->get_device_type() == DeviceType::Telescope);
+    CHECK_FALSE(telescope->get_connected());
+    // Auto mode scans at connect, never at registration.
+    REQUIRE(catalog.create(kZwoTelescopeKey, DeviceConfig{}, 5) != nullptr);
+
+    DeviceConfig dew;
+    dew.set("cameraIndex", std::int64_t{1});
+    auto dew_switch = catalog.create(kZwoSwitchKey, dew, 6);
+    REQUIRE(dew_switch != nullptr);
+    CHECK(dew_switch->get_device_type() == DeviceType::Switch);
+    CHECK_THROWS_AS(catalog.create(kZwoSwitchKey, DeviceConfig{}, 7), AlpacaException);
+
+    DeviceConfig names;
+    names.set("filterwheelIndex", std::int64_t{0});
+    names.set("filterNames", std::vector<std::string>{"L", "R", "G", "B", "Ha"});
+    REQUIRE(catalog.create(kZwoWheelKey, names, 8) != nullptr);
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kZwoSwitchKey, bad_type, 9), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - ZWO normalize keeps the arms' refusals and texts", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto refusal_of = [&](const DeviceKey& key, const DeviceConfig& config) {
+        const auto result = catalog.normalize(key, config, Source::Api);
+        return result.rejection.value_or("");
+    };
+
+    CHECK(refusal_of(kZwoWheelKey, DeviceConfig{}) == "ZWO filter wheel requires filterwheelIndex or filterwheelId");
+    CHECK(refusal_of(kZwoFocuserKey, DeviceConfig{}) == "ZWO EAF focuser requires focuserIndex or focuserId");
+    CHECK(refusal_of(kZwoRotatorKey, DeviceConfig{}) == "ZWO rotator requires rotatorIndex or rotatorId");
+    CHECK(refusal_of(kZwoSwitchKey, DeviceConfig{}) == "ZWO dew heater switch requires cameraIndex or cameraId");
+
+    DeviceConfig index;
+    index.set("filterwheelIndex", std::int64_t{0});
+    CHECK(refusal_of(kZwoWheelKey, index).empty());
+    DeviceConfig id;
+    id.set("focuserId", std::int64_t{0});
+    CHECK(refusal_of(kZwoFocuserKey, id).empty());
+
+    // filterNames of the wrong type is rejected by the declared StringList field.
+    DeviceConfig wrong_names = index;
+    wrong_names.set("filterNames", std::string{"L,R,G,B"});
+    CHECK(catalog.normalize(kZwoWheelKey, wrong_names, Source::Api).rejection.has_value());
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"nope"});
+    CHECK(refusal_of(kZwoSwitchKey, bad_type) ==
+          "ZWO switchType must be 'dewheater', 'asiair', 'asiair-plus-picm4', or 'asiair-plus-rk3568'");
+    // The match is case-insensitive, as the arm's was.
+    DeviceConfig upper;
+    upper.set("switchType", std::string{"ASIAIR"});
+    CHECK(refusal_of(kZwoSwitchKey, upper).empty());
+
+    DeviceConfig rk;
+    rk.set("switchType", std::string{"asiair-plus-rk3568"});
+    rk.set("devicePath", std::string{"/dev/null"});
+    CHECK(refusal_of(kZwoSwitchKey, rk).rfind("Hardware config refused: 'devicePath'", 0) == 0);
+
+    DeviceConfig chip;
+    chip.set("switchType", std::string{"asiair"});
+    chip.set("gpioChip", std::string{"/dev/gpiochip3"});
+    CHECK(refusal_of(kZwoSwitchKey, chip).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+    chip.set("switchType", std::string{"asiair-plus-picm4"});
+    CHECK(refusal_of(kZwoSwitchKey, chip).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+
+    DeviceConfig ports;
+    ports.set("switchType", std::string{"asiair"});
+    ports.set("ports", std::vector<DeviceConfig>{DeviceConfig{}});
+    CHECK(refusal_of(kZwoSwitchKey, ports) == "ASIAIR port entry requires integer 'gpio'");
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(5)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).rfind("Hardware config refused: 'ports[].gpio'", 0) == 0);
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(12), zwo_port(12)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).find("at most once") != std::string::npos);
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(12), zwo_port(13), zwo_port(26), zwo_port(18)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).empty());
+    // The RK3568 layout ignores gpio.
+    DeviceConfig rk_ports;
+    rk_ports.set("switchType", std::string{"asiair-plus-rk3568"});
+    rk_ports.set("ports", std::vector<DeviceConfig>{DeviceConfig{}});
+    CHECK(refusal_of(kZwoSwitchKey, rk_ports).empty());
+}
+
+TEST_CASE("Builtin catalog - ZWO telescope connection type and endpoint rules", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // An absent connectionType is not "auto" for this mount: refused from the API, read as serial when saved.
+    const auto absent_api = catalog.normalize(kZwoTelescopeKey, DeviceConfig{}, Source::Api);
+    REQUIRE(absent_api.rejection.has_value());
+    CHECK(*absent_api.rejection == "Invalid connection type. Use 'serial', 'network', or 'auto'");
+    const auto absent_saved = catalog.normalize(kZwoTelescopeKey, DeviceConfig{}, Source::Persisted);
+    CHECK_FALSE(absent_saved.rejection.has_value());
+    REQUIRE_FALSE(absent_saved.warnings.empty());
+    CHECK(absent_saved.warnings.front().find("has connectionType") != std::string::npos);
+    const ConfigValue* read_as = absent_saved.config.find_value("connectionType");
+    REQUIRE(read_as != nullptr);
+    CHECK(std::get<std::string>(*read_as) == "serial");
+
+    DeviceConfig autod;
+    autod.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kZwoTelescopeKey, autod, Source::Api).rejection.has_value());
+
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    const auto no_port = catalog.normalize(kZwoTelescopeKey, serial, Source::Api);
+    REQUIRE(no_port.rejection.has_value());
+    CHECK(*no_port.rejection == "Serial port path is required");
+    CHECK_FALSE(catalog.normalize(kZwoTelescopeKey, serial, Source::Persisted).rejection.has_value());
+
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    const auto no_host = catalog.normalize(kZwoTelescopeKey, network, Source::Api);
+    REQUIRE(no_host.rejection.has_value());
+    CHECK(*no_host.rejection == "Host IP address is required");
+
+    DeviceConfig bogus;
+    bogus.set("connectionType", std::string{"usb"});
+    CHECK(catalog.normalize(kZwoTelescopeKey, bogus, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device type", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterwheelId", std::int64_t{5});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    wheel.set("focuserIndex", std::int64_t{2});  // a focuser key, not a wheel one
+    const DeviceConfig kept_wheel = catalog.sanitize(kZwoWheelKey, wheel);
+    CHECK(kept_wheel.has("filterwheelIndex"));
+    CHECK(kept_wheel.has("filterwheelId"));
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("focuserIndex"));
+
+    DeviceConfig scope;
+    scope.set("connectionType", std::string{"network"});
+    scope.set("host", std::string{"192.168.4.1"});
+    scope.set("tcpPort", std::int64_t{4030});
+    scope.set("rotatorId", std::int64_t{1});
+    const DeviceConfig kept_scope = catalog.sanitize(kZwoTelescopeKey, scope);
+    CHECK(kept_scope.has("host"));
+    CHECK(kept_scope.has("tcpPort"));
+    CHECK_FALSE(kept_scope.has("rotatorId"));
+
+    DeviceConfig port;
+    port.set("gpio", std::int64_t{12});
+    port.set("name", std::string{"Mount"});
+    port.set("pwm", true);
+    port.set("secretish", std::string{"x"});
+    DeviceConfig sw;
+    sw.set("switchType", std::string{"asiair"});
+    sw.set("gpioChip", std::string{"/dev/gpiochip0"});
+    sw.set("ports", std::vector<DeviceConfig>{port});
+    sw.set("focuserId", std::int64_t{1});
+    const DeviceConfig kept_sw = catalog.sanitize(kZwoSwitchKey, sw);
+    CHECK(kept_sw.has("switchType"));
+    CHECK(kept_sw.has("gpioChip"));
+    CHECK_FALSE(kept_sw.has("focuserId"));
+    const ConfigValue* ports_value = kept_sw.find_value("ports");
+    REQUIRE(ports_value != nullptr);
+    const auto* kept_ports = std::get_if<std::vector<DeviceConfig>>(ports_value);
+    REQUIRE(kept_ports != nullptr);
+    REQUIRE(kept_ports->size() == 1);
+    CHECK((*kept_ports)[0].has("gpio"));
+    CHECK((*kept_ports)[0].has("pwm"));
+    CHECK_FALSE((*kept_ports)[0].has("secretish"));
+}

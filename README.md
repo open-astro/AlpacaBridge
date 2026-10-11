@@ -3,6 +3,7 @@
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 [![CI](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml)
+[![Nightly Build](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)

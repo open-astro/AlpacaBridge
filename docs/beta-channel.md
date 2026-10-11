@@ -39,6 +39,20 @@ on the beta build until the stable release overtakes it.
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
 newest build of either kind.
 
+## Nightly builds
+
+`.github/workflows/nightly-build.yml` builds `main` every night (03:17 UTC, skipped when `main` has not
+moved) and replaces the assets of the `nightly-build` pre-release on GitHub, whose tag moves to the built
+commit. A nightly is unreleased, unvalidated code for trying a merged fix before a beta carries it;
+it is never published to apt. Install it the way a beta is installed by hand above: download the
+`.deb` and its `.sha256` from the `nightly-build` release, check the sum, `sudo apt install ./<file>`.
+
+Its version is `<next>~nightly<YYYYMMDDHHMM>.g<sha7>`, where `<next>` is what
+`changelog_fragments.py --bump` prints on `main`, so `5.0.0~beta2 < 5.0.0~nightly202610120317.gabc1234 < 5.0.0`:
+apt upgrades a nightly to the release when it ships. It also sorts above every beta of that
+version, so apt offers a tester on a nightly no later beta; install the next one by hand. A maintainer can force a build with
+`gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
+
 ## Branch model
 
 - `main`: all development. PRs go here as usual.
@@ -95,7 +109,29 @@ newest build of either kind.
 
 - Bug and stability fixes only: crashes, hangs, races, wrong ASCOM behaviour, packaging and
   install failures, regressions from the previous stable, and docs fixes for the release itself.
-  No features, no refactors, no new drivers.
+  No features, no refactors, no new drivers. Every fix is also subject to the admission test in
+  the next two bullets.
+- A fix is admitted to the stable branch only when at least one of these holds: it repairs a
+  regression from the previous stable release, it closes an open issue on the `X.Y.0 promotion`
+  milestone, or it is small enough that the ConformU result already recorded for that driver on
+  this branch still stands. "Fixes a real bug" is not sufficient on its own: a long-standing
+  defect that the previous stable also had is a `main` fix that ships in the next minor.
+  Packaging, install and release-docs fixes from the bullet above need no hardware run.
+- Some driver changes go to `main` whichever criterion they meet, because each one invalidates
+  the hardware validation the beta exists to accumulate and pushes promotion out instead of
+  bringing it in: a new SDK seam or a new fake, a change to a capability flag a client can read
+  (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state machine, and a
+  driver change that would need a fresh ConformU run but lands without one. New test cases over an existing fake are not a
+  new fake: a stable fix carries them as usual, including the fake-SDK test `AGENTS.md` asks for
+  with a connect-path fix. Two cases override this list. A maintainer may admit such a change by
+  name in an issue on the `X.Y.0 promotion` milestone, which is a deliberate decision, not a
+  criterion a contributor can meet by filing an issue. And a series of PRs fixing one issue
+  across several drivers finishes on the stable branch once part of it has landed there, so the
+  release does not ship two behaviours for one contract; each driver the series touches then gets
+  a ConformU issue on the milestone. The question to ask of every stable fix PR is whether the
+  driver it touches would need a fresh ConformU run afterwards; if yes, it targets `main` unless
+  one of those two cases applies. A PR that misses the bar is retargeted with
+  `gh pr edit --base main` before review, not reviewed on the branch.
 - Fixes land on the stable branch and reach `main` through the merge down. No cherry-picks.
 - GitHub closes `Closes #N` issues only for a PR merged into `main`, so a merged PR into `stable/**`
   closes its issues through `.github/workflows/close-linked-issues.yml` (`scripts/close_linked_issues.py`):
@@ -119,8 +155,14 @@ newest build of either kind.
 All three hold before promoting:
 
 - At least 14 days since the last beta tag with no open regression labelled for that release.
+  A major release (`X.0.0`) also needs at least 28 days since its first beta tag, so a major
+  release spends at least four weeks in beta even when its last beta came out quickly.
 - At least one full rig session by the maintainer on the final beta build.
 - A ConformU re-run on the rig for every driver touched during the beta.
+
+Track the hardware work in a GitHub milestone named `X.Y.0 promotion`: one issue for each
+ConformU run or hardware check the release waits on. A release is ready to promote when that
+milestone has no open issues and the criteria above hold.
 
 ## Who does what
 

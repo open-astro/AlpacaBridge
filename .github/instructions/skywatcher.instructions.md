@@ -543,8 +543,9 @@ below was one of them.
   check had no window left to close. The real window is the one the hardware showed -- `:f`
   clearing while the last counts still arrive -- and it needed its own seam (`land_short_by()`:
   report the landing stopped N counts short, then creep the remainder in). Goto counts could not
-  be the signal either (`refine_goto_landing()` burns all three iterations on this fake whether or
-  not a landing coasts), nor wall-clock timing (the tracking restore sits between the landing
+  be the signal either (when this case was written, `refine_goto_landing()` burned all three
+  iterations on this fake whether or not a landing coasted; since #1019 a plain landing takes one
+  goto and a coasting one four, but the WARN stays the sharper signal), nor wall-clock timing (the tracking restore sits between the landing
   and `Slewing` clearing, as the 3 s `slew_force_until_` window also did before #715). What works: coast for
   longer than `kLandingSettleTimeout` and assert the check's own give-up WARN, a string nothing
   else emits. **Rule:** before claiming a change is covered, delete it and run the suite; if it

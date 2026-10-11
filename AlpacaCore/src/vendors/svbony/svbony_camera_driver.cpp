@@ -61,8 +61,9 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    SVBONYCameraDriver(int device_number, int camera_index)
+    SVBONYCameraDriver(int device_number, int camera_index, SVBSDK& sdk)
         : AsyncConnectable("SVBONY"),
+          sdk_(sdk),
           device_number_(device_number),
           camera_index_(camera_index),
           camera_id_(-1),
@@ -162,7 +163,7 @@ public:
     // DriverInfo). SVBONY reports both this and the real device firmware above;
     // the SDK version is a constant pointer, so reading it per poll is cheap.
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = SVBSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         if (version.empty()) {
             return std::nullopt;
         }
@@ -222,7 +223,7 @@ public:
             return;
         }
 
-        auto& sdk = SVBSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (connected) {
             int resolved_id = resolve_camera_id_locked();
@@ -922,7 +923,7 @@ public:
         // so the worst case is an SDK error on a closed id, not a
         // use-after-free (issue #116).
         try {
-            SVBSDKWrapper::instance().pulse_guide(camera_id_value(), guide_direction, duration);
+            sdk_.pulse_guide(camera_id_value(), guide_direction, duration);
         } catch (...) {
             pulse_guiding_.store(false);
             throw;
@@ -981,7 +982,7 @@ public:
             // Fast register write under the same mutex_ hold as the id read
             // (shape (a)); the lifecycle lock already excludes a racing
             // disconnect for the rest of this function.
-            SVBSDKWrapper::instance().set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
+            sdk_.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
         }
 
         // Stop any previous exposure thread
@@ -1017,7 +1018,7 @@ public:
         // Deferred SDK writes (ROI, FrameSpeedMode) happen here so that
         // start_exposure returns quickly and ConformU sees fast API timing.
         exposure_thread_ = std::thread([this, active_camera_id, exposure_us]() {
-            auto& sdk = SVBSDKWrapper::instance();
+            auto& sdk = sdk_;
             // Deferred-write bookkeeping lives outside the try so the catch can
             // re-mark ONLY the stage that did not apply (M16): clearing the
             // dirty flags at snapshot time and never restoring them meant one
@@ -1146,7 +1147,7 @@ public:
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         exposure_active_.store(false);
         try {
-            with_camera([](int id) { SVBSDKWrapper::instance().stop_video_capture(id); });
+            with_camera([this](int id) { sdk_.stop_video_capture(id); });
         } catch (const std::exception&) {
             // Best-effort wake of the blocking SDK read; the join below is
             // what guarantees the worker has exited.
@@ -1163,6 +1164,7 @@ public:
     }
 
 private:
+    SVBSDK& sdk_;  // outlives the driver (the singleton, or a test fake)
     int device_number_;
     int camera_index_;
     int camera_id_;
@@ -1306,7 +1308,7 @@ private:
     }
 
     int resolve_camera_id_locked() {
-        auto cameras = SVBSDKWrapper::instance().enumerate_cameras();
+        auto cameras = sdk_.enumerate_cameras();
         if (cameras.empty()) {
             ALPACA_LOG_WARN("SVBONY", "No SVBONY cameras detected by SDK");
             throw AlpacaException("No SVBONY cameras detected", AlpacaError::NotConnected);
@@ -1329,7 +1331,7 @@ private:
     void refresh_camera_info_locked(int camera_id) {
         // Re-read properties now that the camera is open
         SVBCameraInfo info;
-        if (SVBSDKWrapper::instance().get_camera_info_by_index(camera_index_, info)) {
+        if (sdk_.get_camera_info_by_index(camera_index_, info)) {
             // Preserve camera_id from open
             info.camera_id = camera_id;
             camera_info_ = info;
@@ -1344,7 +1346,7 @@ private:
         }
 
         try {
-            auto cameras = SVBSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
                 camera_info_valid_ = true;
@@ -1361,7 +1363,7 @@ private:
         }
 
         try {
-            auto cameras = SVBSDKWrapper::instance().enumerate_cameras();
+            auto cameras = sdk_.enumerate_cameras();
             if (camera_index_ >= 0 && camera_index_ < static_cast<int>(cameras.size())) {
                 const auto& info = cameras[static_cast<std::size_t>(camera_index_)];
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -1379,7 +1381,7 @@ private:
 
     void load_control_caps_locked(int camera_id) {
         control_caps_.clear();
-        auto caps = SVBSDKWrapper::instance().get_control_caps(camera_id);
+        auto caps = sdk_.get_control_caps(camera_id);
         for (const auto& cap : caps) {
             control_caps_[cap.type] = cap;
         }
@@ -1437,7 +1439,7 @@ private:
         }
         bool is_auto = false;
         long value = 0;
-        if (!SVBSDKWrapper::instance().get_control_value(camera_id_, type, value, is_auto)) {
+        if (!sdk_.get_control_value(camera_id_, type, value, is_auto)) {
             throw AlpacaException("Failed to get control value", AlpacaError::DriverException);
         }
         return value;
@@ -1450,9 +1452,9 @@ private:
         }
         long cur_value = 0;
         bool is_auto = false;
-        if (SVBSDKWrapper::instance().get_control_value(camera_id_, type, cur_value, is_auto)) {
+        if (sdk_.get_control_value(camera_id_, type, cur_value, is_auto)) {
             if (is_auto) {
-                SVBSDKWrapper::instance().set_control_value(camera_id_, type, cur_value, false);
+                sdk_.set_control_value(camera_id_, type, cur_value, false);
             }
         }
     }
@@ -1476,7 +1478,7 @@ private:
         if (camera_id_ < 0) {
             throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
         }
-        SVBSDKWrapper::instance().set_control_value(camera_id_, type, value, false);
+        sdk_.set_control_value(camera_id_, type, value, false);
     }
 
     // Reject runtime sensor-register / geometry writes while a frame is
@@ -1492,7 +1494,7 @@ private:
 
     // Balance the SDK open when post-open configuration throws (H9). The
     // close itself must not mask the original error.
-    void close_after_failed_connect_locked(SVBSDKWrapper& sdk, int resolved_id) {
+    void close_after_failed_connect_locked(SVBSDK& sdk, int resolved_id) {
         try {
             sdk.close_camera(resolved_id);
         } catch (const std::exception& e) {
@@ -1701,7 +1703,11 @@ private:
 };
 
 std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index) {
-    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index);
+    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index, SVBSDKWrapper::instance());
+}
+
+std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk) {
+    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index, sdk);
 }
 
 } // namespace alpacacore::vendor::svbony

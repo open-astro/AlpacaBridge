@@ -36,6 +36,10 @@ enum class SynScanVersion {
 /// driver's refusal to guess; other models ignore the setting.
 enum class SynScanAlignmentSetting : std::uint8_t { Auto, AltAz, Equatorial };
 
+/// Park RA for a saved hour angle: (lst - hour_angle) wrapped into [0, 24).
+/// Never returns 24.0, which validate_ra_dec() rejects (#869).
+double park_ra_from_hour_angle(double lst_hours, double hour_angle_hours);
+
 std::unique_ptr<TelescopeDriver> create_synscan_telescope(
     int device_number,
     const ConnectionInfo& connection_info,

@@ -8,6 +8,8 @@ Devices: Camera, FilterWheel (Phoenix Wheel), Switch (thermal: dew heater + fan 
 
 SDK locations: `AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/` (cameras) and `AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/` (Phoenix Wheel). These are **two unrelated SDK libraries** (`libPlayerOneCamera`, `libPlayerOnePW`) with separate C APIs — the filter wheel has its own wrapper (`playerone_pw_wrapper`, mirroring `zwo_efw_wrapper`) rather than extending `playerone_sdk_wrapper`. Both `.so` files ship in the `.deb` and via the install scripts.
 
+- **Camera SDK seam**: `PlayerOneCameraDriver` takes a `PlayerOneSDK&`; production factories pass `PlayerOneSDKWrapper::instance()`, and hardware-free tests inject `FakePlayerOneSDK` (`tests/fake_playerone_sdk.h`). The injected SDK must outlive the driver; the driver joins its exposure and pulse-guide workers before destruction.
+
 - **Guide direction mapping (camera)**: Player One ST4 guide config IDs map North=0/South=1/East=2/West=3 — already matching ASCOM order.
 - **ROI alignment (camera)**: divisors width%4, height%2 (see [Camera ROI alignment](../../AGENTS.md#camera-roi-alignment-all-camera-vendors)).
 - **Wheel stores filter aliases and focus offsets on-device** (`POAGetPWFilterAlias`, `POAGetPWFocusOffset`, settable via Player One's own software). The filterwheel driver seeds `Names`/`FocusOffsets` from the wheel at connect; `filterNames` from config (set via `set_names`) takes precedence. The driver does not write aliases/offsets back to the wheel.

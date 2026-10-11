@@ -69,6 +69,7 @@ if(ALPACACORE_ENABLE_ZWO)
         zwo_rotator_driver.cpp
         zwo_mount_protocol_wrapper.cpp
         zwo_telescope_driver.cpp
+        zwo_catalog.cpp
     )
 
     add_library(alpacacore_zwo STATIC ${ZWO_SOURCES})

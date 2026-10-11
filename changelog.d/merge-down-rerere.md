@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Merge downs use `git rerere`** (`.claude/commands/submit-pr.md`): the merge-down block turns on `rerere.enabled` before `git merge` and runs `git rerere remaining` after it, so a conflict hunk that repeats byte for byte (a changelog fragment, a code conflict resolved in an earlier merge down) is replayed instead of resolved again. `rerere.autoupdate` stays off, so a replayed path is read and staged by hand, and the version-file steps and `check_docs_drift.py` still decide `VERSION` and the README badge.

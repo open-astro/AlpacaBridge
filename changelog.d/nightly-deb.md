@@ -1,0 +1,2 @@
+### Added (CI)
+- **Nightly arm64 `.deb` from `main`** (CI, issue #1035): `.github/workflows/nightly-build.yml` builds the package in a Debian trixie container every night that `main` has moved and publishes it on a moving `nightly-build` GitHub pre-release (never apt), versioned `<next>~nightly<YYYYMMDDHHMM>.g<sha7>` so it sorts above every beta of the next version and below the release; see docs/beta-channel.md.

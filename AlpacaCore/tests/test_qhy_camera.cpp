@@ -691,6 +691,124 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     driver->set_connected(false);
 }
 
+TEST_CASE("QHY Camera Driver - malformed SDK frame never publishes ImageReady and recovers", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 0;
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+    const int array_error = error_code_of([&] { (void)driver->get_image_array(); });
+    INFO("ImageArray error=" << array_error << "; camera state=" << static_cast<int>(driver->get_camera_state()));
+    CHECK(array_error == alpacacore::AlpacaError::DriverException);
+
+    fake.frame_width.reset();
+    fake.frame_bpp = 12;
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+
+    fake.frame_bpp.reset();
+    fake.mem_length_override = 1;
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+
+    fake.mem_length_override.reset();
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
+    const auto image = driver->get_image_array();
+    CHECK(image.rank == 2);
+    CHECK(image.width > 0);
+    CHECK(image.height > 0);
+    CHECK(image.data.size() == static_cast<std::size_t>(image.width) * image.height);
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - malformed exposure failure clears on reconnect", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 0;
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] {
+        return error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException;
+    }));
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to requested ROI", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 2;
+    fake.frame_height = 2;
+    fake.frame_bytes = {0, 1, 0, 2, 0, 3, 0, 4};
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_num_x(4);
+    driver->set_num_y(3);
+    driver->start_exposure(0.05, true);
+
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 4);
+    CHECK(image.height == 3);
+    CHECK(image.rank == 2);
+    CHECK(image.data == std::vector<std::int32_t>{1, 2, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0});
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - aborting a pending download leaves ImageReady false without an error",
+          "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool download_entered = false;
+    bool release_download = false;
+    fake.before_call = [&](const std::string& fn) {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        if (fn == "get_single_frame") {
+            download_entered = true;
+            gate_cv.notify_all();
+            gate_cv.wait(lock, [&] { return release_download; });
+        } else if (fn == "cancel_exposure") {
+            release_download = true;
+            gate_cv.notify_all();
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.05, true);
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        CHECK(gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return download_entered; }));
+    }
+    driver->abort_exposure();
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - a watchdog timeout is raised by ImageReady and ImageArray without CameraState",
           "[qhy][camera][unit]") {
     std::atomic<bool> in_frame{false};

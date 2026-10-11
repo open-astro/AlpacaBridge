@@ -77,6 +77,18 @@ TEST_CASE("SynScan Telescope Driver - Defaults", "[synscan][telescope][unit]") {
     REQUIRE(driver->get_can_set_guide_rates());
 }
 
+TEST_CASE("SynScan Telescope Driver - Park RA wraps below 24 h", "[synscan][telescope][unit]") {
+    using alpacacore::vendor::synscan::park_ra_from_hour_angle;
+    // A tiny negative remainder plus 24.0 rounds to exactly 24.0 in a double.
+    for (const double tiny : {-std::numeric_limits<double>::denorm_min(), -1e-16}) {
+        const double ra = park_ra_from_hour_angle(0.0, -tiny);
+        CHECK(ra >= 0.0);
+        CHECK(ra < 24.0);
+    }
+    CHECK(park_ra_from_hour_angle(6.0, 2.0) == 4.0);
+    CHECK(park_ra_from_hour_angle(1.0, 3.0) == 22.0);
+}
+
 TEST_CASE("SynScan Telescope Driver - Target Range Validation", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;

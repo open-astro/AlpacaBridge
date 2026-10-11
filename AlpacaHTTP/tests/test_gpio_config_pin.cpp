@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <iostream>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
 #include <string>
@@ -176,6 +177,30 @@ int main() {
     EXPECT(status == 400);
     EXPECT(body.find("Hardware config refused") != std::string::npos);
     EXPECT(!registered(router, 9711));
+
+    // An integral JSON float names the same line as the integer; a value that only equals a
+    // board line modulo 2^32 is a different line and is refused, not wrapped to 12.
+    configure(router, switch_config(9712, "asiair", R"("ports":[{"gpio":12.0}])"), status);
+    EXPECT(status == 200);
+    EXPECT(registered(router, 9712));
+    configure(router, switch_config(9713, "asiair", R"("ports":[{"gpio":4294967308}])"), status);
+    EXPECT(status == 400);
+    EXPECT(!registered(router, 9713));
+
+    // RK3568 ports: a null entry becomes an empty port, so [null, {name:A}] is two ports and
+    // the named one is DC2.
+    configure(router, switch_config(9714, "asiair-plus-rk3568", R"("ports":[null,{"name":"A"}])"), status);
+    EXPECT(status == 200);
+    EXPECT(registered(router, 9714));
+    {
+        // case: RK3568 null port entry keeps its position
+        const auto max_json = nlohmann::json::parse(route(router, "GET", "/api/v1/switch/9714/maxswitch", "").body());
+        EXPECT(max_json.value("ErrorNumber", -1) == 0);
+        EXPECT(max_json.value("Value", -1) == 2);
+        const auto name_json =
+            nlohmann::json::parse(route(router, "GET", "/api/v1/switch/9714/getswitchname?Id=1", "").body());
+        EXPECT(name_json.value("Value", "") == "A");
+    }
 
     // A request-supplied devicePath is refused, whatever the path.
     for (const char* path : {"/etc/hostname", "/dev/sda", "/dev/gpiochip0"}) {

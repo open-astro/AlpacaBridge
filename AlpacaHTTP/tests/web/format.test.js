@@ -319,16 +319,19 @@ test('serverClockError surfaces a synctime ErrorMessage and nothing on success (
 test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () => {
     const { deviceStatus } = require('../../web/format.js');
     assert.strictEqual(deviceStatus({ Connected: true }).state, 'connected');
+    assert.strictEqual(deviceStatus({ Connected: true }).text, 'Client connected');
     assert.strictEqual(deviceStatus({ Connected: false }).state, 'idle');
-    assert.strictEqual(deviceStatus({ Connected: false }).text, 'Loaded, not connected');
+    assert.strictEqual(deviceStatus({ Connected: false }).text, 'Idle, no client connected');
     assert.strictEqual(deviceStatus({}).state, 'error');
-    assert.strictEqual(deviceStatus({ Connected: true, LastConnectError: 'port busy' }).text, 'Error: port busy');
+    assert.strictEqual(deviceStatus({}).text, 'Status unavailable');
+    assert.strictEqual(deviceStatus({ Connected: true, LastConnectError: 'port busy' }).text,
+                       'Last connect failed: port busy');
     const both = deviceStatus({ LoadError: true, LastConnectError: 'x' });
     assert.strictEqual(both.state, 'error');
-    assert.match(both.text, /failed to load.*x/);
+    assert.strictEqual(both.text, 'Driver failed to load, see the server log; Last connect failed: x');
     const faulted = deviceStatus({ Connected: true, LinkFault: 'no status frame for 12 s' });
     assert.strictEqual(faulted.state, 'error');
-    assert.match(faulted.text, /Link fault: no status frame/);
+    assert.strictEqual(faulted.text, 'Device not responding: no status frame for 12 s');
     assert.strictEqual(deviceStatus({ Connected: false, LastConnectError: '' }).state, 'idle');
     // Any fault is red, connected or not.
     assert.strictEqual(deviceStatus({ Connected: false, LinkFault: 'late read' }).state, 'error');

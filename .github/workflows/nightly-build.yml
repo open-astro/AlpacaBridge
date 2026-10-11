@@ -1,0 +1,189 @@
+# Build the arm64 .deb from main every night and publish it on a moving
+# `nightly-build` pre-release (issue #1035).
+#
+# Nightlies are for testers who want a fix that has merged to main before a
+# beta carries it. They are unsupported and never reach apt.openastro.net.
+#
+# Version: <next>~nightly<YYYYMMDDHHMM>.g<sha7>, written to the workspace
+# VERSION only (never committed). <next> is the version the next release will
+# take (scripts/changelog_fragments.py --bump), so dpkg sorts a nightly above
+# every beta of that version and below the release itself: a tester moves
+# beta -> nightly -> release without a downgrade.
+#
+# The `nightly-build` tag is moved to the built commit and the release's assets are
+# replaced. The tag does not match release.yml's v* filters, so it publishes
+# nothing else. The release is marked --latest=false so the repository's
+# Latest release stays the stable one.
+#
+# Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
+# -f force=true`), so the public nightly-build release always names a main
+# commit. Forks never build on the cron; a manual run there builds the branch
+# it is dispatched on, for testing the workflow itself.
+
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if the nightly-build tag already points at this commit"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash   # the trixie container has bash; the steps use its expansions
+
+jobs:
+  check:
+    name: Skip if main has not moved
+    if: >-
+      (github.repository == 'open-astro/AlpacaBridge' && github.ref == 'refs/heads/main') ||
+      (github.repository != 'open-astro/AlpacaBridge' && github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.compare.outputs.build }}
+    steps:
+      - name: Compare HEAD with the nightly-build tag
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          set -euo pipefail
+          tagged="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly-build" --jq .object.sha 2>/dev/null || true)"
+          if [ "${tagged}" = "${GITHUB_SHA}" ] && [ "${FORCE}" != "true" ]; then
+            echo "nightly-build already points at ${GITHUB_SHA}; nothing to build."
+            echo "build=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Building ${GITHUB_SHA} (nightly-build tag: ${tagged:-none})."
+            echo "build=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  build:
+    name: Build and publish the nightly .deb
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: write   # move the nightly-build tag, gh release create/edit/upload
+    runs-on: ubuntu-24.04-arm
+    # Built on the target distribution so dpkg-shlibdeps derives trixie
+    # package names, as release.yml's beta-deb job does.
+    container: debian:trixie
+    timeout-minutes: 30
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Stamp the nightly version
+        id: version
+        run: |
+          set -euo pipefail
+          next="$(python3 scripts/changelog_fragments.py --bump)"
+          version="${next}~nightly$(date -u +%Y%m%d%H%M).g${GITHUB_SHA::7}"
+          # Guard the ordering the header promises: above any beta of <next>,
+          # below <next> itself.
+          dpkg --compare-versions "${version}" gt "${next}~beta999"
+          dpkg --compare-versions "${version}" lt "${next}"
+          echo "${version}" > VERSION
+          # GitHub does not keep `~` in asset names; dpkg reads the version
+          # from the package, not the file name.
+          asset="alpacabridge_${version//\~/-}_arm64.deb"
+          echo "Nightly version ${version}"
+          {
+            echo "version=${version}"
+            echo "asset=${asset}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build the .deb
+        env:
+          VERSION_STR: ${{ steps.version.outputs.version }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          mkdir -p dist
+          cp "../alpacabridge_${VERSION_STR}_arm64.deb" "dist/${ASSET}"
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
+          dpkg-deb --info "dist/${ASSET}" | sed -n '/Package:/,/Depends:/p'
+          ls -l dist
+
+      - name: Move the nightly-build tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly-build" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly-build" \
+              -f sha="${GITHUB_SHA}" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref=refs/tags/nightly-build -f sha="${GITHUB_SHA}" >/dev/null
+          fi
+          echo "nightly-build -> ${GITHUB_SHA}"
+
+      - name: Publish the nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_STR: ${{ steps.version.outputs.version }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly-build/${ASSET}"
+          {
+            echo "Nightly build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA} (version \`${VERSION_STR}\`)."
+            echo ""
+            echo "Unsupported: built from unreleased code that has not been validated on hardware. Use a beta or a stable release for observing."
+            echo ""
+            echo '```bash'
+            echo "curl -LO ${url}"
+            echo "curl -LO ${url}.sha256 && sha256sum -c ${ASSET}.sha256"
+            echo "sudo apt install ./${ASSET}"
+            echo '```'
+            echo ""
+            echo "Changes since the last release: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}/changelog.d"
+          } > release-notes.md
+          if gh release view nightly-build --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit nightly-build --repo "${GITHUB_REPOSITORY}" --title "Nightly Build" \
+              --notes-file release-notes.md --prerelease --latest=false
+          else
+            gh release create nightly-build --repo "${GITHUB_REPOSITORY}" --title "Nightly Build" \
+              --notes-file release-notes.md --verify-tag --prerelease --latest=false
+          fi
+          gh release upload nightly-build --repo "${GITHUB_REPOSITORY}" --clobber \
+            "dist/${ASSET}" "dist/${ASSET}.sha256"
+          # Upload first, then drop the previous night's assets, so the
+          # release is never left without a .deb.
+          gh release view nightly-build --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' |
+            while read -r name; do
+              if [ "${name}" != "${ASSET}" ] && [ "${name}" != "${ASSET}.sha256" ]; then
+                gh release delete-asset nightly-build "${name}" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done

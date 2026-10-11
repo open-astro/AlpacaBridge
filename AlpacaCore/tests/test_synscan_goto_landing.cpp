@@ -20,8 +20,10 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -56,6 +58,10 @@ struct LandingOffsetHandset {
     std::atomic<uint32_t> ra_offset_counts{kRaOffsetCounts};
     std::atomic<bool> growing{false};
     std::atomic<int> goto_ms{300};
+    // When set, GOTO n (1-based, up to the array size) lands dec_offset_script[n-1] counts off the commanded Dec:
+    // the random per-GOTO Dec scatter a SynScan handset shows on a real mount (#1027).
+    std::atomic<bool> dec_scripted{false};
+    std::array<std::atomic<int32_t>, 4> dec_offset_script{};
 
     bool goto_in_progress() const {
         if (goto_count.load() == 0) return false;
@@ -86,7 +92,11 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 const int ordinal = st->goto_count.fetch_add(1) + 1;
                 const uint32_t offset = st->ra_offset_counts.load() * (st->growing.load() ? ordinal : 1U);
                 st->ra_raw.store((ra + offset) & kCountsMask);
-                st->dec_raw.store(dec);
+                int32_t dec_offset = 0;
+                if (st->dec_scripted.load() && ordinal <= static_cast<int>(st->dec_offset_script.size())) {
+                    dec_offset = st->dec_offset_script[static_cast<std::size_t>(ordinal - 1)].load();
+                }
+                st->dec_raw.store(static_cast<uint32_t>(static_cast<int32_t>(dec) + dec_offset) & kCountsMask);
                 st->goto_started.store(Clock::now().time_since_epoch().count());
                 if (ordinal == 1) st->first_goto_at.store(st->goto_started.load());
                 if (ordinal == 2) st->second_goto_at.store(st->goto_started.load());
@@ -140,6 +150,37 @@ constexpr double kTargetRa = 5.5;
 constexpr double kTargetDec = 20.0;
 // ConformU's SlewToCoordinates tolerance.
 constexpr double kConformUToleranceArcsec = 10.0;
+
+// The EQM-35 Pro on its HC 06.03.00 handset, 2026-10-11 14:24:23 (#1027), landed minus commanded aim per GOTO:
+// RA +10.4" every time (systematic, which refinement cancels), Dec -0.8", +9.6", +0.1", -10.7" (random). The
+// first landing's Dec was already good; the passes RA needed left Dec 10.7" off after the last one.
+void script_rig_dec_scatter(LandingOffsetHandset& st) {
+    st.ra_offset_counts.store(135);  // 10.4"
+    const std::array<int32_t, 4> dec_counts{-10, 124, 1, -139};
+    for (std::size_t i = 0; i < dec_counts.size(); ++i) {
+        st.dec_offset_script[i].store(dec_counts[i]);
+    }
+    st.dec_scripted.store(true);
+}
+
+// Counts the SynScan WARN that reports a landing still off after the last refinement pass. The sink may be
+// called from the async slew thread, so the count is atomic.
+struct LandingWarnCounter {
+    std::atomic<int> warns{0};
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    LandingWarnCounter() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn && component == "SynScan" &&
+                    message.find("refinement passes") != std::string_view::npos) {
+                    warns.fetch_add(1);
+                }
+            });
+    }
+    ~LandingWarnCounter() { alpacacore::logging::set_log_sink(previous); }
+    LandingWarnCounter(const LandingWarnCounter&) = delete;
+    LandingWarnCounter& operator=(const LandingWarnCounter&) = delete;
+};
 
 }  // namespace
 
@@ -237,6 +278,7 @@ TEST_CASE("SynScan GOTO landing - async slew keeps Slewing true until the refine
 
 TEST_CASE("SynScan GOTO landing - a landing that never converges is bounded and reported (#880)",
           "[synscan][telescope][goto-landing]") {
+    LandingWarnCounter counter;
     auto st = std::make_shared<LandingOffsetHandset>();
     st->growing.store(true);  // every GOTO lands further off than the last
     alpacacore::test::FakeMountServer server(responder(st));
@@ -245,18 +287,16 @@ TEST_CASE("SynScan GOTO landing - a landing that never converges is bounded and 
         0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
-    try {
-        driver->slew_to_coordinates(kTargetRa, kTargetDec);
-        FAIL("Expected AlpacaException for an exhausted refinement");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
-    }
+    // Reported as a WARN and the slew completes (#1027): the residual is the handset's, not a failed command.
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+    CHECK(counter.warns.load() == 1);
     CHECK(st->goto_count.load() == 4);  // the GOTO plus three refinement passes, no more
     driver->set_connected(false);
 }
 
 TEST_CASE("SynScan GOTO landing - an async landing that never converges is bounded and reported (#880)",
           "[synscan][telescope][goto-landing]") {
+    LandingWarnCounter counter;
     auto st = std::make_shared<LandingOffsetHandset>();
     st->growing.store(true);  // every GOTO lands further off than the last
     alpacacore::test::FakeMountServer server(responder(st));
@@ -267,20 +307,61 @@ TEST_CASE("SynScan GOTO landing - an async landing that never converges is bound
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
     const auto deadline = Clock::now() + std::chrono::seconds(60);
-    bool reported = false;
-    while (!reported && Clock::now() < deadline) {
-        try {
-            if (!driver->get_slewing()) {
-                break;
-            }
-        } catch (const alpacacore::AlpacaException& ex) {
-            reported = ex.error_code() == alpacacore::AlpacaError::DriverException;
-            break;
-        }
+    bool slewing = true;
+    while (slewing && Clock::now() < deadline) {
+        // Reported as a WARN, not as a slew error on the next Slewing read (#1027).
+        REQUIRE_NOTHROW(slewing = driver->get_slewing());
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    CHECK(reported);
+    CHECK_FALSE(slewing);
+    CHECK(counter.warns.load() == 1);
     CHECK(st->goto_count.load() == 4);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - Dec scatter left after the last pass completes the slew with a WARN (#1027)",
+          "[synscan][telescope][goto-landing]") {
+    LandingWarnCounter counter;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    script_rig_dec_scatter(*st);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    CHECK(st->goto_count.load() == 4);  // the GOTO plus three refinement passes, no more
+    CHECK(ra_error_arcsec(*driver, kTargetRa) < 3.0);
+    CHECK(dec_error_arcsec(*driver, kTargetDec) > kConformUToleranceArcsec);  // the scatter is reported, not hidden
+    CHECK(counter.warns.load() == 1);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - async Dec scatter left after the last pass completes the slew with a WARN (#1027)",
+          "[synscan][telescope][goto-landing]") {
+    LandingWarnCounter counter;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    script_rig_dec_scatter(*st);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const auto deadline = Clock::now() + std::chrono::seconds(60);
+    bool slewing = true;
+    while (slewing && Clock::now() < deadline) {
+        REQUIRE_NOTHROW(slewing = driver->get_slewing());
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK_FALSE(slewing);
+    CHECK(st->goto_count.load() == 4);
+    CHECK(dec_error_arcsec(*driver, kTargetDec) > kConformUToleranceArcsec);
+    CHECK(counter.warns.load() == 1);
     driver->set_connected(false);
 }
 

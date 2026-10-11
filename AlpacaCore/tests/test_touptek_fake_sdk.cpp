@@ -22,8 +22,13 @@
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <limits>
+#include <mutex>
+#include <string>
 #include <thread>
+#include <utility>
 
 #include "catch2_compat.h"
 #include "fake_touptek_sdk.h"
@@ -37,6 +42,15 @@ FakeToupTekSDK make_fake_with_camera() {
     FakeToupTekSDK fake;
     fake.cameras.push_back(FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
     return fake;
+}
+
+bool eventually(const std::function<bool()>& predicate, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return predicate();
 }
 
 }  // namespace
@@ -235,6 +249,224 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
 
     driver->set_connected(false);
     CHECK(fake.ref_count("fake-cam-0") == 0);
+}
+
+TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid frame recovers",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+
+    auto wait_until = [](const std::function<bool()>& pred) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (pred()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return pred();
+    };
+
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    auto error_code_of = [](const std::function<void()>& call) {
+        try {
+            call();
+            return 0;
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+    };
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == alpacacore::AlpacaError::DriverException);
+
+    fake.frame_bytes = {1, 0, 2, 0, 3, 0, 4, 0};
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{1, 2};
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == alpacacore::AlpacaError::DriverException);
+
+    fake.delivered_dimensions.reset();
+    driver->start_exposure(0.01, true);
+    REQUIRE(wait_until([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (const AlpacaException&) {
+            return false;
+        }
+    }));
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 2);
+    CHECK(image.height == 2);
+    CHECK(image.rank == 2);
+    CHECK(image.data == std::vector<std::int32_t>{1, 2, 3, 4});
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - no delivered frame fails ImageReady and ImageArray", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+
+    const auto image_ready_error = [&] {
+        try {
+            (void)driver->get_image_ready();
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    REQUIRE(eventually([&] { return image_ready_error() == alpacacore::AlpacaError::DriverException; }));
+
+    const auto image_array_error = [&] {
+        try {
+            (void)driver->get_image_array();
+        } catch (const AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    CHECK(image_array_error() == alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - dimensions above INT_MAX fail before conversion", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+
+    const auto has_dimension_limit_error = [](auto&& read) {
+        try {
+            read();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException &&
+                   std::string(e.what()).find("ToupTek frame dimensions exceed supported limits") != std::string::npos;
+        }
+        return false;
+    };
+    const auto over_limit = static_cast<unsigned>(std::numeric_limits<int>::max()) + 1U;
+    for (const auto& dimensions : {std::pair<unsigned, unsigned>{over_limit, 2U}, {2U, over_limit}}) {
+        fake.delivered_dimensions = dimensions;
+        driver->start_exposure(0.01, true);
+        REQUIRE(eventually([&] { return has_dimension_limit_error([&] { (void)driver->get_image_ready(); }); }));
+        CHECK(has_dimension_limit_error([&] { (void)driver->get_image_array(); }));
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - a frame arriving after the watchdog fails both image readers",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{2U, 2U};
+
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool wait_image_entered = false;
+    bool release_wait_image = false;
+    fake.before_call = [&](const std::string& method) {
+        if (method != "wait_image") return;
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        wait_image_entered = true;
+        gate_cv.notify_all();
+        gate_cv.wait(lock, [&] { return release_wait_image; });
+    };
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+
+    bool waiting = false;
+    {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        waiting = gate_cv.wait_for(lock, std::chrono::seconds(2), [&] { return wait_image_entered; });
+    }
+    CHECK(waiting);
+    if (!waiting) {
+        {
+            std::lock_guard<std::mutex> lock(gate_mutex);
+            release_wait_image = true;
+        }
+        gate_cv.notify_all();
+        driver->set_connected(false);
+        return;
+    }
+
+    const bool watchdog_expired = eventually(
+        [&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }, std::chrono::seconds(17));
+    CHECK(watchdog_expired);
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        release_wait_image = true;
+    }
+    gate_cv.notify_all();
+    if (!watchdog_expired) {
+        driver->set_connected(false);
+        return;
+    }
+
+    const auto is_late_frame_failure = [](auto&& read) {
+        try {
+            read();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException &&
+                   std::string(e.what()).find("frame arrived after the exposure was no longer active") !=
+                       std::string::npos;
+        }
+        return false;
+    };
+    REQUIRE(eventually([&] { return is_late_frame_failure([&] { (void)driver->get_image_ready(); }); }));
+    CHECK(is_late_frame_failure([&] { (void)driver->get_image_array(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - aborting a held image wait leaves ImageReady false without an error",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.hold_wait_image(true);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return fake.call_count("wait_image") > 0; }));
+
+    driver->abort_exposure();
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - malformed exposure failure clears on reconnect", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] {
+        try {
+            (void)driver->get_image_ready();
+        } catch (const AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    }));
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
 }
 
 // open-astro#294: a wheel's DeviceState is the single Position member, so it already costs one
