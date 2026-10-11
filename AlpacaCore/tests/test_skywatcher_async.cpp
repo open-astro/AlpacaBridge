@@ -253,6 +253,66 @@ TEST_CASE("SkyWatcher async - async slew lifecycle lands on target and restores 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - an ahead landing is held for the sky, not re-goto'd or left ahead (#1019)",
+          "[skywatcher][async]") {
+    // EQM-35 Pro geometry: its gotos cost far less than the 0.5-2.5 s the
+    // overhead estimate allows, so every goto lands ahead of the sky. Before
+    // #1019 the first slew re-goto'd twice (6 ":S" writes) and every landing
+    // restarted tracking 6-18" of RA west of the target; the error never
+    // fell below 6" however many slews warmed the estimates.
+    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro());
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+
+    // ConformU scores a slew by RA difference in arcseconds of RA, with no
+    // cos(Dec) (RaDifferenceInArcSeconds).
+    auto ra_error_arcsec = [](double actual_ra, double target_ra) {
+        return (std::fmod(actual_ra - target_ra + 36.0, 24.0) - 12.0) * 15.0 * 3600.0;
+    };
+    const double site_latitude = 39.7392;
+    struct Leg {
+        double hour_angle;
+        double declination;
+    };
+    // TelescopeSyncTest's start position, then TelescopeSlewTest's
+    // SlewToTargetAsync target (ConformU TelescopeTester.cs).
+    const Leg legs[] = {{3.0, 90.0 - (180.0 - site_latitude) * 0.5}, {4.0, 4.0}};
+    auto slew = [&](const Leg& leg, int& goto_target_writes) {
+        const double target_ra = std::fmod(driver->get_sidereal_time() - leg.hour_angle + 48.0, 24.0);
+        const int writes_before = mount.frames_seen('S');
+        driver->set_target_right_ascension(target_ra);
+        driver->set_target_declination(leg.declination);
+        driver->slew_to_target_async();
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 60000));
+        REQUIRE(driver->get_tracking());
+        goto_target_writes = mount.frames_seen('S') - writes_before;
+        // Tracking holds whatever offset the restart left, so a read shortly
+        // after Slewing clears is the error ConformU reports.
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        return ra_error_arcsec(driver->get_right_ascension(), target_ra);
+    };
+
+    // The first slew lands ahead by the full initial overhead estimate: it
+    // is held, so it takes one goto (an RA and a Dec ":S"), not three.
+    int writes = 0;
+    slew(legs[0], writes);
+    CHECK(writes == 2);
+    slew(legs[1], writes);
+
+    // With one slew behind it the restart-latency estimate has measured this
+    // board, and the hold leaves no lead for tracking to keep.
+    for (const Leg& leg : legs) {
+        const double err = slew(leg, writes);
+        INFO("HA " << leg.hour_angle << " h, Dec " << leg.declination << ": RA error " << err << " arcsec, "
+                   << writes << " :S writes");
+        CHECK(std::abs(err) <= 4.0);
+        CHECK(std::abs(driver->get_declination() - leg.declination) * 3600.0 <= 8.0);
+    }
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - Park completes and Unpark cancels an in-flight park", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
