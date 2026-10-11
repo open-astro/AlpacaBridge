@@ -92,8 +92,8 @@ release (the last stable tag before `X.Y.0`) passes the admission test in "Rules
 branch" there: a defect that release also had, a feature, refactor, new driver, test, tooling or
 docs change targets `main`, and so does a fix that adds a new SDK seam or fake, a client-visible
 capability-flag change, a state-machine rewrite or a driver change that needs a fresh ConformU
-run, unless the maintainer admitted it by name on the promotion milestone. Say so and stop if the diff does not pass. With `--base
-stable/X.Y`, read every `main` in Steps 3-7 as `stable/X.Y` (`git log stable/X.Y..HEAD`, `gh pr
+run, unless the maintainer admitted it by name on the promotion milestone. Say so and stop if the
+diff does not pass. With `--base stable/X.Y`, read every `main` in Steps 3-7 as `stable/X.Y` (`git log stable/X.Y..HEAD`, `gh pr
 create --base stable/X.Y`, and `PREFLIGHT_BASE=origin/stable/X.Y` for the pre-flight), and the
 changelog fragment is still required.
 

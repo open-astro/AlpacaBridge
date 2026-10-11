@@ -73,8 +73,10 @@ version, so apt offers a tester on a nightly no later beta; install the next one
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
    `.deb` in a Debian trixie container and attaches it with a `.sha256` (job `beta-deb`). The `.deb`
    is also published to the apt `beta` component (outside this repository).
-3. **Fix.** A bug found in beta is fixed by a PR against `stable/X.Y`. It is not fixed on `main`
-   first and cherry-picked. A fix for code the branch does not have goes to `main` as usual.
+3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
+   against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
+   cherry-picked. A defect that release also had, or a fix for code the branch does not have,
+   goes to `main` as usual.
 4. **Re-beta and merge down.** Each batch of fixes becomes the next beta tag. After every beta
    tag, one PR merges `stable/X.Y` into `main` with the merge-commit method (never squash). Its
    head is a short-lived `merge-down/X.Y-to-main` branch cut from `stable/X.Y`, never the stable
@@ -122,7 +124,7 @@ version, so apt offers a tester on a nightly no later beta; install the next one
   invalidates the hardware validation the beta exists to accumulate and pushes promotion out
   instead of bringing it in: a new SDK seam or a new fake, a change to a capability flag a client
   can read (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state
-  machine, and a driver change that would need a fresh ConformU run but lands without one. New
+  machine, and a driver change that would need a fresh ConformU run. New
   test cases over an existing fake are not a new fake: a stable fix carries them as usual,
   including the fake-SDK test `AGENTS.md` asks for with a connect-path fix. One case overrides
   this list: a maintainer may admit a fix that meets the test above but hits one of these

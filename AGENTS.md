@@ -943,7 +943,8 @@ defect that release also had, a feature, a refactor, a new driver, a test, tooli
 targets `main`, whatever its severity or milestone, and so does a fix that adds a new SDK seam or
 fake, a client-visible capability-flag change, an exposure or slew state-machine rewrite, or a
 driver change that needs a fresh ConformU run, unless the maintainer admits that fix by name on the
-promotion milestone; `stable/X.Y` retires when the next release is promoted, not when its branch is cut.
+promotion milestone; `stable/X.Y` retires when the next release is promoted, not when its branch
+is cut.
 Cutting, tagging, promoting and the merge-down PR stay with the upstream maintainer and
 diegopereiran. Branch model, promotion criteria, opt-in steps and the three version spellings:
 [docs/beta-channel.md](docs/beta-channel.md).
