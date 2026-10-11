@@ -4098,12 +4098,43 @@ private:
         dispatch_goto_locked(lock, t1, t2);  // records the branch of t2 once the goto is on its way
     }
 
+    // Longest the RA axis is held still after a landing for the sky to reach
+    // it. A lead beyond this means the goto estimate was badly off, and a
+    // re-goto is cheaper than a long hold.
+    static constexpr double kMaxLandingHoldSeconds = 5.0;
+
+    // Seconds until the target reaches the RA axis angle the mount is parked
+    // at (positive: the mount is ahead and the sky has yet to arrive). The
+    // RA axis angle of a fixed target moves at sidereal rate with LST, in
+    // the hemisphere's direction. Caller holds mutex_ and has refreshed the
+    // position cache.
+    double landing_lead_seconds_locked(double ra, double dec) const {
+        const double target_now = ra_dec_to_axis_degrees_locked(ra, dec).first;
+        const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
+        const double axis_deg_per_second = sky_sign * kHoursToDegrees * kLstHoursPerSecond;
+        return (cached_ra_axis_deg_ - target_now) / axis_deg_per_second;
+    }
+
     // After the first goto lands, close the residual (prediction error) with
     // short re-gotos until inside the deadband. Slewing is held true across
     // the inter-goto gaps by goto_in_progress_, which both callers set.
+    //
+    // open-astro#1019: every goto aims ahead by its estimated duration, so
+    // it lands with the mount parked ahead of the sky by however much that
+    // estimate ran long. Restarting tracking straight away kept that error
+    // (6-8" short in RA on an EQM-35 Pro, whose gotos cost far less than the
+    // 0.5 s floor of goto_overhead_seconds_), and re-goto-ing an ahead
+    // landing aimed off the same over-estimate: one such re-goto targeted
+    // the counts the mount already held, the board never moved, the wait
+    // charged its 2 s start grace to the overhead estimate, and ConformU
+    // read the result as 17.0" off. An ahead landing is therefore held, axis
+    // stopped, until the sky is one resume latency away, and only a landing
+    // that is behind, off in Dec, or ahead by more than
+    // kMaxLandingHoldSeconds gets another goto.
     bool refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec,
                              uint64_t* expected_generation = nullptr) {
-        for (int iter = 0; iter < 3; ++iter) {
+        const double deadband_seconds = kLandingDeadbandDeg / (kHoursToDegrees * kLstHoursPerSecond);
+        for (int iter = 0;; ++iter) {
             if (expected_generation && motion_generation_ != *expected_generation) {
                 return false;
             }
@@ -4111,12 +4142,19 @@ private:
                 break;  // AbortSlew/unpark/disconnect cancelled the slew
             }
             refresh_position_cache_locked(true);
-            // Judge the landing against the target ADVANCED by the resume
-            // window -- the mount deliberately lands ahead (see above).
-            auto [n1, n2] = ra_dec_to_axis_degrees_locked(ra, dec, resume_latency_seconds_ * kLstHoursPerSecond);
-            if (std::abs(n1 - cached_ra_axis_deg_) <= kLandingDeadbandDeg &&
-                std::abs(n2 - cached_dec_axis_deg_) <= kLandingDeadbandDeg) {
+            const double dec_target = ra_dec_to_axis_degrees_locked(ra, dec).second;
+            const bool dec_landed = std::abs(dec_target - cached_dec_axis_deg_) <= kLandingDeadbandDeg;
+            // Time to hold before tracking restarts: the sky still has to
+            // close the lead, less the restart's own latency.
+            const double hold_seconds = landing_lead_seconds_locked(ra, dec) - resume_latency_seconds_;
+            if (dec_landed && hold_seconds >= -deadband_seconds && hold_seconds <= kMaxLandingHoldSeconds) {
+                if (hold_seconds > 0.0 && !hold_for_sky_locked(lock, hold_seconds, expected_generation)) {
+                    return false;
+                }
                 break;
+            }
+            if (iter >= 3) {
+                break;  // three re-gotos did not converge: keep the old bound
             }
             slewing_cached_ = true;
             dispatch_predicted_goto_locked(lock, ra, dec);
@@ -4132,6 +4170,34 @@ private:
             return false;
         }
         slewing_cached_ = false;
+        return true;
+    }
+
+    // Holds the landed mount still for `seconds` of task-clock time, mutex_
+    // released between short sleeps so reads stay responsive and an
+    // AbortSlew, a newer motion command or a disconnect ends the hold
+    // promptly. False when the slew was superseded. The landing time is
+    // stamped again at the end: resume_latency_seconds_ measures landing to
+    // ":J", and the hold is not part of that.
+    bool hold_for_sky_locked(std::unique_lock<std::mutex>& lock, double seconds,
+                             const uint64_t* expected_generation) const {
+        constexpr auto kHoldStep = std::chrono::milliseconds(100);
+        const auto hold = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(seconds));
+        const auto until = clock_.now() + hold;
+        while (clock_.now() < until) {
+            const auto left = until - clock_.now();
+            lock.unlock();
+            clock_.sleep_for(std::min<std::chrono::nanoseconds>(left, kHoldStep));
+            lock.lock();
+            check_connected();
+            if (expected_generation && motion_generation_ != *expected_generation) {
+                return false;
+            }
+            if (slew_task_cancel_.load()) {
+                return true;  // the caller's loop sees the cancel and stops refining
+            }
+        }
+        last_landing_time_ = clock_.now();
         return true;
     }
 
