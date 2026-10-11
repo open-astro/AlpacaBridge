@@ -31,6 +31,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
@@ -159,6 +160,11 @@ TEST_CASE("SkyWatcher link loss - a fault that clears inside the bound is not a 
     CHECK(protocol->inquire_position(sw::kAxisRa) != 0);
     CHECK_FALSE(protocol->link_faulted());
     clock.advance(std::chrono::seconds(60));
+    // The status poll republishes a frame on its next tick; until it has, the
+    // frame is as old as the jump and reads as a stalled poll.
+    for (int i = 0; i < 200 && !driver->get_connected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     CHECK(driver->get_connected());
     CHECK_FALSE(protocol->consume_link_lost_at().has_value());
     driver->set_connected(false);

@@ -426,7 +426,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         // open-astro#445: connected_ records that a connect succeeded; the
         // link is asked too, so a pulled adapter reads false at once.
-        return connected_ && protocol_->link_alive();
+        return connected_ && protocol_->link_alive() && !frame_lost_locked();
     }
 
     // Takes no mutex_, so the management listing never waits on a connect.
@@ -2518,7 +2518,7 @@ private:
     void check_connected() const {
         // open-astro#445: also refuse on a lost link, so cached position reads
         // cannot keep answering from a mount that is no longer there.
-        if (!connected_ || !protocol_->link_alive()) {
+        if (!connected_ || !protocol_->link_alive() || frame_lost_locked()) {
             throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
         }
     }
@@ -2663,9 +2663,9 @@ private:
                 // kPositionCacheTtl, so the position stays honest; only the
                 // between-poll interpolation is flat.
                 //
-                // GOTO-mode motion needs no flag either:
-                // get_hardware_slewing_locked() re-derives it from the board
-                // on every read.
+                // GOTO-mode motion needs no flag either: the status poll
+                // publishes the board's running/goto flags and the Slewing
+                // getter serves them (served_hardware_slewing_locked()).
                 std::string message = "Link restored after ";
                 message += gap;
                 message += " with ";
@@ -3322,6 +3322,19 @@ private:
             throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
         }
         return *reading;
+    }
+
+    // A frame older than the link-loss bound with no latch: the poll stopped
+    // answering the clock. Lost like a pulled adapter: Connected false, every
+    // getter and setter NotConnected, DeviceState empty (decision 0010).
+    bool frame_lost_locked() const {
+        // A latched fault is decision 0009's own clock (the poll cannot publish
+        // while it lasts), so only an unlatched link ages the frame out.
+        if (!protocol_->link_fault().empty()) {
+            return false;
+        }
+        const auto reading = snapshot_.read();
+        return reading && clock_.now() - reading->measured_at >= util::kLinkStalenessBound;
     }
 
     // What the position getters call instead of refresh_position_cache_locked():

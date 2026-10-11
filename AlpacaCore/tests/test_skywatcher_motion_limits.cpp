@@ -548,6 +548,32 @@ TEST_CASE("SkyWatcher limits - MoveAxis carrying the tube below the floor is sto
     driver->set_connected(false);
 }
 
+// The guard reads the polled frame only while it is fresh. With the poll
+// stalled the frame is stale, so the guard must keep its direct read of the
+// board: serving the frozen frame would leave it blind to the moving axis.
+TEST_CASE("SkyWatcher limits - a stale frame is not served to the guard and it reads the board",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg);
+    auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
+
+    // A slow MoveAxis: the dead-reckoned model alone never reaches the floor
+    // in this test, so only a direct read of the board can see the jump.
+    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));  // past the freshness bound
+    const int reads_before = mount.frames_seen('j');
+    mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor, behind the frozen frame
+    CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
+    CHECK(mount.frames_seen('j') > reads_before);
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));
+    driver->set_connected(false);
+}
+
 // The mount crosses the floor between the position the driver last knew and
 // the guard's first sample (the cache still holds the inside position, the
 // board is already outside). The baseline must come from before the dispatch,

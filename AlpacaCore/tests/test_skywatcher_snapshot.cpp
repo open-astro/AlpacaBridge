@@ -342,6 +342,9 @@ TEST_CASE("SkyWatcher snapshot - a frame older than the link-loss bound with no 
     CHECK(driver->get_link_fault().empty());
     require_not_connected([&] { driver->get_right_ascension(); });
     require_not_connected([&] { driver->get_slewing(); });
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_device_state().empty());
+    require_not_connected([&] { driver->set_tracking(true); });
     sw::set_status_poll_paused_for_testing(*driver, false);
     driver->set_connected(false);
 }

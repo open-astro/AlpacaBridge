@@ -240,7 +240,10 @@ void check_landing(const LandedFrame& f, double latitude, double target_ra, doub
 // A jump never moves a tracking axis: only a goto axis is jumped, and the
 // driver restarts tracking only after both axes have landed. Nothing here
 // sleeps for a driver timer.
-constexpr auto kGotoJump = std::chrono::seconds(120);  // > any goto here (180 deg at 800x sidereal = 55 s)
+// Under util::kLinkStalenessBound: a longer jump would age the status frame into
+// a lost link before the poll could publish. Three or four jumps cover any goto here
+// (180 deg at 800x sidereal = 55 s).
+constexpr auto kGotoJump = std::chrono::seconds(20);
 constexpr auto kFrameRendezvous = std::chrono::milliseconds(50);
 
 bool run_until_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
