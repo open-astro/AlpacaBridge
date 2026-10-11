@@ -1013,7 +1013,8 @@ public:
         // while it is still inside SVBGetVideoData.
         if (!stop_exposure_thread()) {
             throw AlpacaException(
-                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before another exposure",
+                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before another "
+                "exposure",
                 AlpacaError::DriverException);
         }
 
@@ -1151,7 +1152,8 @@ public:
                         }
                         if (capture_stop_failed_) {
                             throw AlpacaException(
-                                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect",
+                                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and "
+                                "reconnect",
                                 AlpacaError::DriverException);
                         }
                         capture_start_attempted = true;
@@ -1791,7 +1793,8 @@ private:
     void ensure_capture_stop_confirmed_locked() const {
         if (capture_stop_failed_) {
             throw AlpacaException(
-                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before changing settings",
+                "SVBONY capture stop was not confirmed; retry AbortExposure or disconnect and reconnect before "
+                "changing settings",
                 AlpacaError::DriverException);
         }
     }
