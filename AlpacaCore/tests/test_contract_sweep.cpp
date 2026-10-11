@@ -111,6 +111,11 @@
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
 #endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+
+#include "fake_playerone_sdk.h"
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
@@ -1188,6 +1193,36 @@ Tier2Host tier2_host_touptek_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+Tier2Host tier2_host_playerone_camera() {
+    Tier2Host h{"playerone_camera",
+                "playerone",
+                "camera",
+                "fake_playerone_sdk.h",
+                DeviceType::Camera,
+                "playerone_camera",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        if (hold) sdk->set_open_delay(kHold);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOneSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_camera(0, 0, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOneSDK>();
+        sdk->set_no_cameras(true);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOneSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_camera(0, 0, fake);
+        });
+    };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GPHOTO
 struct GPhotoSdkHold {
     alpacacore::test::FakeGPhotoSDK fake;
@@ -1377,6 +1412,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+#define CS2_PLAYERONE(X) X(playerone_camera, NPR)
+#else
+#define CS2_PLAYERONE(X)
+#endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
 #define CS2_GPHOTO(X) X(gphoto_camera, NPR)
 #else
@@ -1397,6 +1437,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
+    CS2_PLAYERONE(X) \
     CS2_GPHOTO(X) \
     CS2_WANDERERASTRO(X)
 // clang-format on
@@ -1497,6 +1538,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
     CS2_ENABLED("touptek")
+#endif
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    CS2_ENABLED("playerone")
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
     CS2_ENABLED("gphoto")
