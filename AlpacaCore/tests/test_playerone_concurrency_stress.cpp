@@ -64,6 +64,8 @@ TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playe
 TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[playerone][camera][stress]") {
     alpacacore::test::FakePlayerOneSDK sdk;
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.000001, true);
 
     // open-astro#326: one guard per call, and it COUNTS what it swallows.
     alpacacore::test::StressCallGuard guard(
@@ -89,6 +91,10 @@ TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+    CHECK(sdk.open_count() > 0);
+    CHECK(sdk.exposure_start_count() > 0);
+    CHECK_FALSE(sdk.close_during_download());
+    CHECK_FALSE(sdk.operation_after_close());
     CHECK(sdk.open_count() == sdk.close_count());
 }
 
