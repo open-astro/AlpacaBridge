@@ -476,11 +476,15 @@ public:
             // not cancelled. A slew task blocked on mutex_ would wake to the
             // reconnected session and resume against the new link: drop the
             // lock and join it first, as the probe path does.
+            relink = true;
             lock.unlock();
             cancel_async_tasks();
             lock.lock();
         }
-        if (connected && connected_ && link_lost_locked()) {
+        // A probe's verdict stands once the tasks are cancelled: the poll can
+        // publish a fresh frame while cancel_async_tasks() joins it, and the
+        // idempotency return would then leave the session with no poll.
+        if (connected && connected_ && (relink || link_lost_locked())) {
             // open-astro#445: a connect against a dead link used to hit the
             // idempotency return below and report success with no reconnect.
             // Settle the dead session first, then run the gates as for any
@@ -3325,9 +3329,6 @@ private:
         return *reading;
     }
 
-    // A frame older than the link-loss bound with no latch: the poll stopped
-    // answering the clock. Lost like a pulled adapter: Connected false, every
-    // getter and setter NotConnected, DeviceState empty (decision 0010).
     // The link is lost: the transport is gone, or the frame aged out with no
     // latch. Either takes the same cancel, teardown and reconnect on Connected=true.
     // A stale-frame loss stamps link_lost_at at the moment the frame crossed
@@ -3345,6 +3346,9 @@ private:
         return true;
     }
 
+    // A frame older than the link-loss bound with no latch: the poll stopped
+    // answering the clock. Lost like a pulled adapter: Connected false, every
+    // getter and setter NotConnected, DeviceState empty (decision 0010).
     bool frame_lost_locked() const {
         // A latched fault is decision 0009's own clock (the poll cannot publish
         // while it lasts), so only an unlatched link ages the frame out.

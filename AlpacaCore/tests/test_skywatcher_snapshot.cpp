@@ -369,6 +369,35 @@ TEST_CASE("SkyWatcher snapshot - Connected=true relinks a stale-frame lost link"
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher snapshot - stale-frame lost link past the window, then relinked: both axes stop",
+          "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    driver->move_axis(1, FakeSkyWatcherMount::kSiderealDegPerSec * 8.0);
+    REQUIRE(mount.axis_running(1));
+    REQUIRE(mount.axis_running(2));
+
+    // The poll stops answering the clock: no latch, the frame ages out.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
+    REQUIRE_FALSE(driver->get_connected());
+
+    // The mount kept turning unattended for longer than the preserve window,
+    // counted from when the frame crossed the bound (open-astro#521).
+    clock.advance(sw::detail::relink_motion_preserve_window() + seconds(5));
+    REQUIRE(mount.axis_running(1));
+
+    driver->set_connected(true);
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked: both axes stop",
           "[skywatcher][snapshot][udp]") {
     FakeTaskClock clock;
