@@ -11,10 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the Player One drivers --
-// Phoenix filter wheel, camera, and thermal switch (issue #101). Same
-// rationale as the ZWO EFW stress file: no fake seam, so hardware-free hosts
-// storm the failure path and the AsyncConnectable machinery; hosts with the
-// hardware attached exercise the full connect.
+// Phoenix filter wheel, camera, and thermal switch (issue #101). The camera
+// uses FakePlayerOneSDK and always reaches its connected path; the filter wheel
+// and switch use the production SDK and fail fast when hardware is absent.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -25,6 +24,7 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_playerone_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -57,23 +57,28 @@ TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playe
         []() { return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0); });
 }
 
-// Camera lifecycle storm (issue #116): the Player One camera's operational
-// calls were converted from snapshot-then-call (camera_id_copy) to the
-// held-mutex_ with_camera shape, and its disconnect now publishes
-// disconnected before the SDK close. Hardware-free hosts storm the
-// connect-failure and gate paths; with a camera attached the same test
-// exercises the full path.
+// Camera lifecycle storm (issue #116): FakePlayerOneSDK always connects, so
+// every run exercises the full connected exposure path while racing lifecycle
+// operations. The camera's operational calls use the held-mutex_ with_camera
+// shape, and disconnect publishes disconnected before the SDK close.
 TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[playerone][camera][stress]") {
-    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0);
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.000001, true);
 
     // open-astro#326: one guard per call, and it COUNTS what it swallows.
-    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { static_cast<void>(camera.get_camera_state()); });
         guard([&] { static_cast<void>(camera.get_ccd_temperature()); });
         guard([&] { static_cast<void>(camera.get_gain()); });
         guard([&] { static_cast<void>(camera.get_cooler_on()); });
+        guard([&] { camera.start_exposure(0.000001, true); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_image_array()); });
         guard([&] { camera.stop_exposure(); });
     });
 
@@ -86,6 +91,11 @@ TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+    CHECK(sdk.open_count() > 0);
+    CHECK(sdk.exposure_start_count() > 0);
+    CHECK_FALSE(sdk.close_during_download());
+    CHECK_FALSE(sdk.operation_after_close());
+    CHECK(sdk.open_count() == sdk.close_count());
 }
 
 TEST_CASE("Player One camera - destruction races an in-flight connect", "[playerone][camera][stress]") {
