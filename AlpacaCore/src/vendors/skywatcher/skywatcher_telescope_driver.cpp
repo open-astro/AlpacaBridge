@@ -1337,7 +1337,7 @@ public:
                 return;  // already at home
             }
             displaced = claim_slew_slot_locked();
-            invalidate_position_cache_locked();
+            invalidate_position_cache_locked(false);
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
@@ -1384,6 +1384,12 @@ public:
                     }
                     if (owns_slew_state_locked(ctx)) {
                         homing_ = false;
+                        // The goto branch ended the slewing flag in
+                        // wait_for_slew_complete(); AutoHome waits on its own
+                        // loop. No getter re-reads the board to clear it
+                        // (decision 0010), and a flag left set keeps the axes
+                        // busy: rate offsets deferred, the limit guard exempt.
+                        set_slewing_cached_false_locked();
                     }
                 } catch (const std::exception& ex) {
                     abandon_slew_body_locked(ctx, homing_);
@@ -1439,7 +1445,7 @@ public:
             target_ra_axis = park_ra_axis_deg_;
             target_dec_axis = park_dec_axis_deg_;
             displaced = claim_slew_slot_locked();
-            invalidate_position_cache_locked();
+            invalidate_position_cache_locked(false);
             slewing_cached_ = true;
             restore_tracking_after_slew_ = false;
             manual_axis_slewing_[0] = false;
@@ -2263,7 +2269,7 @@ public:
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
             if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
-                invalidate_position_cache_locked();
+                invalidate_position_cache_locked(false);
                 clear_last_slew_error_locked();
                 return;  // the no-op described under the lock below
             }
@@ -2305,7 +2311,7 @@ public:
                 if (from_rest) {
                     seed_limit_guard_baseline_locked();
                 }
-                start_speed_motion_locked(lock, channel, rate);
+                start_speed_motion_locked(lock, channel, rate, /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
             } else if (manual_axis_slewing_[axis]) {
@@ -2316,6 +2322,7 @@ public:
                 // exceed 1 s), then restores the previous tracking state per
                 // ASCOM.
                 protocol_->stop_motion(channel);
+                advance_model_anchor_locked();  // keep the motion up to the stop
                 cmd_axis_rate_deg_s_[axis] = 0.0;
                 // The stop is a motion command: bump and capture the
                 // generation so the background restore-tracking task can tell
@@ -2330,8 +2337,9 @@ public:
             // the RA axis) continues untouched per the ASCOM restore-tracking
             // semantics. Raising the flag here and clearing it via the status
             // poll failed ConformU over Wi-Fi, where the poll round-trip
-            // outlasted the checker's window.
-            invalidate_position_cache_locked();
+            // outlasted the checker's window. No board read either: the model
+            // was anchored where the rate changed, and the next poll re-measures.
+            invalidate_position_cache_locked(false);
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that jogs an axis after a failed GOTO must not be told the OLD
             // goto failed.
@@ -3179,8 +3187,13 @@ private:
         }
     }
 
-    // `read_back` is false only on the pulse-guide dispatch and restore paths,
-    // whose timing is the guide pulse itself: the poll re-anchors there.
+    // `read_back` is false where the caller must not wait on the board: the
+    // asynchronous initiators (Park, FindHome, SlewToCoordinatesAsync, MoveAxis)
+    // and what they reach (FindHome's status check, the stop after a refused
+    // start), which return inside ConformU's STANDARD target and whose read a
+    // quiet link would stretch to seconds, and the pulse-guide dispatch and
+    // restore paths, whose timing is the guide pulse itself. The next poll
+    // re-anchors there.
     void invalidate_position_cache_locked(bool read_back = true) const {
         position_cache_valid_ = false;
         note_model_write_locked();
@@ -3211,7 +3224,19 @@ private:
         cached_ra_axis_deg_ += cmd_axis_rate_deg_s_[0] * dt;
         cached_dec_axis_deg_ += cmd_axis_rate_deg_s_[1] * dt;
         last_position_update_ = now;
-        note_model_write_locked();  // a poll that sampled before the new anchor must not undo it
+        drop_poll_in_flight_locked();  // a poll that sampled before the new anchor must not undo it
+    }
+
+    // Moves the model anchor to now with no board read: the angles advance by
+    // the commanded rates (what the getters were serving), so a rate change
+    // made next applies from now, not from the last poll. For MoveAxis, an
+    // asynchronous initiator; its caller invalidates, so the next poll
+    // re-measures.
+    void advance_model_anchor_locked() const {
+        const auto [a1, a2] = dead_reckoned_axes_locked();
+        cached_ra_axis_deg_ = a1;
+        cached_dec_axis_deg_ = a2;
+        last_position_update_ = std::chrono::steady_clock::now();
     }
 
     // True while a goto/park/home/pulse/manual motion owns THIS axis.
@@ -3374,9 +3399,16 @@ private:
         return clock_.now() - reading->measured_at;
     }
 
-    // A write the poll in flight must not overwrite: the model anchor moved,
-    // or a sync / slew changed what the board's registers mean. Drops that
-    // poll's frame; the next one publishes.
+    // A model re-anchor (a rate setter's, PR #221) the poll in flight must not
+    // undo: drops that poll's frame; the next one publishes. The board did not
+    // change, so the last frame's status flags stay current.
+    void drop_poll_in_flight_locked() const {
+        snapshot_.write([](PolledFrame&) {});
+    }
+
+    // A write that changed what the board's registers or motion mean (an
+    // invalidation, a sync included, or the end of a slew): drops the poll in
+    // flight and marks the last frame's status flags not current.
     void note_model_write_locked() const {
         snapshot_.write([](PolledFrame& frame) { frame.status_current = false; });
     }
@@ -3388,18 +3420,22 @@ private:
         note_model_write_locked();
     }
 
-    // Both axes' positions and status, from the board. Throws what the
-    // protocol throws; the wrapper has counted a failure toward the link latch.
-    PolledFrame sample_frame(std::chrono::steady_clock::time_point& sampled_at) {
+    // Both axes' positions and status, from the board, with the counts per
+    // revolution the caller read under mutex_. `sampled_at` is taken before
+    // the reads, as refresh_position_cache_locked() takes its anchor, so a
+    // sample never claims to be newer than a direct read made after it began.
+    // Throws what the protocol throws; the wrapper has counted a failure
+    // toward the link latch.
+    PolledFrame sample_frame(uint32_t ra_cpr, uint32_t dec_cpr, std::chrono::steady_clock::time_point& sampled_at) {
         auto& protocol = *protocol_;
+        sampled_at = std::chrono::steady_clock::now();
         const uint32_t ra_counts = protocol.inquire_position(kAxisRa);
         const uint32_t dec_counts = protocol.inquire_position(kAxisDec);
         const AxisStatus ra_status = protocol.inquire_status(kAxisRa);
         const AxisStatus dec_status = protocol.inquire_status(kAxisDec);
-        sampled_at = std::chrono::steady_clock::now();
         PolledFrame frame;
-        frame.ra_axis_deg = counts_to_degrees(ra_counts, axis_params_[0].counts_per_revolution);
-        frame.dec_axis_deg = counts_to_degrees(dec_counts, axis_params_[1].counts_per_revolution);
+        frame.ra_axis_deg = counts_to_degrees(ra_counts, ra_cpr);
+        frame.dec_axis_deg = counts_to_degrees(dec_counts, dec_cpr);
         frame.ra_running = ra_status.running;
         frame.ra_speed_mode = ra_status.speed_mode;
         frame.dec_running = dec_status.running;
@@ -3421,6 +3457,11 @@ private:
         if (!board_reset_fault_.empty()) {
             return;
         }
+        // A direct read or a model anchor made after this poll began sampling
+        // is the newer measurement: the older sample must not replace it.
+        if (!force && sampled_at < last_position_update_) {
+            return;
+        }
         const bool offset_hold = position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
                                  (sampled_at - last_position_update_) < kOffsetModelHold;
         const bool follows_raw = cmd_axis_rate_deg_s_[0] == 0.0 && cmd_axis_rate_deg_s_[1] == 0.0;
@@ -3439,7 +3480,8 @@ private:
     void seed_snapshot_locked() {
         const auto token = snapshot_.begin_poll();
         std::chrono::steady_clock::time_point sampled_at;
-        const PolledFrame frame = sample_frame(sampled_at);
+        const PolledFrame frame =
+            sample_frame(axis_params_[0].counts_per_revolution, axis_params_[1].counts_per_revolution, sampled_at);
         if (snapshot_.publish(token, frame)) {
             adopt_frame_locked(frame, sampled_at, /*force=*/true);
         }
@@ -3461,11 +3503,26 @@ private:
     // One poll: sample both axes, then publish and adopt under mutex_. The
     // exchanges run WITHOUT mutex_ (the protocol wrapper serialises them), so
     // a getter never waits behind a slow link and the snapshot mutex is never
-    // held across I/O. Returns false when the connection is gone and the poll
-    // body should end.
-    bool poll_status_once() {
+    // held across I/O. Returns false when the connection is gone or a newer
+    // body replaced this one, and the poll body should end.
+    bool poll_status_once(util::OperationContext& ctx) {
         if (status_poll_paused_for_testing_.load()) {
             return true;
+        }
+        uint32_t ra_cpr = 0;
+        uint32_t dec_cpr = 0;
+        {
+            // A body started after a connect released mutex_ can outlive a
+            // disconnect landing in that gap and run on into the next session,
+            // which no cancel reaches until that session starts its own body.
+            // It reads the axis parameters here, under mutex_, so never while
+            // a connect writes them.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                return false;
+            }
+            ra_cpr = axis_params_[0].counts_per_revolution;
+            dec_cpr = axis_params_[1].counts_per_revolution;
         }
         if (!protocol_->link_alive()) {
             // Lost (decision 0009): the wrapper has closed the transport and
@@ -3480,7 +3537,7 @@ private:
         std::chrono::steady_clock::time_point sampled_at;
         PolledFrame frame;
         try {
-            frame = sample_frame(sampled_at);
+            frame = sample_frame(ra_cpr, dec_cpr, sampled_at);
         } catch (const std::exception& e) {
             // The wrapper counts the failure toward the link latch; the frame
             // simply ages. This is the only silence detector while idle.
@@ -3489,7 +3546,7 @@ private:
         }
         run_status_poll_after_sample_hook();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
+        if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             return false;
         }
         if (snapshot_.publish(token, frame)) {  // false: a write landed since the sample
@@ -3501,7 +3558,7 @@ private:
     void run_status_poller(util::OperationContext& ctx) {
         for (;;) {
             const auto started = clock_.now();
-            if (!poll_status_once()) {
+            if (!poll_status_once(ctx)) {
                 return;
             }
             // Start to start: wait for the next tick, skipping any a slow
@@ -3867,10 +3924,17 @@ private:
     }
 
     // Start speed-mode motion at a signed rate on one axis (assumes the caller
-    // wants the axis re-commanded from stopped).
-    void start_speed_motion_locked(std::unique_lock<std::mutex>& lock, int channel, double signed_rate_deg_per_sec) {
+    // wants the axis re-commanded from stopped). `anchor_model` (MoveAxis,
+    // which reads no position back) anchors the model before the stop drops
+    // the old rate and again once the new one starts, so neither rate is
+    // applied over the other's time.
+    void start_speed_motion_locked(std::unique_lock<std::mutex>& lock, int channel, double signed_rate_deg_per_sec,
+                                   bool anchor_model = false) {
         auto& protocol = *protocol_;
         const uint64_t gen = ++motion_generation_;
+        if (anchor_model) {
+            advance_model_anchor_locked();
+        }
         if (!stop_axis_and_wait_locked(lock, channel, gen)) {
             throw AlpacaException("Motion superseded before dispatch");
         }
@@ -3888,6 +3952,9 @@ private:
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
         protocol.start_motion(channel);
+        if (anchor_model) {
+            advance_model_anchor_locked();
+        }
         cmd_axis_rate_deg_s_[channel - 1] = rate;
     }
 
@@ -4762,7 +4829,7 @@ private:
             }
         }
         if (was_slewing && !slewing_cached_) {
-            invalidate_position_cache_locked();
+            invalidate_position_cache_locked(false);
         }
         return slewing_cached_;
     }
@@ -5388,7 +5455,7 @@ private:
             protocol_->instant_stop(kAxisDec);
             cmd_axis_rate_deg_s_[0] = 0.0;
             cmd_axis_rate_deg_s_[1] = 0.0;
-            invalidate_position_cache_locked();
+            invalidate_position_cache_locked(false);
         } catch (...) {  // NOLINT(bugprone-empty-catch)
             // Best effort; a dead link is reported by the link-health path.
         }
@@ -5470,7 +5537,7 @@ private:
             return lock;
         }
         const bool displaced = claim_slew_slot_locked();
-        invalidate_position_cache_locked();
+        invalidate_position_cache_locked(false);
         slewing_cached_ = true;
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that retries a rejected goto must not be told the OLD goto failed.

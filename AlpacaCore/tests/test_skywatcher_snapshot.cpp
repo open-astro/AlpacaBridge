@@ -127,6 +127,10 @@ TEST_CASE("SkyWatcher snapshot - getters and DeviceState make no device transact
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
     REQUIRE(driver->get_connected());
+    // The connect's first poll is over once it parks on the clock; the fake
+    // counts each reply just after sending it, so let the last count land.
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    std::this_thread::sleep_for(milliseconds(50));
 
     mount.set_reply_latency(kLatency);
     const int before = mount.transactions_served();
@@ -293,6 +297,114 @@ TEST_CASE("SkyWatcher snapshot - a poll that sampled before a Sync cannot put th
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
     sw::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
     CHECK(std::abs(driver->get_declination() - target_dec) < 1.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher snapshot - a poll that sampled before a board read cannot put the older position back",
+          "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+
+    // A slow poll has read both positions (the mount at home) and is still
+    // reading the status when the mount moves and SetPark reads it from the
+    // board. That direct read is the newer one, though the poll ends after it.
+    mount.set_reply_latency(kLatency);
+    const int frames = mount.frames_seen('j');
+    clock.advance(milliseconds(150));  // wakes the poll
+    REQUIRE(mount.wait_for_frames('j', frames + 2, kRendezvous));
+    mount.jump_axis_degrees(2, 30.0);
+    driver->set_park();
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
+    mount.set_reply_latency(milliseconds(0));
+
+    // 30 deg off the pole, not the home position the poll sampled.
+    CHECK(std::abs(driver->get_declination() - 60.0) < 1.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher snapshot - asynchronous initiators make no position read", "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    // No poll runs after the connect's first one: the clock never moves.
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    // The slew bodies never run, so only each initiator's own traffic counts.
+    sw::set_slew_spawn_for_testing(*driver, [](std::function<void()>) { return std::thread([] {}); });
+
+    const auto position_reads = [&](const std::function<void()>& initiator) {
+        const int before = mount.frames_seen('j');
+        initiator();
+        return mount.frames_seen('j') - before;
+    };
+    const double lst = driver->get_sidereal_time();
+    CHECK(position_reads([&] { driver->move_axis(1, 0.0); }) == 0);  // nothing moving: the no-op
+    CHECK(position_reads([&] { driver->move_axis(1, 1.0); }) == 0);
+    CHECK(position_reads([&] { driver->move_axis(1, 0.0); }) == 0);  // the stop of that motion
+    CHECK(position_reads([&] { driver->slew_to_coordinates_async(std::fmod(lst - 2.0 + 24.0, 24.0), 40.0); }) == 0);
+    CHECK(position_reads([&] { driver->find_home(); }) == 0);
+    CHECK(position_reads([&] { driver->park(); }) == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the rate with no board read",
+          "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;  // moves in real time, like the model
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // no poll re-anchors the model from here
+    constexpr double kRate = 1.0;                     // deg/s on the Dec axis
+
+    // Start: the last anchor is the connect's frame, 400 ms old, and the five
+    // start transactions take 50 ms each. The new rate applies from the start,
+    // not from that anchor or from the first of those transactions.
+    std::this_thread::sleep_for(milliseconds(400));
+    const double at_rest = driver->get_declination();
+    mount.set_reply_latency(milliseconds(50));
+    driver->move_axis(1, kRate);
+    mount.set_reply_latency(milliseconds(0));
+    const double started = driver->get_declination();
+    CHECK(std::abs(started - at_rest) < 0.1);
+
+    // A new rate on the moving axis: the 0.4 deg covered so far is kept.
+    std::this_thread::sleep_for(milliseconds(400));
+    const double moving = driver->get_declination();
+    REQUIRE(std::abs(moving - started) > 0.3);
+    driver->move_axis(1, -kRate);
+    const double reversed = driver->get_declination();
+    CHECK(std::abs(reversed - moving) < 0.1);
+
+    // Stop: the motion up to the stop is kept too.
+    std::this_thread::sleep_for(milliseconds(400));
+    const double moving_back = driver->get_declination();
+    REQUIRE(std::abs(moving_back - reversed) > 0.3);
+    driver->move_axis(1, 0.0);
+    CHECK(std::abs(driver->get_declination() - moving_back) < 0.1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher snapshot - a rate write does not hide a GOTO the poll measured", "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+
+    // A GOTO-mode run the driver did not start (one that survived a relink,
+    // say): no driver flag is set, so Slewing answers from the frame.
+    driver->command_blind(":G200", true);  // Dec axis to GOTO mode
+    mount.hold_running(2, true);           // and ":f" reports it running
+    step(clock, milliseconds(150));        // a poll measures it
+    REQUIRE(driver->get_slewing());
+
+    // The rate setter re-anchors the model in place (PR #221). That drops the
+    // poll in flight, but the board did not change: Slewing stays true.
+    driver->set_declination_rate(1.0);
+    CHECK(driver->get_slewing());
+    mount.hold_running(2, false);
     driver->set_connected(false);
 }
 

@@ -279,10 +279,17 @@ datagrams before each send so replies cannot get off-by-one.
   `serve_position_locked()` / `served_frame_locked()`, never `refresh_position_cache_locked()`:
   that is the control-path direct read (goto planning, the stop waits, `get_hardware_slewing_locked(false)`
   for landing detection) and the limit guard's fallback while the frame is stale (over 200 ms).
-  Anything that changes what the last poll measured (a re-anchor, a sync, the end of a slew)
-  must drop the poll in flight and mark the status flags not current
-  (`note_model_write_locked()`, `set_slewing_cached_false_locked()`); do not assign
-  `slewing_cached_ = false` directly. Past [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)'s
+  A model re-anchor must drop the poll in flight (`drop_poll_in_flight_locked()`); anything
+  that changes what the board's registers or motion mean (a sync or other invalidation, the
+  end of a slew) must also mark the status flags not current (`note_model_write_locked()`,
+  `set_slewing_cached_false_locked()`); do not assign `slewing_cached_ = false` directly. No
+  getter re-reads the board to clear that flag any more, so every operation that sets it clears
+  it when it ends, AutoHome included: a flag left set keeps the axes busy (rate offsets
+  deferred, the limit guard exempt). An
+  asynchronous initiator (Park, FindHome, `SlewToCoordinatesAsync`, MoveAxis) never waits on a
+  position read: it invalidates with `read_back` false, MoveAxis anchors the model where it
+  changes a rate (`advance_model_anchor_locked()`), and the next poll re-measures. A poll sample
+  older than the model's anchor is never adopted. Past [decision 0009](../../docs/decisions/0009-link-loss-and-relink-policy.md)'s
   30 s bound the link is lost (`NotConnected`, `Connected` false); a stale frame younger than
   that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
   one waiter that is always parked (`kPollerWaiter`), or pauses it with

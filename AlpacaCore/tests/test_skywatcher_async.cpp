@@ -382,6 +382,29 @@ TEST_CASE("SkyWatcher async - FindHome runs AutoHome against the index sensors",
     driver->set_connected(false);
 }
 
+// Since decision 0010 no getter clears the driver's slewing flag from a board
+// read, so the operation that set it must. AutoHome waits on its own loop, not
+// wait_for_slew_complete(), and left the flag set: the axes then read busy for
+// the rest of the session, which deferred every rate offset and kept the live
+// limit guard exempt.
+TEST_CASE("SkyWatcher async - after AutoHome a DeclinationRate offset moves the Dec axis", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_home_index_degrees(1, 2.0);
+    mount.set_home_index_degrees(2, 2.0);
+    auto driver = connected_driver(mount);
+
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home(); }, 60000));
+    REQUIRE_FALSE(driver->get_slewing());
+
+    driver->set_tracking(true);
+    driver->set_declination_rate(10.0);  // arcsec/s, continuous (above the floor)
+    CHECK(wait_until([&] { return mount.axis_running(2); }, 3000));
+    driver->set_declination_rate(0.0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cleanly", "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
