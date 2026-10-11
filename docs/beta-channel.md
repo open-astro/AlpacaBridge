@@ -73,8 +73,10 @@ version, so apt offers a tester on a nightly no later beta; install the next one
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
    `.deb` in a Debian trixie container and attaches it with a `.sha256` (job `beta-deb`). The `.deb`
    is also published to the apt `beta` component (outside this repository).
-3. **Fix.** A bug found in beta is fixed by a PR against `stable/X.Y`. It is not fixed on `main`
-   first and cherry-picked. A fix for code the branch does not have goes to `main` as usual.
+3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
+   against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
+   cherry-picked. A defect that release also had, or a fix for code the branch does not have,
+   goes to `main` as usual.
 4. **Re-beta and merge down.** Each batch of fixes becomes the next beta tag. After every beta
    tag, one PR merges `stable/X.Y` into `main` with the merge-commit method (never squash). Its
    head is a short-lived `merge-down/X.Y-to-main` branch cut from `stable/X.Y`, never the stable
@@ -108,30 +110,30 @@ version, so apt offers a tester on a nightly no later beta; install the next one
 ## Rules for the stable branch
 
 - Bug and stability fixes only: crashes, hangs, races, wrong ASCOM behaviour, packaging and
-  install failures, regressions from the previous stable, and docs fixes for the release itself.
-  No features, no refactors, no new drivers. Every fix is also subject to the admission test in
-  the next two bullets.
-- A fix is admitted to the stable branch only when at least one of these holds: it repairs a
-  regression from the previous stable release, it closes an open issue on the `X.Y.0 promotion`
-  milestone, or it is small enough that the ConformU result already recorded for that driver on
-  this branch still stands. "Fixes a real bug" is not sufficient on its own: a long-standing
-  defect that the previous stable also had is a `main` fix that ships in the next minor.
-  Packaging, install and release-docs fixes from the bullet above need no hardware run.
-- Some driver changes go to `main` whichever criterion they meet, because each one invalidates
-  the hardware validation the beta exists to accumulate and pushes promotion out instead of
-  bringing it in: a new SDK seam or a new fake, a change to a capability flag a client can read
-  (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state machine, and a
-  driver change that would need a fresh ConformU run but lands without one. New test cases over an existing fake are not a
-  new fake: a stable fix carries them as usual, including the fake-SDK test `AGENTS.md` asks for
-  with a connect-path fix. Two cases override this list. A maintainer may admit such a change by
-  name in an issue on the `X.Y.0 promotion` milestone, which is a deliberate decision, not a
-  criterion a contributor can meet by filing an issue. And a series of PRs fixing one issue
-  across several drivers finishes on the stable branch once part of it has landed there, so the
-  release does not ship two behaviours for one contract; each driver the series touches then gets
-  a ConformU issue on the milestone. The question to ask of every stable fix PR is whether the
-  driver it touches would need a fresh ConformU run afterwards; if yes, it targets `main` unless
-  one of those two cases applies. A PR that misses the bar is retargeted with
-  `gh pr edit --base main` before review, not reviewed on the branch.
+  install failures, and docs fixes for the release itself. No features, no refactors, no new
+  drivers. Every fix is also subject to the admission test in the next two bullets.
+- A PR targets `stable/X.Y` only when it fixes a defect or regression introduced after the
+  previous stable release (the last stable tag before `X.Y.0`; `v4.2.0` for `stable/5.0`), so that
+  release did not have the defect. Everything else targets `main`: a defect the previous stable
+  release also had (a crash or an issue on the `X.Y.0 promotion` milestone included), and every
+  feature, refactor, new driver, test, tooling or docs change. "Fixes a real bug" is not
+  sufficient: a long-standing defect is a `main` fix that ships in the next minor. Packaging,
+  install and release-docs fixes from the bullet above qualify only when the problem is new since
+  the previous stable release; they need no hardware run.
+- Some driver changes go to `main` even when the fix meets that test, because each one
+  invalidates the hardware validation the beta exists to accumulate and pushes promotion out
+  instead of bringing it in: a new SDK seam or a new fake, a change to a capability flag a client
+  can read (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state
+  machine, and a driver change that would need a fresh ConformU run. New
+  test cases over an existing fake are not a new fake: a stable fix carries them as usual,
+  including the fake-SDK test `AGENTS.md` asks for with a connect-path fix. One case overrides
+  this list: a maintainer may admit a fix that meets the test above but hits one of these
+  exclusions, by name in an issue on the `X.Y.0 promotion` milestone. That is a deliberate
+  decision, not a criterion a contributor can meet by filing an issue, and it never admits a
+  defect the previous stable release also had. The question to ask of every stable fix PR is
+  whether the defect was introduced after the previous stable release; if not, it targets `main`.
+  A PR that misses the bar is retargeted with `gh pr edit --base main` before review, not
+  reviewed on the branch.
 - Fixes land on the stable branch and reach `main` through the merge down. No cherry-picks.
 - GitHub closes `Closes #N` issues only for a PR merged into `main`, so a merged PR into `stable/**`
   closes its issues through `.github/workflows/close-linked-issues.yml` (`scripts/close_linked_issues.py`):
