@@ -1241,9 +1241,11 @@ public:
                         try {
                             sdk.stop_video_capture(active_camera_id);
                             stopped = true;
-                        } catch (const std::exception&) {
+                        } catch (const std::exception& stop_error) {
                             // Preserve uncertain capture state until Stop succeeds
                             // or disconnect closes and reopens the physical handle.
+                            ALPACA_LOG_WARN("SVBONY", "stop_video_capture after exposure failure failed: " +
+                                                          std::string(stop_error.what()));
                         }
                     }
                     // Re-mark only the deferred stage that did NOT apply, so the
