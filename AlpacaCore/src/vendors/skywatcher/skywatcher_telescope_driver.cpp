@@ -2369,7 +2369,7 @@ public:
                 // ramped down; the mount coasted on after it. The next motion from
                 // rest seeds its limit-guard baseline from the cache, and a stale
                 // inside position would read a reverse MoveAxis as a crossing.
-                invalidate_position_cache_locked();
+                invalidate_position_cache_locked(false);  // lazy: the seed must read the board after the coast
                 if (!stopped) {
                     ALPACA_LOG_WARN("SkyWatcher", "MoveAxis stop: axis " + std::to_string(channel) +
                                                       " still reported running at timeout");
