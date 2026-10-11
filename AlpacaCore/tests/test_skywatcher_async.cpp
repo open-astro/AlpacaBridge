@@ -304,8 +304,8 @@ TEST_CASE("SkyWatcher async - an ahead landing is held for the sky, not re-goto'
     // board, and the hold leaves no lead for tracking to keep.
     for (const Leg& leg : legs) {
         const double err = slew(leg, writes);
-        INFO("HA " << leg.hour_angle << " h, Dec " << leg.declination << ": RA error " << err << " arcsec, "
-                   << writes << " :S writes");
+        INFO("HA " << leg.hour_angle << " h, Dec " << leg.declination << ": RA error " << err << " arcsec, " << writes
+                   << " :S writes");
         CHECK(std::abs(err) <= 4.0);
         CHECK(std::abs(driver->get_declination() - leg.declination) * 3600.0 <= 8.0);
     }
