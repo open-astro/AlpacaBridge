@@ -349,6 +349,26 @@ TEST_CASE("SkyWatcher snapshot - a frame older than the link-loss bound with no 
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher snapshot - Connected=true relinks a stale-frame lost link", "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+
+    // The poll stops answering the clock: no latch, the frame ages out.
+    sw::set_status_poll_paused_for_testing(*driver, true);
+    step(clock, alpacacore::util::kLinkStalenessBound + seconds(1));
+    REQUIRE_FALSE(driver->get_connected());
+
+    // Connected=true with the poll still paused must not hit the idempotency
+    // return: it relinks, re-seeds the frame and restarts the poll.
+    driver->set_connected(true);
+    sw::set_status_poll_paused_for_testing(*driver, false);
+    CHECK(driver->get_connected());
+    CHECK_NOTHROW(driver->get_right_ascension());
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher snapshot - UDP link pulled past the window, then relinked: both axes stop",
           "[skywatcher][snapshot][udp]") {
     FakeTaskClock clock;

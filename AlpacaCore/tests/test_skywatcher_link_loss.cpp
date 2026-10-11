@@ -87,7 +87,13 @@ void run_staleness_scenario(const Transport& t, FakeTaskClock& clock) {
     const auto lost_at = protocol->consume_link_lost_at();
     REQUIRE(lost_at.has_value());
     CHECK(*lost_at == clock.now());
-    // The transport is closed (best effort): no fd to the board is left open.
+    // The transport is closed: no fd to the board is left open. A poll
+    // exchange may hold the I/O lock when the loss is seen, so the status poll
+    // finishes the close on its next tick; step the fake clock to reach it.
+    for (int i = 0; i < 300 && protocol->is_connected(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        clock.advance(std::chrono::milliseconds(100));
+    }
     CHECK_FALSE(protocol->is_connected());
     // The last fault text stays, so the listing shows why.
     CHECK(driver->get_link_fault().find("consecutive failures") != std::string::npos);
@@ -162,8 +168,11 @@ TEST_CASE("SkyWatcher link loss - a fault that clears inside the bound is not a 
     clock.advance(std::chrono::seconds(60));
     // The status poll republishes a frame on its next tick; until it has, the
     // frame is as old as the jump and reads as a stalled poll.
+    // Step the fake clock each round so a poll that was mid-exchange when the
+    // jump landed still reaches its next tick.
     for (int i = 0; i < 200 && !driver->get_connected(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        clock.advance(std::chrono::milliseconds(100));
     }
     CHECK(driver->get_connected());
     CHECK_FALSE(protocol->consume_link_lost_at().has_value());

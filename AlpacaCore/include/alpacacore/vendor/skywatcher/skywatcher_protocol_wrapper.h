@@ -167,6 +167,13 @@ public:
     // connect sees nullopt and takes the safe branch.
     virtual std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
+    // Closes a link that was flagged lost while an exchange held the I/O lock
+    // (the loss path only try-locks). Call with no exchange of your own in
+    // flight. No-op unless a loss is pending.
+    void finish_lost_close();
+    // Stamps the lost-at time from the driver's own evidence (first stamp wins).
+    void note_link_lost_at(std::chrono::steady_clock::time_point at);
+
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
     // Throws AlpacaException on transport failure or a "!" error reply.

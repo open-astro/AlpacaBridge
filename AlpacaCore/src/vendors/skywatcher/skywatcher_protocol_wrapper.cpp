@@ -946,6 +946,20 @@ public:
         }
     }
 
+    // Finishes the close a loss left pending because an exchange held
+    // io_mutex_ when it was seen (lose_stale_link() only try_locks). Called by
+    // a caller that holds no io_mutex_, such as the status poll on its exit.
+    void finish_lost_close() {
+        std::unique_lock<std::mutex> lock(io_mutex_);
+        if (link_lost_.load() && connected_.load()) {
+            disconnect_locked();
+        }
+    }
+
+    // The driver's own loss evidence (a snapshot frame past the staleness
+    // bound): stamps when the outage began; the first stamp wins.
+    void note_link_lost_at(std::chrono::steady_clock::time_point at) { link_lost_at_.note(at); }
+
     util::TaskClock& clock() const { return *clock_.load(); }
 
     // open-astro#521: when the link was last LOST (not cleanly disconnected).
@@ -1789,6 +1803,12 @@ std::string SkyWatcherProtocolWrapper::link_fault() { return pimpl_->link_fault(
 bool SkyWatcherProtocolWrapper::link_faulted() { return !pimpl_->link_fault().empty(); }
 
 std::uint64_t SkyWatcherProtocolWrapper::link_recovery_epoch() { return pimpl_->recovery_epoch(); }
+
+void SkyWatcherProtocolWrapper::finish_lost_close() { pimpl_->finish_lost_close(); }
+
+void SkyWatcherProtocolWrapper::note_link_lost_at(std::chrono::steady_clock::time_point at) {
+    pimpl_->note_link_lost_at(at);
+}
 
 std::optional<std::chrono::steady_clock::time_point> SkyWatcherProtocolWrapper::consume_link_lost_at() {
     return pimpl_->consume_link_lost_at();

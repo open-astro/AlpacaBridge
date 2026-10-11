@@ -462,7 +462,7 @@ public:
         bool relink = false;
         if (connected) {
             std::lock_guard<std::mutex> lock(mutex_);
-            relink = connected_ && !protocol.link_alive();
+            relink = connected_ && link_lost_locked();
         }
         if (!connected || relink) {
             // Join background task threads BEFORE taking mutex_ (they take it).
@@ -471,7 +471,7 @@ public:
             cancel_async_tasks();
         }
         std::unique_lock<std::mutex> lock(mutex_);
-        if (connected && !relink && connected_ && !protocol.link_alive()) {
+        if (connected && !relink && connected_ && link_lost_locked()) {
             // The loss became visible after the probe above, so the tasks were
             // not cancelled. A slew task blocked on mutex_ would wake to the
             // reconnected session and resume against the new link: drop the
@@ -480,7 +480,7 @@ public:
             cancel_async_tasks();
             lock.lock();
         }
-        if (connected && connected_ && !protocol.link_alive()) {
+        if (connected && connected_ && link_lost_locked()) {
             // open-astro#445: a connect against a dead link used to hit the
             // idempotency return below and report success with no reconnect.
             // Settle the dead session first, then run the gates as for any
@@ -488,6 +488,7 @@ public:
             ALPACA_LOG_WARN("SkyWatcher", "Connect requested on a lost link; reconnecting");
             session_open_.store(false);
             protocol.disconnect();
+            snapshot_.reset();
             connected_ = false;
             reset_runtime_state_locked();
         }
@@ -3327,6 +3328,23 @@ private:
     // A frame older than the link-loss bound with no latch: the poll stopped
     // answering the clock. Lost like a pulled adapter: Connected false, every
     // getter and setter NotConnected, DeviceState empty (decision 0010).
+    // The link is lost: the transport is gone, or the frame aged out with no
+    // latch. Either takes the same cancel, teardown and reconnect on Connected=true.
+    // A stale-frame loss stamps link_lost_at at the moment the frame crossed
+    // the bound, so the relink's outage-length decision (#521) sees it.
+    bool link_lost_locked() const {
+        if (!protocol_->link_alive()) {
+            return true;
+        }
+        if (!frame_lost_locked()) {
+            return false;
+        }
+        if (const auto reading = snapshot_.read()) {
+            protocol_->note_link_lost_at(reading->measured_at + util::kLinkStalenessBound);
+        }
+        return true;
+    }
+
     bool frame_lost_locked() const {
         // A latched fault is decision 0009's own clock (the poll cannot publish
         // while it lasts), so only an unlatched link ages the frame out.
@@ -3449,6 +3467,9 @@ private:
             // Lost (decision 0009): the wrapper has closed the transport and
             // stamped link_lost_at. Drop the frame; only a Connect relinks.
             snapshot_.reset();
+            // The loss may have been seen while an exchange held the I/O lock,
+            // which left the close pending; this body holds no I/O lock.
+            protocol_->finish_lost_close();
             return false;
         }
         const auto token = snapshot_.begin_poll();
