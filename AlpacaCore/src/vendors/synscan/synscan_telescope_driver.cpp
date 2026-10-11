@@ -1328,9 +1328,11 @@ public:
                 if (guide_position_ra_hours_ < 0.0) guide_position_ra_hours_ += 24.0;
             }
 
-            // Keep position override active so get_ra/get_dec return the estimate.
+            // Keep position override active so get_ra/get_dec return the estimate. The estimate is
+            // shared by both axes, so a pulse never shortens a hold another axis still needs (#990).
             position_override_until_ =
-                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuidePositionGrace;
+                std::max(position_override_until_, now + std::chrono::milliseconds(duration) +
+                                                       kPulseGuideCompletionDelay + kPulseGuidePositionGrace);
 
             protocol.move_axis_variable_rate(axis, slew_rate_deg_per_sec);
 

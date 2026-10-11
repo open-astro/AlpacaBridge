@@ -375,6 +375,25 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
     driver->set_connected(false);
 }
 
+TEST_CASE("SynScan PulseGuide - short Dec pulse keeps the position override of a long RA pulse (#990)",
+          "[synscan][telescope][pulseguiding]") {
+    auto st = std::make_shared<FakeSynScanState>();
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    // The fake mount never moves, so any difference from this reading is the private estimate.
+    const double live_ra = driver->get_right_ascension();
+    driver->pulse_guide(2, 1500);  // East, RA: the estimate is held until about 5.5 s
+    driver->pulse_guide(0, 100);   // North, Dec: its own hold would end at about 4.1 s
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));
+    // Past the Dec pulse's hold, inside the RA pulse's: the RA estimate must still be served.
+    CHECK(std::abs(driver->get_right_ascension() - live_ra) > 1e-6);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[synscan][telescope][pulseguiding]") {
     auto st = std::make_shared<FakeSynScanState>();
     alpacacore::test::FakeMountServer server(synscan_responder(st));
