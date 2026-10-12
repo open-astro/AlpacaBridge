@@ -492,6 +492,10 @@ public:
         if (!key.empty() && !is_ascom_sensor_name(key)) {
             throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
         }
+        // Parameter validation precedes the connection check (ASCOM contract).
+        if (!get_connected()) {
+            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
+        }
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
         std::lock_guard<std::mutex> lock(data_mutex_);
