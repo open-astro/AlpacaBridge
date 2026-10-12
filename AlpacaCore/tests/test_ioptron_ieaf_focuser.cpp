@@ -14,7 +14,10 @@
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <functional>
 #include <thread>
 
@@ -235,13 +238,25 @@ TEST_CASE("iOptron iEAF Focuser Driver - sync disconnect during sync connect is 
 // does to each candidate, fails with EBUSY and the probe skips the port
 // instead of flushing the connected driver's replies and writing its own query.
 TEST_CASE("iOptron iEAF Focuser Driver - a connected port refuses a second open", "[ioptron][focuser][unit]") {
+    if (geteuid() == 0) {
+        SUCCEED("root bypasses TIOCEXCL");
+        return;
+    }
     alpacacore::test::FakeIoptronIeaf fake;
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    errno = 0;
+    const int fd = open(fake.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    const int err = errno;
+    if (fd >= 0) close(fd);
+    CHECK(fd < 0);
+    CHECK(err == EBUSY);
+
     // A second driver on the same node stands in for a probe's open().
     auto intruder = alpacacore::vendor::ioptron::create_ieaf_focuser(1, fake.slave_path());
-    CHECK_THROWS(intruder->set_connected(true));
+    require_alpaca_error([&] { intruder->set_connected(true); },
+                         static_cast<int>(alpacacore::AlpacaError::NotConnected));
     CHECK(intruder->get_connected() == false);
 
     CHECK(fake.connects() == 1);

@@ -14,10 +14,14 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -33,6 +37,7 @@
 #include "fake_mount_server.h"
 #endif
 #include "fake_ioptron_mount.h"
+#include "fake_pty_write.h"
 
 using alpacacore::DeviceType;
 
@@ -629,3 +634,32 @@ TEST_CASE("iOptron Telescope Driver - non-finite site latitude and longitude are
 }
 
 #endif  // _WIN32
+
+// Issue #995: the mount's serial link is held exclusively while connected and
+// released on disconnect. connect() over serial only opens and configures the
+// port, so a bare pty stands in for the adapter.
+TEST_CASE("iOptron mount serial - the connected port is claimed exclusively and released on disconnect",
+          "[ioptron][telescope][unit]") {
+    if (geteuid() == 0) {
+        SUCCEED("root bypasses TIOCEXCL");
+        return;
+    }
+    alpacacore::test::PtyPair pty("iOptron mount exclusive test");
+    auto& protocol = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    info.port_path = pty.slave_path();
+    REQUIRE(protocol.connect(info));
+
+    errno = 0;
+    int fd = open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    const int err = errno;
+    if (fd >= 0) close(fd);
+    CHECK(fd < 0);
+    CHECK(err == EBUSY);
+
+    protocol.disconnect();
+    fd = open(pty.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    CHECK(fd >= 0);
+    if (fd >= 0) close(fd);
+}
