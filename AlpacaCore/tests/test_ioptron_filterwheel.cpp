@@ -14,11 +14,15 @@
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
 #include <alpacacore/version.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <functional>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_ioptron_ieaf.h"
 
 namespace {
 
@@ -166,4 +170,38 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - Unique IDs", "[ioptron][filterwhee
     CHECK(d0->get_unique_id() != d1->get_unique_id());
     CHECK(d5->get_unique_id() == "IOPTRON_IEFW_5");
     CHECK(d5->get_device_number() == 5);
+}
+
+// Issue #995: a connected iEFW link is held exclusively, is released on
+// disconnect, and a connect aimed at a port another driver holds is refused
+// (what an auto-detect probe does: skip the candidate).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a connected port refuses a second open", "[ioptron][filterwheel][unit]") {
+    if (geteuid() == 0) {
+        SUCCEED("root bypasses TIOCEXCL");
+        return;
+    }
+    // The iEAF fake answers the same :DeviceInfo# handshake; model 99 = iEFW-15.
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    alpacacore::vendor::ioptron::IefwProtocolWrapper wheel;
+    alpacacore::vendor::ioptron::IefwConnectionConfig cfg;
+    cfg.serial_port = fake.slave_path();
+    cfg.serial_timeout_s = 2;
+    wheel.connect(cfg);
+    REQUIRE(wheel.is_connected());
+
+    errno = 0;
+    int fd = open(fake.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    const int err = errno;
+    if (fd >= 0) close(fd);
+    CHECK(fd < 0);
+    CHECK(err == EBUSY);
+
+    alpacacore::vendor::ioptron::IefwProtocolWrapper intruder;
+    require_alpaca_error([&] { intruder.connect(cfg); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
+
+    wheel.disconnect();
+    fd = open(fake.slave_path().c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+    CHECK(fd >= 0);
+    if (fd >= 0) close(fd);
 }

@@ -1209,7 +1209,14 @@ private:
                                             "no other process has it open.");
             return false;
         }
-        
+
+        // Exclusive access (issue #995): a later open() of this node, e.g. an
+        // auto-detect probe of another iOptron driver scanning the same
+        // Prolific/FTDI candidates, then fails with EBUSY and the probe skips
+        // the port, instead of flushing our pending reply and writing its own
+        // query. Same as the SynScan and Sky-Watcher wrappers: connected link
+        // only, ignored on failure (pty back ends may not support it).
+        (void)ioctl(serial_fd_, TIOCEXCL);
         ALPACA_LOG_INFO("iOptron", "Getting terminal attributes...");
         // Configure serial port
         struct termios tty;
@@ -1217,6 +1224,7 @@ private:
             int tc_err = errno;
             ALPACA_LOG_ERROR("iOptron", "tcgetattr failed: " + util::errno_string(tc_err) + " (errno " +
                                             std::to_string(tc_err) + ")");
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1264,6 +1272,7 @@ private:
             int tc_err = errno;
             ALPACA_LOG_ERROR("iOptron", "tcsetattr failed: " + util::errno_string(tc_err) + " (errno " +
                                             std::to_string(tc_err) + ")");
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1276,6 +1285,7 @@ private:
             int fc_err = errno;
             ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + util::errno_string(fc_err) + " (errno " +
                                             std::to_string(fc_err) + ")");
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             return false;
@@ -1314,6 +1324,7 @@ private:
                 tcflush(serial_fd_, TCOFLUSH);
             }
             tcflush(serial_fd_, TCIFLUSH);
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
         }

@@ -31,6 +31,8 @@ Connection types: Serial (USB serial, 115200 baud default per v3.10 spec) and Ne
 - **ConformU 4.4 tests `Connect()` immediately after `Connected=false`** — an async disconnect must not drop a racing connect (AsyncConnectable now queues it; see `pending_connect_`). ConformU 4.3 never exercised this, so a 4.3 pass does not imply a 4.4 pass on the connect phase.
 - **Debugging discipline from this session**: mount "wedges" that survive reconnects but clear on a fresh flushed port open are usually leaked-byte desync or firmware state, not dead hardware; a mount that answers probes but fails mid-motion points at the USB link (here: loose cable + VMware passthrough drop under motor load). Reproduce failing ConformU members individually with `curl` against the live server before burning full ConformU runs.
 
+- **Serial links are exclusive (`TIOCEXCL`)** (#995): the mount, iEAF and iEFW wrappers claim the connected tty and issue `TIOCNXCL` before every close, so another iOptron auto-detect probe's open of that port fails with `EBUSY` and the probe skips it. The probe opens themselves do not claim (same as Sky-Watcher and SynScan). The iMate PowerBox is GPIO, with no tty.
+
 #### iEAF / iAFS2/3 (Focuser)
 
 The iEAF electronic focuser (and the iAFS2/3 automatic focuser, which speaks the identical protocol and reports `:DeviceInfo#` model code 3 vs the iEAF's 2; per INDIGO `indigo_focuser_ioptron.c`) has its own serial protocol and its own wrapper (`ioptron_ieaf_protocol_wrapper`) — it does **not** share `ioptron_protocol_wrapper` with the mount. Reference implementation: INDI core `drivers/focuser/ieaffocus.cpp`.
