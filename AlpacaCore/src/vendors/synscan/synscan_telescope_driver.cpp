@@ -60,7 +60,7 @@ constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 // HC 06.03.00: about +/-10" in Dec per GOTO, up to 20", open-astro#1027) is not something another pass can
 // remove, and failing the slew there turned a plate-solvable 15" landing into an error.
 // open-astro#1030: that handset's precise RA readback also ramps down 15.04" (one second of sidereal motion) and
-// jumps back once a second, so a single RA read can be off by up to a quantum; a pass that has RA inside this
+// jumps back once a second, so a single RA read can be off by up to one 15.04" step; a pass that has RA inside this
 // tolerance must not move the RA aim (see refine_goto_landing_locked), or the Dec-only passes drag RA along.
 constexpr double kLandingToleranceArcsec = 3.0;
 constexpr int kMaxLandingRefinePasses = 3;
@@ -2292,7 +2292,7 @@ private:
     // After a GOTO completes, read the handset's own position and re-issue the GOTO while RA or Dec is off by
     // more than kLandingToleranceArcsec on either axis, at most kMaxLandingRefinePasses times (open-astro#880).
     // Each pass aims at the target corrected by the residual just read, so a systematic landing offset is
-    // cancelled rather than repeated; an axis already inside the tolerance keeps its aim, so a Dec-only pass does
+    // cancelled rather than repeated; RA inside the tolerance keeps its aim, so a Dec-driven pass does
     // not chase the handset's one-second RA readback steps (open-astro#1030). 16-bit handsets (V3) step ~19.8" in RA,
     // so they are not refined. `lock` is held on entry and on return. Returns false when the slew was superseded,
     // aborted or cancelled; throws when a pass fails. A residual left after the last pass is logged as a WARN, not
@@ -2337,9 +2337,7 @@ private:
             if (ra_error_arcsec > kLandingToleranceArcsec) {
                 aim_ra = std::fmod(aim_ra + ra_error_hours + 24.0, 24.0);
             }
-            if (dec_error_arcsec > kLandingToleranceArcsec) {
-                aim_dec = std::clamp(aim_dec + dec_error_degrees, -90.0, 90.0);
-            }
+            aim_dec = std::clamp(aim_dec + dec_error_degrees, -90.0, 90.0);
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             slewing_cached_ = true;
