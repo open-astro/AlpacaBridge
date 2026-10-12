@@ -155,7 +155,9 @@ constexpr double kConformUToleranceArcsec = 10.0;
 // RA +10.4" every time (systematic, which refinement cancels), Dec -0.8", +9.6", +0.1", -10.7" (random). The
 // first landing's Dec was already good; the passes RA needed left Dec 10.7" off after the last one.
 void script_rig_dec_scatter(LandingOffsetHandset& st) {
-    st.ra_offset_counts.store(135);  // 10.4"
+    // The rig's +10.4" is inside the RA quantum since #1030 and would stop the passes after the first GOTO, so the
+    // scripted RA offset is 29.4": outside it, systematic, cancelled by the first refinement as before.
+    st.ra_offset_counts.store(kRaOffsetCounts);
     const std::array<int32_t, 4> dec_counts{-10, 124, 1, -139};
     for (std::size_t i = 0; i < dec_counts.size(); ++i) {
         st.dec_offset_script[i].store(dec_counts[i]);
@@ -198,6 +200,58 @@ TEST_CASE("SynScan GOTO landing - SlewToCoordinates refines a GOTO the handset l
     CHECK(ra_error_arcsec(*driver, kTargetRa) < kConformUToleranceArcsec);
     CHECK(dec_error_arcsec(*driver, kTargetDec) < kConformUToleranceArcsec);
     CHECK(st->goto_count.load() == 2);  // the GOTO plus one refinement
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - an RA residual inside one handset quantum is not chased (#1030)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->ra_offset_counts.store(150);  // 11.6", inside the 194-count (15") one-second readback sawtooth
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    CHECK(st->goto_count.load() == 1);  // no refinement GOTO
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - an RA residual outside the quantum is still refined (#1030)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->ra_offset_counts.store(230);  // 17.7", just past the quantum
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    CHECK(st->goto_count.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan GOTO landing - a Dec residual over the Dec tolerance is refined with RA inside the quantum (#1030)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->ra_offset_counts.store(0);
+    st->dec_offset_script[0].store(124);  // a systematic 9.6" Dec offset, cancelled by the aim correction
+    st->dec_offset_script[1].store(124);
+    st->dec_scripted.store(true);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates(kTargetRa, kTargetDec));
+
+    CHECK(st->goto_count.load() == 2);
+    CHECK(dec_error_arcsec(*driver, kTargetDec) < 3.0);
     driver->set_connected(false);
 }
 

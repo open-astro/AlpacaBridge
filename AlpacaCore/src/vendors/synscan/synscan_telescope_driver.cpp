@@ -60,6 +60,11 @@ constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 // +/-10" in Dec per GOTO, up to 20", open-astro#1027) is not something another pass can remove, and failing the
 // slew there turned a plate-solvable 15" landing into an error.
 constexpr double kLandingToleranceArcsec = 3.0;
+// open-astro#1030: the handset's precise RA readback ramps down one second of sidereal motion (194 counts, 15.04")
+// and jumps back once a second, so any single RA read is 0-15" low depending on phase. A tolerance below that
+// chases the sawtooth: each extra GOTO re-slews both axes and disturbs Dec by about +/-10". An RA error inside one
+// quantum (plus 1" of readback noise) counts as landed. Dec has no such ramp and keeps kLandingToleranceArcsec.
+constexpr double kLandingRaToleranceArcsec = 16.0;
 constexpr int kMaxLandingRefinePasses = 3;
 // A readback this far from the target is not a landing error a fine re-GOTO corrects (a refused or limit-stopped
 // GOTO, a mount that never moved): it is left as it was before refinement existed and logged, not chased.
@@ -2287,7 +2292,8 @@ private:
     };
 
     // After a GOTO completes, read the handset's own position and re-issue the GOTO while RA or Dec is off by
-    // more than kLandingToleranceArcsec, at most kMaxLandingRefinePasses times (open-astro#880). Each pass aims at
+    // more than kLandingRaToleranceArcsec (RA, one handset readback quantum, open-astro#1030) or
+    // kLandingToleranceArcsec (Dec), at most kMaxLandingRefinePasses times (open-astro#880). Each pass aims at
     // the target corrected by the residual just read, so a systematic landing offset is cancelled rather than
     // repeated. 16-bit handsets (V3) step ~19.8" in RA, so they are not refined. `lock` is held on entry and on
     // return. Returns false when the slew was superseded, aborted or cancelled; throws when a pass fails. A
@@ -2313,7 +2319,7 @@ private:
             const double dec_error_degrees = dec - decode_angle(raw.second, 24);
             const double ra_error_arcsec = std::abs(ra_error_hours) * kHoursToDegrees * 3600.0;
             const double dec_error_arcsec = std::abs(dec_error_degrees) * 3600.0;
-            if (ra_error_arcsec <= kLandingToleranceArcsec && dec_error_arcsec <= kLandingToleranceArcsec) {
+            if (ra_error_arcsec <= kLandingRaToleranceArcsec && dec_error_arcsec <= kLandingToleranceArcsec) {
                 return true;
             }
             if (ra_error_arcsec > kLandingRefineLimitArcsec || dec_error_arcsec > kLandingRefineLimitArcsec) {
