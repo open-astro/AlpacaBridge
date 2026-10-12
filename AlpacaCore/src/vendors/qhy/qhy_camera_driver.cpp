@@ -1496,6 +1496,8 @@ public:
             exposure_buffer_.clear();
             exposure_width_ = 0;
             exposure_height_ = 0;
+            image_width_ = 0;
+            image_height_ = 0;
             exposure_bpp_ = 0;
             exposure_channels_ = 0;
         }
@@ -1799,6 +1801,10 @@ public:
                     exposure_buffer_ = std::move(local_buf);
                     exposure_width_ = w;
                     exposure_height_ = h;
+                    // ROI size is frozen while Working; keep it for ImageArray
+                    // so a later NumX/NumY change cannot reshape this frame.
+                    image_width_ = num_x_;
+                    image_height_ = num_y_;
                     exposure_bpp_ = bpp;
                     exposure_channels_ = channels;
                     try {
@@ -1924,6 +1930,8 @@ private:
     std::vector<uint8_t> exposure_buffer_;
     uint32_t exposure_width_{};
     uint32_t exposure_height_{};
+    int image_width_{};  // NumX/NumY captured when the frame completed
+    int image_height_{};
     uint32_t exposure_bpp_{};
     uint32_t exposure_channels_{};
     double last_exposure_duration_;
@@ -2159,6 +2167,8 @@ private:
         exposure_buffer_.clear();
         exposure_width_    = 0;
         exposure_height_   = 0;
+        image_width_ = 0;
+        image_height_ = 0;
         exposure_bpp_      = 0;
         exposure_channels_ = 0;
     }
@@ -2669,15 +2679,15 @@ private:
 
     ImageArray build_image_array_locked() const {
         ImageArray image;
-        image.width  = num_x_;
-        image.height = num_y_;
+        image.width = image_width_;
+        image.height = image_height_;
 
         if (image.width <= 0 || image.height <= 0 || exposure_buffer_.empty()) {
             alpacacore::util::throw_invalid_camera_image("invalid QHY dimensions or empty frame buffer");
         }
 
-        const uint32_t eff_w = exposure_width_  > 0 ? exposure_width_  : static_cast<uint32_t>(num_x_);
-        const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(num_y_);
+        const uint32_t eff_w = exposure_width_ > 0 ? exposure_width_ : static_cast<uint32_t>(image_width_);
+        const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(image_height_);
         const uint32_t bpp   = exposure_bpp_;
         const uint32_t ch    = exposure_channels_;
 
