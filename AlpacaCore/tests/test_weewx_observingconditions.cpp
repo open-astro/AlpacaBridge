@@ -310,6 +310,25 @@ TEST_CASE("WeeWX ObservingConditions Driver - TimeSinceLastUpdate empty name is 
     driver->set_connected(false);
 }
 
+TEST_CASE("WeeWX ObservingConditions Driver - TimeSinceLastUpdate is NotConnected after disconnect", "[weewx]") {
+    FakeWeeWxFeed feed;
+    feed.set_body(weewx_payload());
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = feed.url();
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, config);
+    const int not_connected = alpacacore::AlpacaError::NotConnected;
+
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_time_since_last_update("Temperature") >= 0.0);
+    driver->set_connected(false);
+
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update("Temperature"); }) == not_connected);
+    CHECK(alpaca_error_of([&] { (void)driver->get_time_since_last_update(""); }) == not_connected);
+}
+
 TEST_CASE("WeeWX ObservingConditions Driver - Unknown sensor name is InvalidValue", "[weewx]") {
     FakeWeeWxFeed feed;
     feed.set_body(weewx_payload());
