@@ -63,4 +63,8 @@ protected:
 /// Test overload: the driver keeps a reference, `sdk` must outlive it.
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, int camera_id, ZWODewHeaterSdk& sdk);
 
+/// Test overload binding by SDK slot index; `sdk` must outlive the driver.
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
+                                                                    ZWODewHeaterSdk& sdk);
+
 } // namespace alpacacore::vendor::zwo

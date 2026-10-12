@@ -130,7 +130,9 @@ struct FakeDewSdk final : alpacacore::vendor::zwo::ZWODewHeaterSdk {
     std::atomic<bool> fail_reads{false};
     long heater{40};
 
-    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override { return {}; }
+    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> cameras;
+
+    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override { return cameras; }
     bool get_camera_info_by_id(int, alpacacore::vendor::zwo::ZWOCameraInfo&) override { return false; }
     void open_camera(int) override {}
     void init_camera(int) override {}
@@ -232,4 +234,24 @@ TEST_CASE("ZWO Dew Heater Switch Driver - a dead link is not served from the cac
 
     sdk.fail_reads = false;
     CHECK(driver->get_switch_value(0) == 40.0);
+}
+
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, index into the list (cameras[index]) instead of
+// matching slot_index
+TEST_CASE("ZWO Dew Heater Switch Driver - an index binds the SDK slot, not the list position", "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    // Slot 0 was unreadable and skipped: the one readable camera sits at SDK slot 1.
+    alpacacore::vendor::zwo::ZWOCameraInfo cam;
+    cam.camera_id = 7;
+    cam.name = "ASI120MM Mini";
+    cam.slot_index = 1;
+    sdk.cameras = {cam};
+
+    auto bound = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 1, sdk);
+    bound->set_connected(true);
+    CHECK(bound->get_connected());
+
+    auto skipped = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);
+    require_alpaca_error([&]() { skipped->set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK_FALSE(skipped->get_connected());
 }

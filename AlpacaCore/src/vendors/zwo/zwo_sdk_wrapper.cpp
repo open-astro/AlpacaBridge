@@ -355,6 +355,7 @@ bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
         ASI_CAMERA_INFO sdk_info{};
         if (ASIGetCameraProperty(&sdk_info, i) == ASI_SUCCESS && sdk_info.CameraID == camera_id) {
             info = convert_camera_info(sdk_info);
+            info.slot_index = i;
             return true;
         }
     }
@@ -369,6 +370,7 @@ bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& in
         return false;
     }
     info = convert_camera_info(sdk_info);
+    info.slot_index = camera_index;
     return true;
 }
 

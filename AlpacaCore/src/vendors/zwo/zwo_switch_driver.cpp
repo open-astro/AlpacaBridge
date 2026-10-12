@@ -454,6 +454,11 @@ std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch(int device_number, in
     return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, camera_id, std::nullopt, sdk);
 }
 
+std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index,
+                                                                    ZWODewHeaterSdk& sdk) {
+    return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index, sdk);
+}
+
 std::unique_ptr<SwitchDriver> create_zwo_dew_heater_switch_by_index(int device_number, int camera_index) {
     return std::make_unique<ZWODewHeaterSwitchDriver>(device_number, std::nullopt, camera_index,
                                                       SingletonDewHeaterSdk::instance());
