@@ -1,0 +1,2 @@
+### Fixed
+- **WeeWX ObservingConditions: `TimeSinceLastUpdate` raises `NotConnected` while disconnected** (AlpacaCore, issue #1016): it used to return the age of the last reading kept from the previous session. An unknown sensor name still raises `InvalidValue` first, connected or not. Covered by the `TimeSinceLastUpdate is NotConnected after disconnect` case in `test_weewx_observingconditions.cpp`.
