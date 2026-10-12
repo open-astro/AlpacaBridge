@@ -730,6 +730,47 @@ TEST_CASE("SkyWatcher async - SyncToCoordinates during a Dec pulse succeeds and 
     driver->set_connected(false);
 }
 
+// open-astro#870: sync used to write ":E" to an axis MoveAxis was turning.
+TEST_CASE("SkyWatcher async - SyncToCoordinates during a Dec MoveAxis jog is refused and leaves the jog running (#870)",
+          "[skywatcher][async][moveaxis]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+
+    driver->move_axis(1, 1.0);
+    CHECK(mount.axis_running(2));
+    expect_alpaca_error([&] { driver->sync_to_coordinates(driver->get_right_ascension(), 20.0); },
+                        alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.axis_running(2));  // the jog was neither stopped nor written to
+    try {
+        driver->sync_to_coordinates(1.0, 20.0);
+        FAIL("sync during a jog must throw");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("secondary (Dec)") != std::string::npos);
+    }
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - SyncToCoordinates during an RA MoveAxis jog with tracking off is refused (#870)",
+          "[skywatcher][async][moveaxis]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(false);
+
+    driver->move_axis(0, 1.0);
+    CHECK(mount.axis_running(1));
+    expect_alpaca_error([&] { driver->sync_to_coordinates(1.0, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(mount.axis_running(1));
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a refused SyncToCoordinates during a Dec pulse leaves the pulse to end itself (#630)",
           "[skywatcher][async][pulseguide]") {
     FakeTaskClock clock;

@@ -2141,6 +2141,18 @@ public:
         slew_to_coordinates_async(ra, dec);
     }
 
+    // open-astro#870: ":E" needs the motor stopped and the controller answers
+    // "Motor not stopped" for a jogging axis. Refuse instead of cancelling the
+    // client's jog as a hidden side effect; callers hold mutex_.
+    void refuse_sync_during_move_axis_locked() const {
+        if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
+            throw AlpacaException(std::string("SyncToCoordinates is not allowed while MoveAxis is running on the ") +
+                                      (manual_axis_slewing_[0] ? "primary (RA)" : "secondary (Dec)") +
+                                      " axis; stop the axis first",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
     void sync_to_coordinates(double ra, double dec) override {
         {
             // A refused sync must not cancel a pulse in flight (open-astro#630),
@@ -2149,12 +2161,14 @@ public:
             check_connected();
             check_not_parked_locked("SyncToCoordinates");
             validate_ra_dec(ra, dec, "SyncToCoordinates");
+            refuse_sync_during_move_axis_locked();
         }
         stop_pulse_ops();
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
+        refuse_sync_during_move_axis_locked();
 
         auto& protocol = *protocol_;
 
@@ -2178,9 +2192,10 @@ public:
         const bool was_tracking = tracking_;
         // ":E" on EITHER axis needs that motor stopped, and the reap above
         // cancelled any pulse without touching the hardware (open-astro#630):
-        // stop every axis MoveAxis does not own -- RA's drive or pulse, Dec's
-        // pulse or rate offset. set_tracking_locked(true) below restarts the
-        // drive and the offset; a cancelled pulse is not resumed.
+        // stop every axis: a MoveAxis jog is refused above (open-astro#870), so
+        // none is manual here -- RA's drive or pulse, Dec's pulse or rate
+        // offset. set_tracking_locked(true) below restarts the drive and the
+        // offset; a cancelled pulse is not resumed.
         const bool stop_ra = was_tracking || !manual_axis_slewing_[0];
         const bool stop_dec = !manual_axis_slewing_[1];
         if (stop_ra || stop_dec) {
