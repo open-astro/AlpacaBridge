@@ -2293,9 +2293,10 @@ private:
     // more than kLandingToleranceArcsec on either axis, at most kMaxLandingRefinePasses times (open-astro#880).
     // Each pass aims at the target corrected by the residual just read, so a systematic landing offset is
     // cancelled rather than repeated; an axis already inside the tolerance keeps its aim, so a Dec-only pass does
-    // not chase the handset's one-second RA readback steps (open-astro#1030). 16-bit handsets (V3) step ~19.8" in RA, so they are not refined. `lock` is held on entry and on
-    // return. Returns false when the slew was superseded, aborted or cancelled; throws when a pass fails. A
-    // residual left after the last pass is logged as a WARN, not thrown (open-astro#1027).
+    // not chase the handset's one-second RA readback steps (open-astro#1030). 16-bit handsets (V3) step ~19.8" in RA,
+    // so they are not refined. `lock` is held on entry and on return. Returns false when the slew was superseded,
+    // aborted or cancelled; throws when a pass fails. A residual left after the last pass is logged as a WARN, not
+    // thrown (open-astro#1027).
     bool refine_goto_landing_locked(std::unique_lock<std::mutex>& lock, double ra, double dec,
                                     uint64_t owner_generation, util::OperationContext* ctx) {
         if (!use_precise_commands_) {
