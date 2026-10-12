@@ -778,6 +778,50 @@ TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to reques
     driver->set_connected(false);
 }
 
+TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after NumX changes", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 2;
+    fake.frame_height = 2;
+    fake.frame_bytes = {0, 1, 0, 2, 0, 3, 0, 4};
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_num_x(4);
+    driver->set_num_y(3);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+
+    driver->set_num_x(2);
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 4);
+    CHECK(image.height == 3);
+    CHECK(image.data == std::vector<std::int32_t>{1, 2, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0});
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumY after NumY changes", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    fake.frame_width = 2;
+    fake.frame_height = 2;
+    fake.frame_bytes = {0, 1, 0, 2, 0, 3, 0, 4};
+    fake.read_directly = true;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_num_x(4);
+    driver->set_num_y(3);
+    driver->start_exposure(0.05, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+
+    driver->set_num_y(1);
+    const auto image = driver->get_image_array();
+    CHECK(image.width == 4);
+    CHECK(image.height == 3);
+    CHECK(image.data == std::vector<std::int32_t>{1, 2, 0, 0, 3, 4, 0, 0, 0, 0, 0, 0});
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - aborting a pending download leaves ImageReady false without an error",
           "[qhy][camera][unit]") {
     auto fake = make_fake();
