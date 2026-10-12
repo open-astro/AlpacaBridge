@@ -54,8 +54,10 @@ constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 // open-astro#880: a GOTO can land tens of arcseconds off (EQM-35 Pro: 29.4" in RA) and the driver reports the
-// handset's own position afterwards. Refinement re-issues the GOTO until the readback is inside the tolerance,
-// well inside ConformU's +/-10", for at most this many extra passes. A residual still above the tolerance after
+// handset's own position afterwards. Refinement re-issues the GOTO until the Dec readback is inside this
+// tolerance, well inside ConformU's +/-10", for at most this many extra passes. RA uses the wider
+// kLandingRaToleranceArcsec below (#1030), which accepts up to about 16" and so does not make ConformU's RA 10"
+// check more reliable. A residual still above the tolerance after
 // the last pass is logged and the slew completes: a handset's own GOTO scatter (EQM-35 Pro on HC 06.03.00: about
 // +/-10" in Dec per GOTO, up to 20", open-astro#1027) is not something another pass can remove, and failing the
 // slew there turned a plate-solvable 15" landing into an error.

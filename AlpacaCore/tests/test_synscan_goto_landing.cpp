@@ -152,8 +152,9 @@ constexpr double kTargetDec = 20.0;
 constexpr double kConformUToleranceArcsec = 10.0;
 
 // The EQM-35 Pro on its HC 06.03.00 handset, 2026-10-11 14:24:23 (#1027), landed minus commanded aim per GOTO:
-// RA +10.4" every time (systematic, which refinement cancels), Dec -0.8", +9.6", +0.1", -10.7" (random). The
-// first landing's Dec was already good; the passes RA needed left Dec 10.7" off after the last one.
+// RA +10.4" every time (systematic; since #1030 it is inside the RA quantum and no longer refined), Dec -0.8", +9.6",
+// +0.1", -10.7" (random). The first landing's Dec was already good; the passes RA needed left Dec 10.7" off after the
+// last one.
 void script_rig_dec_scatter(LandingOffsetHandset& st) {
     // The rig's +10.4" is inside the RA quantum since #1030 and would stop the passes after the first GOTO, so the
     // scripted RA offset is 29.4": outside it, systematic, cancelled by the first refinement as before.
@@ -238,7 +239,7 @@ TEST_CASE("SynScan GOTO landing - an RA residual outside the quantum is still re
 TEST_CASE("SynScan GOTO landing - a Dec residual over the Dec tolerance is refined with RA inside the quantum (#1030)",
           "[synscan][telescope][goto-landing]") {
     auto st = std::make_shared<LandingOffsetHandset>();
-    st->ra_offset_counts.store(0);
+    st->ra_offset_counts.store(150);      // 11.6" RA, inside the quantum on its own
     st->dec_offset_script[0].store(124);  // a systematic 9.6" Dec offset, cancelled by the aim correction
     st->dec_offset_script[1].store(124);
     st->dec_scripted.store(true);
