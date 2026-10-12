@@ -29,6 +29,7 @@
 #ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -374,8 +375,16 @@ private:
                 AlpacaError::NotConnected);
         }
 
+        // Exclusive access (issue #995): a later open() of this node, e.g. an
+        // auto-detect probe of another iOptron driver scanning the same
+        // Prolific/FTDI candidates, then fails with EBUSY and the probe skips
+        // the port, instead of flushing our pending reply and writing its own
+        // query. Same as the SynScan and Sky-Watcher wrappers: connected link
+        // only, ignored on failure (pty back ends may not support it).
+        (void)ioctl(serial_fd_, TIOCEXCL);
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             throw AlpacaException("Failed to get serial port attributes", AlpacaError::DriverException);
@@ -401,12 +410,14 @@ private:
         tty.c_cc[VTIME] = 10;  // 1s per-character timeout; read_response() has its own timeout
 
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             throw AlpacaException("Failed to set serial port attributes", AlpacaError::DriverException);
         }
 
         if (!util::clear_nonblocking(serial_fd_)) {
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
             throw AlpacaException("Failed to set serial port to blocking mode", AlpacaError::DriverException);
@@ -422,6 +433,7 @@ private:
         connected_ = false;
 #ifndef _WIN32
         if (serial_fd_ >= 0) {
+            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
             close(serial_fd_);
             serial_fd_ = -1;
         }

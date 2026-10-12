@@ -229,3 +229,22 @@ TEST_CASE("iOptron iEAF Focuser Driver - sync disconnect during sync connect is 
     CHECK(fake.connects() == 1);
     driver->set_connected(false);
 }
+
+// Issue #995: a connected iOptron link is held exclusively (TIOCEXCL), so a
+// second open of the same tty, which is what every iOptron auto-detect probe
+// does to each candidate, fails with EBUSY and the probe skips the port
+// instead of flushing the connected driver's replies and writing its own query.
+TEST_CASE("iOptron iEAF Focuser Driver - a connected port refuses a second open", "[ioptron][focuser][unit]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    // A second driver on the same node stands in for a probe's open().
+    auto intruder = alpacacore::vendor::ioptron::create_ieaf_focuser(1, fake.slave_path());
+    CHECK_THROWS(intruder->set_connected(true));
+    CHECK(intruder->get_connected() == false);
+
+    CHECK(fake.connects() == 1);
+    CHECK(driver->get_position() == 1000);
+    driver->set_connected(false);
+}
