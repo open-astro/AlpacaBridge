@@ -778,8 +778,7 @@ TEST_CASE("QHY Camera Driver - positive short SDK frame is zero-padded to reques
     driver->set_connected(false);
 }
 
-TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after NumX changes",
-          "[qhy][camera][unit]") {
+TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after NumX changes", "[qhy][camera][unit]") {
     auto fake = make_fake();
     fake.frame_width = 2;
     fake.frame_height = 2;
@@ -801,8 +800,7 @@ TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumX after
     driver->set_connected(false);
 }
 
-TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumY after NumY changes",
-          "[qhy][camera][unit]") {
+TEST_CASE("QHY Camera Driver - ImageArray keeps the completed frame's NumY after NumY changes", "[qhy][camera][unit]") {
     auto fake = make_fake();
     fake.frame_width = 2;
     fake.frame_height = 2;

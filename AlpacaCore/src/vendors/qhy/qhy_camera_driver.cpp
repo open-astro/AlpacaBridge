@@ -1930,7 +1930,7 @@ private:
     std::vector<uint8_t> exposure_buffer_;
     uint32_t exposure_width_{};
     uint32_t exposure_height_{};
-    int image_width_{};   // NumX/NumY captured when the frame completed
+    int image_width_{};  // NumX/NumY captured when the frame completed
     int image_height_{};
     uint32_t exposure_bpp_{};
     uint32_t exposure_channels_{};
@@ -2167,8 +2167,8 @@ private:
         exposure_buffer_.clear();
         exposure_width_    = 0;
         exposure_height_   = 0;
-        image_width_       = 0;
-        image_height_      = 0;
+        image_width_ = 0;
+        image_height_ = 0;
         exposure_bpp_      = 0;
         exposure_channels_ = 0;
     }
@@ -2679,14 +2679,14 @@ private:
 
     ImageArray build_image_array_locked() const {
         ImageArray image;
-        image.width  = image_width_;
+        image.width = image_width_;
         image.height = image_height_;
 
         if (image.width <= 0 || image.height <= 0 || exposure_buffer_.empty()) {
             alpacacore::util::throw_invalid_camera_image("invalid QHY dimensions or empty frame buffer");
         }
 
-        const uint32_t eff_w = exposure_width_  > 0 ? exposure_width_  : static_cast<uint32_t>(image_width_);
+        const uint32_t eff_w = exposure_width_ > 0 ? exposure_width_ : static_cast<uint32_t>(image_width_);
         const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(image_height_);
         const uint32_t bpp   = exposure_bpp_;
         const uint32_t ch    = exposure_channels_;
