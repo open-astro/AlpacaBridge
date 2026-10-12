@@ -98,17 +98,34 @@ ZwoResolveResult resolve_zwo_camera(const ZwoConfiguredIdentity& entry, const st
                       "ZWO camera ID " + std::to_string(entry.camera_id.value()) + " not found");
     }
     if (entry.camera_index.has_value()) {
+        // `index` is the SDK slot; a skipped slot leaves a gap, so match it, never the list position.
         const int index = entry.camera_index.value();
-        if (index < 0 || index >= static_cast<int>(found.size())) {
-            return failed(ZwoResolveFailure::IndexOutOfRange, "Camera index not found");
+        for (const auto& camera : found) {
+            if (camera.index != index) {
+                continue;
+            }
+            if (claimed(camera)) {
+                return failed(ZwoResolveFailure::NotFound,
+                              "ZWO camera at index " + std::to_string(index) + " belongs to another device entry");
+            }
+            return found_camera(camera);
         }
-        if (claimed(found[static_cast<std::size_t>(index)])) {
-            return failed(ZwoResolveFailure::NotFound,
-                          "ZWO camera at index " + std::to_string(index) + " belongs to another device entry");
-        }
-        return found_camera(found[static_cast<std::size_t>(index)]);
+        return failed(ZwoResolveFailure::IndexOutOfRange, "Camera index not found");
     }
     return failed(ZwoResolveFailure::NotFound, "Camera ID not specified");
+}
+
+std::string describe_unreadable_zwo_slots(const std::vector<ZwoUnreadableSlot>& unreadable) {
+    if (unreadable.empty()) {
+        return {};
+    }
+    std::string text = "The SDK could not read ZWO camera slot";
+    text += unreadable.size() > 1 ? "s " : " ";
+    for (std::size_t i = 0; i < unreadable.size(); ++i) {
+        text += (i == 0 ? "" : ", ") + std::to_string(unreadable[i].slot) + " (" + unreadable[i].error + ")";
+    }
+    text += "; power-cycle the camera (and any hub it powers)";
+    return text;
 }
 
 std::string generate_zwo_unique_id() {

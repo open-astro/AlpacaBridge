@@ -75,6 +75,8 @@ struct ZWOControlCaps {
 };
 
 struct ZWOCameraInfo {
+    /// SDK slot (the index ASIGetCameraProperty takes); -1 when not from an enumeration.
+    int slot_index{-1};
     int camera_id{};
     std::string name;
     int max_width{};
@@ -107,14 +109,18 @@ class ZWOSDKWrapper {
 public:
     static ZWOSDKWrapper& instance();
 
-    std::vector<ZWOCameraInfo> enumerate_cameras();
+    /// Readable cameras only; each carries its SDK slot in `slot_index`.
+    std::vector<ZWOCameraInfo> enumerate_cameras(std::vector<ZwoUnreadableSlot>* unreadable = nullptr);
     /// Every connected camera with its serial. ASIGetSerialNumber needs an
     /// open camera, so each one is opened through the ref-counted
     /// open_camera()/close_camera() pair (a camera already open in this
     /// process stays open). A failed serial read leaves the serial empty.
     /// With `only_model_name` (already trimmed) set, only cameras of that
     /// model are opened; the others are listed with an empty serial.
-    std::vector<ZwoEnumeratedCamera> enumerate_identified_cameras(const std::string& only_model_name = {});
+    /// `index` is the SDK slot. A slot the SDK cannot read is skipped and, when
+    /// `unreadable` is not null, reported there.
+    std::vector<ZwoEnumeratedCamera> enumerate_identified_cameras(const std::string& only_model_name = {},
+                                                                  std::vector<ZwoUnreadableSlot>* unreadable = nullptr);
     bool get_camera_info_by_id(int camera_id, ZWOCameraInfo& info);
     bool get_camera_info_by_index(int camera_index, ZWOCameraInfo& info);
 

@@ -1280,14 +1280,21 @@ private:
     }
 
     int resolve_camera_id_locked() {
-        const auto found =
-            ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(binding_.identity.camera_name));
+        std::vector<ZwoUnreadableSlot> unreadable;
+        const auto found = ZWOSDKWrapper::instance().enumerate_identified_cameras(
+            trim_zwo_name(binding_.identity.camera_name), &unreadable);
         const auto result = resolve_zwo_camera(binding_.identity, found, binding_.claimed_serials);
         if (!result.camera.has_value()) {
-            ALPACA_LOG_WARN("ZWO", result.message);
-            throw AlpacaException(result.message, result.failure == ZwoResolveFailure::IndexOutOfRange
-                                                      ? AlpacaError::InvalidValue
-                                                      : AlpacaError::NotConnected);
+            // The camera this entry means may be the slot the SDK could not read: say so.
+            std::string message = result.message;
+            const std::string hint = describe_unreadable_zwo_slots(unreadable);
+            if (!hint.empty()) {
+                message += ". " + hint;
+            }
+            ALPACA_LOG_WARN("ZWO", message);
+            throw AlpacaException(message, result.failure == ZwoResolveFailure::IndexOutOfRange
+                                               ? AlpacaError::InvalidValue
+                                               : AlpacaError::NotConnected);
         }
         const auto& camera = result.camera.value();
         ALPACA_LOG_INFO("ZWO", "Using camera index " + std::to_string(camera.index) + ": " + camera.name + " (ID " +

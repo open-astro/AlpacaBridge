@@ -18,6 +18,7 @@
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -382,11 +383,15 @@ private:
                 throw AlpacaException("No ZWO cameras detected", AlpacaError::NotConnected);
             }
             int index = camera_index_.value();
-            if (index < 0 || index >= static_cast<int>(cameras.size())) {
-                ALPACA_LOG_WARN("ZWO", "Camera index out of range: " + std::to_string(index) + " (count=" + std::to_string(cameras.size()) + ")");
+            // The index is the SDK slot; an unreadable slot is skipped, so match the slot, not the list position.
+            const auto it = std::find_if(cameras.begin(), cameras.end(),
+                                         [index](const ZWOCameraInfo& c) { return c.slot_index == index; });
+            if (it == cameras.end()) {
+                ALPACA_LOG_WARN("ZWO", "Camera index not found: " + std::to_string(index) +
+                                           " (readable=" + std::to_string(cameras.size()) + ")");
                 throw AlpacaException("Camera index not found", AlpacaError::InvalidValue);
             }
-            const auto& info = cameras[static_cast<std::size_t>(index)];
+            const auto& info = *it;
             camera_id_ = info.camera_id;
             camera_name_ = info.name;
             return camera_id_.value();

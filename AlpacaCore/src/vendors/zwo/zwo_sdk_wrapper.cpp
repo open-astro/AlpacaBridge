@@ -281,30 +281,40 @@ ZWOSDKWrapper& ZWOSDKWrapper::instance() {
     return wrapper;
 }
 
-std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras() {
+std::vector<ZWOCameraInfo> ZWOSDKWrapper::enumerate_cameras(std::vector<ZwoUnreadableSlot>* unreadable) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int count = ASIGetNumOfConnectedCameras();
+    const int count = ASIGetNumOfConnectedCameras();
     std::vector<ZWOCameraInfo> result;
     if (count <= 0) {
         return result;
     }
-    result.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        ASI_CAMERA_INFO info{};
-        throw_on_error(ASIGetCameraProperty(&info, i), "ASIGetCameraProperty");
-        result.push_back(convert_camera_info(info));
+    const auto slots = read_zwo_camera_slots<ASI_CAMERA_INFO>(
+        count,
+        [](int slot, ASI_CAMERA_INFO& info, std::string& error) {
+            const ASI_ERROR_CODE code = ASIGetCameraProperty(&info, slot);
+            if (code != ASI_SUCCESS) {
+                error = error_code_to_string(code);
+                return false;
+            }
+            return true;
+        },
+        unreadable);
+    result.reserve(slots.size());
+    for (const auto& slot : slots) {
+        result.push_back(convert_camera_info(slot.info));
+        result.back().slot_index = slot.slot;
     }
     return result;
 }
 
-std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(const std::string& only_model_name) {
+std::vector<ZwoEnumeratedCamera> ZWOSDKWrapper::enumerate_identified_cameras(
+    const std::string& only_model_name, std::vector<ZwoUnreadableSlot>* unreadable) {
     std::vector<ZwoEnumeratedCamera> result;
-    const auto cameras = enumerate_cameras();
+    const auto cameras = enumerate_cameras(unreadable);
     result.reserve(cameras.size());
-    int index = 0;
     for (const auto& info : cameras) {
         ZwoEnumeratedCamera camera;
-        camera.index = index++;
+        camera.index = info.slot_index;
         camera.camera_id = info.camera_id;
         camera.name = info.name;
         if (!only_model_name.empty() && trim_zwo_name(info.name) != only_model_name) {

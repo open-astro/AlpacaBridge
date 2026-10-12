@@ -177,3 +177,64 @@ TEST_CASE("ZWO camera identity - UniqueID", "[zwo][camera][identity][unit]") {
     CHECK(zwo_unique_id("", generated) == generated);
     CHECK(zwo_unique_id("", generated) == zwo_unique_id("", generated));
 }
+
+namespace {
+
+struct FakeSlotInfo {
+    std::string name;
+};
+
+// Slot 0 answers ASI_ERROR_CAMERA_REMOVED (the rig in issue #1029), slot 1 reads fine.
+bool slot0_removed(int slot, FakeSlotInfo& info, std::string& error) {
+    if (slot == 0) {
+        error = "ASI_ERROR_CAMERA_REMOVED";
+        return false;
+    }
+    info.name = "ZWO ASI120MM Mini";
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("ZWO camera slots - an unreadable slot is skipped and the rest keep their SDK slot index",
+          "[zwo][camera][identity][unit]") {
+    std::vector<alpacacore::vendor::zwo::ZwoUnreadableSlot> unreadable;
+
+    const auto slots = alpacacore::vendor::zwo::read_zwo_camera_slots<FakeSlotInfo>(2, slot0_removed, &unreadable);
+
+    REQUIRE(slots.size() == 1);
+    CHECK(slots[0].slot == 1);
+    CHECK(slots[0].info.name == "ZWO ASI120MM Mini");
+    REQUIRE(unreadable.size() == 1);
+    CHECK(unreadable[0].slot == 0);
+    CHECK(unreadable[0].error == "ASI_ERROR_CAMERA_REMOVED");
+}
+
+TEST_CASE("ZWO camera slots - an index entry binds the SDK slot, not the list position",
+          "[zwo][camera][identity][unit]") {
+    // Slot 0 was skipped: the one camera left is listed first but is slot 1.
+    const std::vector<ZwoEnumeratedCamera> found{mini(1)};
+    ZwoConfiguredIdentity by_index;
+    by_index.camera_index = 1;
+    ZwoConfiguredIdentity skipped_slot;
+    skipped_slot.camera_index = 0;
+
+    const auto bound = resolve_zwo_camera(by_index, found, {});
+    const auto missing = resolve_zwo_camera(skipped_slot, found, {});
+
+    REQUIRE(bound.camera.has_value());
+    CHECK(bound.camera->index == 1);
+    CHECK_FALSE(missing.camera.has_value());
+    CHECK(missing.failure == ZwoResolveFailure::IndexOutOfRange);
+}
+
+TEST_CASE("ZWO camera slots - the refusal names the slot, the SDK error and the remedy",
+          "[zwo][camera][identity][unit]") {
+    using alpacacore::vendor::zwo::describe_unreadable_zwo_slots;
+
+    CHECK(describe_unreadable_zwo_slots({}).empty());
+    const auto text = describe_unreadable_zwo_slots({{0, "ASI_ERROR_CAMERA_REMOVED"}});
+    CHECK(text ==
+          "The SDK could not read ZWO camera slot 0 (ASI_ERROR_CAMERA_REMOVED); "
+          "power-cycle the camera (and any hub it powers)");
+}
