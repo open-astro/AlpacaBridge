@@ -2326,9 +2326,12 @@ private:
             // Keep last known state if polling times out.
         } catch (...) {
             if (propagate_error) {
-                if (++park_poll_failures_ >= kParkPollFailureThreshold) {
+                const int failures = ++park_poll_failures_;
+                if (failures >= kParkPollFailureThreshold) {
                     throw;
                 }
+                ALPACA_LOG_WARN("SynScan", "Park slew status poll failed (" + std::to_string(failures) + "/" +
+                                               std::to_string(kParkPollFailureThreshold) + ")");
                 return true;
             }
             // Keep last known state if polling times out.

@@ -61,6 +61,8 @@ struct FakeSynScanState {
     std::atomic<bool> invalid_slew_status{false};
     // The next N slew-status queries go unanswered (a dropped reply), then the handset answers again.
     std::atomic<int> drop_slew_status{0};
+    // While set, the GOTO never lands, so a test controls exactly when the slew-status queries see it end.
+    std::atomic<bool> goto_never_ends{false};
     std::atomic<bool> reject_tracking_stop{false};
     // With `no_location` set the handset never answers the location query,
     // so the driver has no site unless config or a client supplies one.
@@ -84,6 +86,7 @@ struct FakeSynScanState {
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
+        if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
         return now() - started < kGotoDuration;
     }
@@ -445,6 +448,68 @@ TEST_CASE("SynScan async - Park survives dropped status replies below the thresh
     st->drop_slew_status.store(2);
     REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
     CHECK(st->drop_slew_status.load() == 0);  // both drops were consumed by Park polls
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - Park failure count resets on a good status reply", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->goto_never_ends.store(true);
+    st->drop_slew_status.store(2);
+    REQUIRE(advance_until(clock, [&] { return st->drop_slew_status.load() == 0; }));
+    // A good reply that still reports the slew in progress: the failure count must go back to zero here.
+    const int polls_after_drops = st->slew_status_polls.load();
+    REQUIRE(advance_until(clock, [&] { return st->slew_status_polls.load() > polls_after_drops; }));
+    REQUIRE_FALSE(driver->get_at_park());
+    st->drop_slew_status.store(2);
+    const int polls_before_second_drops = st->slew_status_polls.load();
+    REQUIRE(advance_until(clock, [&] { return st->drop_slew_status.load() == 0; }));
+    CHECK(st->slew_status_polls.load() >= polls_before_second_drops + 2);
+    // Two failures on each side of the good reply: four in all, never three in a row.
+    st->goto_never_ends.store(false);
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(1000);
+    bool park_failed = false;
+    REQUIRE(advance_until(clock, [&] {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            park_failed = true;
+            return true;
+        }
+    }));
+    REQUIRE(park_failed);
+    st->drop_slew_status.store(0);
+    st->goto_seen.store(false);
+    // The second Park meets one dropped reply; a count left at three would fail it at once.
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(1);
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
     driver->set_connected(false);
 }
 
