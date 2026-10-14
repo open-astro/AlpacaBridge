@@ -1,0 +1,3 @@
+### Fixed
+
+- **Bisque synchronous slew reports a persistent completion-poll failure**, Bisque driver, issue #1112. `SlewToCoordinates` used to swallow every `IsSlewComplete` poll error and wait out the 120 s timeout. It now tolerates a single failed poll (a success resets the count) and, after 3 failures in a row, throws an error that names the poll failure and keeps the original TheSkyX error text and code; `Slewing` stays in progress and a disconnect during the wait is still `NotConnected`. Covered by `Bisque sync slew - a transient poll failure is tolerated and a persistent one is named` in `AlpacaCore/tests/test_bisque_telescope.cpp`.

@@ -893,3 +893,49 @@ TEST_CASE("Bisque Telescope Driver - out-of-range guide rates are InvalidValue a
         CHECK(driver->get_guide_rate().dec == kSiderealDegPerSec);
     }
 }
+
+// open-astro#1112: the synchronous slew wait used to swallow every poll error and
+// report a persistent TheSkyX fault as a 120 s timeout.
+TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persistent one is named",
+          "[bisque][telescope][slewfailure]") {
+    auto fail_polls = std::make_shared<std::atomic<int>>(1);  // failures still to serve
+    auto polls = std::make_shared<std::atomic<int>>(0);
+    alpacacore::test::FakeMountServer server([fail_polls, polls](const std::string& command) {
+        if (command.find("ConnectAndDoNotUnpark") != std::string::npos) return "1#";
+        if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
+        if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
+        if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("IsSlewComplete") != std::string::npos) {
+            polls->fetch_add(1);
+            if (fail_polls->load() != 0) {
+                if (fail_polls->load() > 0) fail_polls->fetch_sub(1);
+                return "|No error. Error = 1.IsSlewComplete unavailable#";
+            }
+            return "|No error. Error = 0.1#";
+        }
+        return "|No error. Error = 0.OK#";
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    // One failure, then success: the slew completes.
+    CHECK_NOTHROW(driver->slew_to_coordinates(5.5, 20.0));
+    CHECK(polls->load() == 2);
+
+    // Persistent failure: the error names the poll failure, not the timeout, and
+    // the slew is not reported complete.
+    fail_polls->store(-1);
+    polls->store(0);
+    try {
+        driver->slew_to_coordinates(5.5, 20.0);
+        FAIL("Expected poll failure");
+    } catch (const alpacacore::AlpacaException& ex) {
+        const std::string what = ex.what();
+        CHECK(what.find("Slew completion poll failed 3 times in a row") != std::string::npos);
+        CHECK(what.find("TheSkyX error") != std::string::npos);
+        CHECK(what.find("timed out") == std::string::npos);
+    }
+    CHECK(polls->load() == 3);
+    driver->set_connected(false);
+}
