@@ -2639,8 +2639,11 @@ private:
                 }
                 ALPACA_LOG_WARN("SynScan", miss + "; repeating the GOTO once (open-astro#1105)");
                 // The same target, not one aimed by the residual: the miss is the handset's, not an offset to
-                // correct, and an aim moved by 49' would land 49' the other way.
+                // correct, and an aim moved by 49' would land 49' the other way. The carried aim returns to the
+                // target too, so the next re-GOTO round is aimed by the repeat's residual alone (open-astro#1120).
                 far_miss_repeated = true;
+                aim_ra = ra;
+                aim_dec = dec;
                 equatorial_cache_valid_ = false;
                 altaz_cache_valid_ = false;
                 guide_position_valid_ = false;
