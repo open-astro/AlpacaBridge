@@ -1053,6 +1053,10 @@ private:
     }
 
     void wait_for_slew_complete_locked(std::unique_lock<std::mutex>& lock) {
+        // One failed poll is tolerated (a transient TheSkyX hiccup); this many in a
+        // row is a persistent fault and is reported as such, not as a 120 s timeout.
+        constexpr int kMaxConsecutivePollFailures = 3;
+        int consecutive_failures = 0;
         auto start = std::chrono::steady_clock::now();
         while (true) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -1060,9 +1064,13 @@ private:
             if (elapsed > 120) {
                 throw AlpacaException("Slew timed out after 120 seconds");
             }
+            int failure_code = AlpacaError::DriverException;
+            std::string failure_what;
             try {
                 auto& protocol = BisqueProtocolWrapper::instance();
-                if (protocol.is_slew_complete()) {
+                const bool complete = protocol.is_slew_complete();
+                consecutive_failures = 0;
+                if (complete) {
                     slewing_cached_ = false;
                     if (slew_settle_time_seconds_ > 0) {
                         lock.unlock();
@@ -1072,12 +1080,26 @@ private:
                     }
                     return;
                 }
-            } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
-                // Includes NotConnected from a racing disconnect — keep polling
-                // only while still connected (re-checked below).
+            } catch (const AlpacaException& ex) {
+                // A racing disconnect stays NotConnected.
+                if (ex.error_code() == AlpacaError::NotConnected) {
+                    throw;
+                }
+                failure_code = ex.error_code();
+                failure_what = ex.what();
+                ++consecutive_failures;
+            } catch (const std::exception& ex) {
+                failure_what = ex.what();
+                ++consecutive_failures;
             } catch (...) {
-                // Non-Alpaca exception from a status poll — same policy: keep
-                // polling while still connected (re-checked below).
+                failure_what = "unknown error";
+                ++consecutive_failures;
+            }
+            if (consecutive_failures >= kMaxConsecutivePollFailures) {
+                // slewing_cached_ stays set: a failed poll is not evidence of arrival.
+                throw AlpacaException("Slew completion poll failed " + std::to_string(consecutive_failures) +
+                                          " times in a row: " + failure_what,
+                                      failure_code);
             }
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::seconds(1));
