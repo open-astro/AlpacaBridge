@@ -34,7 +34,7 @@ function makeEl(props) {
     }, props);
 }
 
-async function setup({ apOn, confirmAnswer }) {
+async function setup({ apOn, confirmAnswer, host = 'pi.local', status }) {
     const src = fs.readFileSync(APP_JS, 'utf8');
     const block = src.slice(src.indexOf('const WIFI_BASE'));
     const els = {
@@ -57,7 +57,7 @@ async function setup({ apOn, confirmAnswer }) {
             querySelector: (sel) => (sel.includes('.active') ? bands.find((b) => b.classList.contains('active')) : null),
             activeElement: null,
         },
-        location: { hostname: 'pi.local' },
+        location: { hostname: host },
         confirm: (msg) => { prompts.push(msg); return confirmAnswer.value; },
         alert: () => {},
         fetch: async (url, opts) => {
@@ -69,7 +69,7 @@ async function setup({ apOn, confirmAnswer }) {
     };
     vm.createContext(ctx);
     vm.runInContext(block + '\n;wifiRefresh = function () {}; globalThis.__wifiState = wifiState; globalThis.__init = wifiInit;', ctx);
-    ctx.__wifiState.status = { Ssid: 'HomeNet', DeviceCount: 1, ApActive: apOn };
+    ctx.__wifiState.status = status || { Ssid: 'HomeNet', DeviceCount: 1, ApActive: apOn };
     ctx.__wifiState.ap = { Configured: true, Ssid: 'Old Name', Band: 'bg' };
     ctx.__init();
     const sent = () => requests.filter((r) => r.method === 'PUT');
@@ -204,4 +204,47 @@ test('WiFi radio on saves without a prompt', async () => {
     assert.equal(t.prompts.length, 0);
     assert.equal(t.sent().length, 1);
     assert.equal(t.sent()[0].body.Enabled, true);
+});
+
+// Page served from the hotspot address on a dual-interface board: the client
+// switch skip must NOT apply to actions that take the hotspot or radio away.
+const ON_HOTSPOT = { host: '172.24.1.1', status: { Ssid: 'HomeNet', DeviceCount: 2, ApActive: true } };
+
+test('on the hotspot address: hotspot off prompts once, Cancel sends nothing', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: false }, ...ON_HOTSPOT });
+    t.els['wifi-ap-toggle'].checked = false;
+    t.els['wifi-ap-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.prompts.length, 1);
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-toggle'].checked, true);
+});
+
+test('on the hotspot address: hotspot name edit prompts once, Cancel sends nothing', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: false }, ...ON_HOTSPOT });
+    t.els['wifi-ap-ssid'].value = 'New Name';
+    t.els['wifi-ap-ssid'].handlers.change();
+    await flush();
+    assert.equal(t.prompts.length, 1);
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-ap-ssid'].value, 'Old Name');
+});
+
+test('on the hotspot address: radio off prompts once, Cancel sends nothing', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: false }, ...ON_HOTSPOT });
+    t.els['wifi-radio-toggle'].checked = false;
+    t.els['wifi-radio-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.prompts.length, 1);
+    assert.equal(t.sent().length, 0);
+    assert.equal(t.els['wifi-radio-toggle'].checked, true);
+});
+
+test('hotspot-only board (ApActive, no Ssid) on a LAN host: hotspot off prompts', async () => {
+    const t = await setup({ apOn: true, confirmAnswer: { value: false }, status: { DeviceCount: 1, ApActive: true } });
+    t.els['wifi-ap-toggle'].checked = false;
+    t.els['wifi-ap-toggle'].handlers.change();
+    await flush();
+    assert.equal(t.prompts.length, 1);
+    assert.equal(t.sent().length, 0);
 });

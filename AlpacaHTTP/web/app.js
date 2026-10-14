@@ -5061,6 +5061,18 @@ function wifiConfirmSwitch(action) {
     return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection while it switches.');
 }
 
+// Warning for changes that take the hotspot or the radio away (hotspot off,
+// running-hotspot edit, radio off). Unlike wifiConfirmSwitch there is no
+// on-the-hotspot skip: a browser on the hotspot address is exactly the one
+// that loses the page. Ask whenever the page is not local and the hotspot is
+// up or the client is associated, whatever the interface count or Ssid.
+function wifiConfirmDrop(action) {
+    const status = wifiState.status || {};
+    if (location.hostname === 'localhost') return true;
+    if (!status.ApActive && !status.Ssid) return true;
+    return confirm('The device will ' + action + '. If you are connected to it over WiFi right now, this page will lose connection.');
+}
+
 // 5 GHz needs a regulatory country: under the world domain most 5 GHz
 // channels are blocked, so the AP can beacon on a channel clients refuse.
 // The server rejects Band "a" too; this is the friendly front-end check.
@@ -5109,12 +5121,13 @@ async function wifiApplyAp(enabled, fromToggle, revert) {
         return;
     }
     if (fromToggle) {
-        const action = enabled ? 'start the hotspot "' + ssid + '"' : 'turn off the hotspot';
-        if (!wifiConfirmSwitch(action)) {
+        const ok = enabled ? wifiConfirmSwitch('start the hotspot "' + ssid + '"')
+            : wifiConfirmDrop('turn off the hotspot');
+        if (!ok) {
             const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled;
             return;
         }
-    } else if (enabled && !wifiConfirmSwitch('restart the hotspot "' + ssid + '" with the new settings')) {
+    } else if (enabled && !wifiConfirmDrop('restart the hotspot "' + ssid + '" with the new settings')) {
         if (revert) revert();
         return;
     }
@@ -5165,7 +5178,7 @@ function wifiInit() {
     if (radioToggle) {
         radioToggle.addEventListener('change', async () => {
             // Turning the radio on cannot drop a connection; turning it off can.
-            if (!radioToggle.checked && !wifiConfirmSwitch('turn WiFi off')) {
+            if (!radioToggle.checked && !wifiConfirmDrop('turn WiFi off')) {
                 radioToggle.checked = true;
                 return;
             }
