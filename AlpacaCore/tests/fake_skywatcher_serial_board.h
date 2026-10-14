@@ -34,15 +34,22 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "fake_pty_write.h"
+#include "fake_skywatcher_mount.h"
 
 namespace alpacacore::test {
 
 class FakeSkyWatcherSerialBoard {
 public:
-    FakeSkyWatcherSerialBoard() : pty_("FakeSkyWatcherSerialBoard") {
+    // The board answers the geometry and feature inquiries (":a", ":b", ":g",
+    // ":q", ":s") and the version of @p profile, the same FakeMountProfile the
+    // UDP fake takes, so a serial test of an EQM-35 Pro is not served the
+    // Wave 100i's counts or its HOME_INDEXER bit.
+    explicit FakeSkyWatcherSerialBoard(FakeMountProfile profile = FakeMountProfile::wave_100i())
+        : pty_("FakeSkyWatcherSerialBoard"), profile_(std::move(profile)), version_reply_(profile_.version_reply) {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387). Its keep-alive slave is what holds
@@ -197,7 +204,7 @@ public:
         reject_j_on_running_ = reject;
     }
 
-    /// The ":e1" payload (default "033A44": Wave 100i, MC 3.58 / code 0x44).
+    /// The ":e1" payload (default: the profile's, "033A44" for the Wave 100i); overrides it.
     void set_version_reply(std::string payload) {
         std::lock_guard<std::mutex> lock(mutex_);
         version_reply_ = std::move(payload);
@@ -337,11 +344,15 @@ private:
             case 'e':
                 return "=" + version_reply_;
             case 'a':
-                return "=" + u24(4147200);
+                // Same rule as FakeSkyWatcherMount: axis 2 reports cpr_dec when set.
+                return "=" + u24(axis == 2 && profile_.cpr_dec != 0 ? profile_.cpr_dec : profile_.cpr);
             case 'b':
-                return "=" + u24(14000000);
+                return "=" + u24(profile_.timer_freq);
             case 'g':
-                return "=01";
+                return "=" + profile_.high_speed_ratio_reply;
+            case 's':
+                if (!profile_.steps_per_worm) return "!0";
+                return "=" + u24(*profile_.steps_per_worm);
             case 'j':
                 return "=" + u24(counts_[axis - 1]);
             case 'f': {
@@ -352,8 +363,12 @@ private:
                 return std::string("=") + static_cast<char>('0' + c0) + static_cast<char>('0' + c1) +
                        static_cast<char>('0' + c2);
             }
-            case 'q':
-                return "=0C1000";
+            case 'q': {
+                const uint32_t inquiry = parse_u24(data);
+                if (inquiry == 0x000001) return "=" + u24(profile_.features);
+                if (inquiry == 0x000000) return "=" + u24(0);  // indexer word: never armed here
+                return "!0";
+            }
             case 'I':
                 t1_[axis - 1] = parse_u24(data);
                 return "=";
@@ -469,6 +484,7 @@ private:
     // First member: constructed before the worker, destroyed after it has
     // been joined.
     PtyPair pty_;
+    const FakeMountProfile profile_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<int> latency_ms_{0};
@@ -478,7 +494,7 @@ private:
     uint32_t t1_[2] = {0, 0};
     int delay_ms_ = 0;
     char delay_command_ = 0;
-    std::string version_reply_ = "033A44";
+    std::string version_reply_;  // seeded from profile_.version_reply
     int answer_baud_ = 0;
     int mispair_left_ = 0;
     bool reject_j_on_running_ = false;
