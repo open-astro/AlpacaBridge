@@ -10,8 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// wifiRefresh is stubbed out; state is seeded by hand. Runs the real WiFi block of app.js (from WIFI_BASE to the end of wifiInit)
-// against a stub DOM, so the confirmation wiring is tested as shipped.
+// wifiRefresh is stubbed out; state is seeded by hand. Runs the real WiFi block of app.js (everything from WIFI_BASE to the end
+// of the file) against a stub DOM, so the confirmation wiring is tested as shipped.
 
 const test = require('node:test');
 const assert = require('node:assert');
