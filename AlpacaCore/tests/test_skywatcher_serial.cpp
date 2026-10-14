@@ -28,6 +28,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -38,6 +39,7 @@
 #include "catch2_compat.h"
 #include "fake_skywatcher_serial_board.h"
 
+using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherSerialBoard;
 namespace sw = alpacacore::vendor::skywatcher;
 
@@ -335,9 +337,9 @@ TEST_CASE("SkyWatcher serial - the dual-baud probe finds a Synta EQ board at 115
     }
 
     SECTION("an EQM-35 board only decodes at 115200") {
-        board.set_version_reply("032732");  // MC 3.39, mount code 0x32
-        board.answer_only_at_baud(115200);
-        REQUIRE(sw::probe_skywatcher_port_any_baud(board.slave_path(), info, baud));
+        FakeSkyWatcherSerialBoard eqm35(FakeMountProfile::eqm35_pro());  // MC 3.39, mount code 0x32
+        eqm35.answer_only_at_baud(115200);
+        REQUIRE(sw::probe_skywatcher_port_any_baud(eqm35.slave_path(), info, baud));
         CHECK(baud == 115200);
         CHECK(info.firmware_version == "3.39");
         CHECK(info.mount_code == 0x32);
@@ -1289,3 +1291,40 @@ TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every t
 }
 
 #endif  // _WIN32
+
+// open-astro#602: the serial fake answered the Wave 100i's counts, timer and
+// features to every board, so an EQM-35 Pro advertised home-index sensors the
+// real mount lacks (its ":q" is 0x7000) and tracked on the wrong step period.
+TEST_CASE("SkyWatcher serial - an EQM-35 board's geometry and features reach the driver",
+          "[skywatcher][serial][eqm35]") {
+    FakeSkyWatcherSerialBoard board(FakeMountProfile::eqm35_pro());
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // 0x7000 has no HOME_INDEXER bit; the Wave's 0x100C does. get_can_find_home()
+    // is true on every board, so the feature word shows in what FindHome sends:
+    // AutoHome arms the indexers with ":W" (kIndexerReset); the count-frame
+    // fallback goes to the origin with a GOTO and never sends one.
+    driver->find_home();
+    REQUIRE(wait_until_true([&] { return board.count_frames('S') > 0 || board.count_frames('W') > 0; }, 3000));
+    CHECK(board.count_frames('W') == 0);
+    driver->abort_slew();
+
+    // Sidereal T1 = TMR_Freq * 360 / CPR / sidereal rate (deg/s), from the
+    // EQM-35 Pro capture (16e6 counts/s, 9216000 counts/rev): ~149592.
+    driver->set_tracking(true);
+    uint32_t t1 = 0;
+    for (const auto& f : board.frames()) {
+        if (f.size() >= 8 && f[0] == 'I' && f[1] == '1') {
+            t1 = 0;
+            for (int byte = 0; byte < 3; ++byte) {
+                t1 |= static_cast<uint32_t>(std::stoul(f.substr(2 + byte * 2, 2), nullptr, 16)) << (8 * byte);
+            }
+        }
+    }
+    const double expected = 16000000.0 * 360.0 / 9216000.0 / (360.0 / 86164.0905);
+    REQUIRE(t1 != 0);
+    CHECK(std::abs(static_cast<double>(t1) - expected) <= 2.0);
+    driver->set_connected(false);
+}
