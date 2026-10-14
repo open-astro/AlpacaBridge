@@ -1097,15 +1097,18 @@ TEST_CASE("SynScan GOTO landing - an Alt-Az mount finishes its landing with re-G
 
 TEST_CASE("SynScan GOTO landing - the re-GOTO after a far-miss repeat is aimed by the repeat's residual alone (#1120)",
           "[synscan][telescope][goto-landing]") {
-    // Alt-Az: every landing round is a re-GOTO. GOTO 1 lands 77" off in Dec, so GOTO 2 is aimed by that residual;
-    // GOTO 2 then misses 49' in RA, so GOTO 3 repeats the target; GOTO 3 lands 39" off in Dec. GOTO 4 must be the
-    // target corrected by that 39" alone, not by GOTO 1's 77" as well.
+    // Alt-Az: every landing round is a re-GOTO. GOTO 1 lands 386" off in RA and 77" in Dec (past the RA tolerance, so the
+    // carried RA aim moves too), so GOTO 2 is aimed by those residuals; GOTO 2 then misses 49' in RA, so GOTO 3
+    // repeats the target; GOTO 3 lands 39" off in RA and Dec. GOTO 4 must be the target corrected by that 39" alone,
+    // not by GOTO 1's miss as well, on both axes.
     auto st = std::make_shared<LandingOffsetHandset>();
     st->model_id.store(128);
     st->dec_offset_script[0].store(1000);
     st->dec_offset_script[2].store(500);
     st->dec_scripted.store(true);
+    st->ra_offset_script[0].store(5000);
     st->ra_offset_script[1].store(kFarMissCounts);
+    st->ra_offset_script[2].store(500);
     st->ra_scripted.store(true);
     alpacacore::test::FakeMountServer server(responder(st));
     REQUIRE(server.ok());
@@ -1121,9 +1124,11 @@ TEST_CASE("SynScan GOTO landing - the re-GOTO after a far-miss repeat is aimed b
     const auto target_dec = static_cast<int32_t>(st->commanded_dec[0].load());
     CHECK(st->commanded_ra[2].load() == st->commanded_ra[0].load());  // the repeat aims at the target
     CHECK(static_cast<int32_t>(st->commanded_dec[2].load()) == target_dec);
-    // RA carries only GOTO 3's own small residual, nothing of GOTO 2's 49' miss.
+    // GOTO 3 landed 500 counts east of the target in RA too, so GOTO 4 aims about 500 counts west of it. The RA
+    // readback is quantised to the handset's one-second ticks, hence the margin; GOTO 1's 5000 counts, carried over,
+    // would put the aim 5000 counts further west.
     CHECK(std::abs(static_cast<int32_t>(st->commanded_ra[3].load()) -
-                   static_cast<int32_t>(st->commanded_ra[0].load())) < static_cast<int32_t>(kFarMissCounts / 4));
+                   (static_cast<int32_t>(st->commanded_ra[0].load()) - 500)) <= 1500);
     // GOTO 3 landed 500 counts above the target, so GOTO 4 aims 500 counts below it (one count of rounding).
     CHECK(std::abs(static_cast<int32_t>(st->commanded_dec[3].load()) - (target_dec - 500)) <= 2);
     driver->set_connected(false);
