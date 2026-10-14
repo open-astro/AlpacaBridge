@@ -4780,7 +4780,7 @@ document.addEventListener('click', (e) => {
 // ---------------------------------------------------------------------------
 // WiFi (see docs/wifi-manager-design.md). Apple-Settings-style interaction:
 // toggles take effect immediately, the network list is tappable, and hotspot
-// settings save themselves on change. No explicit save buttons.
+// settings save themselves on change, asking first when the change can drop the browser connection.
 
 const WIFI_BASE = '/management/v1/wifi';
 const WIFI_COUNTRIES = ['', 'US', 'CA', 'MX', 'GB', 'IE', 'DE', 'FR', 'ES', 'IT', 'NL', 'BE', 'CH', 'AT', 'SE', 'NO', 'FI', 'DK', 'PL', 'CZ', 'PT', 'GR', 'AU', 'NZ', 'JP', 'KR', 'CN', 'TW', 'IN', 'BR', 'AR', 'CL', 'ZA'];
@@ -5087,8 +5087,12 @@ function wifiSelectedBand() {
 }
 
 // Apply the hotspot config. Called by the toggle and by field changes; field
-// changes keep whatever on/off state the toggle shows (auto-save).
-async function wifiApplyAp(enabled, fromToggle) {
+// changes keep whatever on/off state the toggle shows (auto-save). Every
+// change that can drop the browser's connection asks first: turning the
+// hotspot on or off, and editing a running hotspot (it restarts). Editing a
+// hotspot that is off cannot drop anything, so it saves without asking.
+// `revert` puts a field back to its previous value when the user cancels.
+async function wifiApplyAp(enabled, fromToggle, revert) {
     if (wifiState.busy) return;
     const ssid = (wifiEl('wifi-ap-ssid') || {}).value || '';
     const passphrase = (wifiEl('wifi-ap-pass') || {}).value || '';
@@ -5104,8 +5108,14 @@ async function wifiApplyAp(enabled, fromToggle) {
         if (fromToggle) { const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false; }
         return;
     }
-    if (enabled && fromToggle && !wifiConfirmSwitch('start the hotspot "' + ssid + '"')) {
-        const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = false;
+    if (fromToggle) {
+        const action = enabled ? 'start the hotspot "' + ssid + '"' : 'turn off the hotspot';
+        if (!wifiConfirmSwitch(action)) {
+            const t = wifiEl('wifi-ap-toggle'); if (t) t.checked = !enabled;
+            return;
+        }
+    } else if (enabled && !wifiConfirmSwitch('restart the hotspot "' + ssid + '" with the new settings')) {
+        if (revert) revert();
         return;
     }
     wifiState.busy = true;
@@ -5154,6 +5164,11 @@ function wifiInit() {
     const radioToggle = wifiEl('wifi-radio-toggle');
     if (radioToggle) {
         radioToggle.addEventListener('change', async () => {
+            // Turning the radio on cannot drop a connection; turning it off can.
+            if (!radioToggle.checked && !wifiConfirmSwitch('turn WiFi off')) {
+                radioToggle.checked = true;
+                return;
+            }
             try {
                 await wifiApi('/radio', 'PUT', { Enabled: radioToggle.checked });
                 setTimeout(wifiRefresh, 2000);
@@ -5170,7 +5185,10 @@ function wifiInit() {
     }
     for (const id of ['wifi-ap-ssid', 'wifi-ap-pass']) {
         const el = wifiEl(id);
-        if (el) el.addEventListener('change', () => wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false));
+        if (el) el.addEventListener('change', () => wifiApplyAp(
+            (wifiEl('wifi-ap-toggle') || {}).checked || false, false,
+            // The password is never shown back, so its previous value is empty.
+            () => { el.value = id === 'wifi-ap-ssid' ? ((wifiState.ap && wifiState.ap.Ssid) || '') : ''; }));
     }
     document.querySelectorAll('#wifi-ap-band button').forEach((b) => {
         b.addEventListener('click', () => {
@@ -5178,8 +5196,10 @@ function wifiInit() {
                 wifiRequireCountryFor5GHz();
                 return;
             }
+            const previousBand = wifiSelectedBand();
             wifiSetBandUi(b.dataset.band);
-            wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false);
+            wifiApplyAp((wifiEl('wifi-ap-toggle') || {}).checked || false, false,
+                () => wifiSetBandUi(previousBand));
         });
     });
     const passToggle = wifiEl('wifi-ap-pass-toggle');
