@@ -2,6 +2,30 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: AlpacaBridge
 Upstream-Contact: OpenAstro <support@openastro.net>
 Source: https://github.com/open-astro/AlpacaBridge
+Comment: Dynamically linked system libraries, not part of this source tree
+ .
+ The gphoto camera driver links two LGPL libraries from Debian's own
+ packages (Build-Depends libgphoto2-dev, libraw-dev). Neither is vendored
+ or redistributed in this package, so no Files paragraph can match them;
+ they are recorded here instead.
+ .
+ libgphoto2: Copyright 2000 Scott Fritzinger, 2001-2002 Lutz Mueller and
+ the other libgphoto2 authors (see its AUTHORS file). License:
+ LGPL-2.1-or-later (upstream COPYING is the LGPL version 2.1; source
+ files grant "version 2 or (at your option) any later version"). On
+ Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
+ .
+ libraw (LibRaw): Copyright 2008-2025 LibRaw LLC. License: LGPL-2.1 or
+ CDDL-1.0, at the licensee's choice (upstream COPYRIGHT, LICENSE.LGPL and
+ LICENSE.CDDL). The LGPL-2.1 text is at
+ "/usr/share/common-licenses/LGPL-2.1"; the CDDL-1.0 paragraph is
+ below. LibRaw also carries code under other permissive licenses (dcraw,
+ DCB/FBDD, X3F, Adobe DNG SDK) listed in its own COPYRIGHT file.
+ .
+ Both are linked dynamically from the distro packages today. If libgphoto2
+ 2.5.34 is bundled (issue #933), this record must be extended with the
+ bundled files and the LGPL source offer must be added when it lands.
 
 Files: *
 Copyright: 2025-2026 OpenAstro Contributors
@@ -823,6 +847,14 @@ License: AGPL-3.0-or-later with vendor-SDK linking exception
  if any, to sign a "copyright disclaimer" for the program, if necessary.
  For more information on this, and how to apply and follow the GNU AGPL, see
  <https://www.gnu.org/licenses/>.
+
+License: CDDL-1.0
+ The Common Development and Distribution License (CDDL) Version 1.0,
+ one of the two licenses LibRaw (linked dynamically from the Debian
+ libraw package) is offered under. The Debian common-licenses directory
+ has no CDDL; the complete text is at
+ <https://opensource.org/license/cddl-1-0> and ships as LICENSE.CDDL in
+ the LibRaw source distribution.
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
