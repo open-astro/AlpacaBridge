@@ -1097,8 +1097,8 @@ TEST_CASE("SynScan GOTO landing - an Alt-Az mount finishes its landing with re-G
 
 TEST_CASE("SynScan GOTO landing - the re-GOTO after a far-miss repeat is aimed by the repeat's residual alone (#1120)",
           "[synscan][telescope][goto-landing]") {
-    // Alt-Az: every landing round is a re-GOTO. GOTO 1 lands 386" off in RA and 77" in Dec (past the RA tolerance, so the
-    // carried RA aim moves too), so GOTO 2 is aimed by those residuals; GOTO 2 then misses 49' in RA, so GOTO 3
+    // Alt-Az: every landing round is a re-GOTO. GOTO 1 lands 386" off in RA and 77" in Dec (past the RA tolerance, so
+    // the carried RA aim moves too), so GOTO 2 is aimed by those residuals; GOTO 2 then misses 49' in RA, so GOTO 3
     // repeats the target; GOTO 3 lands 39" off in RA and Dec. GOTO 4 must be the target corrected by that 39" alone,
     // not by GOTO 1's miss as well, on both axes.
     auto st = std::make_shared<LandingOffsetHandset>();
