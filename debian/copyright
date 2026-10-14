@@ -854,8 +854,9 @@ License: CDDL-1.0
  libraw package) is offered under. The Debian common-licenses directory
  has no CDDL; the complete text is at
  <https://opensource.org/license/cddl-1-0> and ships as LICENSE.CDDL in
- the LibRaw source distribution (Debian package libraw-dev, directory
- /usr/share/doc/libraw-dev).
+ the LibRaw source distribution; on Debian systems the complete text is
+ in the libraw package's copyright file,
+ "/usr/share/doc/libraw-dev/copyright".
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy
