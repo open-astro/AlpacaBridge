@@ -419,53 +419,51 @@ records the observing site read straight off the mount, at **house-level precisi
 times each, including in the "restored original" lines:
 
 ```
-SiteLatitude Read       OK   -37:12:13.0
-SiteLongitude Read      OK   +174:52:57.0
+SiteLatitude Read       OK   -12:34:56.0
+SiteLongitude Read      OK   +123:45:06.0
 ```
 
-Do not commit a contributor's home coordinates. Before copying the log into the repo,
-replace them with a rounded location in the same region (keeping the hemisphere and rough
-longitude so the report stays internally coherent):
+Do not commit a real observing site, rounded or not (a rounded value still names a region).
+Before copying the log into the repo, replace the site with the made-up public landmark
+(latitude -33.856784 = -33:51:24.4, longitude 151.215297 = +151:12:55.1, elevation 42 m).
+ConformU also writes DERIVED "Test value" coordinates (the real value ±10 degrees); those
+leak the original too, so replace them with the made-up site ±10 degrees (-43:51:24.4 and
++141:12:55.1). The `[.,]` matches either decimal separator: ConformU formats with the SBC's
+locale, and a comma ("+48:03:00,0") is already in this repo's OnStep report.
 
 ```bash
-# Round to the nearest degree. The values below are an EXAMPLE (latitude -37:12:13.0,
-# longitude +174:52:57.0): substitute the ones the report actually contains. Mind that
-# ConformU also writes DERIVED "Test value" coordinates (the real value ±10 degrees) —
-# those leak the original too, so scrub them as well. The `[.,]` matches either decimal
-# separator: ConformU formats with the SBC's locale, and a comma ("+48:03:00,0") is
-# already in this repo's OnStep report, so a pattern hard-coded to "." would silently
-# miss every value in such a log.
+# EXAMPLE: the report's latitude is -12:34:56.0 and its derived test value -22:34:56.0;
+# the longitude is +123:45:06.0 and its derived test value +113:45:06.0. Substitute the
+# strings the report actually contains (read them from the SiteLatitude and SiteLongitude
+# lines), and keep them out of everything that is committed or posted.
 sed -i \
-  -e 's/-37:12:13\([.,]\)0/-37:00:00\10/g'  -e 's/-47:12:13\([.,]\)0/-47:00:00\10/g' \
-  -e 's/+174:52:57\([.,]\)0/+175:00:00\10/g' -e 's/+164:52:57\([.,]\)0/+165:00:00\10/g' \
+  -e 's/-12:34:56\([.,]\)0/-33:51:24\14/g' -e 's/-22:34:56\([.,]\)0/-43:51:24\14/g' \
+  -e 's/+123:45:06\([.,]\)0/+151:12:55\11/g' -e 's/+113:45:06\([.,]\)0/+141:12:55\11/g' \
   "$TMPDIR/conformu.txt"
 ```
 
-`SiteElevation` leaks too, in three lines per run (`SiteElevation Read OK 80`,
-`Current value 80m written successfully`, `Successfully restored original site elevation:
-80.`). Round it to the nearest 100 m (the fixed `Test value 2385` is ConformU's own
-constant, not derived from the site, and can stay):
+`SiteElevation` leaks too, in three lines per run (`SiteElevation Read OK 120`,
+`Current value 120m written successfully`, `Successfully restored original site elevation:
+120.`). Replace it with 42 (the fixed `Test value 2385` is ConformU's own constant, not
+derived from the site, and can stay):
 
 ```bash
-# EXAMPLE: the report says 80 m; substitute the value it actually contains.
+# EXAMPLE: the report says 120 m; substitute the value it actually contains.
 sed -i -E \
-  -e 's/(SiteElevation Read +OK +)80$/\1100/' \
-  -e 's/(Current value )80m/\1100m/' \
-  -e 's/(original site elevation: )80\./\1100./' \
+  -e 's/(SiteElevation Read +OK +)120$/\142/' \
+  -e 's/(Current value )120m/\142m/' \
+  -e 's/(original site elevation: )120\./\142./' \
   "$TMPDIR/conformu.txt"
 ```
 
-Then confirm nothing survived before saving. The first check looks for any site
-coordinate whose minutes or seconds are not zero (either decimal separator), the second
-for an elevation that is not a multiple of 100 m (negative sites, down to ConformU's -300 m
-limit, included); a correct scrub prints NOTHING from
-either:
+Then confirm nothing survived before saving: every site coordinate and elevation line
+must show only the made-up values. A correct scrub prints NOTHING from either:
 
 ```bash
 grep -nE "Site(Latitude|Longitude).*[-+][0-9]+:[0-9]{2}:[0-9]{2}[.,][0-9]" "$TMPDIR/conformu.txt" \
-  | grep -vE "[-+][0-9]+:00:00[.,]0"
+  | grep -vE "[-+](33|43):51:24[.,]4|[-+](151|141):12:55[.,]1"
 grep -nE "SiteElevation.*(OK +|Current value |elevation: )-?[0-9]+(m|\.|$)" "$TMPDIR/conformu.txt" \
-  | grep -vE "(OK +|Current value |elevation: )-?(0|[0-9]*00)(m|\.|$)"
+  | grep -vE "(OK +|Current value |elevation: )(42|0)(m|\.|$)"
 ```
 
 Any output line is an unscrubbed value. Also grep for the raw original strings you used
@@ -473,7 +471,7 @@ in the `sed` commands above; they must return nothing.
 
 Note the limit of this: `SiderealTime` values elsewhere in the log still correlate with
 longitude given the run's timestamps, so this reduces precision rather than making the
-report truly anonymous. Rounding off the house is the goal, not perfect anonymity.
+report truly anonymous. Hiding the house is the goal, not perfect anonymity.
 
 ### 6b. Save logs
 

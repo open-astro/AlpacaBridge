@@ -38,8 +38,9 @@ One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md
 - **Scrub observing-site coordinates before committing a telescope report.** ConformU reads
   `SiteLatitude` / `SiteLongitude` / `SiteElevation` off the mount and prints them at
   house-level precision, several times each (including the "restored original" and derived
-  "Test value" lines). Round latitude and longitude to the nearest degree, keeping the
-  hemisphere and rough region so the log stays coherent, and elevation to the nearest 100 m.
+  "Test value" lines). Replace them with a made-up public site (south
+  -33.856784 / 151.215297, elevation 42 m, derived "Test value" lines the same site +/- 10
+  degrees); a rounded real value still names a region. See `.claude/commands/conformu.md`.
   ConformU formats with the machine's locale, so check for a comma decimal separator
   (`+48:03:00,0`) as well as a period. This is a privacy matter for the contributor who ran
   the test, not a correctness one — the assertions the report exists to carry are unaffected.

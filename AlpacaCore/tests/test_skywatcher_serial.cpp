@@ -431,7 +431,7 @@ sw::ConnectionInfo serial_info(const std::string& path) {
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> serial_driver(const std::string& path) {
-    return sw::create_skywatcher_telescope(0, serial_info(path), -37.0, 175.0, 50.0);
+    return sw::create_skywatcher_telescope(0, serial_info(path), -33.856784, 151.215297, 42.0);
 }
 
 bool wait_until_true(const std::function<bool()>& pred, int timeout_ms) {
@@ -585,7 +585,7 @@ TEST_CASE("SkyWatcher serial - separate drivers keep separate links", "[skywatch
     FakeSkyWatcherSerialBoard second;
     first.set_version_reply("032732");
     auto a = serial_driver(first.slave_path());
-    auto b = sw::create_skywatcher_telescope(1, serial_info(second.slave_path()), -37.0, 175.0, 50.0);
+    auto b = sw::create_skywatcher_telescope(1, serial_info(second.slave_path()), -33.856784, 151.215297, 42.0);
     a->set_connected(true);
     b->set_connected(true);
     CHECK(a->command_string("e1", false) == "=032732");
@@ -641,8 +641,8 @@ TEST_CASE("SkyWatcher serial - late loss joins an old pulse before reconnecting"
     PortLink port(board.slave_path());
     auto protocol = std::make_unique<LateLossProtocol>();
     auto* probe = protocol.get();
-    auto driver =
-        sw::create_skywatcher_telescope(0, serial_info(port.path.string()), -37.0, 175.0, 50.0, std::move(protocol));
+    auto driver = sw::create_skywatcher_telescope(0, serial_info(port.path.string()), -33.856784, 151.215297, 42.0,
+                                                  std::move(protocol));
     driver->set_connected(true);
     // Only the fake board moves. Wait for dispatch before introducing the loss.
     driver->pulse_guide(0, 400);
@@ -1223,7 +1223,7 @@ TEST_CASE("SkyWatcher serial - a Dec pulse whose ':K' is lost stops before the f
     FakeSkyWatcherSerialBoard board;
     sw::ConnectionInfo info = serial_info(board.slave_path());
     info.response_timeout_ms = kIssue559ReplyTimeoutMs;
-    auto driver = sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+    auto driver = sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     REQUIRE_FALSE(board.axis_running(sw::kAxisDec));
@@ -1357,7 +1357,7 @@ TEST_CASE("SkyWatcher serial - a refused connect names the port or host:port and
         info.host = "127.0.0.1";
         info.udp_port = 9;  // discard port, nothing replies
         info.response_timeout_ms = 100;
-        auto driver = sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+        auto driver = sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0);
         try {
             driver->set_connected(true);
             FAIL("connect to a silent endpoint must throw");

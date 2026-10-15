@@ -954,7 +954,7 @@ Tier2Host tier2_host_skywatcher_telescope_serial() {
         info.port_path = path;
         info.baud_rate = 9600;
         info.response_timeout_ms = 300;
-        return sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+        return sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0);
     };
     Tier2Host h{"skywatcher_telescope_serial",
                 "skywatcher",

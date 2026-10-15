@@ -96,18 +96,18 @@
 11:47:36.873 SiteElevation Write                 OK       Current value 0m written successfully
 11:47:36.874 SiteElevation Write                 OK       Test value 2385 set and read correctly
 11:47:36.876 SiteElevation Write                 OK       Successfully restored original site elevation: 0.
-11:47:36.876 SiteLatitude Read                   OK       -37:00:00.0
+11:47:36.876 SiteLatitude Read                   OK       -33:51:24.4
 11:47:36.877 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude < -90 degrees
 11:47:36.878 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude > 90 degrees
-11:47:36.915 SiteLatitude Write                  OK       Current value: -37:00:00.0 degrees written successfully
-11:47:36.952 SiteLatitude Write                  OK       Test value -47:00:00.0 set and read correctly
-11:47:36.990 SiteLatitude Write                  OK       Successfully restored original site latitude: -37:00:00.0
-11:47:36.991 SiteLongitude Read                  OK       +175:00:00.0
+11:47:36.915 SiteLatitude Write                  OK       Current value: -33:51:24.4 degrees written successfully
+11:47:36.952 SiteLatitude Write                  OK       Test value -43:51:24.4 set and read correctly
+11:47:36.990 SiteLatitude Write                  OK       Successfully restored original site latitude: -33:51:24.4
+11:47:36.991 SiteLongitude Read                  OK       +151:12:55.1
 11:47:36.991 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude < -180 degrees
 11:47:36.992 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude > 180 degrees
-11:47:37.036 SiteLongitude Write                 OK       Current value +175:00:00.0 degrees written successfully
-11:47:37.077 SiteLongitude Write                 OK       Test value +165:00:00.0 set and read correctly
-11:47:37.114 SiteLongitude Write                 OK       Successfully restored original site longitude: +175:00:00.0
+11:47:37.036 SiteLongitude Write                 OK       Current value +151:12:55.1 degrees written successfully
+11:47:37.077 SiteLongitude Write                 OK       Test value +141:12:55.1 set and read correctly
+11:47:37.114 SiteLongitude Write                 OK       Successfully restored original site longitude: +151:12:55.1
 11:47:37.148 Slewing                             OK       False
 11:47:37.150 SlewSettleTime Read                 OK       0
 11:47:37.151 SlewSettleTime Write                OK       Invalid Value exception generated as expected on set slew settle time < 0

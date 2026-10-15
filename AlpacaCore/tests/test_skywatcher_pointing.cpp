@@ -20,7 +20,7 @@
 // six-hour error shipped and passed conformance on three different boards.
 //
 // WHAT IS AND IS NOT AN EXTERNAL ANCHOR HERE. The hardware rows in the
-// first test case are: an EQM-35 Pro at latitude -37.2 was driven to known
+// first test case are: an EQM-35 Pro at a southern latitude was driven to known
 // axis positions on 2026-09-12 with the shipped (wrong) 3.5.1 build and the
 // tube's real direction was read off the mount by hand (three rows), a
 // fourth, northern row comes from the Wave 150i report that opened the
@@ -284,16 +284,16 @@ LandedFrame land_on_fake_clock(alpacacore::test::FakeTaskClock& clock, alpacacor
 
 TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on hardware (#432)",
           "[skywatcher][telescope][pointing]") {
-    // Rows 1-3: EQM-35 Pro, latitude -37.2 (rounded), 2026-09-12, shipped
+    // Rows 1-3: EQM-35 Pro, 2026-09-12, shipped
     // 3.5.1 build, tube direction read off the mount by hand after each
     // goto. Row 4: the Wave 150i report that opened #432, latitude +45.45.
     // Row 5 (open-astro#458): the same EQM-35 Pro on 2026-09-19 with the
     // 4.0.0 build, still set up facing the south pole but with the driver's
-    // latitude at +37.2. The board is never told the latitude, and that
+    // latitude at the mirrored northern latitude. The board is never told the latitude, and that
     // mount is a northern one turned half a turn about the vertical, so the
     // row is a northern reading with every azimuth shifted by 180 deg. The
-    // driver aimed at HA -3 h, dec +30 (alt 52, az 87) and the saddle ended
-    // pointing front-left and slightly down (SE, about -8 deg), which is
+    // driver aimed at HA -3 h, dec +30 (alt 52, az 83) and the saddle ended
+    // pointing front-left and slightly down (SE, about -13 deg), which is
     // HA +9 h: the 6 h term had to flip with the hemisphere.
     // What row 5 refutes is the OLD model, which reported the tube 52 deg UP
     // while it pointed below the horizon; the alt tolerance below compares
@@ -320,6 +320,10 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // as row 5's comment says of its own altitude. What the row pins is that
     // the model, given a2 = +89.37 at +40, puts the tube WEST -- which the
     // owner saw -- rather than 12 h away to the east.
+    // The hardware run was at a different latitude than the one in the table:
+    // the expected alt/az below are recomputed from this oracle for a made-up
+    // site (-33.856784 south, +33.856784 north), and the HA and dec columns do
+    // not depend on the latitude's value, only on its sign.
     struct Row {
         const char* what;
         double latitude;
@@ -333,13 +337,14 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
         const char* observed;
     };
     const Row rows[] = {
-        {"counterweight down, dec axis square", -37.2, 1.6, -90.0, -1, -6.11, 0.0, -1.3, 91.0, "level, pointing east"},
-        {"RA axis 60 deg, dec axis square", -37.2, 60.0, -90.0, -1, -10.00, 0.0, -43.6, -1.0, "down about 45 deg"},
-        {"RA axis 45 deg, dec axis 70 deg", -37.2, 45.1, -70.0, -1, -9.01, -20.0, -18.9, 136.0,
+        {"counterweight down, dec axis square", -33.856784, 1.6, -90.0, -1, -6.11, 0.0, -1.3, 90.9,
+         "level, pointing east"},
+        {"RA axis 60 deg, dec axis square", -33.856784, 60.0, -90.0, -1, -10.00, 0.0, -46.0, -1.0, "down about 45 deg"},
+        {"RA axis 45 deg, dec axis 70 deg", -33.856784, 45.1, -70.0, -1, -9.01, -20.0, -21.2, 134.6,
          "down, azimuth about 136"},
         {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
-        {"EQM-35 Pro at a northern latitude", 37.2, 45.0, -60.0, -1, 9.00, 30.0, -10.7, -1.0,
-         "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg"},
+        {"EQM-35 Pro at a northern latitude", 33.856784, 45.0, -60.0, -1, 9.00, 30.0, -13.3, -1.0,
+         "front-left and slightly down on the south-facing rig, i.e. SE, about -13 deg"},
         {"EQ-AL55i Pro, the #579 reading", 40.0, 0.0, 89.37, +1, 6.00, 0.63, 0.41, 270.5,
          "dovetail west, level, after a dec-only move of +89.37 deg from home"},
     };
@@ -364,7 +369,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // tube MUST be level. Level and square to the meridian is six hours of
     // hour angle away from it. The shipped model called that position
     // HA -11.9 h, which is 53 degrees below the horizon.
-    const AltAz perpendicular = horizon_from_sky(sky_from_axes(-37.2, 0.0, -90.0), -37.2);
+    const AltAz perpendicular = horizon_from_sky(sky_from_axes(-33.856784, 0.0, -90.0), -33.856784);
     CHECK(std::abs(perpendicular.altitude_degrees) < 0.5);
 }
 
@@ -937,8 +942,8 @@ TEST_CASE("SkyWatcher pointing - a reconnect that fails to identify forgets the 
     alpacacore::test::FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    const double latitude = 37.2;
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    const double latitude = 33.856784;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 151.215297, 42.0);
     driver->set_connected(true);
     driver->set_connected(false);
     mount.set_garbled_version_replies(true);
@@ -1062,7 +1067,7 @@ TEST_CASE("SkyWatcher pointing - the hemisphere-symmetric model agrees with indi
     // indi-eqmod agree everywhere a goto can reach, in both hemispheres. The
     // #432 model agrees with indi-eqmod in the north only, and is 12 h out in
     // the south: that difference IS #458.
-    for (const double latitude : {45.0, -37.2}) {
+    for (const double latitude : {45.0, -33.856784}) {
         for (double a1 = -90.0; a1 <= 90.0; a1 += 15.0) {
             for (double a2 = -170.0; a2 <= 170.0; a2 += 17.0) {
                 if (std::abs(a2) < 1e-9) {
@@ -1092,8 +1097,8 @@ TEST_CASE("SkyWatcher pointing - an EQM-35 Pro goto east of the meridian lands o
     alpacacore::test::FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    const double latitude = 37.2;
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    const double latitude = 33.856784;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 151.215297, 42.0);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -1118,8 +1123,8 @@ TEST_CASE("SkyWatcher pointing - an EQM-35 Pro goto west of the meridian lands o
     alpacacore::test::FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    const double latitude = 37.2;
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    const double latitude = 33.856784;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 151.215297, 42.0);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -1145,8 +1150,8 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     alpacacore::test::FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    const double latitude = 37.2;
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 174.88, 80.0);
+    const double latitude = 33.856784;
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 151.215297, 42.0);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -1376,8 +1381,8 @@ TEST_CASE("SkyWatcher pointing - the pier side changes at HA 0 and the axes stay
     }
 }
 
-// Hardware rows measured against the sky. EQM-35 Pro (0x32) at latitude -37.1
-// (rounded), 2026-09-24. Each row pairs the physical axis
+// Hardware rows measured against the sky. EQM-35 Pro (0x32) at a southern latitude
+// 2026-09-24. Each row pairs the physical axis
 // angles at a 5 s exposure with where ASTAP plate-solved that exposure, precessed
 // to the equinox of date. The axes are the board's own :j replies from the
 // driver's TRACE log, read within 2.7 s of the exposure midpoint, with both :E
@@ -1429,7 +1434,7 @@ TEST_CASE("SkyWatcher pointing - measured axes agree with the plate-solved sky a
         {"IC 5148 after a flip, east", 2, -65.344, -47.464, -1.297, -37.956},
         {"M7 after the flip back, west", 2, 53.241, 58.396, 2.877, -34.143},
     };
-    constexpr double latitude = -37.1;
+    constexpr double latitude = -33.856784;
     constexpr double kRowHaToleranceHours = 0.5;     // 7.5 deg; a 6 h error is twelve times this
     constexpr double kRowDecToleranceDegrees = 5.0;  // a wrong hemisphere sign is 53 deg or more here
     constexpr double kSameSideSpreadHours = 0.05;    // 3 min; measured spread is under 2 min
@@ -1567,27 +1572,27 @@ void connect_and_land(const alpacacore::test::FakeMountProfile& profile, sw::Dec
 TEST_CASE("SkyWatcher pointing - decAxisSense normal beats the measured -1 of an EQM-35 Pro (#582)",
           "[skywatcher][telescope][pointing][eqm35][hemisphere][taskclock]") {
     // eps = +1 north is the unmeasured model's k = +1: a2 < 0 at HA -3 h.
-    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, 37.2, 30.0, +1,
-                     -1);
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, 33.856784, 30.0,
+                     +1, -1);
 }
 
 TEST_CASE("SkyWatcher pointing - decAxisSense reversed beats the measured +1 of a Wave 150i (#582)",
           "[skywatcher][telescope][pointing][hemisphere][taskclock]") {
-    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Reversed, 37.2, 30.0, -1, +1);
+    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Reversed, 33.856784, 30.0, -1, +1);
 }
 
 TEST_CASE("SkyWatcher pointing - decAxisSense auto keeps the measured table (#582)",
           "[skywatcher][telescope][pointing][eqm35][hemisphere][taskclock]") {
-    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, 37.2, 30.0, -1,
-                     +1);
-    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Auto, 37.2, 30.0, +1, -1);
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Auto, 33.856784, 30.0,
+                     -1, +1);
+    connect_and_land(wave_150i_profile(), sw::DecAxisSenseSetting::Auto, 33.856784, 30.0, +1, -1);
 }
 
 TEST_CASE("SkyWatcher pointing - decAxisSense applies when the board will not identify itself (#582)",
           "[skywatcher][telescope][pointing][hemisphere][taskclock]") {
     // North: the unmeasured default is k = +1 (a2 < 0); reversed is k = -1 (a2 > 0).
-    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Reversed, 37.2, 30.0, -1,
-                     +1, true);
+    connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Reversed, 33.856784,
+                     30.0, -1, +1, true);
     // South: normal is k = s = -1, which puts a2 on the other branch (a2 > 0).
     connect_and_land(alpacacore::test::FakeMountProfile::eqm35_pro(), sw::DecAxisSenseSetting::Normal, -35.0, -30.0, +1,
                      +1, true);
