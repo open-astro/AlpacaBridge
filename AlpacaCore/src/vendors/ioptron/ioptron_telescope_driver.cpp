@@ -1097,8 +1097,6 @@ public:
         if (slew_override_until_ > now) {
             return true;
         }
-        // The firmware reports no motion: a Park/FindHome the driver started has ended.
-        driver_motion_active_ = false;
         // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
         // compensating sidereal motion during its final ~1 s approach, so
         // slews settle a consistent ~11-16 arcsec east of the RA target
@@ -2160,6 +2158,11 @@ private:
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
             last_status_update_ = now;
+            // A fresh status with no motion, past the initiator's override, ends a driver-started Park or
+            // FindHome whichever getter fetched it (AtHome, AtPark, Tracking or Slewing).
+            if (!cached_status_.is_slewing && slew_override_until_ <= now) {
+                driver_motion_active_ = false;
+            }
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Status", e.what());
@@ -2876,7 +2879,8 @@ private:
     mutable bool slew_in_progress_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those):
     // keeps get_slewing() true when a PulseGuide arrives mid-motion. Set by park()/find_home(),
-    // cleared once the status cache reports no motion, and by AbortSlew, any new initiator
+    // cleared by refresh_status_cache_locked() once a fresh status reports no motion past the
+    // initiator's override, and by AbortSlew, any new initiator
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     mutable bool driver_motion_active_ = false;
     // open-astro#575: an async slew that fails AFTER the initiator returned
