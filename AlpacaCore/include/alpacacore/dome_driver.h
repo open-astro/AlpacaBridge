@@ -96,11 +96,6 @@ public:
     virtual bool get_can_slave() const = 0;
 
     /**
-     * @brief Get whether the dome can slew.
-     */
-    virtual bool get_can_slew() const = 0;
-
-    /**
      * @brief Get whether the dome can sync azimuth.
      */
     virtual bool get_can_sync_azimuth() const = 0;

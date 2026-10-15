@@ -16,8 +16,7 @@
 // accepts (#646), captured from the k*Methods tables in
 // AlpacaHTTP/src/http/router.cpp at origin/main c4640d6e. Not the ASCOM spec:
 // it includes this repo's extensions (filterwheel PUT names/focusoffsets,
-// rotator PUT targetposition, switch cancelasync, dome canslew,
-// observingconditions seeing). test_route_table.cpp compares the live router
+// rotator PUT targetposition, switch cancelasync). test_route_table.cpp compares the live router
 // against this list in both directions, so ANY change to the accepted surface
 // shows up as a row diff here. Update it deliberately, in the same commit as
 // the router change.
@@ -221,7 +220,6 @@ constexpr RouteRow kRoutes[] = {
     {"dome", "cansetpark", kGet},
     {"dome", "cansetshutter", kGet},
     {"dome", "canslave", kGet},
-    {"dome", "canslew", kGet},
     {"dome", "cansyncazimuth", kGet},
     {"dome", "closeshutter", kPut},
     {"dome", "findhome", kPut},
@@ -272,7 +270,6 @@ constexpr RouteRow kRoutes[] = {
     {"observingconditions", "pressure", kGet},
     {"observingconditions", "rainrate", kGet},
     {"observingconditions", "refresh", kPut},
-    {"observingconditions", "seeing", kGet},
     {"observingconditions", "sensordescription", kGet},
     {"observingconditions", "skybrightness", kGet},
     {"observingconditions", "skyquality", kGet},

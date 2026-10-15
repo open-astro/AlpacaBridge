@@ -320,7 +320,6 @@ public:
     bool get_can_set_park() const override { return bool{}; }
     bool get_can_set_shutter() const override { return bool{}; }
     bool get_can_slave() const override { return bool{}; }
-    bool get_can_slew() const override { return bool{}; }
     bool get_can_sync_azimuth() const override { return bool{}; }
     double get_azimuth() const override { return double{}; }
     bool get_at_home() const override { return bool{}; }
@@ -344,7 +343,7 @@ private:
     bool connected_ = false;
 };
 
-class SwitchStub final : public alpacacore::SwitchDriver {
+class SwitchStub : public alpacacore::SwitchDriver {
 public:
     explicit SwitchStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Switch, "switch")
@@ -409,7 +408,6 @@ public:
     double get_sky_brightness() const override { return double{}; }
     double get_sky_quality() const override { return double{}; }
     double get_sky_temperature() const override { return double{}; }
-    double get_seeing() const override { return double{}; }
     double get_star_fwhm() const override { return double{}; }
     double get_temperature() const override { return double{}; }
     double get_wind_direction() const override { return double{}; }

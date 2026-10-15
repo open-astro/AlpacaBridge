@@ -4,7 +4,6 @@
 # router and this list disagree in either direction. One name per line.
 camera
 telescope
-mount
 filterwheel
 focuser
 rotator

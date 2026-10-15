@@ -466,10 +466,6 @@ public:
         return get_value_or_nan(&SensorSnapshot::sky_temperature_c, "skytemperature");
     }
 
-    double get_seeing() const override {
-        throw AlpacaException("Seeing not implemented", AlpacaError::PropertyNotImplemented);
-    }
-
     double get_star_fwhm() const override {
         throw AlpacaException("StarFWHM not implemented", AlpacaError::PropertyNotImplemented);
     }

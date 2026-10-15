@@ -146,9 +146,8 @@ std::string mask_name(unsigned mask) {
 }
 
 // Verb mask of `method` for `type` per the snapshot: the common block wins,
-// then the type's own block, else 0. "mount" is the router's alias of telescope.
+// then the type's own block, else 0.
 unsigned expected_mask(const std::string& type, const std::string& method) {
-    const std::string block = type == "mount" ? "telescope" : type;
     unsigned common = 0;
     unsigned own = 0;
     for (const RouteRow& row : kRoutes) {
@@ -157,7 +156,7 @@ unsigned expected_mask(const std::string& type, const std::string& method) {
         }
         if (std::string(row.type) == "common") {
             common = row.mask;
-        } else if (block == row.type) {
+        } else if (type == row.type) {
             own = row.mask;
         }
     }
@@ -393,10 +392,8 @@ void check_dispatch_reach(alpacahttp::Router& router) {
     std::vector<std::string> failures;
     std::size_t requests = 0;
     for (const auto& type : load_type_names()) {
-        // "mount" is the router's alias of telescope, so it takes telescope's rows.
-        const std::string row_type = type == "mount" ? "telescope" : type;
         for (const RouteRow& row : kRoutes) {
-            if (std::string(row.type) != "common" && row_type != row.type) {
+            if (std::string(row.type) != "common" && type != row.type) {
                 continue;
             }
             for (const auto& [verb, bit] : {std::pair<std::string, unsigned>{"GET", kGet}, {"PUT", kPut}}) {
