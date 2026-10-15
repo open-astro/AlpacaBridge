@@ -4512,11 +4512,10 @@ private:
     // kMaxLandingHoldSeconds gets another goto.
     //
     // The hold also runs when tracking was off before the slew, and it still
-    // subtracts resume_latency_seconds_ although no restart follows. That is
-    // harmless: the mount then stays stopped, so aiming the stop point one
-    // latency ahead of the sky costs at most that latency of RA error, which
-    // is inside the landing deadband, and there is no tracking drift to
-    // correct either way.
+    // subtracts resume_latency_seconds_ although no restart follows. With
+    // tracking off the stopped mount drifts against the sky from the moment
+    // Slewing clears, whether or not the hold ran, so the subtracted latency
+    // only shifts where that drift starts. Nothing measures or corrects it.
     bool refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec,
                              uint64_t* expected_generation = nullptr) {
         const double deadband_seconds = kLandingDeadbandDeg / (kHoursToDegrees * kLstHoursPerSecond);
