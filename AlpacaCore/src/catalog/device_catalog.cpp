@@ -167,7 +167,10 @@ std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
 
 NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {
     NormalizeResult result;
-    result.config = in;
+    // #508 item 2: one fold rule. "Network" and "SERIAL" mean what their lower-case forms mean.
+    DeviceConfig folded = in;
+    fold_connection_type(folded);
+    result.config = folded;
     const Schema* schema = find_schema(key);
     if (!schema) {
         std::string msg = "unknown device " + describe_key(key);
@@ -179,7 +182,7 @@ NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfi
     }
 
     std::vector<std::string> messages;
-    DeviceConfig normalized = normalize_fields(schema->fields, in, "", messages);
+    DeviceConfig normalized = normalize_fields(schema->fields, folded, "", messages);
     if (source == Source::Api) {
         if (!messages.empty()) {
             result.rejection = messages.front();
