@@ -37,11 +37,11 @@
 //     sampled, NOT as covered; deterministic reproduction needs the fake to
 //     hold a reply (set_reply_delay(">L#", ...)) and is a follow-up.
 //
-//     The cover task is not reached at all: the operate callback issues no
-//     open/close/halt_cover, so cover_task_thread_ is never constructed and
-//     reap_cover_task(true) always takes its !joinable() early exit. Adding
-//     a cover call would widen this past a registration PR; also a
-//     follow-up.
+//     The cover task is stormed by open_cover()/close_cover() behind a
+//     get_cover_moving() gate, plus halt_cover() (open-astro#1067). The fake
+//     acks a cover command at once, so each move is short and the same
+//     "rarely connected" caveat below applies: it exercises the
+//     start_cover_task() submission and reap paths, not a long mechanical move.
 //
 // The focuser runs over fake_gemini_focuser.h too (open-astro#1067). It is
 // request/response like the flat panel, with no reader thread. Connects now
@@ -143,6 +143,25 @@ void flatpanel_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
             on = !on;
         }
     });
+    // Cover move: same TOCTOU-gated submission as the calibrator above, so
+    // start_cover_task() spawns one task thread per drain at most instead of
+    // an unbounded chain. The gate does not serialize: two op threads can
+    // both see "not moving" and the loser gets InvalidOperation from
+    // start_cover_task() (gemini_flatpanel_driver.cpp:762), which the case
+    // lists as expected. halt_cover() takes cover_task_mutex_ against the
+    // same transition, so it is stormed alongside the submissions.
+    guard([&] {
+        if (!panel.get_cover_moving()) {
+            thread_local bool open = true;
+            if (open) {
+                panel.open_cover();
+            } else {
+                panel.close_cover();
+            }
+            open = !open;
+        }
+    });
+    guard([&] { panel.halt_cover(); });
     guard([&] { static_cast<void>(panel.get_device_state()); });
 }
 
@@ -236,7 +255,12 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     // than as an unexpected exception attributed to the whole TEST_CASE.
     CHECK_NOTHROW(driver->set_connected(false));
 
-    alpacacore::test::StressCallGuard guard;
+    // NotConnected (racing disconnect) plus InvalidOperation: two op threads
+    // can pass the get_cover_moving() gate together and the second
+    // open_cover()/close_cover() is refused while the first is in flight
+    // (gemini_flatpanel_driver.cpp:762). Nothing else is expected.
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { flatpanel_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
