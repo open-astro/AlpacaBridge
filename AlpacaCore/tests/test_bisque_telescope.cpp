@@ -969,16 +969,19 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
     auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
     REQUIRE_NOTHROW(driver->set_connected(true));
 
-    // One failure, then success: the slew completes.
+    // One failure, then success: the slew completes after one 1 s poll sleep on the clock.
+    const auto start = clock.now();
     auto first = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
     CHECK(advance_until(clock, [&] { return ready(first); }));
     CHECK_NOTHROW(first.get());
     CHECK(polls->load() == 2);
+    CHECK(clock.now() - start == std::chrono::seconds(1));
 
     // Persistent failure: the error names the poll failure, not the timeout, and
     // the slew is not reported complete.
     fail_polls->store(-1);
     polls->store(0);
+    const auto second_start = clock.now();
     auto second = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
     CHECK(advance_until(clock, [&] { return ready(second); }));
     try {
@@ -991,6 +994,7 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
         CHECK(what.find("timed out") == std::string::npos);
     }
     CHECK(polls->load() == 3);
+    CHECK(clock.now() - second_start == std::chrono::seconds(2));
     driver->set_connected(false);
 }
 
