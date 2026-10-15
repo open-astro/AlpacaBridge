@@ -979,6 +979,96 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses a hemisphere-crossing Site
     driver->set_connected(false);
 }
 
+namespace {
+
+int count_exact_frames(const FakeSkyWatcherSerialBoard& board, const std::string& frame) {
+    int n = 0;
+    for (const auto& f : board.frames()) {
+        if (f == frame) ++n;
+    }
+    return n;
+}
+
+// Sets a sub-floor DeclinationRate (on-time clamped to 50 ms of each 3 s duty
+// period) and returns once a burst has started and its stop has landed, so
+// the duty worker is idle between bursts. A link that faults mid-burst keeps
+// resending the burst's stop (the burst END is not gated), which would hide
+// a start that should have been refused.
+void start_dec_duty_and_wait_idle(alpacacore::TelescopeDriver& driver, FakeSkyWatcherSerialBoard& board) {
+    const int starts = count_exact_frames(board, "J2");
+    driver.set_declination_rate(0.01);
+    REQUIRE(wait_until_true([&] { return count_exact_frames(board, "J2") > starts; }, 5000));
+    REQUIRE(wait_until_true([&] { return !board.axis_running(2); }, 2000));
+    // The stop's confirming ':f2' follows the ':K2' at once; let it land.
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+}
+
+// No frame but the status poll's ':f'/':j' inquiries since @p from.
+void check_only_poll_frames(const FakeSkyWatcherSerialBoard& board, std::size_t from) {
+    const auto frames = board.frames();
+    for (std::size_t i = from; i < frames.size(); ++i) {
+        INFO("unexpected frame on a faulted link: " << frames[i]);
+        CHECK((frames[i][0] == 'f' || frames[i][0] == 'j'));
+    }
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a faulted link starts no sub-floor rate burst until it recovers",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#882: a duty burst is a motion command the driver sends by
+    // itself. On a muted board a refused-too-late start shows as its leading
+    // ':K2' (the stop before the start), which times out before any ':G2',
+    // ':I2' or ':J2' goes out, so the check is "nothing but the poll".
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+    start_dec_duty_and_wait_idle(*driver, board);
+
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    // A start attempt in flight when the latch set may still be timing out.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    const std::size_t frames_before = board.frames().size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(6500));  // more than two duty periods
+    REQUIRE_FALSE(driver->get_link_fault().empty());
+    check_only_poll_frames(board, frames_before);
+
+    const int starts = count_exact_frames(board, "J2");
+    board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    CHECK(wait_until_true([&] { return count_exact_frames(board, "J2") > starts; }, 5000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher serial - a board that restarted under a recovered link starts no sub-floor rate burst",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#882: the board answers again, so an ungated start would reach
+    // it as ':K2' ':G2' ':I2' ':J2' and drive an axis whose position registers
+    // no longer mean anything.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+    start_dec_duty_and_wait_idle(*driver, board);
+
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    board.set_init_done(false);
+    board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().find("restarted") != std::string::npos; }, 6000));
+    // A burst started between the good reply and the restart check ends in 50 ms.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    const std::size_t frames_before = board.frames().size();
+    std::this_thread::sleep_for(std::chrono::milliseconds(6500));  // more than two duty periods
+    check_only_poll_frames(board, frames_before);
+    CHECK_FALSE(board.axis_running(2));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher serial - state getters on a faulted link that is then lost report NotConnected",
           "[skywatcher][serial][linkhealth]") {
     // open-astro#882 review: the latch outlives the link (the fault text stays

@@ -2664,6 +2664,10 @@ private:
         }
     }
 
+    // Non-throwing form of the gate above, for the duty worker's burst start,
+    // which has no caller to refuse to.
+    bool link_faulted_locked() const { return !board_reset_fault_.empty() || !protocol_->link_fault().empty(); }
+
     // A command that reaches the wire: refused while faulted, nothing sent.
     void check_writable_locked() const {
         check_connected();
@@ -4270,7 +4274,16 @@ private:
                             ax[i].bursting = false;
                         }
                     } else if (rate != 0.0 && now >= ax[i].next_start && connected_ && tracking_ &&
-                               !axes_busy_locked() && !restoring_tracking_) {
+                               !axes_busy_locked() && !restoring_tracking_ && !link_faulted_locked()) {
+                        // open-astro#882: a burst is a motion command the
+                        // driver sends by itself, so no burst STARTS while the
+                        // link is faulted or the board restarted. next_start is
+                        // left alone: the first tick after the latch clears
+                        // starts one. The burst END above is not gated: an axis
+                        // left running at the floor rate is worse than a stop
+                        // that times out, so a burst running when the link
+                        // faults resends its stop (one ':K' per tick) until the
+                        // stop lands.
                         // restoring_tracking_ is in this gate and NOT in
                         // axes_busy_locked() on purpose: a burst START here
                         // would bump motion_generation_ under the post-slew
