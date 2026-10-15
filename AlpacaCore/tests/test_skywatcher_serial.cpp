@@ -872,6 +872,8 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     REQUIRE_NOTHROW(driver->get_slewing());
+    driver->move_axis(0, 1.0);  // commanded motion: Slewing would answer true from it
+    REQUIRE(driver->get_slewing());
 
     board.set_muted(true);
     REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
@@ -879,7 +881,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     const auto expect_compromised = [&](const std::function<void()>& fn) {
         try {
             fn();
-            FAIL("expected a DriverException");
+            FAIL_CHECK("expected a DriverException");
         } catch (const alpacacore::AlpacaException& e) {
             CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(e.what()).find("communications compromised") != std::string::npos);
@@ -896,7 +898,12 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     expect_compromised([&] { driver->slew_to_coordinates_async(1.0, 10.0); });
     expect_compromised([&] { driver->abort_slew(); });
     expect_compromised([&] { driver->set_tracking_rate(1); });
-    expect_compromised([&] { driver->command_string("j1", true); });
+    expect_compromised([&] { driver->command_string("V1", true); });
+    expect_compromised([&] { driver->park(); });
+    expect_compromised([&] { driver->unpark(); });
+    expect_compromised([&] { driver->find_home(); });
+    expect_compromised([&] { driver->set_right_ascension_rate(0.5); });
+    expect_compromised([&] { driver->set_declination_rate(1.0); });
     const auto frames = board.frames();
     for (std::size_t i = frames_before; i < frames.size(); ++i) {
         INFO("unexpected frame on a faulted link: " << frames[i]);

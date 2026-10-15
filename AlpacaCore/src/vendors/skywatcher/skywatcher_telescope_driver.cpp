@@ -1209,6 +1209,9 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // open-astro#882: commanded state (a park, a MoveAxis, the force
+        // window) must not answer for a mount whose link is down.
+        throw_if_link_faulted_locked();
         // open-astro#575: surface a stored async-slew failure as an error
         // instead of a silent false, until AbortSlew or a new slew initiator
         // clears it (see last_slew_error_).
@@ -2614,18 +2617,22 @@ private:
         }
     }
 
-    // open-astro#882: the write-side twin of the read gate. A command that
-    // reaches the wire refuses with the read paths' "communications
-    // compromised" DriverException while the fault latch is set (or the board
-    // restarted under a recovered link), and sends nothing. Reads keep their
-    // own gates: on a polled link they are the traffic that clears the latch.
-    void check_writable_locked() const {
-        check_connected();
+    // open-astro#882: refuse with the read paths' "communications compromised"
+    // DriverException while the fault latch is set (or the board restarted
+    // under a recovered link). The status poll, not a client call, is what
+    // clears the latch (decision 0010), so refusing here cannot block recovery.
+    void throw_if_link_faulted_locked() const {
         throw_if_board_reset_locked();
         const std::string fault = protocol_->link_fault();
         if (!fault.empty()) {
             throw_comms_compromised_locked(fault);
         }
+    }
+
+    // A command that reaches the wire: refused while faulted, nothing sent.
+    void check_writable_locked() const {
+        check_connected();
+        throw_if_link_faulted_locked();
     }
 
     // A park in flight (parking_) gates the same members as a completed park
