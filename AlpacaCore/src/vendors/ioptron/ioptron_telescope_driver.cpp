@@ -560,7 +560,15 @@ public:
         }
         return false;
     }
-    
+
+    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed. Does not
+    // clear the flag (get_is_pulse_guiding() does).
+    bool pulse_window_open() const {
+        return pulse_guiding_active_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now().time_since_epoch().count() <
+                   pulse_guiding_end_ns_.load(std::memory_order_relaxed);
+    }
+
     bool get_can_set_declination_rate() const override {
         return false;  // iOptron doesn't support setting Dec rate directly
     }
@@ -1078,7 +1086,11 @@ public:
         }
         refresh_status_cache_locked();
         if (cached_status_.is_slewing) {
-            return true;
+            // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
+            // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
+            // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
+            // dispatching; every driver-initiated motion is caught by the checks above.
+            return !(pulse_window_open() && !slew_in_progress_);
         }
         if (slew_override_until_ > now) {
             return true;

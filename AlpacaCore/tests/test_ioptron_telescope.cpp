@@ -663,3 +663,48 @@ TEST_CASE("iOptron mount serial - the connected port is claimed exclusively and 
     CHECK(fd >= 0);
     if (fd >= 0) close(fd);
 }
+
+// Issue #843: a HAE29C reports system status 2 (slewing) while a long PulseGuide runs, and the guider
+// stopped on Slewing == true. Slewing stays false for the pulse window (duration plus the driver's
+// settle delay); IsPulseGuiding reports the pulse.
+TEST_CASE("iOptron Telescope Driver - Slewing stays false while a PulseGuide runs",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    // The firmware already reports "slewing" when the driver first reads the status (the read is cached).
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->pulse_guide(3, 2704);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still reports Slewing",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    // The firmware already reports "slewing" when the driver first reads the status (the read is cached).
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // A slew started from the handset: firmware moving, no driver-initiated motion, no pulse.
+    CHECK(driver->get_slewing());
+
+    // A short pulse that has ended (duration plus settle delay) no longer masks the firmware status.
+    driver->pulse_guide(3, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+
+    // A driver-initiated GOTO started during a pulse keeps Slewing true.
+    driver->pulse_guide(3, 5000);
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
