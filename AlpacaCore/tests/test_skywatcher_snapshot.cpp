@@ -128,9 +128,8 @@ TEST_CASE("SkyWatcher snapshot - getters and DeviceState make no device transact
     auto driver = connected_driver(mount, clock);
     REQUIRE(driver->get_connected());
     // The connect's first poll is over once it parks on the clock; the fake
-    // counts each reply just after sending it, so let the last count land.
+    // counts each reply before sending it, so the count is already final.
     REQUIRE(clock.wait_for_waiters(1, kRendezvous));
-    std::this_thread::sleep_for(milliseconds(50));
 
     mount.set_reply_latency(kLatency);
     const int before = mount.transactions_served();

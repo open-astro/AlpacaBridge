@@ -3475,9 +3475,9 @@ TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend af
     // the second read has been answered, so ":f" is the transaction in flight.
     const int served_before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(150));
-    // A watcher stops tracking the instant the second read is answered, on
-    // real time: the clock-driving loop below reacts too slowly to land inside
-    // the held ":f" read.
+    // A watcher stops tracking as soon as the second read is counted (the fake
+    // counts a reply just before it sends it), on real time: the clock-driving loop below reacts too slowly to land
+    // inside the held ":f" read.
     std::atomic<bool> stopped{false};
     std::thread watcher([&] {
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
@@ -4983,13 +4983,12 @@ TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transac
     const int before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(40));
     const auto slow = timed_reads(5);
-    // The count follows the send, so the last reply can reach the client first.
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 5; }, 2000));
+    CHECK(mount.transactions_served() - before == 5);
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     mount.set_reply_latency(std::chrono::milliseconds(0));
     const auto fast = timed_reads(5);
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 10; }, 2000));
+    CHECK(mount.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     proto.disconnect();
 }

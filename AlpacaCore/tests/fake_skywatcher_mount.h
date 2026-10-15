@@ -315,8 +315,9 @@ public:
     /// Steady state, until set back to zero: every reply is held for @p latency
     /// before it is sent, on wall time like hold_next_reply. Models a link with
     /// a fixed per-transaction cost; transactions_served() counts the replies
-    /// that paid it. A reply is counted when the fake sends it (or drops it
-    /// under set_silent), so the count never runs ahead of the wire.
+    /// that paid it. A reply is counted before the fake sends it (or drops it
+    /// under set_silent), so a client that holds its reply sees it counted; the
+    /// silent decision is taken before the count becomes visible.
     void set_reply_latency(std::chrono::milliseconds latency) { latency_ms_.store(static_cast<int>(latency.count())); }
 
     /// A reply latency long enough that a slew still runs after the driver's
@@ -789,12 +790,13 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
-            if (silent_.load()) {
-                served_.fetch_add(1);
-                continue;
-            }
-            ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
+            // Decide silence before the count is visible: a case that waits for the count and then
+            // calls set_silent() must not see its late reply dropped. Count before the send, so a
+            // client that has its reply already sees it counted.
+            const bool drop = silent_.load();
             served_.fetch_add(1);
+            if (drop) continue;
+            ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
         }
     }
 
