@@ -381,7 +381,6 @@ TEST_CASE("WeeWX ObservingConditions Driver - every member connected over a full
     CHECK(alpaca_error_of([&] { (void)driver->get_wind_gust(); }) == not_impl);
     CHECK(alpaca_error_of([&] { (void)driver->get_sky_brightness(); }) == not_impl);
     CHECK(alpaca_error_of([&] { (void)driver->get_star_fwhm(); }) == not_impl);
-    CHECK(alpaca_error_of([&] { (void)driver->get_seeing(); }) == not_impl);
 
     CHECK(driver->get_sensor_description("DewPoint") == "Dew point (WeeWX dewpoint)");
     CHECK(driver->get_sensor_description("wind speed") == "Wind speed (WeeWX wind_speed)");

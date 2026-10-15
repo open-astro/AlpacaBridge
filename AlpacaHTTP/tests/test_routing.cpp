@@ -1194,9 +1194,9 @@ int main() {
     EXPECT(request.path() == "/api/v1/camera/0/canconnect");
 
     // Test query parameters
-    test_request = "GET /api/v1/mount/0/slewto?RightAscension=1.5&Declination=-20.3 HTTP/1.1\r\n\r\n";
+    test_request = "PUT /api/v1/telescope/0/slewtocoordinates?RightAscension=1.5&Declination=-20.3 HTTP/1.1\r\n\r\n";
     EXPECT(request.parse(test_request));
-    EXPECT(request.path() == "/api/v1/mount/0/slewto");
+    EXPECT(request.path() == "/api/v1/telescope/0/slewtocoordinates");
     EXPECT(request.has_query_param("RightAscension"));
     EXPECT(request.has_query_param("Declination"));
 
@@ -8823,6 +8823,67 @@ int main() {
         }
     }
 #endif
+
+    {
+        // case: routes outside the Alpaca schema are rejected (#576)
+        constexpr int kSchemaDevice = 9576;
+        class AsyncSwitchStub final : public route_table_stubs::SwitchStub {
+        public:
+            using SwitchStub::SwitchStub;
+            int get_max_switch() const override { return 1; }
+            bool get_can_async(int id) const override {
+                if (id < 0 || id >= get_max_switch()) {
+                    throw alpacacore::AlpacaException("Switch id out of range", alpacacore::AlpacaError::InvalidValue);
+                }
+                return true;
+            }
+        };
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::DomeStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::ObservingConditionsStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kSchemaDevice)));
+        EXPECT(registry.register_device(std::make_shared<AsyncSwitchStub>(kSchemaDevice)));
+        alpacahttp::Router router;
+        const std::string n = std::to_string(kSchemaDevice);
+        auto body_of = [&](const std::string& verb, const std::string& path) {
+            const auto response = route_request(router, verb, path, verb == "PUT" ? "ClientID=1" : "");
+            return std::make_pair(response.status_code(), nlohmann::json::parse(response.body()));
+        };
+
+        for (const std::string path :
+             {"/api/v1/dome/" + n + "/canslew", "/api/v1/observingconditions/" + n + "/seeing"}) {
+            const auto [status, json] = body_of("GET", path);
+            EXPECT(status == 400);
+            EXPECT(json.value("ErrorMessage", "").rfind("Unknown method: ", 0) == 0);
+        }
+
+        // The "mount" alias of telescope is gone; the real path still works.
+        {
+            const auto [status, json] = body_of("GET", "/api/v1/mount/" + n + "/connected");
+            EXPECT(status == 400);
+            EXPECT(json.value("ErrorMessage", "") == "Unknown device type: mount");
+            const auto [real_status, real_json] = body_of("GET", "/api/v1/telescope/" + n + "/connected");
+            EXPECT(real_status == 200);
+            EXPECT(real_json.value("ErrorNumber", -1) == 0);
+        }
+
+        // A switch has no cancel member: both verbs answer NotImplemented even
+        // when the switch is async-capable, never a success that cancelled nothing.
+        for (const std::string verb : {"GET", "PUT"}) {
+            const auto [status, json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=0");
+            EXPECT(status == 200);
+            EXPECT(json.value("ErrorNumber", -1) == 0x400);
+            // An out-of-range Id is still InvalidValue (ConformU checks it).
+            const auto [bad_status, bad_json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=-1");
+            EXPECT(bad_status == 200);
+            EXPECT(bad_json.value("ErrorNumber", -1) == 0x401);
+        }
+
+        registry.unregister_device(alpacacore::DeviceType::Dome, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::ObservingConditions, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kSchemaDevice);
+        registry.unregister_device(alpacacore::DeviceType::Switch, kSchemaDevice);
+    }
 
     std::cout << "All routing tests passed!\n";
     return 0;

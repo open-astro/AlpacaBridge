@@ -532,7 +532,8 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
 // The verb masks below mirror the GET/PUT branches of each dispatch_*_method,
 // not AlpacaDeviceAPI_v1.yaml. They include this repo's extensions: PUT on
 // filter wheel names/focusoffsets and rotator targetposition (GET-only in the
-// spec), and switch cancelasync (no path in the spec). Narrowing a mask to
+// spec), and switch cancelasync (no path in the spec; kept only so it answers
+// NotImplemented instead of "Unknown method", #576). Narrowing a mask to
 // match the spec would turn a call that works today into a 400.
 enum : std::uint8_t {
     kVerbGet = 1,
@@ -698,15 +699,18 @@ const std::unordered_map<std::string, unsigned> kRotatorMethods = {
 };
 
 const std::unordered_map<std::string, unsigned> kDomeMethods = {
-    {"abortslew", kVerbPut},     {"altitude", kVerbGet},       {"athome", kVerbGet},
-    {"atpark", kVerbGet},        {"azimuth", kVerbGet},        {"canfindhome", kVerbGet},
-    {"canpark", kVerbGet},       {"cansetaltitude", kVerbGet}, {"cansetazimuth", kVerbGet},
-    {"cansetpark", kVerbGet},    {"cansetshutter", kVerbGet},  {"canslave", kVerbGet},
-    {"canslew", kVerbGet},       {"cansyncazimuth", kVerbGet}, {"closeshutter", kVerbPut},
-    {"findhome", kVerbPut},      {"openshutter", kVerbPut},    {"park", kVerbPut},
-    {"setpark", kVerbPut},       {"shutterstatus", kVerbGet},  {"slaved", kVerbGet | kVerbPut},
-    {"slewing", kVerbGet},       {"slewtoaltitude", kVerbPut}, {"slewtoazimuth", kVerbPut},
-    {"synctoazimuth", kVerbPut},
+    {"abortslew", kVerbPut},      {"altitude", kVerbGet},
+    {"athome", kVerbGet},         {"atpark", kVerbGet},
+    {"azimuth", kVerbGet},        {"canfindhome", kVerbGet},
+    {"canpark", kVerbGet},        {"cansetaltitude", kVerbGet},
+    {"cansetazimuth", kVerbGet},  {"cansetpark", kVerbGet},
+    {"cansetshutter", kVerbGet},  {"canslave", kVerbGet},
+    {"cansyncazimuth", kVerbGet}, {"closeshutter", kVerbPut},
+    {"findhome", kVerbPut},       {"openshutter", kVerbPut},
+    {"park", kVerbPut},           {"setpark", kVerbPut},
+    {"shutterstatus", kVerbGet},  {"slaved", kVerbGet | kVerbPut},
+    {"slewing", kVerbGet},        {"slewtoaltitude", kVerbPut},
+    {"slewtoazimuth", kVerbPut},  {"synctoazimuth", kVerbPut},
 };
 
 const std::unordered_map<std::string, unsigned> kSwitchMethods = {
@@ -744,7 +748,6 @@ const std::unordered_map<std::string, unsigned> kObservingConditionsMethods = {
     {"pressure", kVerbGet},
     {"rainrate", kVerbGet},
     {"refresh", kVerbPut},
-    {"seeing", kVerbGet},
     {"sensordescription", kVerbGet},
     {"skybrightness", kVerbGet},
     {"skyquality", kVerbGet},
@@ -763,8 +766,8 @@ const std::unordered_map<std::string, unsigned> kSafetyMonitorMethods = {
 
 bool is_known_device_type_name(const std::string& type_name) {
     static const std::unordered_set<std::string> kDeviceTypes = {
-        "camera", "telescope", "mount",           "filterwheel",         "focuser",       "rotator",
-        "dome",   "switch",    "covercalibrator", "observingconditions", "safetymonitor",
+        "camera", "telescope",       "filterwheel",         "focuser",       "rotator", "dome",
+        "switch", "covercalibrator", "observingconditions", "safetymonitor",
     };
     return kDeviceTypes.count(type_name) > 0;
 }
@@ -2717,7 +2720,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
 
 alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str) const {
     if (type_str == "camera") return alpacacore::DeviceType::Camera;
-    if (type_str == "telescope" || type_str == "mount") return alpacacore::DeviceType::Telescope;
+    if (type_str == "telescope") return alpacacore::DeviceType::Telescope;
     if (type_str == "filterwheel") return alpacacore::DeviceType::FilterWheel;
     if (type_str == "focuser") return alpacacore::DeviceType::Focuser;
     if (type_str == "rotator") return alpacacore::DeviceType::Rotator;
@@ -5171,16 +5174,12 @@ Response Router::dispatch_switch_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "cancelasync") {
-                int id = parse_int("Id");
-                if (!sw->get_can_async(id)) {
-                    throw alpacacore::AlpacaException(
-                        "Async switch control not supported",
-                        alpacacore::AlpacaError::NotImplemented
-                    );
-                }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // The switch driver has no cancel member, so succeeding here
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
+                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
+                                                  alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "canasync") {
                 int id = parse_int("Id");
                 AlpacaResponse alpaca_response = make_success_response(
@@ -5253,16 +5252,12 @@ Response Router::dispatch_switch_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "cancelasync") {
-                int id = parse_int("Id");
-                if (!sw->get_can_async(id)) {
-                    throw alpacacore::AlpacaException(
-                        "Async switch control not supported",
-                        alpacacore::AlpacaError::NotImplemented
-                    );
-                }
-                AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
-                response.set_body(alpaca_response);
-                return response;
+                // The switch driver has no cancel member, so succeeding here
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
+                throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
+                                                  alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "setasync") {
                 int id = parse_int("Id");
                 bool state = parse_bool("State");
@@ -5982,11 +5977,6 @@ Response Router::dispatch_dome_method(
                     client_tx_id, server_tx_id, dome->get_can_set_shutter());
                 response.set_body(alpaca_response);
                 return response;
-            } else if (method_name == "canslew") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, dome->get_can_slew());
-                response.set_body(alpaca_response);
-                return response;
             } else if (method_name == "cansyncazimuth") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, dome->get_can_sync_azimuth());
@@ -6370,11 +6360,6 @@ Response Router::dispatch_observingconditions_method(
             } else if (method_name == "skytemperature") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, observingconditions->get_sky_temperature());
-                response.set_body(alpaca_response);
-                return response;
-            } else if (method_name == "seeing") {
-                AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, observingconditions->get_seeing());
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "starfwhm") {

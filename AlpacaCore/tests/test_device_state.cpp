@@ -196,7 +196,6 @@ public:
     bool get_can_set_park() const override { throw_not_connected(); }
     bool get_can_set_shutter() const override { throw_not_connected(); }
     bool get_can_slave() const override { throw_not_connected(); }
-    bool get_can_slew() const override { throw_not_connected(); }
     bool get_can_sync_azimuth() const override { throw_not_connected(); }
     double get_azimuth() const override { throw_not_connected(); }
     bool get_at_home() const override { throw_not_connected(); }
@@ -260,7 +259,6 @@ public:
     double get_sky_brightness() const override { throw_not_connected(); }
     double get_sky_quality() const override { throw_not_connected(); }
     double get_sky_temperature() const override { throw_not_connected(); }
-    double get_seeing() const override { throw_not_connected(); }
     double get_star_fwhm() const override { throw_not_connected(); }
     double get_temperature() const override { throw_not_connected(); }
     double get_wind_direction() const override { throw_not_connected(); }
