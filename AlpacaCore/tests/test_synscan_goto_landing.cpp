@@ -84,6 +84,7 @@ struct LandingOffsetHandset {
     std::array<std::atomic<uint32_t>, 4> commanded_dec{};
     // The once-a-second RA readback sawtooth (#1030), phased from `sawtooth_epoch`.
     std::atomic<bool> sawtooth{false};
+    std::atomic<int> position_reads{0};  // precise `e` reads served
     std::atomic<Clock::rep> sawtooth_epoch{0};
     // Every other GOTO lands one further second of RA east (#1030).
     std::atomic<bool> reroll{false};
@@ -173,6 +174,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             case 'K':
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'e': {
+                st->position_reads.fetch_add(1);
                 uint32_t ra = st->ra_now();
                 if (st->sawtooth.load()) {
                     const auto low = static_cast<uint32_t>(std::lround(st->sawtooth_phase() * kCountsPerSecondOfRa));
@@ -640,6 +642,47 @@ TEST_CASE("SynScan GOTO landing - a tracking write, a time write and a reconnect
     driver->set_connected(false);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK(ra_error_at_phase_09(*driver, *st) > kRawPhase09Arcsec);
+    driver->set_connected(false);
+}
+
+// A handset without the sawtooth: the first landing spends the hunt's 1.3 s first-jump budget (6 or 7 reads, the
+// fake handset answers in about 0.2 s), a later one on the same connection reads once (#1107). Returns the reads a
+// landing took.
+int landing_reads(alpacacore::TelescopeDriver& driver, LandingOffsetHandset& st) {
+    const int before = st.position_reads.load();
+    REQUIRE_NOTHROW(driver.slew_to_coordinates(kTargetRa, kTargetDec));
+    return st.position_reads.load() - before;
+}
+
+TEST_CASE("SynScan GOTO landing - a handset without the sawtooth is hunted once per connection (#1107)",
+          "[synscan][telescope][goto-landing]") {
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->ra_offset_counts.store(0);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    constexpr int kHuntReads = 4;
+
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);  // skipped
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_tracking(true);  // a tracking write drops the flag
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_utc_date(std::chrono::system_clock::now());  // so does a time write
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
+
+    driver->set_connected(false);  // and a reconnect
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    CHECK(landing_reads(*driver, *st) >= kHuntReads);
+    CHECK(landing_reads(*driver, *st) < kHuntReads);
     driver->set_connected(false);
 }
 
