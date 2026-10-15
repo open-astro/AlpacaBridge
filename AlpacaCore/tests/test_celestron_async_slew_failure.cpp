@@ -1068,11 +1068,11 @@ TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere"
         alpacacore::AlignmentMode alignment;
         unsigned char tracking_mode;
     };
-    for (const auto& expected : {Expected{24, 5, 35, 41.3, alpacacore::AlignmentMode::GermanPolar, 2},
-                                 Expected{24, 5, 35, -41.3, alpacacore::AlignmentMode::GermanPolar, 3},
-                                 Expected{9, 5, 35, -41.3, alpacacore::AlignmentMode::AltAz, 1},
-                                 Expected{6, 3, 3, 41.3, alpacacore::AlignmentMode::GermanPolar, 1},
-                                 Expected{6, 3, 3, -41.3, alpacacore::AlignmentMode::GermanPolar, 2}}) {
+    for (const auto& expected : {Expected{24, 5, 35, 33.856784, alpacacore::AlignmentMode::GermanPolar, 2},
+                                 Expected{24, 5, 35, -33.856784, alpacacore::AlignmentMode::GermanPolar, 3},
+                                 Expected{9, 5, 35, -33.856784, alpacacore::AlignmentMode::AltAz, 1},
+                                 Expected{6, 3, 3, 33.856784, alpacacore::AlignmentMode::GermanPolar, 1},
+                                 Expected{6, 3, 3, -33.856784, alpacacore::AlignmentMode::GermanPolar, 2}}) {
         auto st = std::make_shared<FakeCelestronState>();
         st->model_id.store(expected.model_id);
         st->firmware_major.store(expected.firmware_major);
@@ -1082,7 +1082,7 @@ TEST_CASE("Celestron tracking - mode follows mount geometry and site hemisphere"
         auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         driver->set_site_latitude(expected.latitude);
-        driver->set_site_longitude(174.8);
+        driver->set_site_longitude(151.215297);
         CHECK(driver->get_alignment_mode() == expected.alignment);
         driver->set_tracking(true);
 
@@ -1121,11 +1121,11 @@ TEST_CASE("Celestron tracking - a configured alignment mode overrides the nomina
     };
     // 9 = CPC and 22 = NexStar Evolution (forks); 24 = CGX-L (German equatorial).
     for (const auto& expected :
-         {Expected{9, CelestronAlignmentSetting::Equatorial, 41.3, alpacacore::AlignmentMode::Polar, 2},
-          Expected{22, CelestronAlignmentSetting::Equatorial, -41.3, alpacacore::AlignmentMode::Polar, 3},
-          Expected{9, CelestronAlignmentSetting::AltAz, 41.3, alpacacore::AlignmentMode::AltAz, 1},
-          Expected{9, CelestronAlignmentSetting::Auto, 41.3, alpacacore::AlignmentMode::AltAz, 1},
-          Expected{24, CelestronAlignmentSetting::AltAz, 41.3, alpacacore::AlignmentMode::GermanPolar, 2}}) {
+         {Expected{9, CelestronAlignmentSetting::Equatorial, 33.856784, alpacacore::AlignmentMode::Polar, 2},
+          Expected{22, CelestronAlignmentSetting::Equatorial, -33.856784, alpacacore::AlignmentMode::Polar, 3},
+          Expected{9, CelestronAlignmentSetting::AltAz, 33.856784, alpacacore::AlignmentMode::AltAz, 1},
+          Expected{9, CelestronAlignmentSetting::Auto, 33.856784, alpacacore::AlignmentMode::AltAz, 1},
+          Expected{24, CelestronAlignmentSetting::AltAz, 33.856784, alpacacore::AlignmentMode::GermanPolar, 2}}) {
         auto st = std::make_shared<FakeCelestronState>();
         st->model_id.store(expected.model_id);
         alpacacore::test::FakeMountServer server(celestron_responder(st));
@@ -1134,7 +1134,7 @@ TEST_CASE("Celestron tracking - a configured alignment mode overrides the nomina
             0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt, expected.setting);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         driver->set_site_latitude(expected.latitude);
-        driver->set_site_longitude(174.8);
+        driver->set_site_longitude(151.215297);
         CHECK(driver->get_alignment_mode() == expected.alignment);
         driver->set_tracking(true);
 

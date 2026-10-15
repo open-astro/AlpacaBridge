@@ -675,8 +675,8 @@ TEST_CASE("SynScan tracking - mode follows mount geometry, the same in either he
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
             std::nullopt, std::nullopt, expected.setting);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-        driver->set_site_latitude(expected.south ? -41.3 : 41.3);
-        driver->set_site_longitude(174.8);
+        driver->set_site_latitude(expected.south ? -33.856784 : 33.856784);
+        driver->set_site_longitude(151.215297);
         CHECK(driver->get_alignment_mode() == expected.alignment);
         driver->set_tracking(true);
 

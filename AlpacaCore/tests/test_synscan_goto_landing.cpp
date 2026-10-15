@@ -274,7 +274,7 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
             case 'w': {
                 std::string location(8, '\0');
                 if (st->southern.load()) {
-                    location[0] = '\x29';  // 41 degrees
+                    location[0] = '\x22';  // 34 degrees
                     location[3] = '\x01';  // D: 1 = south
                 }
                 return location + "#";
