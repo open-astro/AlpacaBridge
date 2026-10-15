@@ -718,11 +718,14 @@ public:
             disconnect_locked();
         }
         clear_loss_locked();
+        connect_failure_.clear();
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
+            connect_failure_ = "no serial port is set";
             ALPACA_LOG_ERROR("SkyWatcher", "Serial connection requested but port_path is empty");
             return false;
         }
         if (info.type == ConnectionType::Network && info.host.empty()) {
+            connect_failure_ = "no host is set";
             ALPACA_LOG_ERROR("SkyWatcher", "Network connection requested but host is empty");
             return false;
         }
@@ -733,6 +736,13 @@ public:
         bool ok = info.type == ConnectionType::Serial ? connect_serial(info) : connect_udp(info);
         connected_ = ok;
         return ok;
+    }
+
+    // Why the last connect() returned false, in words for the operator; empty
+    // after a success. Read by the driver to build the refusal text (#1018).
+    std::string connect_failure() const {
+        std::lock_guard<std::mutex> lock(io_mutex_);
+        return connect_failure_;
     }
 
     void disconnect() {
@@ -1097,12 +1107,14 @@ private:
         if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
             ALPACA_LOG_ERROR("SkyWatcher",
                              "Port " + registry_key + " is already held open by another connected device");
+            connect_failure_ = "the port is already in use by another connected device";
             return false;
         }
 
         serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
         if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + util::errno_string(errno));
+            connect_failure_ = util::errno_string(errno);
+            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + connect_failure_);
             alpacacore::util::mark_serial_port_closed(registry_key);
             return false;
         }
@@ -1114,6 +1126,7 @@ private:
         (void)ioctl(serial_fd_, TIOCEXCL);
         struct termios tty {};
         if (tcgetattr(serial_fd_, &tty) != 0) {
+            connect_failure_ = "the port is not a serial device (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1137,6 +1150,7 @@ private:
         tty.c_cc[VMIN] = 0;
         tty.c_cc[VTIME] = 1;
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
+            connect_failure_ = "the serial settings were refused (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1160,6 +1174,7 @@ private:
         // (The other serial vendors keep clear_nonblocking + VTIME; this is a
         // Sky-Watcher-specific hardening for a tty that ignores VTIME.)
         if (!util::set_nonblocking(serial_fd_)) {
+            connect_failure_ = "the port could not be set non-blocking (" + util::errno_string(errno) + ")";
             close(serial_fd_);
             serial_fd_ = -1;
             alpacacore::util::mark_serial_port_closed(registry_key);
@@ -1194,6 +1209,7 @@ private:
 #ifndef _WIN32
         socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if (socket_fd_ < 0) {
+            connect_failure_ = "no network socket could be created (" + util::errno_string(errno) + ")";
             return false;
         }
         sockaddr_in addr{};
@@ -1205,6 +1221,7 @@ private:
             hints.ai_socktype = SOCK_DGRAM;
             addrinfo* result = nullptr;
             if (getaddrinfo(info.host.c_str(), nullptr, &hints, &result) != 0 || !result) {
+                connect_failure_ = "the host name could not be resolved";
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
@@ -1215,6 +1232,7 @@ private:
         // connect() the datagram socket so recv() only accepts the mount's
         // replies and send() needs no per-call address.
         if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            connect_failure_ = "the network address is unreachable (" + util::errno_string(errno) + ")";
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
@@ -1224,12 +1242,14 @@ private:
         try {
             std::string reply = exchange_udp(":e1\r", default_timeout(), 6);
             if (reply.empty() || reply[0] != kReplyOk) {
+                connect_failure_ = "the mount did not reply to the handshake";
                 close(socket_fd_);
                 socket_fd_ = -1;
                 return false;
             }
             fw_reply_ = reply;  // known ":e1" answer, used by resync_udp()
         } catch (const std::exception&) {
+            connect_failure_ = "the mount did not reply to the handshake";
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
@@ -1751,6 +1771,7 @@ private:
     // Decision 0009: the link was lost (transport gone, or a fault past the
     // staleness bound). Sticky until the next connect or disconnect.
     std::atomic<bool> link_lost_{false};
+    std::string connect_failure_;  // under io_mutex_: why the last connect() failed
     std::string lost_fault_;  // under health_mutex_: fault text kept after a loss
     std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     // open-astro#505: per-exchange evidence, written only under io_mutex_ by
@@ -1789,6 +1810,7 @@ SkyWatcherProtocolWrapper& SkyWatcherProtocolWrapper::instance() {
 }
 
 bool SkyWatcherProtocolWrapper::connect(const ConnectionInfo& info) { return pimpl_->connect(info); }
+std::string SkyWatcherProtocolWrapper::connect_failure() const { return pimpl_->connect_failure(); }
 
 void SkyWatcherProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 

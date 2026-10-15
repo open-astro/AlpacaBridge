@@ -129,6 +129,9 @@ public:
     static SkyWatcherProtocolWrapper& instance();
 
     bool connect(const ConnectionInfo& info);
+    // Why the last connect() returned false (e.g. "No such file or directory",
+    // "the mount did not reply to the handshake"); empty after a success.
+    std::string connect_failure() const;
     void disconnect();
     bool is_connected() const;
     // Decision 0009: the clock the staleness bound and the link-lost stamp run
