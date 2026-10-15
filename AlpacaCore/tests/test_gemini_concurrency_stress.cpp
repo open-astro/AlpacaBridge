@@ -13,9 +13,8 @@
 // Connect/disconnect/operate concurrency stress for the three Gemini drivers
 // (issue #101).
 //
-// Two of them get the full-seam treatment, because pty-backed fakes already
-// exist and drive them into the CONNECTED state, where the background work
-// actually runs -- but the two drivers are shaped differently, and the storm
+// All three get the full-seam treatment, because pty-backed fakes exist and
+// let a connect succeed. The first two are shaped differently, and the storm
 // reaches a different surface in each:
 //   - PDH Advanced 3 Switch over fake_gemini_pdh.h. This one does own a
 //     serial reader thread that a disconnect has to reap, and it writes the
@@ -44,10 +43,15 @@
 //     a cover call would widen this past a registration PR; also a
 //     follow-up.
 //
-// The focuser runs over fake_gemini_focuser.h too (open-astro#1067): it is
-// request/response like the flat panel, so the storm reaches its connected
-// getters, move/halt and the connect/disconnect transitions rather than a
-// connect that fails at once on an absent port.
+// The focuser runs over fake_gemini_focuser.h too (open-astro#1067). It is
+// request/response like the flat panel, with no reader thread. Connects now
+// succeed, so the storm covers the real connect/disconnect transitions
+// (transition_mutex_, the handshake, the fd close). It rarely holds a
+// CONNECTED driver while the operate calls run: a connect takes about 300 ms
+// and the lifecycle threads disconnect every few hundred microseconds, so in a
+// measured run only 2 of 68033 guarded calls got past NotConnected. The PDH
+// and flat-panel cases share that harness property. Deepening it is a harness
+// change and a follow-up.
 
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/focuser_driver.h>
@@ -268,7 +272,15 @@ TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gem
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     CHECK_NOTHROW(driver->set_connected(false));
 
-    alpacacore::test::StressCallGuard guard;
+    // Expected set stated explicitly (AGENTS.md, CI section). A connected
+    // focuser's only legitimate throw is NotConnected from a racing disconnect
+    // (ensure_connected(), gemini_focuser_driver.cpp:313, and the wrapper's own
+    // check under its lock, gemini_protocol_wrapper.cpp:597). move() clamps
+    // instead of throwing InvalidValue (gemini_focuser_driver.cpp:302), and the
+    // fake answers every query. A DriverException (wrapper read/write failure)
+    // is deliberately not expected: the fake never fails a transaction, so one
+    // would be a real regression.
+    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { focuser_operate(guard, d); });
 
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
