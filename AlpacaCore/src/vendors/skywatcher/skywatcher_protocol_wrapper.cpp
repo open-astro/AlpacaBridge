@@ -2078,7 +2078,15 @@ void SkyWatcherProtocolWrapper::set_step_period(int axis, uint32_t t1_preset, bo
         return;
     }
     const uint32_t diff = readback > t1_preset ? readback - t1_preset : t1_preset - readback;
-    if (diff > kReadbackTolerance) {
+    // An EQM-35 Pro (fw 3.47) answers in units of 16 ticks, as a signed 24-bit
+    // value whose sign is the direction (open-astro#1021): accept that decode
+    // too, within one count for the board's truncation. Stateless on purpose:
+    // a raw readback never lands near preset / 16 inside the compared range.
+    const int32_t signed_readback = static_cast<int32_t>(readback << 8) >> 8;
+    const uint32_t magnitude = static_cast<uint32_t>(signed_readback < 0 ? -signed_readback : signed_readback);
+    const uint32_t expected_div16 = t1_preset / 16;
+    const uint32_t div16_diff = magnitude > expected_div16 ? magnitude - expected_div16 : expected_div16 - magnitude;
+    if (diff > kReadbackTolerance && div16_diff > 1) {
         ALPACA_LOG_WARN("SkyWatcher", "Axis " + std::to_string(axis) + " step period readback " +
                                           std::to_string(readback) + " != written " + std::to_string(t1_preset) +
                                           " (diagnostic only; not resent)");

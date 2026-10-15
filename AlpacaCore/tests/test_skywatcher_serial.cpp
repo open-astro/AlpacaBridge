@@ -20,6 +20,7 @@
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -35,6 +36,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_serial_board.h"
@@ -280,6 +282,61 @@ TEST_CASE("SkyWatcher serial - a transient failure of the ':i' readback does not
     REQUIRE(link.board.count_frames('i') == 5);
     REQUIRE_NOTHROW(link.proto.set_step_period(1, 5020));
     REQUIRE(link.board.count_frames('i') == 5);  // no further ":i"
+}
+
+namespace {
+// Every WARN logged while alive, by message.
+struct SerialWarnCapture {
+    std::vector<std::string> messages;
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    SerialWarnCapture() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) messages.emplace_back(message);
+            });
+    }
+    ~SerialWarnCapture() { alpacacore::logging::set_log_sink(previous); }
+    SerialWarnCapture(const SerialWarnCapture&) = delete;
+    SerialWarnCapture& operator=(const SerialWarnCapture&) = delete;
+    size_t mismatches() const {
+        size_t n = 0;
+        for (const auto& m : messages) n += m.find("step period readback") != std::string::npos ? 1 : 0;
+        return n;
+    }
+};
+}  // namespace
+
+TEST_CASE("SkyWatcher serial - a signed /16 ':i' readback does not warn", "[skywatcher][serial]") {
+    // EQM-35 Pro fw 3.47 answers ":i" with the period / 16, signed by the
+    // direction (open-astro#1021); the table rows are from the rig log.
+    SerialLink link(300);
+    SerialWarnCapture warns;
+    for (const bool negative : {true, false}) {
+        link.board.set_readback_div16(negative);
+        for (const uint32_t period : {149590u, 299181u, 56250u, 187u}) {
+            REQUIRE_NOTHROW(link.proto.set_step_period(1, period));
+        }
+    }
+    CHECK(link.board.count_frames('i') == 8);
+    CHECK(warns.mismatches() == 0);
+}
+
+TEST_CASE("SkyWatcher serial - a ':i' readback fitting neither encoding still warns", "[skywatcher][serial]") {
+    SerialLink link(300);
+    SerialWarnCapture warns;
+    link.board.set_readback_div16(true, /*wrong_value=*/9999);
+    REQUIRE_NOTHROW(link.proto.set_step_period(1, 149590));
+    CHECK(warns.mismatches() == 1);
+}
+
+TEST_CASE("SkyWatcher serial - a raw ':i' readback keeps its tolerance and mismatch warning", "[skywatcher][serial]") {
+    SerialLink link(300);
+    SerialWarnCapture warns;
+    REQUIRE_NOTHROW(link.proto.set_step_period(1, 5000));  // verbatim
+    CHECK(warns.mismatches() == 0);
+    link.board.set_readback_div16(false, /*wrong_value=*/5100);  // raw, 100 off
+    REQUIRE_NOTHROW(link.proto.set_step_period(1, 5000));
+    CHECK(warns.mismatches() == 1);
 }
 
 TEST_CASE("SkyWatcher serial - connect claims the port in the cross-vendor registry and releases it",
