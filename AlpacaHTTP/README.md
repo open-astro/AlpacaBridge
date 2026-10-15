@@ -70,7 +70,8 @@ int main() {
 ### Management API
 
 - `GET /management/v1/description` - Server description
-- `GET /management/v1/configureddevices` - List configured devices
+- `GET /management/v1/configureddevices` - List configured devices that registered
+- `GET /management/v1/faileddevices` - Web UI extension (not an ASCOM path): saved devices that failed to load, in the `configureddevices` row shape with `LoadError: true`, an empty `UniqueID` and the saved `Config`
 
 ### Device API
 
