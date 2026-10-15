@@ -13,7 +13,9 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
+
 #include <memory>
 #include <optional>
 
@@ -29,15 +31,14 @@ void validate_ra_dec(double ra, double dec);
 void validate_move_axis_rate(double rate);
 }  // namespace detail
 
-std::unique_ptr<TelescopeDriver> create_bisque_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info);
+std::unique_ptr<TelescopeDriver> create_bisque_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m);
+std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_number,
+                                                                   const ConnectionInfo& connection_info,
+                                                                   std::optional<double> site_latitude_deg,
+                                                                   std::optional<double> site_longitude_deg,
+                                                                   std::optional<double> site_elevation_m,
+                                                                   util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::bisque
