@@ -292,7 +292,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // latitude at the mirrored northern latitude. The board is never told the latitude, and that
     // mount is a northern one turned half a turn about the vertical, so the
     // row is a northern reading with every azimuth shifted by 180 deg. The
-    // driver aimed at HA -3 h, dec +30 (alt 52, az 87) and the saddle ended
+    // driver aimed at HA -3 h, dec +30 (alt 52) and the saddle ended
     // pointing front-left and slightly down (SE, about -8 deg), which is
     // HA +9 h: the 6 h term had to flip with the hemisphere.
     // What row 5 refutes is the OLD model, which reported the tube 52 deg UP
