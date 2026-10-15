@@ -177,7 +177,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
-  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues.**
+  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues, on libgphoto2 2.5.31 and again on the bundled 2.5.34.**
   When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists a
   whole press/release pair (matched by name, never by index), the same
   `bulb_capture_with_abort` loop runs with the press as the open and the release as the close.
