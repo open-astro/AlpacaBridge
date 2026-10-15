@@ -9,7 +9,9 @@ the tools .github/workflows/ci.yml installs outside debian/control (cppcheck,
 zizmor, and the CI_APT_TOOLS such as Catch2), the ConformU beta build .claude/commands/conformu.md pins,
 and every workflow job's container image (pkg:docker), as development dependencies.
 
-  dependency_snapshot.py [--sha S] [--ref R] [--output FILE]   write the snapshot
+  dependency_snapshot.py [--sha S] [--ref R] [--debian-policy F] [--ubuntu-policy F] [--output FILE]
+                                                               write the snapshot
+  dependency_snapshot.py --apt-packages debian|ubuntu          package names to pass to apt-cache policy
   dependency_snapshot.py --check                               drift check
   dependency_snapshot.py --spdx DEB [--output FILE]            SPDX SBOM for a built .deb
   dependency_snapshot.py --pin                                 rewrite the SDK sha256 pins
@@ -17,7 +19,9 @@ and every workflow job's container image (pkg:docker), as development dependenci
 
 Rules: Build-Depends become scope "development", Depends become "runtime".
 For an alternative group ``a | b`` the FIRST alternative is reported. A version
-is put in a deb purl only for an exact ``(= X)`` pin; ``${...}`` substitutions
+is put in a deb purl for an exact ``(= X)`` pin, else the apt candidate from
+``--debian-policy``/``--ubuntu-policy`` (``apt-cache policy`` output) when one is
+given; with neither the purl carries no version. ``${...}`` substitutions
 and ``debhelper-compat`` are skipped. ``${shlibs:Depends}`` is resolved only at
 package build time and is out of scope. deb and generic purls raise no
 Dependabot alerts; they document the inventory.
@@ -228,9 +232,40 @@ def parse_containers(text: str) -> list[str]:
     return out
 
 
+def parse_apt_policy(text: str) -> dict[str, str]:
+    """{package: candidate version} from `LC_ALL=C apt-cache policy PKG...`; no candidate, no entry."""
+    out: dict[str, str] = {}
+    pkg = None
+    for line in text.splitlines():
+        if line and line[0] not in " \t" and line.endswith(":"):
+            pkg = line[:-1]
+        elif pkg and line.strip().startswith("Candidate:"):
+            ver = line.split(":", 1)[1].strip()
+            if ver and ver != "(none)":
+                out[pkg] = ver
+    return out
+
+
+def apt_packages(root: Path, distro: str) -> list[str]:
+    """The unpinned apt packages the snapshot reports for distro ("debian" or "ubuntu")."""
+    if distro == "ubuntu":
+        return list(CI_APT_TOOLS)
+    control = parse_control((root / "debian/control").read_text(encoding="utf-8"))
+    return list(dict.fromkeys(n for rels in control.values() for n, _ in rels))
+
+
 def deb_purl(name: str, version: str | None) -> str:
     name = urllib.parse.quote(name, safe="")  # purl: "+" in g++ is %2B
     return f"pkg:deb/debian/{name}{'@' + version if version else ''}?{DEB_QUALIFIERS}"
+
+
+def versioned_ubuntu_purl(purl: str, cand: dict[str, str]) -> str:
+    """Insert the candidate version into an unversioned pkg:deb/ubuntu purl; others pass through."""
+    head, sep, quals = purl.partition("?")
+    name = head.removeprefix("pkg:deb/ubuntu/")
+    if name == head or "@" in name or name not in cand:
+        return purl
+    return f"{head}@{cand[name]}{sep}{quals}"
 
 
 def manifest(path: str, entries: list[tuple[str, str]]) -> dict:
@@ -241,10 +276,14 @@ def manifest(path: str, entries: list[tuple[str, str]]) -> dict:
     return {"name": path, "file": {"source_location": path}, "resolved": resolved}
 
 
-def build_snapshot(root: Path, sha: str, ref: str, job_id: str, scanned: str) -> dict:
+def build_snapshot(root: Path, sha: str, ref: str, job_id: str, scanned: str,
+                   candidates: dict[str, dict[str, str]] | None = None) -> dict:
+    """candidates: {"debian"|"ubuntu": parse_apt_policy()} versions the unpinned deb entries."""
+    candidates = candidates or {}
+    deb_cand, ubuntu_cand = candidates.get("debian", {}), candidates.get("ubuntu", {})
     manifests = {}
     control = parse_control((root / "debian/control").read_text(encoding="utf-8"))
-    entries = [(deb_purl(n, v), scope) for scope, rels in control.items() for n, v in rels]
+    entries = [(deb_purl(n, v or deb_cand.get(n)), scope) for scope, rels in control.items() for n, v in rels]
     manifests["debian/control"] = manifest("debian/control", entries)
     cm = "AlpacaHTTP/CMakeLists.txt"
     fetched = parse_fetchcontent((root / cm).read_text(encoding="utf-8"))
@@ -257,6 +296,7 @@ def build_snapshot(root: Path, sha: str, ref: str, job_id: str, scanned: str) ->
     manifests[TABLE] = manifest(TABLE, sdk)
     if (root / CI).is_file():
         tools, _ = parse_ci_tools((root / CI).read_text(encoding="utf-8"))
+        tools = [versioned_ubuntu_purl(p, ubuntu_cand) for p in tools]
         manifests[CI] = manifest(CI, [(p, "development") for p in tools])
     for path, steps in WORKFLOW_TOOL_STEPS.items():
         if (root / path).is_file():
@@ -744,6 +784,30 @@ def self_test() -> int:
         (r / CONFORMU_DOC).unlink()
         assert snap["manifests"]["debian/control"]["resolved"][deb_purl("cmake", None)]["scope"] == "development"
         assert snap["manifests"]["debian/control"]["resolved"][deb_purl("adduser", None)]["scope"] == "runtime"
+        # apt-cache policy candidates version the unpinned deb entries; an exact (= X) pin wins and a
+        # package with no candidate stays unversioned.
+        policy = ("cmake:\n  Installed: (none)\n  Candidate: 3.31.6-2\n  Version table:\n"
+                  "     3.31.6-2 500\n        500 http://deb.debian.org/debian trixie/main arm64 Packages\n"
+                  "libfoo:\n  Installed: 1.2-3\n  Candidate: 9.9-9\n"
+                  "g++:\n  Installed: (none)\n  Candidate: (none)\n"
+                  "libusb-1.0-0:\n  Installed: (none)\n  Candidate: 2:1.0.28-1\n")
+        assert parse_apt_policy(policy) == {"cmake": "3.31.6-2", "libfoo": "9.9-9",
+                                            "libusb-1.0-0": "2:1.0.28-1"}, parse_apt_policy(policy)
+        (r / CI).write_text(ci)
+        cand = {"debian": parse_apt_policy(policy),
+                "ubuntu": parse_apt_policy("catch2:\n  Installed: (none)\n  Candidate: 3.4.0-1build1\n")}
+        snap = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z", candidates=cand)
+        dc = snap["manifests"]["debian/control"]["resolved"]
+        assert deb_purl("cmake", "3.31.6-2") in dc and deb_purl("libusb-1.0-0", "2:1.0.28-1") in dc, dc
+        assert deb_purl("libfoo", "1.2-3") in dc, "an exact pin is not replaced by the candidate"
+        assert deb_purl("g++", None) in dc and deb_purl("adduser", None) in dc, dc
+        ct = snap["manifests"][CI]["resolved"]
+        assert f"pkg:deb/ubuntu/catch2@3.4.0-1build1?{CI_APT_QUALIFIERS}" in ct, ct
+        assert f"pkg:deb/ubuntu/gcovr?{CI_APT_QUALIFIERS}" in ct, ct
+        assert apt_packages(r, "debian") == ["cmake", "g++", "libgpiod-dev", "libfoo",
+                                             "libcurl4-openssl-dev", "libusb-1.0-0", "adduser"], apt_packages(r, "debian")
+        assert apt_packages(r, "ubuntu") == list(CI_APT_TOOLS)
+        (r / CI).unlink()
         deb = {"Package": "alpacabridge", "Version": "5.0.0~beta2", "Architecture": "arm64",
                "Depends": "libc6 (>= 2.38), libgpiod3 (>= 2.1), libusb-1.0-0 (>= 2:1.0.16), adduser"}
         doc = build_spdx(r, deb, "x.deb", "f" * 64, "2026-01-01T00:00:00Z", "https://example.test/sbom")
@@ -907,9 +971,15 @@ def main() -> int:
     ap.add_argument("--output")
     ap.add_argument("--spdx", metavar="DEB")
     ap.add_argument("--pin", action="store_true")
+    ap.add_argument("--apt-packages", choices=("debian", "ubuntu"))
+    ap.add_argument("--debian-policy", metavar="FILE", help="apt-cache policy output from debian:trixie")
+    ap.add_argument("--ubuntu-policy", metavar="FILE", help="apt-cache policy output from the CI runner")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
+    if a.apt_packages:
+        print("\n".join(apt_packages(ROOT, a.apt_packages)))
+        return 0
     if a.pin:
         pin_sdk_hashes(ROOT)
         print(f"{TABLE}: sha256 pins rewritten")
@@ -958,7 +1028,15 @@ def main() -> int:
     ref = a.ref or os.environ.get("GITHUB_REF") or "refs/heads/main"
     job_id = os.environ.get("GITHUB_RUN_ID", "local")
     scanned = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    text = json.dumps(build_snapshot(ROOT, sha, ref, job_id, scanned), indent=2) + "\n"
+    candidates = {}
+    for distro, path in (("debian", a.debian_policy), ("ubuntu", a.ubuntu_policy)):
+        if path:
+            candidates[distro] = parse_apt_policy(Path(path).read_text(encoding="utf-8"))
+            missing = [n for n in apt_packages(ROOT, distro) if n not in candidates[distro]]
+            if missing:
+                print(f"WARNING: no {distro} apt candidate (left unversioned): {', '.join(missing)}",
+                      file=sys.stderr)
+    text = json.dumps(build_snapshot(ROOT, sha, ref, job_id, scanned, candidates), indent=2) + "\n"
     if a.output:
         Path(a.output).write_text(text, encoding="utf-8")
     else:
