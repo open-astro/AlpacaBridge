@@ -2,10 +2,10 @@
 # known vulnerabilities with OSV-Scanner (which reads Debian advisories, unlike
 # Dependabot). The .deb's Depends are installed into a debian:trixie image with
 # `apt-get satisfy`, so every package is at the exact version a user gets; the
-# SBOM cannot be scanned as is, because its runtime entries carry only `>=`
-# constraints. Only findings in the .deb's own runtime dependencies (not the
-# base system, not the C/C++ runtime) that Debian does not rate unimportant go
-# to Security > Code scanning; the new High/Critical ones among them that Debian
+# SBOM cannot be scanned as is, because its runtime versions are those of the
+# build environment, not the versions a user installs. Only findings in the
+# .deb's own runtime dependencies (not the base system, not the C/C++ runtime)
+# that Debian does not rate unimportant go to Security > Code scanning; the new High/Critical ones among them that Debian
 # has fixed in trixie also open one summary issue
 # (scripts/dependency_updates.py --filter-sarif / --osv-summary).
 # Vendored SDKs have no advisory source and are not covered.
