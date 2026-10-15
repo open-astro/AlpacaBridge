@@ -90,6 +90,10 @@ inline const Field<std::int64_t> kZwoFocuserIndex{.key = "focuserIndex",
                                                   .max = kZwoSelectorMax};
 inline const Field<std::int64_t> kZwoFocuserId{
     .key = "focuserId", .default_value = -1, .role = Role::DeviceId, .min = kZwoSelectorMin, .max = kZwoSelectorMax};
+// Optional. Absent means "leave the unit's stored max step alone": the catalog never fills it in, and
+// the factory reads it with find(), so default_value is only the descriptor's placeholder. The driver
+// refuses a value above the unit's own EAFStepRange at connect; the schema cannot know that bound.
+inline const Field<std::int64_t> kZwoFocuserMaxStep{.key = "maxStep", .default_value = 0, .min = 1, .max = 2000000};
 inline const Field<std::int64_t> kZwoRotatorIndex{.key = "rotatorIndex",
                                                   .default_value = -1,
                                                   .role = Role::EnumerationIndex,
@@ -173,7 +177,7 @@ inline const std::vector<FieldRef>& zwo_filterwheel_fields() {
 }
 
 inline const std::vector<FieldRef>& zwo_focuser_fields() {
-    static const std::vector<FieldRef> fields{kZwoFocuserIndex.ref(), kZwoFocuserId.ref()};
+    static const std::vector<FieldRef> fields{kZwoFocuserIndex.ref(), kZwoFocuserId.ref(), kZwoFocuserMaxStep.ref()};
     return fields;
 }
 

@@ -4875,6 +4875,9 @@ int main() {
             R"({"filterwheelIndex":1,"filterwheelId":5,"filterNames":["L","R","G","B","Ha"]})");
         add("zwo", "focuser", "Focuser", "", R"({"focuserIndex":1,"focuserId":3})",
             R"({"focuserIndex":1,"focuserId":3})");
+        // open-astro#1152: maxStep survives the save; left out it stays absent (no default is filled in).
+        add("zwo", "focuser", "Focuser", "maxStep", R"({"focuserIndex":1,"maxStep":40000})",
+            R"({"focuserIndex":1,"maxStep":40000})");
         add("zwo", "rotator", "Rotator", "", R"({"rotatorIndex":1,"rotatorId":2})",
             R"({"rotatorIndex":1,"rotatorId":2})");
         add("zwo", "switch", "Switch", "dewheater", R"({"switchType":"dewheater","cameraIndex":1,"cameraId":4})",
