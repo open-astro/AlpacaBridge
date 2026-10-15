@@ -1328,3 +1328,72 @@ TEST_CASE("SkyWatcher serial - an EQM-35 board's geometry and features reach the
     CHECK(std::abs(static_cast<double>(t1) - expected) <= 2.0);
     driver->set_connected(false);
 }
+
+TEST_CASE("SkyWatcher serial - a refused connect names the port or host:port and the reason",
+          "[skywatcher][serial][connect-error]") {
+    SECTION("a serial node that does not exist") {
+        const std::string path = "/dev/alpaca-no-such-skywatcher-port";
+        auto driver = serial_driver(path);
+        try {
+            driver->set_connected(true);
+            FAIL("connect to a missing port must throw");
+        } catch (const alpacacore::AlpacaException& e) {
+            const std::string what = e.what();
+            INFO(what);
+            CHECK(what.find(path) != std::string::npos);
+            CHECK(what.find("No such file or directory") != std::string::npos);
+            CHECK(what.find("Serial Port setting") != std::string::npos);
+        }
+        CHECK_FALSE(driver->get_connected());
+        driver->connect();  // LastConnectError is stored by the async path
+        REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 5000));
+        const std::string last = driver->get_last_connect_error();
+        CHECK(last.find(path) != std::string::npos);
+        CHECK(last.find("No such file or directory") != std::string::npos);
+    }
+    SECTION("a UDP endpoint that never answers the handshake") {
+        sw::ConnectionInfo info;
+        info.type = sw::ConnectionType::Network;
+        info.host = "127.0.0.1";
+        info.udp_port = 9;  // discard port, nothing replies
+        info.response_timeout_ms = 100;
+        auto driver = sw::create_skywatcher_telescope(0, info, -37.0, 175.0, 50.0);
+        try {
+            driver->set_connected(true);
+            FAIL("connect to a silent endpoint must throw");
+        } catch (const alpacacore::AlpacaException& e) {
+            const std::string what = e.what();
+            INFO(what);
+            CHECK(what.find("127.0.0.1:9") != std::string::npos);
+            CHECK(what.find("did not reply to the handshake") != std::string::npos);
+        }
+        driver->connect();  // LastConnectError is stored by the async path
+        REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 5000));
+        const std::string last = driver->get_last_connect_error();
+        CHECK(last.find("127.0.0.1:9") != std::string::npos);
+        CHECK(last.find("did not reply to the handshake") != std::string::npos);
+    }
+}
+
+TEST_CASE("SkyWatcher serial - a muted board's refused connect names the port and the setting",
+          "[skywatcher][serial][connect-error]") {
+    FakeSkyWatcherSerialBoard board;
+    board.set_muted(true);
+    const std::string path = board.slave_path();
+    auto driver = serial_driver(path);
+    try {
+        driver->set_connected(true);
+        FAIL("connect to a silent board must throw");
+    } catch (const alpacacore::AlpacaException& e) {
+        const std::string what = e.what();
+        INFO(what);
+        CHECK(what.find(path) != std::string::npos);
+        CHECK(what.find("Serial Port setting") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+    driver->connect();
+    REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 15000));
+    const std::string last = driver->get_last_connect_error();
+    CHECK(last.find(path) != std::string::npos);
+    CHECK(last.find("Serial Port setting") != std::string::npos);
+}
