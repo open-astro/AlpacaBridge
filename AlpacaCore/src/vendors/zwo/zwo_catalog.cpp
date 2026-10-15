@@ -167,6 +167,7 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
     bool duplicate_serial = false;
     bool duplicate_unique_id = false;
     bool cleared_duplicate_serial = false;
+    bool cleared_duplicate_unique_id = false;
     for (const PeerEntry& peer : context.peers) {
         const std::optional<std::string> peer_serial = peer.config.find(kZwoCamSerial);
         const std::optional<std::string> peer_unique_id = peer.config.find(kZwoCamUniqueId);
@@ -200,7 +201,10 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
             binding.identity.serial.clear();
             cleared_duplicate_serial = true;
         }
-        if (duplicate_unique_id) unique_id.clear();
+        if (duplicate_unique_id) {
+            unique_id.clear();
+            cleared_duplicate_unique_id = true;
+        }
     }
 
     // A camera that is not plugged in yet still registers with the identity it was
@@ -236,7 +240,13 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
         result.learned.set(kZwoCamSerial.key, std::string());
     }
     if (configured_name.empty() && !learned_name.empty()) result.learned.set(kZwoCamName.key, learned_name);
-    if (!unique_id.empty() && unique_id != supplied_unique_id) result.learned.set(kZwoCamUniqueId.key, unique_id);
+    if (!unique_id.empty() && unique_id != supplied_unique_id) {
+        result.learned.set(kZwoCamUniqueId.key, unique_id);
+    } else if (cleared_duplicate_unique_id) {
+        // Persist the clear, as for a serial: otherwise the duplicate stays in the file and
+        // both entries clear it again on every start.
+        result.learned.set(kZwoCamUniqueId.key, std::string());
+    }
 
     result.driver = vendor::zwo::create_zwo_camera_bound(device_number, binding, sdk);
     return result;

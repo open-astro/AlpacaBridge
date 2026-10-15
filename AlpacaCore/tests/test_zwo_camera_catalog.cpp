@@ -194,15 +194,15 @@ TEST_CASE("ZWO camera catalog - a stored duplicate is cleared and relearned", "[
     REQUIRE(cleared.driver != nullptr);
     CHECK(learned(cleared, "serialNumber") == std::string());
 
-    // A duplicated UniqueID is cleared on its own and a new one generated.
+    // A duplicated UniqueID is cleared on its own.
     DeviceConfig uid = camera_config(0);
     uid.set("uniqueId", std::string("ZWO_UID_00112233445566ff"));
     const BindResult fresh = bind(rig, uid, 9, Source::Persisted, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
     REQUIRE(fresh.driver != nullptr);
     CHECK_FALSE(fresh.rejection.has_value());
-    const auto new_uid = learned(fresh, "uniqueId");
-    // The camera has a serial, so no UniqueID is generated: the cleared one is simply not kept.
-    CHECK_FALSE(new_uid.has_value());
+    // The camera has a serial, so no UniqueID is generated: the clear is handed back as an
+    // empty uniqueId, as for a serial, so the duplicate leaves the stored file.
+    CHECK(learned(fresh, "uniqueId") == std::string());
     CHECK(learned(fresh, "serialNumber") == std::string(kFakeSerial));
 }
 
