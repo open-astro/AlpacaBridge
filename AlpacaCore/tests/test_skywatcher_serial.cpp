@@ -941,6 +941,44 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher serial - state getters on a faulted link that is then lost report NotConnected",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#882 review: the latch outlives the link (the fault text stays
+    // until the client disconnects), so a state getter that tests the latch
+    // before the connection answered DriverException while Connected read false.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+    board.sever_link();
+    REQUIRE(wait_until_true([&] { return !driver->get_connected(); }, 6000));
+    REQUIRE_FALSE(driver->get_link_fault().empty());  // the latch is still set
+
+    const auto expect_not_connected = [&](const char* name, const std::function<void()>& fn) {
+        INFO(name);
+        try {
+            fn();
+            FAIL_CHECK("expected NotConnected");
+        } catch (const alpacacore::AlpacaException& e) {
+            INFO(e.what());
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        }
+    };
+    expect_not_connected("TrackingRate", [&] { driver->get_tracking_rate(); });
+    expect_not_connected("RightAscensionRate", [&] { driver->get_right_ascension_rate(); });
+    expect_not_connected("DeclinationRate", [&] { driver->get_declination_rate(); });
+    expect_not_connected("Tracking", [&] { driver->get_tracking(); });
+    expect_not_connected("IsPulseGuiding", [&] { driver->get_is_pulse_guiding(); });
+    expect_not_connected("AtHome", [&] { driver->get_at_home(); });
+    expect_not_connected("AtPark", [&] { driver->get_at_park(); });
+    expect_not_connected("SideOfPier", [&] { driver->get_side_of_pier(); });
+    expect_not_connected("Slewing", [&] { driver->get_slewing(); });
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is not silently resumed",
           "[skywatcher][serial][linkhealth]") {
     // The hardware run's sharpest finding (EQM-35 Pro, 2026-09-17): after a

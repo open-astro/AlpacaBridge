@@ -1009,6 +1009,10 @@ public:
 
 private:
     void disconnect_locked() {
+        // First: link_alive() reads connected_ without io_mutex_, and once
+        // link_path_ is cleared below it has no node to check, so a later
+        // store left Connected reading true mid-close (open-astro#882).
+        connected_ = false;
 #ifndef _WIN32
         if (serial_fd_ >= 0) {
             // open-astro#912: the exclusive flag lives on the tty and survives
@@ -1036,7 +1040,6 @@ private:
             std::lock_guard<std::mutex> lock(health_mutex_);
             link_health_.reset();
         }
-        connected_ = false;
     }
 
     // Decision 0009 point 2: a socket errno is lost-at-once only when it says

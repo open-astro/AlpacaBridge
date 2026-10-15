@@ -831,6 +831,7 @@ public:
 
     double get_declination_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return dec_rate_arcsec_per_sec_;
     }
@@ -987,6 +988,7 @@ public:
 
     double get_right_ascension_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return ra_rate_sec_per_sidereal_sec_;
     }
@@ -1270,6 +1272,7 @@ public:
 
     int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return tracking_rate_;
     }
@@ -1487,7 +1490,7 @@ public:
         uint64_t park_error_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             if (parked_ || parking_) {
                 return;  // calling Park twice is harmless
             }
