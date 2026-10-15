@@ -126,14 +126,37 @@ int main() {
     }
 
     // 3a. A whole-valued JSON float in an int field (e.g. 1.0) is accepted and
-    // stored as the integer, as config_get<int>() accepted it; a fractional or
-    // out-of-int64-range float is still the wrong type.
+    // stored as the integer, as config_get<int>() accepted it; a fractional
+    // float gets the whole-number text (the case below), an out-of-int64-range
+    // float is still the wrong type.
     {
         const DeviceConfig c = cj::config_from_json(nlohmann::json::parse(R"({"count":2.0})"), schema);
         const auto* v = c.find_value("count");
         EXPECT(v != nullptr && std::holds_alternative<std::int64_t>(*v) && std::get<std::int64_t>(*v) == 2);
         EXPECT(invalid_value_message(R"({"count":-3.0})").empty());
         EXPECT(invalid_value_message(R"({"count":1e300})").find("count") != std::string::npos);
+    }
+
+    {
+        // case: a fractional number or a boolean in an int field says it must be a whole number
+        EXPECT(invalid_value_message(R"({"count":1.5})") ==
+               "Device config field 'count' must be a whole number (got 1.5)");
+        EXPECT(invalid_value_message(R"({"count":true})") ==
+               "Device config field 'count' must be a whole number (got true)");
+        EXPECT(invalid_value_message(R"({"count":-0.25})") ==
+               "Device config field 'count' must be a whole number (got -0.25)");
+        // Other wrong kinds keep the type text.
+        EXPECT(invalid_value_message(R"({"count":[1]})") ==
+               "Device config field 'count' has the wrong type (got array)");
+        EXPECT(invalid_value_message(R"({"count":{"a":1}})") ==
+               "Device config field 'count' has the wrong type (got object)");
+        EXPECT(invalid_value_message(R"({"count":"7"})") ==
+               "Device config field 'count' has the wrong type (got string)");
+        // A bool field given a number, and an out-of-range float, keep the type text too.
+        EXPECT(invalid_value_message(R"({"enabled":1})") ==
+               "Device config field 'enabled' has the wrong type (got number)");
+        EXPECT(invalid_value_message(R"({"count":1e300})") ==
+               "Device config field 'count' has the wrong type (got number)");
     }
 
     {

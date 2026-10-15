@@ -1,0 +1,3 @@
+### Fixed
+
+- **A fractional or boolean value in a whole-number device config field now says so** (`AlpacaHTTP/src/core/catalog_json.cpp`, issue #1017): `baudRate: 9600.5` or `cameraIndex: true` was refused with "has the wrong type (got number)" (for a boolean, "(got boolean)"), which reads as if a number were not allowed. The refusal is now "Device config field 'baudRate' must be a whole number (got 9600.5)" (`true` for a boolean), still InvalidValue (test_catalog_json.cpp "a fractional number or a boolean in an int field says it must be a whole number"). A string, array or object in a number field, a number in a string or boolean field, and an out-of-range float keep the "has the wrong type (got <type>)" text, and what is accepted is unchanged (`9600.0` still is).

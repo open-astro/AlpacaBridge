@@ -7318,8 +7318,26 @@ int main() {
             "Telescope");
         EXPECT(!fractional.ok);
         EXPECT(fractional.message.find("baudRate") != std::string::npos);
-        EXPECT(fractional.message.find("wrong type") != std::string::npos);
+        EXPECT(fractional.message == "Device config field 'baudRate' must be a whole number (got 9600.5)");
         EXPECT(listed_entry(router, "Telescope", 9259).is_null());
+
+        const auto boolean =
+            api_attempt(router,
+                        nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                              R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":true,)"
+                                              R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                        "Telescope");
+        EXPECT(!boolean.ok);
+        EXPECT(boolean.message == "Device config field 'baudRate' must be a whole number (got true)");
+
+        const auto text = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":"9600",)"
+                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+            "Telescope");
+        EXPECT(!text.ok);
+        EXPECT(text.message == "Device config field 'baudRate' has the wrong type (got string)");
 
         const auto whole = api_attempt(
             router,

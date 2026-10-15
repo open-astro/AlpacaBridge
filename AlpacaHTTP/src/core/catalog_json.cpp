@@ -42,6 +42,15 @@ using alpacacore::catalog::Role;
         alpacacore::AlpacaError::InvalidValue);
 }
 
+// An Int field given a fractional number or a boolean: the value is the wrong
+// shape of number, not the wrong kind of JSON, so say what the field needs and
+// what it got (`9600.5`, `true`).
+[[noreturn]] void throw_not_whole_number(const std::string& name, const nlohmann::json& value) {
+    throw AlpacaException(
+        std::string("Device config field '") + name + "' must be a whole number (got " + value.dump() + ")",
+        alpacacore::AlpacaError::InvalidValue);
+}
+
 // A JSON float with no fractional part that fits an int64 (e.g. 1.0), as the
 // integer it holds; config_get<int>() accepted that shape. Anything else,
 // including 1.5 and a JSON true/false (which config_get<int>() took as 1/0),
@@ -79,6 +88,9 @@ DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<con
                     out.set(f.key, v.get<std::int64_t>());
                 } else if (const auto whole = whole_number(v)) {
                     out.set(f.key, *whole);
+                } else if (v.is_boolean() || (v.is_number_float() && std::isfinite(v.get<double>()) &&
+                                              v.get<double>() != std::trunc(v.get<double>()))) {
+                    throw_not_whole_number(name, v);
                 } else {
                     throw_wrong_type(name, v);
                 }
