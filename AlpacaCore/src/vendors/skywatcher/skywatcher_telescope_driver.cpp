@@ -2107,8 +2107,8 @@ public:
         // kLandingSettleTimeout (2 s) -- about 7.5 s past the landing if
         // every bound is hit, against ~450 ms when the first sample agrees,
         // which is the ordinary case. Before that budget starts, the landing
-        // landing refinement (refine_goto_landing(): up to three re-gotos,
-        // each with its own wait_for_slew_complete, plus a hold of up to
+        // refinement (refine_goto_landing(): up to three re-gotos, each
+        // with its own wait_for_slew_complete, plus a hold of up to
         // kMaxLandingHoldSeconds, 5 s) has already run, so the whole call
         // can take that much longer.
         goto_in_progress_ = false;
