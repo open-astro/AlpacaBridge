@@ -5,7 +5,7 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
 ## Quick Start
 
 1. **Download the vendor SDK** from the vendor's official website
-2. **Read the SDK root** that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on. Nothing searches for the SDK: the path is literal and its shape differs per vendor. Most vendors keep the extracted folder as a level of its own (`external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64_26.06.04/`, `external/ToupTek/toupcamsdk.20260128/`, `external/Altair/altaircamsdk.20260531/`, `external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/`); SVBONY does not: `SVB_SDK_ROOT` is `external/SVBONY/` itself, and CMake looks for `external/SVBONY/include/SVBCameraSDK.h` and `external/SVBONY/lib/`, one level below that root
+2. **Read the SDK root** that vendor's `src/vendors/<vendor>/CMakeLists.txt` sets and hard-fails on. Nothing searches for the SDK: the path is literal and its shape differs per vendor. Most vendors keep the extracted folder as a level of its own (`external/ZWO/ASI_Camera_SDK/`, `external/QHY/sdk_linux_arm64_26.06.04/`, `external/ToupTek/toupcamsdk.20260128/`, `external/Altair/altaircamsdk.20260531/`, `external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/`); SVBONY does not: `SVB_SDK_ROOT` is `external/SVBONY/` itself, and CMake looks for `external/SVBONY/include/SVBCameraSDK.h` and `external/SVBONY/lib/`, one level below that root
 3. **Extract the SDK archive** so that its contents land at exactly that root
    - Two-level vendors: place the vendor-named folder under `external/<Vendor>/`
    - SVBONY: place the archive's `include/`, `lib/` and the rest directly in `external/SVBONY/`, with no extra folder level

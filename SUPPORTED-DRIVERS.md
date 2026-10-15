@@ -92,7 +92,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>iOptron Camera Driver Notes</strong></summary>
 
-- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.0) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
+- **Backend**: the iCAM cameras are rebadged Player One cameras (iCAM178M = USB `a0a0:178b`, iCAM462C = `a0a0:462a`, iCAM464C = `a0a0:464a`; the Player One SDK enumerates them by their iCAM names). It is served by the Player One camera driver (Player One Camera SDK v3.10.1) and needs the `ALPACACORE_ENABLE_PLAYERONE` build flag; iOptron publishes no camera SDK.
 - **Configuration**: select vendor iOptron, device type Camera, and the Player One SDK camera index. The index is shared with any Player One-branded cameras on the same system.
 - **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
 - **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
@@ -112,7 +112,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>Player One Driver Notes</strong></summary>
 
-- **SDK**: Player One Camera SDK v3.10.0 (build target)
+- **SDK**: Player One Camera SDK v3.10.1 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
 - **Tested models**: Ceres 462M (uncooled), Mars-C II (uncooled guide camera, IMX290), and Uranus-C PRO (cooled, IMX585) on Linux arm64.
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
