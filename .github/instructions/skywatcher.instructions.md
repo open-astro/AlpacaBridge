@@ -538,8 +538,10 @@ below was one of them.
   ~0.13 arcsec frozen, stable to +/-0.1 across runs; the case asserts a 2 arcsec floor.
   **And the seam disagrees with the hardware about which is better**: on the loopback fake the
   frozen constants land at about -0.8 arcsec and the measured EMAs at -3 to -13, because the
-  fake has no equivalent of the real MC's ~3 s floor on even a 350-count refinement goto --
-  which is precisely the fact that made the constants wrong on an EQM-35. So the test pins that
+  fake's goto and restart timing is not the real MC's (the EQM-35 measures ~0.26 s for a
+  259-count refinement goto and ~0.2 s landing-to-`:J1`, which is why the Wave 100i constants
+  were wrong there; an earlier "~3 s floor" explanation for the gap was wrong and is dropped,
+  and the loopback fake has not been shown to reproduce the real timing). So the test pins that
   the aim-ahead is driven by something that moves, and says in its own comment that the
   evidence measuring HELPS is the hardware ConformU run, not the fake. **Rule:** when a fake
   cannot reproduce the quantity a change was made for, pin the mechanism and name the real
