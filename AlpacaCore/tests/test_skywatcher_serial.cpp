@@ -941,6 +941,44 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher serial - a faulted link refuses a hemisphere-crossing SiteLatitude write",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#882: crossing the equator while tracking re-applies the drive
+    // on the board, so that write is refused like every other command while
+    // latched, and the stored site is left as it was.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());  // site latitude -37.0
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+
+    const std::size_t frames_before = board.frames().size();
+    try {
+        driver->set_site_latitude(51.477833);
+        FAIL_CHECK("expected a DriverException");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("communications compromised") != std::string::npos);
+    }
+    const auto frames = board.frames();
+    for (std::size_t i = frames_before; i < frames.size(); ++i) {
+        INFO("unexpected frame on a faulted link: " << frames[i]);
+        CHECK((frames[i][0] == 'f' || frames[i][0] == 'j'));
+    }
+    CHECK(driver->get_site_latitude() == -37.0);
+    CHECK(driver->get_connected());
+
+    board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    CHECK_NOTHROW(driver->set_site_latitude(51.477833));
+    CHECK(driver->get_site_latitude() == 51.477833);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher serial - state getters on a faulted link that is then lost report NotConnected",
           "[skywatcher][serial][linkhealth]") {
     // open-astro#882 review: the latch outlives the link (the fault text stays
