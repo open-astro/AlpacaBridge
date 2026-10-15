@@ -503,8 +503,10 @@ err=$("$server" "$@" 2>&1 >/dev/null); rc=$?
 test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
     add_test(NAME server_cli_unknown_option
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "unknown option '--bogus'" --bogus)
+    add_test(NAME server_cli_extra_argument
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "at most one" a b)
     add_test(NAME server_cli_missing_config
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
             ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
-    set_tests_properties(server_cli_unknown_option server_cli_missing_config PROPERTIES TIMEOUT 20)
+    set_tests_properties(server_cli_unknown_option server_cli_extra_argument server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()
