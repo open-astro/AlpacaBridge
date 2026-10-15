@@ -1,0 +1,2 @@
+### Fixed
+- **The SBOM records runtime library versions** (`scripts/dependency_snapshot.py`, issue #1140): the SPDX SBOM attested on each beta and nightly `.deb` listed its runtime dependencies without a version. They now carry the version installed in the build environment, as the build dependencies already did, so the SBOM shows which runtime library versions the build was made against. A dependency not installed there stays unversioned. Pinned by the new runtime-dependency case in `dependency_snapshot.py --self-test`.
