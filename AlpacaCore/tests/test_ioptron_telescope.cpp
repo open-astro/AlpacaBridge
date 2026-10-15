@@ -774,7 +774,8 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
 
 // Review of #843: MoveAxis(axis, 0) sends :qR#/:qD#, which stop arrow motion only; the iOptron RS-232 command
 // language says other slewing is not affected, so the park keeps moving and must not be masked by a PulseGuide.
-TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis rate 0 during a park",
+// A jog before the stop does not end it either.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis during a park",
           "[ioptron][telescope][unit][fake][pulseguide]") {
     alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
@@ -784,8 +785,27 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     REQUIRE(driver->get_connected());
 
     driver->park();
+    driver->move_axis(0, driver->get_axis_rate_range(0).first);
     driver->move_axis(0, 0.0);
     driver->move_axis(1, 0.0);
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Same for a GOTO: MoveAxis supersedes the dispatch (slew_in_progress_ cleared), but the mount keeps slewing.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis rate 0 during a GOTO",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    driver->move_axis(0, 0.0);
     driver->pulse_guide(3, 3000);
     CHECK(driver->get_is_pulse_guiding());
     CHECK(driver->get_slewing());
