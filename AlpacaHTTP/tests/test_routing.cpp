@@ -4275,10 +4275,18 @@ int main() {
         alpacahttp::Router startup_router;
         const auto listed = nlohmann::json::parse(
             route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        // The unregistrable 9655 row is served by faileddevices (#576); the
+        // float-numbered skywatcher entry is registered (configureddevices) on
+        // a build with that vendor and a failed row on one without it.
+        const auto failed_listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
         bool listed_lowercase = false;
         bool float_listed = false;
-        if (!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array()) {
-            for (const auto& entry : listed["Value"]) {
+        for (const auto* source : {&listed, &failed_listed}) {
+            if (source->is_discarded() || !source->contains("Value") || !(*source)["Value"].is_array()) {
+                continue;
+            }
+            for (const auto& entry : (*source)["Value"]) {
                 if (entry.value("DeviceNumber", -1) == 9655) {
                     listed_lowercase = entry.value("DeviceType", "") == "telescope";
                 }
