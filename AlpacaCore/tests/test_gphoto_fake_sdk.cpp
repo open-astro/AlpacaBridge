@@ -707,8 +707,7 @@ int count_calls(const FakeGPhotoSDK& fake, const std::string& name) {
 
 }  // namespace
 
-TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and captures",
-          "[gphoto][camera][unit][fakesdk]") {
+TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and captures", "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_camera());
@@ -725,7 +724,7 @@ TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and capture
         if (name == "set_choice_value" && !dropped) {
             dropped = true;
             throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                          alpacacore::AlpacaError::DriverException);
+                                                                         alpacacore::AlpacaError::DriverException);
         }
     };
 
@@ -757,7 +756,7 @@ TEST_CASE("GPhoto camera fake - failed session reopen ends the exposure without 
     fake.before_call = [&](const std::string& name) {
         if (name == "set_choice_value") {
             throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                          alpacacore::AlpacaError::DriverException);
+                                                                         alpacacore::AlpacaError::DriverException);
         }
     };
     fake.throw_from.insert("open_camera");

@@ -1378,8 +1378,7 @@ private:
     // have fired. A second failure, or any other error, propagates as before. `handle` is updated
     // for the caller. Runs on the exposure worker; stop_exposure()/disconnect join it before they
     // close handle_, so handle_ is only changed here under mutex_.
-    void set_shutter_choice_reopening_lost_session(int& handle, const std::string& widget,
-                                                   const std::string& choice) {
+    void set_shutter_choice_reopening_lost_session(int& handle, const std::string& widget, const std::string& choice) {
         auto& sdk = sdk_;
         try {
             sdk.set_choice_value(handle, widget, choice);
