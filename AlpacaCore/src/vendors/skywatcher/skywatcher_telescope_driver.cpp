@@ -1169,6 +1169,9 @@ public:
             const bool dec_busy = axis_busy_locked(kAxisDec);
             const bool still_crossing =
                 connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) && !(ra_busy && dec_busy);
+            if (still_crossing) {
+                check_writable_locked();  // the latch may have set while the mutex was released
+            }
             const double previous = effective_ra_rate_locked();
             site_latitude_ = latitude;
             site_latitude_set_ = true;
