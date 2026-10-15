@@ -296,7 +296,7 @@ public:
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_in_progress_ = false;
-                driver_motion_active_ = false;
+                driver_motion_ = DriverMotion::None;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -375,7 +375,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             slew_override_until_ = std::chrono::steady_clock::time_point{};
             slew_in_progress_ = false;
-            driver_motion_active_ = false;
+            driver_motion_ = DriverMotion::None;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -1091,8 +1091,8 @@ public:
             // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
             // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
             // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
-            // dispatching and no Park/FindHome still moving (driver_motion_active_).
-            return !(pulse_window_open() && !slew_in_progress_ && !driver_motion_active_);
+            // dispatching and no Park/FindHome still moving (driver_motion_).
+            return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
         }
         if (slew_override_until_ > now) {
             return true;
@@ -1285,7 +1285,7 @@ public:
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
         protocol.go_to_home();
         supersede_slew_dispatch_locked();
-        driver_motion_active_ = true;
+        driver_motion_ = DriverMotion::Home;
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
@@ -1312,7 +1312,7 @@ public:
                                   AlpacaError::DriverException);
         }
         supersede_slew_dispatch_locked();
-        driver_motion_active_ = true;
+        driver_motion_ = DriverMotion::Park;
         park_override_until_ = std::chrono::steady_clock::time_point{};
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
@@ -1375,7 +1375,7 @@ public:
                                   AlpacaError::DriverException);
         }
         slew_in_progress_ = false;
-        driver_motion_active_ = false;
+        driver_motion_ = DriverMotion::None;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
     }
@@ -1987,7 +1987,7 @@ private:
         // generation mismatch, preventing a ghost slew/trim after newer motion.
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
-        driver_motion_active_ = false;
+        driver_motion_ = DriverMotion::None;
         clear_slew_override_locked();
     }
 
@@ -2165,11 +2165,14 @@ private:
                                   AlpacaError::DriverException);
         }
         finalize_wedged_park_locked();
-        // A fresh status with no motion (the finalizer may have re-read it), past the initiator's override,
-        // ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark, Tracking or
-        // Slewing).
-        if (!cached_status_.is_slewing && slew_override_until_ <= now) {
-            driver_motion_active_ = false;
+        // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
+        // Tracking or Slewing): its own end state (parked, at home) at once, any other no-motion status only
+        // past the initiator's override (the firmware can still report its old status just after the command).
+        // Runs after the finalizer, which may have re-read the status.
+        const bool reached_end = (driver_motion_ == DriverMotion::Park && cached_status_.is_parked) ||
+                                 (driver_motion_ == DriverMotion::Home && cached_status_.is_at_home);
+        if (reached_end || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
+            driver_motion_ = DriverMotion::None;
         }
     }
 
@@ -2880,10 +2883,11 @@ private:
     mutable bool slew_in_progress_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those):
     // keeps get_slewing() true when a PulseGuide arrives mid-motion. Set by park()/find_home(),
-    // cleared by refresh_status_cache_locked() once a fresh status reports no motion past the
-    // initiator's override, and by AbortSlew, any new initiator
+    // cleared by refresh_status_cache_locked() once a fresh status reports that initiator's end
+    // state, or no motion past the initiator's override, and by AbortSlew, any new initiator
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
-    mutable bool driver_motion_active_ = false;
+    enum class DriverMotion { None, Park, Home };
+    mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
