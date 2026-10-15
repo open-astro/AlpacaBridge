@@ -201,12 +201,20 @@ nlohmann::json listed_config(alpacahttp::Router& router, const std::string& devi
     return entry.is_null() ? nlohmann::json() : entry.value("Config", nlohmann::json());
 }
 
-// The "<vendor> (failed to load)" row configureddevices lists for a persisted
-// entry that did not register (LoadError true, lower-case DeviceType).
+// The "<vendor> (failed to load)" row GET /management/v1/faileddevices lists
+// for a persisted entry that did not register (LoadError true, lower-case
+// DeviceType). configureddevices never lists it (open-astro#576).
 nlohmann::json listed_failed_entry(alpacahttp::Router& router, const std::string& lower_type, int device_number) {
-    const auto entry = listed_entry(router, lower_type, device_number);
-    if (!entry.is_null() && entry.value("LoadError", false)) {
-        return entry;
+    const auto listed =
+        nlohmann::json::parse(route_request(router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
+    if (listed.is_discarded() || !listed.contains("Value") || !listed["Value"].is_array()) {
+        return nlohmann::json();
+    }
+    for (const auto& entry : listed["Value"]) {
+        if (entry.value("LoadError", false) && entry.value("DeviceType", "") == lower_type &&
+            entry.value("DeviceNumber", -1) == device_number) {
+            return entry;
+        }
     }
     return nlohmann::json();
 }
@@ -233,7 +241,7 @@ ApiAttempt api_attempt(alpacahttp::Router& router, const nlohmann::json& posted,
 struct PersistedAttempt {
     bool listed = false;          // REGISTERED: listed under its Alpaca type name, no LoadError
     nlohmann::json config;        // Config of the registered device
-    bool failed_listed = false;   // not registered, but listed as "<vendor> (failed to load)"
+    bool failed_listed = false;   // not registered, but listed by faileddevices as "<vendor> (failed to load)"
     nlohmann::json failed_entry;  // that row (DeviceType lower-case, LoadError true, sanitized Config)
     std::string name;             // DeviceName of the registered device (what the factory was handed)
     std::vector<std::string> warnings;
@@ -4267,10 +4275,18 @@ int main() {
         alpacahttp::Router startup_router;
         const auto listed = nlohmann::json::parse(
             route_request(startup_router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        // The unregistrable 9655 row is served by faileddevices (#576); the
+        // float-numbered skywatcher entry is registered (configureddevices) on
+        // a build with that vendor and a failed row on one without it.
+        const auto failed_listed = nlohmann::json::parse(
+            route_request(startup_router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
         bool listed_lowercase = false;
         bool float_listed = false;
-        if (!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array()) {
-            for (const auto& entry : listed["Value"]) {
+        for (const auto* source : {&listed, &failed_listed}) {
+            if (source->is_discarded() || !source->contains("Value") || !(*source)["Value"].is_array()) {
+                continue;
+            }
+            for (const auto& entry : (*source)["Value"]) {
                 if (entry.value("DeviceNumber", -1) == 9655) {
                     listed_lowercase = entry.value("DeviceType", "") == "telescope";
                 }
@@ -8842,6 +8858,37 @@ int main() {
     }
 #endif
 
+    {
+        // case: failed-to-load entries are served by faileddevices, not configureddevices (#576)
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << R"([{"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":9577}])";
+        }
+        alpacahttp::Router router;
+        const auto configured = nlohmann::json::parse(
+            route_request(router, "GET", "/management/v1/configureddevices").body(), nullptr, false);
+        EXPECT(!configured.is_discarded() && configured.value("ErrorNumber", -1) == 0);
+        for (const auto& row : configured["Value"]) {
+            EXPECT(!row.value("LoadError", false));
+            EXPECT(row.value("UniqueID", "x") != "");
+            EXPECT(row.value("Vendor", "") != "nosuchvendor");
+        }
+        for (const std::string path : {"/management/v1/faileddevices", "/management/faileddevices"}) {
+            const auto failed = nlohmann::json::parse(route_request(router, "GET", path).body(), nullptr, false);
+            EXPECT(!failed.is_discarded() && failed.value("ErrorNumber", -1) == 0);
+            EXPECT(failed["Value"].is_array() && failed["Value"].size() == 1);
+            const auto& row = failed["Value"][0];
+            EXPECT(row.value("LoadError", false));
+            EXPECT(row.value("DeviceName", "") == "nosuchvendor (failed to load)");
+            EXPECT(row.value("DeviceType", "") == "focuser");
+            EXPECT(row.value("DeviceNumber", -1) == 9577);
+            EXPECT(row.value("UniqueID", "x").empty());
+            EXPECT(row["Config"].value("vendor", "") == "nosuchvendor");
+        }
+        EXPECT(route_request(router, "PUT", "/management/v1/faileddevices", "{}").status_code() == 405);
+    }
     {
         // case: routes outside the Alpaca schema are rejected (#576)
         constexpr int kSchemaDevice = 9576;
