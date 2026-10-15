@@ -3476,8 +3476,8 @@ TEST_CASE("SkyWatcher async - a rate check past its last wait does not resend af
     const int served_before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(150));
     // A watcher stops tracking as soon as the second read is counted (the fake
-    // counts a reply just before it sends it), on real time: the clock-driving loop below reacts too slowly to land inside
-    // the held ":f" read.
+    // counts a reply just before it sends it), on real time: the clock-driving loop below reacts too slowly to land
+    // inside the held ":f" read.
     std::atomic<bool> stopped{false};
     std::thread watcher([&] {
         const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(10);
