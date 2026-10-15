@@ -18,7 +18,7 @@ ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux
 SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
 TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc
 ALTAIR_LIB_DIR     := $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/arm64/glibc
-PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64
+PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64
 PLAYERONE_PW_LIB_DIR := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64
 
 # Cross-compilation flags (no-op when building natively)
@@ -116,7 +116,7 @@ override_dh_auto_install:
 	  $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/udev/99-altaircam.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
-	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/udev/99-player_one_astronomy.rules \
+	  $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/udev/99-player_one_astronomy.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	# ASIAIR Plus (RK3568): /dev/pwm-gpio-misc is created root-only by ZWO's
 	# pwm_gpio.ko; this rule opens it to the gpio group (postinst guarantees
