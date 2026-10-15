@@ -1,0 +1,2 @@
+### Changed
+- **Player One Camera SDK updated from 3.10.0 to 3.10.1** (AlpacaCore, issue #1129): the vendored `libPlayerOneCamera` under `AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/` fixes horizontal stripes in HDR sensor mode on Uranus and Xena 585M cameras with hardware bin 2. The public headers and the udev rules are unchanged, so the wrapper needed no change. ConformU was not re-run.

@@ -317,7 +317,7 @@ Add Player One camera driver with end-to-end HTTP/UI integration
 - **Player One Device Support** (AlpacaHTTP): router registration,
   web UI vendor selection and camera-index config
 - **Player One Unit Tests**: 6 test cases, 28 assertions
-- **Player One SDK**: v3.10.0 libraries under external/PlayerOne/
+- **Player One SDK**: v3.10.1 libraries under external/PlayerOne/
 ```
 
 ### Examples from project history

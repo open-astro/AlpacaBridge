@@ -368,8 +368,8 @@ def build_spdx(root: Path, deb: dict[str, str], file_name: str, sha256: str,
 
     deb: the package's control fields (dpkg-deb -f). Runtime dependencies come from its
     Depends, where ${shlibs:Depends} is already resolved; vendored SDKs and FetchContent
-    libraries are CONTAINS; Build-Depends are BUILD_DEPENDENCY_OF, at the version in
-    installed (dpkg-query in the build environment) when one is given.
+    libraries are CONTAINS; Build-Depends are BUILD_DEPENDENCY_OF. Both kinds of dependency are
+    at the version in installed (dpkg-query in the build environment) when one is given.
 
     payload: {path inside the .deb: file_digests()} for the shipped vendor files. Each must be
     byte-identical to a file under a listed SDK's path, and is reported as a file CONTAINS-ed by
@@ -398,6 +398,7 @@ def build_spdx(root: Path, deb: dict[str, str], file_name: str, sha256: str,
     packages[0]["checksums"] = [{"algorithm": "SHA256", "checksumValue": sha256}]
     rels = [("SPDXRef-DOCUMENT", "DESCRIBES", root_id)]
     for n, v in parse_relations(deb.get("Depends", "")):
+        v = installed.get(n, v)
         rels.append((root_id, "DEPENDS_ON", add(deb_purl(n, v), n, v)))
     for repo, tag in parse_fetchcontent((root / "AlpacaHTTP/CMakeLists.txt").read_text(encoding="utf-8")):
         rels.append((root_id, "CONTAINS", add(f"pkg:github/{repo}@{tag}", repo, tag)))
@@ -767,6 +768,28 @@ def self_test() -> int:
         assert (purl[deb_purl("cmake", None)], "BUILD_DEPENDENCY_OF", root_id) in rels
         assert (purl[deb_purl("libfoo", "1.2-3")], "BUILD_DEPENDENCY_OF", root_id) in rels
         assert len(rels) == len(doc["relationships"]), "no duplicate relationships"
+        # Runtime dependencies carry the version installed in the build environment; one that is
+        # not installed keeps no version (a >= constraint is never recorded as a version).
+        doc_rt = build_spdx(r, deb, "x.deb", "f" * 64, "t", "n",
+                            installed={"libc6": "2.41-12", "libusb-1.0-0": "2:1.0.27-2"})
+        rt = {p["name"]: p for p in doc_rt["packages"]}
+        assert rt["libc6"]["versionInfo"] == "2.41-12", rt["libc6"]
+        assert rt["libusb-1.0-0"]["versionInfo"] == "2:1.0.27-2", rt["libusb-1.0-0"]
+        assert "versionInfo" not in rt["adduser"], "a runtime dep not installed stays unversioned"
+        rt_purls = {p["externalRefs"][0]["referenceLocator"] for p in doc_rt["packages"]}
+        assert deb_purl("libc6", "2.41-12") in rt_purls and deb_purl("libc6", None) not in rt_purls
+        assert "versionInfo" not in rt["libgpiod3"], "a >= constraint is never recorded as a version"
+        assert deb_purl("libgpiod3", None) in rt_purls
+        rt_rels = {(x["spdxElementId"], x["relationshipType"], x["relatedSpdxElement"]) for x in doc_rt["relationships"]}
+        rt_root = next(p["SPDXID"] for p in doc_rt["packages"] if p["name"] == "alpacabridge")
+        assert (rt_root, "DEPENDS_ON", rt["libc6"]["SPDXID"]) in rt_rels
+        # An alternative "a | b" is recorded as its first branch; installing only b changes nothing.
+        alt = dict(deb, Depends="liba | libb")
+        for inst, want in (({"libb": "1"}, None), ({"liba": "2"}, "2")):
+            dalt = build_spdx(r, alt, "x.deb", "f" * 64, "t", "n", installed=inst)
+            names = {p["name"]: p for p in dalt["packages"]}
+            assert "liba" in names and "libb" not in names, names.keys()
+            assert names["liba"].get("versionInfo") == want, (inst, names["liba"])
         for p in doc["packages"]:
             assert {"name", "SPDXID", "downloadLocation", "filesAnalyzed"} <= set(p), p
         # --- Vendored file pins and the shipped-file gate ---
