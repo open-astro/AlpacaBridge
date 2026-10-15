@@ -448,6 +448,22 @@ function updateAutoNumbering() {
     maybeAutoFillIndexFields();
 }
 
+// Persisted devices that did not register. They are not in the standard
+// configureddevices list (open-astro#576); this UI-only extension endpoint
+// serves them so the error card can still be edited or removed. A failure here
+// leaves the registered devices usable.
+async function fetchFailedDevices() {
+    try {
+        const response = await fetch(API_BASE + '/management/v1/faileddevices?ts=' + Date.now(), { cache: 'no-store' });
+        if (!response.ok) return [];
+        const data = await response.json();
+        if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return [];
+        return data.Value;
+    } catch (e) {
+        return [];
+    }
+}
+
 // Load devices
 async function loadDevices() {
     const devicesList = document.getElementById('devices-list');
@@ -508,6 +524,8 @@ async function loadDevices() {
             }
         }
         
+        devices = devices.concat(await fetchFailedDevices());
+
         if (devices.length === 0) {
             currentDevices = [];
             devicesList.innerHTML = `
@@ -1382,7 +1400,7 @@ async function pollDeviceStatus() {
         if (!response.ok) return;
         const data = await response.json();
         if (data.ErrorNumber !== 0 || !Array.isArray(data.Value)) return;
-        for (const device of data.Value) {
+        for (const device of data.Value.concat(await fetchFailedDevices())) {
             const status = deviceStatus(device);
             document.querySelectorAll('.status-dot').forEach(dot => {
                 if (dot.dataset.deviceType === String(device.DeviceType) &&
