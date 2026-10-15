@@ -1687,6 +1687,51 @@ TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking c
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - MoveAxis stop restore tail running inside an in-flight SetTracking(false)",
+          "[skywatcher][async]") {
+    // Issue #535, interleaved by hand. The mount's braking ramp ends at 800 ms
+    // (a second stop does not extend it). The restore task polls on 50 ms
+    // multiples; SetTracking(false) starts at 225 ms, so its polls fall on
+    // 25 ms offsets and it is parked, mutex released, when the restore task
+    // sees the axis stopped at 800 ms. The restore tail runs inside that window.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(800);
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    REQUIRE(call_on_clock(clock, [&] { driver->move_axis(0, 2.0); }, std::chrono::milliseconds(5000)));
+    driver->move_axis(0, 0.0);
+    REQUIRE(advance_through(clock, std::chrono::milliseconds(225), std::chrono::milliseconds(25)));
+
+    std::atomic<bool> finished{false};
+    std::string thrown;
+    std::thread caller([&] {
+        try {
+            driver->set_tracking(false);
+        } catch (const std::exception& e) {
+            thrown = e.what();
+        }
+        finished = true;
+    });
+    // Step only once the caller is parked beside the restore task and the
+    // poller, so its polls keep the 25 ms offset from the restore task's.
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 2, kRendezvous));
+    bool stepped = true;
+    for (int steps = 0; steps < 80 && !finished.load() && stepped; ++steps) {
+        stepped = step_clock(clock, std::chrono::milliseconds(25));
+    }
+    const bool done = wait_until([&] { return finished.load(); }, 2000);
+    caller.join();
+    REQUIRE(done);
+    CHECK(thrown.empty());
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_slewing(); }, std::chrono::milliseconds(10000)));
+    elapse(clock, std::chrono::milliseconds(1500));
+    REQUIRE_FALSE(driver->get_tracking());
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 5000));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - DeclinationRate drives Dec with the east-branch sign", "[skywatcher][async]") {
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
