@@ -28,14 +28,15 @@
 //     Be precise about how often the storm actually reaches it: most
 //     submissions take the INLINE fast path instead. start_calibrator_task()
 //     claims inline whenever !cover_in_flight_ && calibrator_pending_count_
-//     == 0 (gemini_flatpanel_driver.cpp:897), the callback issues no cover
-//     move so cover_in_flight_ is always false, and the submission gate
-//     below only fires when the count reads 0. The background path is
-//     therefore reached only when a second op thread slips between another
-//     thread's gate check and its claim -- a microsecond window, so it is
-//     hit opportunistically, not on every run. Treat the background path as
-//     sampled, NOT as covered; deterministic reproduction needs the fake to
-//     hold a reply (set_reply_delay(">L#", ...)) and is a follow-up.
+//     == 0 (gemini_flatpanel_driver.cpp:897). open_cover()/close_cover() set
+//     cover_in_flight_, so while a cover move is in flight a calibrator
+//     submission takes the BACKGROUND path instead; the cover moves feed it.
+//     A second op thread slipping between another thread's gate check and
+//     its claim reaches it too. The fake acks a cover command at once, so the
+//     moves are short and the background path is hit opportunistically, not
+//     on every run. Treat it as sampled, NOT as covered; deterministic
+//     reproduction needs the fake to hold a reply (set_reply_delay(">L#",
+//     ...)) and is a follow-up.
 //
 //     The cover task is stormed by open_cover()/close_cover() behind a
 //     get_cover_moving() gate, plus halt_cover() (open-astro#1067). The fake
