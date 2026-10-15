@@ -756,6 +756,49 @@ TEST_CASE("Player One Camera Driver - Invalid replacement exposure preserves cur
     driver->set_connected(false);
 }
 
+TEST_CASE("Player One Camera Driver - StartExposure during an exposure is refused", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+    const int stops_before = sdk.stop_count();
+    require_alpaca_error([&] { driver->start_exposure(1.0, true); }, alpacacore::AlpacaError::InvalidOperation);
+    CHECK(sdk.stop_count() == stops_before);
+    CHECK(sdk.exposure_start_count() == 1);
+    driver->abort_exposure();
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - StartExposure after abort or a finished frame succeeds",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+    driver->abort_exposure();
+
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 2; }));
+    sdk.set_image_ready(true);
+    REQUIRE(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (...) {
+            return false;
+        }
+    }));
+
+    sdk.set_image_ready(false);
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 3; }));
+    driver->abort_exposure();
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - Download SDK exceptions are reported and recover", "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
