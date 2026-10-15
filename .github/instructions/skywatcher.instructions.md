@@ -745,17 +745,15 @@ slewing_cached_ || manual_axis_slewing_[axis] ||
 pulse_axis_active_[channel - 1]`), the exact idiom the duty-cycle worker already uses, and only
 treats a `motion_generation_` mismatch as a real supersession when `same_axis_owner`
 is true. The historical regression this guards against (PR #216 round-5:
-`SetTracking(false)` racing the restore) is covered only for a COMPLETED
-`SetTracking(false)`: that path publishes `tracking_ = false` under the SAME `mutex_`
-this task also holds, so the `tracking_ &&`/`dec_rate_arcsec_per_sec_ != 0.0 &&` guards
-ahead of the generation check see it. They do NOT cover one still IN FLIGHT.
-`set_tracking_locked(false)` bumps `motion_generation_` first, then releases `mutex_`
-inside `stop_axis_and_wait_locked()`'s poll loop, and assigns `tracking_` only after that
-wait returns -- so a restore tail waking inside that window reads `tracking_ == true`,
-restores the drive, and the caller throws `Tracking change superseded by a concurrent
-motion command` with the mount left tracking. That is issue #535, still open; its
-regression case is quarantined `[!mayfail]` in `test_skywatcher_async.cpp` (see #586 /
-#587), so nothing gates this path until #535 lands.
+`SetTracking(false)` racing the restore) has two halves. A COMPLETED `SetTracking(false)`
+publishes `tracking_ = false` under the SAME `mutex_` this task holds. One still IN FLIGHT
+bumps `motion_generation_`, then releases `mutex_` inside `stop_axis_and_wait_locked()` and
+assigns `tracking_` only after the wait returns; the restore tail therefore tests
+`tracking_effectively_on_locked()` (`tracking_ && tracking_off_pending_ == 0`), not bare
+`tracking_`, so it yields instead of making the caller throw `Tracking change superseded by
+a concurrent motion command` with the mount left tracking (issue #535, fixed). Gated by
+`SkyWatcher async - MoveAxis stop restore yields to a newer tracking command` and the
+`[stress]` case `MoveAxis stop racing SetTracking(false)`.
 Extended the regression test from the first bug to assert the RA axis actually resumes
 running (not just that `Slewing` clears); confirmed it fails at exactly that assertion
 with the fix reverted to the raw equality check, and passes with it restored.

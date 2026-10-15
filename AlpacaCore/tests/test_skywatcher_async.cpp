@@ -1661,19 +1661,7 @@ TEST_CASE("SkyWatcher async - superseded dispatch neither strands nor clobbers t
     driver->set_connected(false);
 }
 
-// QUARANTINED (issue #586): tagged [!mayfail] so it still runs and reports
-// but cannot fail the gate. It exposes a REAL driver defect, not a flaky
-// test -- issue #535: an in-flight SetTracking(false) is invisible to the
-// MoveAxis(0) restore task, so the client's call throws and the mount is
-// left tracking. Measured at 02346b6f on arm64 Debian 13: 10 failures in
-// 30 standalone runs, 5 in 30 under load -- but 0 in three full
-// `ctest -j 4` suite runs, so a filtered or sharded invocation is what
-// hits it. Those figures are for the DEFAULT build type (9/30 on a
-// re-measure); a CMAKE_BUILD_TYPE=Debug build saw 0/30, so reproduce at
-// the default type before concluding anything about #535.
-// REMOVE THIS TAG when #535 is fixed.
-TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command",
-          "[skywatcher][async][!mayfail]") {
+TEST_CASE("SkyWatcher async - MoveAxis stop restore yields to a newer tracking command", "[skywatcher][async]") {
     // PR #216 round-5 finding: the MoveAxis(0) background restore-tracking
     // task must not re-start tracking that a concurrent SetTracking(false)
     // stopped while the task was polling the deceleration.
