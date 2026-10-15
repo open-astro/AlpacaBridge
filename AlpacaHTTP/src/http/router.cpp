@@ -1846,6 +1846,11 @@ RouteMatch Router::parse_route(const std::string& path) {
         match.management_endpoint = "configureddevices";
         return match;
     }
+    if (path == "/management/v1/faileddevices" || path == "/management/faileddevices") {
+        match.is_management = true;
+        match.management_endpoint = "faileddevices";
+        return match;
+    }
     if (path == "/management/v1/devicecatalog" || path == "/management/devicecatalog") {
         match.is_management = true;
         match.management_endpoint = "devicecatalog";
@@ -1972,6 +1977,8 @@ Response Router::handle_management(const Request& request, const RouteMatch& mat
         return handle_build_info(request, server_tx_id);
     } else if (match.management_endpoint == "configureddevices") {
         return handle_configured_devices(request, server_tx_id);
+    } else if (match.management_endpoint == "faileddevices") {
+        return handle_failed_devices(request, server_tx_id);
     } else if (match.management_endpoint == "devicecatalog") {
         return handle_device_catalog(request, server_tx_id);
     } else if (match.management_endpoint == "configuredevice") {
@@ -2505,6 +2512,48 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
             devices.push_back(device);
         }
 
+        AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
+        alpaca_response.value = devices;
+        response.set_body(alpaca_response);
+    } catch (const std::exception& e) {
+        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        AlpacaResponse alpaca_response = make_error_response(
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
+        response.set_body(alpaca_response);
+    }
+
+    return response;
+}
+
+Response Router::handle_failed_devices(const Request& request, std::uint32_t server_tx_id) {
+    Response response;
+    response.set_content_type("application/json");
+
+    std::uint32_t client_tx_id = 0;
+    if (request.has_query_param("ClientTransactionID")) {
+        client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for faileddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
+    }
+
+    try {
+        load_persisted_devices();
+
+        std::vector<nlohmann::json> persisted_snapshot;
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            persisted_snapshot = persisted_devices_;
+        }
+        auto capabilities = alpacacore::management::DeviceRegistry::instance().get_all_device_capabilities();
+
+        nlohmann::json devices = nlohmann::json::array();
         for (const auto& entry : persisted_snapshot) {
             const auto pkey = persisted_key(entry);
             std::string ptype = pkey ? pkey->device_type : "";
@@ -2539,12 +2588,9 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
         alpaca_response.value = devices;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting configured devices: " + std::string(e.what()));
+        util::log_error("Error getting failed devices: " + std::string(e.what()));
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
         response.set_body(alpaca_response);
     }
 
