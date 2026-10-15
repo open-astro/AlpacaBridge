@@ -155,11 +155,8 @@ public:
                 }
                 apply_configured_max_step_locked(sdk, resolved_id);
                 if (max_step_ <= 0) {
-                    // Every Move would fail the range check with no hint; the unit stops moves at its
-                    // stored max step too, so a driver-only limit cannot repair this.
+                    // Connects as before the Max Step setting existed: every Move fails the range check.
                     ALPACA_LOG_WARN("ZWO", "EAF reports max step 0 and no Max Step is configured");
-                    throw AlpacaException("The EAF reports max step 0. Set Max Step in the focuser's device settings.",
-                                          AlpacaError::DriverException);
                 }
                 status_cache_.reset();
                 try {
@@ -299,17 +296,19 @@ public:
 private:
     // Writes the configured max step to the unit when it differs from the stored one, and
     // adopts it. Caller holds mutex_ and has read max_step_ and step_range_. A value above
-    // the unit's step range is refused before any write; an unavailable range (0) is no bound.
+    // the unit's step range is clamped to it; an unavailable range (0) is no bound.
     void apply_configured_max_step_locked(ZWOEAFSDK& sdk, int focuser_id) {
-        if (!configured_max_step_.has_value() || *configured_max_step_ == max_step_) {
+        if (!configured_max_step_.has_value()) {
             return;
         }
-        const int wanted = *configured_max_step_;
+        int wanted = *configured_max_step_;
         if (step_range_ > 0 && wanted > step_range_) {
-            throw AlpacaException("The configured Max Step " + std::to_string(wanted) +
-                                      " is above the EAF's step range " + std::to_string(step_range_) +
-                                      ". Lower Max Step in the focuser's device settings.",
-                                  AlpacaError::DriverException);  // connect refusal, as the CGX missing-site one
+            ALPACA_LOG_WARN("ZWO", "EAF configured Max Step " + std::to_string(wanted) + " is above the step range " +
+                                       std::to_string(step_range_) + "; using " + std::to_string(step_range_));
+            wanted = step_range_;
+        }
+        if (wanted == max_step_) {
+            return;
         }
         sdk.set_max_step(focuser_id, wanted);
         max_step_ = wanted;
