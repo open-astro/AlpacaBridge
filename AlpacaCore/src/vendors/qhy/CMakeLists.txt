@@ -46,8 +46,8 @@ if(ALPACACORE_ENABLE_QHY)
     # links down to it, never the reverse (open-astro#710).
     target_link_libraries(alpacacore_qhy PRIVATE alpacacore)
 
-    # SYSTEM: the vendored SDK headers trip -Werror otherwise (the previous
-    # SDK release shipped qhyccdcamdef.h with QHY26800A_MAX_WIDTH defined twice with
+    # SYSTEM: the vendored SDK headers trip -Werror otherwise (earlier
+    # SDK releases shipped qhyccdcamdef.h with QHY26800A_MAX_WIDTH defined twice with
     # different values -- a vendor bug we don't get to fix; 26.07.28 comments
     # one pair out, and SYSTEM stays so the next header slip cannot break the build).
     target_include_directories(alpacacore_qhy SYSTEM PRIVATE
