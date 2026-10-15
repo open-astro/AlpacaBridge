@@ -5315,16 +5315,24 @@ int main() {
                           : obj({R"("connectionType":"carrier-pigeon")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
-            // #508 item 2: connectionType is not case-folded. "Network" is
-            // rejected by the API; a saved one is read as "serial" (WARN), the
-            // host is not kept (sanitize tests == "network"), and the entry
-            // keeps the raw "Network".
-            pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
-                obj({R"("connectionType":"Network","host":"192.168.1.60")", site}), m.bad_type_message, "{}", true,
-                // OnStep has no host field, so the catalog drops it as sanitize did.
-                (m.catalog && vendor != "onstep") ? obj({R"("connectionType":"Network","host":"192.168.1.60")", site})
-                                                  : obj({R"("connectionType":"Network")", site}),
-                {"has connectionType \"Network\"", warned_serial}, {"Skipping persisted device"});
+            // #508 item 2: connectionType is folded to lower case once, on the
+            // way into registration and into the stored entry, so "Network"
+            // behaves exactly as "network" from the API and from a saved file:
+            // registered as a network mount, host kept, no fallback WARN, and
+            // configureddevices lists the folded "network". OnStep has no
+            // network type, so there the folded value is refused (API) or
+            // read as "serial" (saved), naming the folded value.
+            if (vendor == "onstep") {
+                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"Network")", site}), m.bad_type_message, "{}", true,
+                    obj({R"("connectionType":"network")", site}), {"has connectionType \"network\"", warned_serial},
+                    {"Skipping persisted device"});
+            } else {
+                const std::string network = obj({R"("connectionType":"network","host":"192.0.2.60")", site});
+                pin("connectionType \"Network\" (#508 item 2)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"Network","host":"192.0.2.60")", site}), "", network, true, network, {},
+                    {warned_serial, "Skipping persisted device"});
+            }
 
             // #508 item 1 (the six mount arms that go through
             // reject_invalid_config): an empty portPath on serial is rejected

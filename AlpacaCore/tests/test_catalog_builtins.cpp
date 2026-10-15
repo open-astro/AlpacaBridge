@@ -1004,7 +1004,7 @@ TEST_CASE(
     // as "serial" (never "auto", #380: a saved unknown type must not
     // auto-probe) with a warning that keeps the arm's two fragments, which
     // the router wraps as "... config normalized: <warning>. ...".
-    for (const char* type : {"carrier-pigeon", "Network", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config = skywatcher_serial_with_site();
         config.set("connectionType", std::string{type});
@@ -1569,7 +1569,7 @@ TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and r
     no_site.set("connectionType", std::string{"auto"});
     CHECK_FALSE(catalog.normalize(kOnStepKey, no_site, Source::Api).rejection.has_value());
 
-    for (const char* type : {"network", "carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"network", "carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1748,7 +1748,7 @@ TEST_CASE("Builtin catalog - Celestron normalize accepts '', auto, serial and ne
         CHECK(persisted.warnings.empty());
     }
 
-    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1999,7 +1999,7 @@ TEST_CASE("Builtin catalog - SynScan normalize accepts '', auto, serial and netw
         CHECK(persisted.warnings.empty());
     }
 
-    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -3435,4 +3435,45 @@ TEST_CASE("Builtin catalog - ZWO camera identity strings and selector rule", "[c
     DeviceConfig max_index;
     max_index.set("cameraIndex", std::int64_t{std::numeric_limits<int>::max()});
     CHECK_FALSE(catalog.normalize(kZwoCameraKey, max_index, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - connectionType is folded to lower case (#508 item 2)", "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto folded = [&](const char* given, Source source, const char* extra_key = nullptr,
+                            const char* extra_value = nullptr) {
+        DeviceConfig in;
+        in.set("connectionType", std::string{given});
+        if (extra_key) in.set(extra_key, std::string{extra_value});
+        return catalog.normalize(kSynScanKey, in, source);
+    };
+    const auto stored = [](const NormalizeResult& r) {
+        const ConfigValue* v = r.config.find_value("connectionType");
+        REQUIRE(v != nullptr);
+        return std::get<std::string>(*v);
+    };
+
+    for (const Source source : {Source::Api, Source::Persisted}) {
+        const auto network = folded("Network", source, "host", "192.0.2.60");
+        CHECK_FALSE(network.rejection.has_value());
+        CHECK(network.warnings.empty());
+        CHECK(stored(network) == "network");
+
+        const auto serial = folded("SERIAL", source, "portPath", "/dev/ttyUSB9");
+        CHECK_FALSE(serial.rejection.has_value());
+        CHECK(serial.warnings.empty());
+        CHECK(stored(serial) == "serial");
+
+        const auto autod = folded("Auto", source);
+        CHECK_FALSE(autod.rejection.has_value());
+        CHECK(autod.warnings.empty());
+        CHECK(stored(autod) == "auto");
+    }
+
+    // The folded form still gets its endpoint rule, and an unknown value is still unknown.
+    const auto no_host = folded("Network", Source::Api);
+    REQUIRE(no_host.rejection.has_value());
+    CHECK(*no_host.rejection == "Host IP address is required");
+    CHECK(folded("Carrier-Pigeon", Source::Api).rejection.has_value());
 }

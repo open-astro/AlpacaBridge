@@ -69,4 +69,8 @@ private:
     std::vector<std::pair<std::string, ConfigValue>> entries_;
 };
 
+// Lower-cases a string "connectionType" in place (ASCII). The one fold rule for
+// the catalog's normalize(); the router applies the same rule to its JSON.
+void fold_connection_type(DeviceConfig& config);
+
 }  // namespace alpacacore::catalog

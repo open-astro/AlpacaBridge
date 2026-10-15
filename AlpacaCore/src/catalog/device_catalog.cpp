@@ -146,6 +146,17 @@ std::string format_bound(FieldRef::Kind kind, double bound) {
     return std::string(buf, res.ptr);
 }
 
+void fold_connection_type(DeviceConfig& config) {
+    const ConfigValue* v = config.find_value("connectionType");
+    const auto* text = v ? std::get_if<std::string>(v) : nullptr;
+    if (!text) return;
+    std::string lower = *text;
+    for (char& c : lower) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    if (lower != *text) config.set("connectionType", std::move(lower));
+}
+
 std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;
     views.reserve(schemas_.size());
@@ -167,7 +178,10 @@ std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
 
 NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {
     NormalizeResult result;
-    result.config = in;
+    // #508 item 2: one fold rule. "Network" and "SERIAL" mean what their lower-case forms mean.
+    DeviceConfig folded = in;
+    fold_connection_type(folded);
+    result.config = folded;
     const Schema* schema = find_schema(key);
     if (!schema) {
         std::string msg = "unknown device " + describe_key(key);
@@ -179,7 +193,7 @@ NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfi
     }
 
     std::vector<std::string> messages;
-    DeviceConfig normalized = normalize_fields(schema->fields, in, "", messages);
+    DeviceConfig normalized = normalize_fields(schema->fields, folded, "", messages);
     if (source == Source::Api) {
         if (!messages.empty()) {
             result.rejection = messages.front();
