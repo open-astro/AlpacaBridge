@@ -292,8 +292,8 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // latitude at the mirrored northern latitude. The board is never told the latitude, and that
     // mount is a northern one turned half a turn about the vertical, so the
     // row is a northern reading with every azimuth shifted by 180 deg. The
-    // driver aimed at HA -3 h, dec +30 (alt 52, az 83) and the saddle ended
-    // pointing front-left and slightly down (SE, about -13 deg), which is
+    // driver aimed at HA -3 h, dec +30 (alt 52, az 87) and the saddle ended
+    // pointing front-left and slightly down (SE, about -8 deg), which is
     // HA +9 h: the 6 h term had to flip with the hemisphere.
     // What row 5 refutes is the OLD model, which reported the tube 52 deg UP
     // while it pointed below the horizon; the alt tolerance below compares
@@ -320,10 +320,11 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
     // as row 5's comment says of its own altitude. What the row pins is that
     // the model, given a2 = +89.37 at +40, puts the tube WEST -- which the
     // owner saw -- rather than 12 h away to the east.
-    // The hardware run was at a different latitude than the one in the table:
-    // the expected alt/az below are recomputed from this oracle for a made-up
-    // site (-33.856784 south, +33.856784 north), and the HA and dec columns do
-    // not depend on the latitude's value, only on its sign.
+    // Rows 1-3 and 5 are the hardware run, at a different latitude than the
+    // one in the table: the expected alt/az below are recomputed from this
+    // oracle for a made-up site (-33.856784 south, +33.856784 north), and the
+    // HA and dec columns do not depend on the latitude's value, only on its
+    // sign.
     struct Row {
         const char* what;
         double latitude;
@@ -344,7 +345,7 @@ TEST_CASE("SkyWatcher pointing - the model reproduces the positions measured on 
          "down, azimuth about 136"},
         {"Wave 150i, the #432 report", 45.45, 61.98, 70.95, +1, 10.13, 19.05, -20.7, -1.0, "down about 20 deg"},
         {"EQM-35 Pro at a northern latitude", 33.856784, 45.0, -60.0, -1, 9.00, 30.0, -13.3, -1.0,
-         "front-left and slightly down on the south-facing rig, i.e. SE, about -13 deg"},
+         "front-left and slightly down on the south-facing rig, i.e. SE, about -8 deg"},
         {"EQ-AL55i Pro, the #579 reading", 40.0, 0.0, 89.37, +1, 6.00, 0.63, 0.41, 270.5,
          "dovetail west, level, after a dec-only move of +89.37 deg from home"},
     };

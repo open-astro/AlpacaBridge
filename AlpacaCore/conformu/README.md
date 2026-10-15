@@ -25,9 +25,9 @@ One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md
 - **OnStep** - Generic OnStep telescope
 - **Player One** - Ceres 462M, Uranus-C PRO, Mars-C II cameras; PW8 filter wheel; Uranus-C PRO thermal switch
 - **QHY** - QHY268C, miniCam8M cameras; miniCam8M CFW filter wheel
-- **SkyWatcher** - Wave 100i telescope (direct motor controller, USB and Wi-Fi reports); EQM-35 Pro telescope (direct motor controller, built-in USB; site coordinates rounded to whole degrees)
+- **SkyWatcher** - Wave 100i telescope (direct motor controller, USB and Wi-Fi reports); EQM-35 Pro telescope (direct motor controller, built-in USB)
 - **SVBONY** - SV905C2 camera; SC715C camera (rebadged ToupTek G3M715C, served by the ToupTek driver); SC571CC camera (rebadged ToupTek ATR2600C, served by the ToupTek driver)
-- **SynScan** - Sky-Watcher HEQ5 PRO and EQM-35 Pro telescopes via SynScan V3/V4 hand controller (serial); site coordinates rounded to whole degrees
+- **SynScan** - Sky-Watcher HEQ5 PRO and EQM-35 Pro telescopes via SynScan V3/V4 hand controller (serial)
 - **ToupTek** - GPCMOS01200KPF, GPCMOS02000KPA, ATR2600M, GPM662M, ATR585M cameras (also G3M715C and ATR2600C, whose reports are filed under `SVBONY/SC715C/` and `SVBONY/SC571CC/` after the badges they were validated under); AFW-M filter wheel; AAF focuser; ATR2600M and ATR585M thermal switches; StellaVita PowerBox switch
 - **WandererAstro** - WandererCover V4 (CoverCalibrator); SFW36S filter wheel; WandererRotator Mini V2 (Rotator); WandererBox Pro V3 (Switch)
 - **WeeWX** - HTTP JSON ObservingConditions source
@@ -35,15 +35,15 @@ One folder per vendor, one subfolder per tested model. See [SUPPORTED-DRIVERS.md
 
 ## Notes
 
-- **Scrub observing-site coordinates before committing a telescope report.** ConformU reads
+- **Set a made-up observing site on the mount before a telescope run.** ConformU reads
   `SiteLatitude` / `SiteLongitude` / `SiteElevation` off the mount and prints them at
-  house-level precision, several times each (including the "restored original" and derived
-  "Test value" lines). Replace them with a made-up public site (south
+  house-level precision, several times each, and the home altitude, sidereal time, UTC date
+  and time zone lines identify the site too. Use the made-up public site (south
   -33.856784 / 151.215297, elevation 42 m, derived "Test value" lines the same site +/- 10
-  degrees); a rounded real value still names a region. See `.claude/commands/conformu.md`.
+  degrees) on the device before the run; a post-run `sed` does not remove those other lines
+  and a rounded real value still names a region. See `.claude/commands/conformu.md`.
   ConformU formats with the machine's locale, so check for a comma decimal separator
-  (`+48:03:00,0`) as well as a period. This is a privacy matter for the contributor who ran
-  the test, not a correctness one — the assertions the report exists to carry are unaffected.
+  (`+48:03:00,0`) as well as a period.
 - All drivers must pass ConformU verification before being added to the supported drivers list
 - Test results are generated using ConformU version 4.1.0 or later
 - For more information about ConformU, see the [ASCOM ConformU documentation](https://ascom-standards.org/)

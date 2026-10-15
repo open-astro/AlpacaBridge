@@ -424,40 +424,23 @@ SiteLongitude Read      OK   +123:45:06.0
 ```
 
 Do not commit a real observing site, rounded or not (a rounded value still names a region).
-Before copying the log into the repo, replace the site with the made-up public landmark
-(latitude -33.856784 = -33:51:24.4, longitude 151.215297 = +151:12:55.1, elevation 42 m).
-ConformU also writes DERIVED "Test value" coordinates (the real value ±10 degrees); those
-leak the original too, so replace them with the made-up site ±10 degrees (-43:51:24.4 and
-+141:12:55.1). The `[.,]` matches either decimal separator: ConformU formats with the SBC's
-locale, and a comma ("+48:03:00,0") is already in this repo's OnStep report.
 
-```bash
-# EXAMPLE: the report's latitude is -12:34:56.0 and its derived test value -22:34:56.0;
-# the longitude is +123:45:06.0 and its derived test value +113:45:06.0. Substitute the
-# strings the report actually contains (read them from the SiteLatitude and SiteLongitude
-# lines), and keep them out of everything that is committed or posted.
-sed -i \
-  -e 's/-12:34:56\([.,]\)0/-33:51:24\14/g' -e 's/-22:34:56\([.,]\)0/-43:51:24\14/g' \
-  -e 's/+123:45:06\([.,]\)0/+151:12:55\11/g' -e 's/+113:45:06\([.,]\)0/+141:12:55\11/g' \
-  "$TMPDIR/conformu.txt"
-```
+**Set the made-up site on the mount BEFORE the run** (latitude -33.856784 = -33:51:24.4,
+longitude 151.215297 = +151:12:55.1, elevation 42 m). That is the only way to get a
+consistent log. A `sed` after the run is not enough: it cannot reach the home `Altitude`
+(which gives the latitude), the `SiderealTime`, `RightAscension` and `UTCDate` lines (which
+together give the longitude) or the PC time zone line (which names the region). If a run
+was made on the real site, do not commit the log; re-run it on the made-up site.
 
-`SiteElevation` leaks too, in three lines per run (`SiteElevation Read OK 120`,
-`Current value 120m written successfully`, `Successfully restored original site elevation:
-120.`). Replace it with 42 (the fixed `Test value 2385` is ConformU's own constant, not
-derived from the site, and can stay):
+ConformU also writes DERIVED "Test value" coordinates (the site +/- 10 degrees); with the
+made-up site set first they read -43:51:24.4 and +141:12:55.1. `SiteElevation` appears in
+three lines per run (`SiteElevation Read OK 42`, `Current value 42m written successfully`,
+`Successfully restored original site elevation: 42.`); the fixed `Test value 2385` is
+ConformU's own constant.
 
-```bash
-# EXAMPLE: the report says 120 m; substitute the value it actually contains.
-sed -i -E \
-  -e 's/(SiteElevation Read +OK +)120$/\142/' \
-  -e 's/(Current value )120m/\142m/' \
-  -e 's/(original site elevation: )120\./\142./' \
-  "$TMPDIR/conformu.txt"
-```
-
-Then confirm nothing survived before saving: every site coordinate and elevation line
-must show only the made-up values. A correct scrub prints NOTHING from either:
+Before saving, confirm every site line shows only the made-up values. A correct log prints
+NOTHING from either command (`[.,]` matches both decimal separators: ConformU formats with
+the SBC's locale):
 
 ```bash
 grep -nE "Site(Latitude|Longitude).*[-+][0-9]+:[0-9]{2}:[0-9]{2}[.,][0-9]" "$TMPDIR/conformu.txt" \
@@ -466,12 +449,8 @@ grep -nE "SiteElevation.*(OK +|Current value |elevation: )-?[0-9]+(m|\.|$)" "$TM
   | grep -vE "(OK +|Current value |elevation: )(42|0)(m|\.|$)"
 ```
 
-Any output line is an unscrubbed value. Also grep for the raw original strings you used
-in the `sed` commands above; they must return nothing.
-
-Note the limit of this: `SiderealTime` values elsewhere in the log still correlate with
-longitude given the run's timestamps, so this reduces precision rather than making the
-report truly anonymous. Hiding the house is the goal, not perfect anonymity.
+Any output line is an unscrubbed value. Also check the home `Altitude`, `SiderealTime`,
+`UTCDate` and time zone lines by eye against the made-up site.
 
 ### 6b. Save logs
 
