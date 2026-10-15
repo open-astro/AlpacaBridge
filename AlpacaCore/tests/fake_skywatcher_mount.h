@@ -791,8 +791,7 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
             // Count before the send, so a client that has its reply already sees it counted.
             served_.fetch_add(1);
-            if (silent_.load())
-                continue;
+            if (silent_.load()) continue;
             ::sendto(fd_, reply.data(), reply.size(), 0, reinterpret_cast<sockaddr*>(&peer), plen);
         }
     }
