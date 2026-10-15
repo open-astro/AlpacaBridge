@@ -126,8 +126,9 @@ int main() {
     }
 
     // 3a. A whole-valued JSON float in an int field (e.g. 1.0) is accepted and
-    // stored as the integer, as config_get<int>() accepted it; a fractional or
-    // out-of-int64-range float is still the wrong type.
+    // stored as the integer, as config_get<int>() accepted it; a fractional
+    // float gets the whole-number text (the case below), an out-of-int64-range
+    // float is still the wrong type.
     {
         const DeviceConfig c = cj::config_from_json(nlohmann::json::parse(R"({"count":2.0})"), schema);
         const auto* v = c.find_value("count");

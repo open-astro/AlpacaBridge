@@ -30,10 +30,13 @@
 //      converts to int64 there, so `true` in an int field must still be
 //      refused. A JSON float with no fractional part that fits an int64
 //      (e.g. 1.0) in an Int field is accepted and stored as that integer,
-//      as config_get<int>() accepted it. 1.5 and a JSON true/false are
-//      now refused, a narrowing: config_get<int>() took them as 1, 1 and
-//      0. An out-of-range float (e.g. 1e300) is refused too. A nested
-//      record field is named with its index, e.g.
+//      as config_get<int>() accepted it. An Int field given a JSON bool or
+//      a finite fractional number (1.5) is refused, a narrowing:
+//      config_get<int>() took them as 1, 1 and 0. The message then is
+//      "Device config field '<name>' must be a whole number (got <value>)",
+//      <value> being the JSON dump. Every other wrong kind, and an
+//      out-of-range float (e.g. 1e300), keeps the "has the wrong type" text.
+//      A nested record field is named with its index, e.g.
 //      "ports[1].name"; a bad list or a bad list element is named by the
 //      list's own key ("ports", "filterNames"), never indexed, because the
 //      failure is in the list's shape, not in one declared sub-field.
