@@ -58,11 +58,18 @@ std::string answer_one(const std::string&) { return "1#"; }
 
 // Steps the fake clock one second at a time, once the driver's wait is parked
 // on it, until `done` holds or `max_steps` steps pass. Each step waits for the
-// woken wait to settle, so no step lands between two of its waits.
+// woken wait to settle, so no step lands between two of its waits. When no
+// wait registers within 5 real seconds the driver is not sleeping on the
+// clock, so the helper gives up with `done()` instead of advancing a clock
+// nobody waits on (a wait that moved back to real time then fails the case).
 bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& done, int max_steps = 400) {
     for (int i = 0; i < max_steps; ++i) {
-        if (done()) return true;
-        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        bool waiting = false;
+        for (int tries = 0; tries < 50 && !waiting; ++tries) {
+            if (done()) return true;
+            waiting = clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        }
+        if (!waiting) return done();
         clock.advance(std::chrono::seconds(1));
         clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
@@ -80,12 +87,17 @@ struct ClockedBisque {
     alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeMountServer server{mount.responder()};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::FakeTaskClock::clock::time_point start;
 
     ClockedBisque() {
         REQUIRE(server.ok());
         driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
         REQUIRE_NOTHROW(driver->set_connected(true));
+        start = clock.now();
     }
+    // Virtual time that passed since the connect: it moves only when the
+    // driver slept on the clock, so a wait on real time leaves it at zero.
+    std::chrono::nanoseconds virtual_elapsed() const { return clock.now() - start; }
     ~ClockedBisque() { driver->set_connected(false); }
 };
 
@@ -578,12 +590,13 @@ TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid rep
         return "|No error. Error = 0.OK#";
     });
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
     REQUIRE_NOTHROW(driver->set_connected(true));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
 
-    // The driver deliberately holds Slewing=true for 8 seconds after dispatch.
-    std::this_thread::sleep_for(std::chrono::milliseconds(8100));
+    // The driver deliberately holds Slewing=true for 8 task-clock seconds after dispatch.
+    clock.advance(std::chrono::seconds(8));
 
     try {
         static_cast<void>(driver->get_slewing());
@@ -952,19 +965,24 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
         return "|No error. Error = 0.OK#";
     });
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()), clock);
     REQUIRE_NOTHROW(driver->set_connected(true));
 
     // One failure, then success: the slew completes.
-    CHECK_NOTHROW(driver->slew_to_coordinates(5.5, 20.0));
+    auto first = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    CHECK(advance_until(clock, [&] { return ready(first); }));
+    CHECK_NOTHROW(first.get());
     CHECK(polls->load() == 2);
 
     // Persistent failure: the error names the poll failure, not the timeout, and
     // the slew is not reported complete.
     fail_polls->store(-1);
     polls->store(0);
+    auto second = std::async(std::launch::async, [&] { driver->slew_to_coordinates(5.5, 20.0); });
+    CHECK(advance_until(clock, [&] { return ready(second); }));
     try {
-        driver->slew_to_coordinates(5.5, 20.0);
+        second.get();
         FAIL("Expected poll failure");
     } catch (const alpacacore::AlpacaException& ex) {
         const std::string what = ex.what();
@@ -988,6 +1006,7 @@ TEST_CASE("Bisque park - the poll sleeps on the task clock and completes without
     CHECK(rig.driver->get_at_park());
     // Two polls that said "not yet" (one 1 s sleep each), then the third.
     CHECK(rig.mount.park_polls.load() == 3);
+    CHECK(rig.virtual_elapsed() == std::chrono::seconds(2));
 }
 
 TEST_CASE("Bisque park - a park that never completes times out after 120 virtual seconds",
@@ -1009,6 +1028,7 @@ TEST_CASE("Bisque sync slew - the poll sleep and completion run on the task cloc
     CHECK(advance_until(rig.clock, [&] { return ready(slewed); }));
     CHECK_NOTHROW(slewed.get());
     CHECK(rig.mount.slew_polls.load() == 4);
+    CHECK(rig.virtual_elapsed() == std::chrono::seconds(3));
     CHECK_FALSE(rig.driver->get_slewing());
 }
 
