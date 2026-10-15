@@ -288,9 +288,11 @@ void register_zwo_factory(DeviceCatalog& catalog) {
     focuser.key = DeviceKey{"zwo", DeviceType::Focuser};
     focuser.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
         const int id = static_cast<int>(config.get(kZwoFocuserId));
-        if (id >= 0) return vendor::zwo::create_zwo_eaf_focuser(device_number, id);
+        std::optional<int> max_step;  // absent: leave the unit's stored max step alone
+        if (const auto configured = config.find(kZwoFocuserMaxStep)) max_step = static_cast<int>(*configured);
+        if (id >= 0) return vendor::zwo::create_zwo_eaf_focuser(device_number, id, max_step);
         return vendor::zwo::create_zwo_eaf_focuser_by_index(device_number,
-                                                            static_cast<int>(config.get(kZwoFocuserIndex)));
+                                                            static_cast<int>(config.get(kZwoFocuserIndex)), max_step);
     };
     catalog.add(std::move(focuser));
 

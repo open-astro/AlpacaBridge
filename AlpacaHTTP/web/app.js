@@ -1293,6 +1293,8 @@ function startEditDevice(device) {
 
     setFormValue('focuser-index', config.focuserIndex);
     setFormValue('focuser-id', config.focuserId);
+    // Another vendor's focuser also saves maxStep (QHY): only a ZWO focuser fills this input, blank = not set.
+    setFormValue('zwo-focuser-max-step', vendor === 'zwo' && deviceType === 'focuser' ? config.maxStep : '');
     setFormValue('rotator-index', config.rotatorIndex);
     setFormValue('rotator-id', config.rotatorId);
     setFormValue('zwo-switch-type', config.switchType);
@@ -4230,6 +4232,14 @@ document.getElementById('device-form').addEventListener('submit', async function
                 const focuserId = Number.parseInt(focuserIdValue, 10);
                 if (!Number.isNaN(focuserId)) {
                     deviceData.focuserId = focuserId;
+                }
+            }
+            // Blank means "not set": the key is left out, never sent as 0 or a default.
+            const zwoMaxStepValue = formData.get('zwoFocuserMaxStep');
+            if (zwoMaxStepValue !== null && zwoMaxStepValue !== undefined && zwoMaxStepValue !== '') {
+                const zwoMaxStep = Number.parseInt(zwoMaxStepValue, 10);
+                if (!Number.isNaN(zwoMaxStep)) {
+                    deviceData.maxStep = zwoMaxStep;
                 }
             }
         }

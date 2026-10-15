@@ -923,6 +923,11 @@
                             <input type="number" id="focuser-id" name="focuserId" min="0">
                             <small>If set, overrides the focuser index.</small>
                         </div>
+                        <div class="form-group">
+                            <label for="zwo-focuser-max-step">Max Step (optional):</label>
+                            <input type="number" id="zwo-focuser-max-step" name="zwoFocuserMaxStep" min="1" max="2000000">
+                            <small>Upper travel limit written to the EAF at connect. Leave blank to keep the value stored in the focuser. It cannot exceed the EAF's own step range.</small>
+                        </div>
                     </div>
 
                     <div id="zwo-rotator-fields" style="display: none;">

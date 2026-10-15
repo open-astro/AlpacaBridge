@@ -10,6 +10,8 @@ Devices: Camera, FilterWheel, Focuser (EAF), Rotator, Switch (dew heater, ASIAIR
 
 SDK locations: `AlpacaCore/external/ZWO/ASI_Camera_SDK/`, `EAF/`, `EFW/`, `CAA/`, `AM/`. The ASIair Pro switch driver does not use an SDK — it talks directly to the on-board Pi 4 GPIO via libgpiod v2.
 
+EAF focuser `maxStep` (optional config): the unit clamps moves at its stored max step silently, so a driver-only limit (the QHY Q-Focuser shape) is not enough. At connect the driver writes `maxStep` with `EAFSetMaxStep` only when it differs from `EAFGetMaxStep` (never when unset, never when equal), refuses a value above `EAFStepRange` before any write, and refuses a stored 0 with nothing configured. The web UI input is blank-means-unset: do not give it a default.
+
 - ROI divisors: width%8, height%2 after binning (see [Camera ROI alignment](../../AGENTS.md#camera-roi-alignment-all-camera-vendors)).
 - Dew heater is exposed as an Alpaca Switch device (not a camera action) and is camera-dependent.
 - ST4 pulse guiding should be enabled only when the SDK reports `has_st4_port`.

@@ -516,6 +516,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB (requires libusb-1.0)
 - **EAF Pro Bluetooth**: The ZWO EAF Pro Bluetooth version will only currently work with USB connection. Bluetooth support is not yet implemented.
 - **EAF and EAFN**: the EAFN (EAF Robotic Focuser, SKU ZWO-EAFN) is served by the same driver with the same configuration as the EAF; there is no model selector. `Name` is whatever the EAF SDK reports for the unit; both validated units report `EAF`.
+- **Max Step**: the EAF stops a move at the max step stored in the unit and does so silently, and `MaxStep` reports that stored value. The optional `maxStep` setting (1 to the unit's own step range; blank = leave the stored value alone) is written to the unit at connect with `EAFSetMaxStep` when it differs from the stored one, and `MaxStep` then reports it. A value above the unit's step range refuses the connect. A unit that stores max step 0 with no `maxStep` set refuses the connect too (every `Move` would fail the range check); the reason is the connect error in the web UI.
 
 </details>
 
