@@ -530,11 +530,20 @@ public:
                 connection_info_, connection_resolved_, connection_resolver_,
                 [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
+                        const std::string reason = protocol.connect_failure();
+                        const bool serial = info.type == ConnectionType::Serial;
+                        const std::string where =
+                            serial ? info.port_path : info.host + ":" + std::to_string(info.udp_port);
+                        const std::string text =
+                            serial ? "Could not open " + where + " for the Sky-Watcher mount: " + reason +
+                                         ". Check the Serial Port setting."
+                                   : "Could not reach the Sky-Watcher mount at " + where + ": " + reason +
+                                         ". Check the Host setting and that the mount is on.";
                         // Unanswered UDP endpoint or vanished serial node: stale, re-scan.
-                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
-                            throw util::StaleEndpoint("Failed to connect to Sky-Watcher motor controller");
+                        if (!serial || util::device_node_missing(info.port_path)) {
+                            throw util::StaleEndpoint(text);
                         }
-                        throw AlpacaException("Failed to connect to Sky-Watcher motor controller");
+                        throw AlpacaException(text);
                     }
                 },
                 "SkyWatcher");
