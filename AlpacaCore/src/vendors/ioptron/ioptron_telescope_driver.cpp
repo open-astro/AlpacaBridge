@@ -2166,12 +2166,12 @@ private:
         }
         finalize_wedged_park_locked();
         // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
-        // Tracking or Slewing): its own end state (parked, at home) at once, any other no-motion status only
-        // past the initiator's override (the firmware can still report its old status just after the command).
+        // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
+        // initiator's override (the firmware can still report its old status just after the command). A Park
+        // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
         // Runs after the finalizer, which may have re-read the status.
-        const bool reached_end = (driver_motion_ == DriverMotion::Park && cached_status_.is_parked) ||
-                                 (driver_motion_ == DriverMotion::Home && cached_status_.is_at_home);
-        if (reached_end || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
+        const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
+        if (reached_home || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
             driver_motion_ = DriverMotion::None;
         }
     }
@@ -2883,8 +2883,8 @@ private:
     mutable bool slew_in_progress_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those):
     // keeps get_slewing() true when a PulseGuide arrives mid-motion. Set by park()/find_home(),
-    // cleared by refresh_status_cache_locked() once a fresh status reports that initiator's end
-    // state, or no motion past the initiator's override, and by AbortSlew, any new initiator
+    // cleared by refresh_status_cache_locked() once a fresh status reports at home after a FindHome,
+    // or no motion past the initiator's override, and by AbortSlew, any new initiator
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     enum class DriverMotion { None, Park, Home };
     mutable DriverMotion driver_motion_ = DriverMotion::None;
