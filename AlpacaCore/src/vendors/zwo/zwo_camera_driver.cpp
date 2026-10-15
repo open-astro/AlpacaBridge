@@ -238,6 +238,7 @@ public:
                 throw;
             }
             reset_exposure_state_locked();
+            first_temperature_read_pending_.store(true);
             connected_.store(true);
             return;
         }
@@ -374,6 +375,17 @@ public:
     double get_ccd_temperature() const override {
         ensure_connected();
         long value = get_control_value_or_throw(ZWOControlType::Temperature);
+        // Issue #722: the SDK answers success with 0 on the first temperature read
+        // after open (an ASI533MC Pro shows the real value by ~250 ms). A genuine
+        // 0.0 C must stay reportable, so only the first read of a connection, and
+        // only while it reads 0, re-reads on a bounded budget (5 x 50 ms), then
+        // returns what it has. Later reads are never delayed or cached.
+        if (first_temperature_read_pending_.exchange(false) && value == 0) {
+            for (int attempt = 0; attempt < kFirstTemperatureRetries && value == 0; ++attempt) {
+                std::this_thread::sleep_for(kFirstTemperatureRetryDelay);
+                value = get_control_value_or_throw(ZWOControlType::Temperature);
+            }
+        }
         return static_cast<double>(value) / 10.0;
     }
 
@@ -1106,6 +1118,10 @@ private:
     std::unordered_map<ZWOControlType, ZWOControlCaps> control_caps_;
 
     std::atomic<bool> connected_;
+    // True from connect until the first CCDTemperature read of the connection (#722).
+    mutable std::atomic<bool> first_temperature_read_pending_{false};
+    static constexpr int kFirstTemperatureRetries = 5;
+    static constexpr std::chrono::milliseconds kFirstTemperatureRetryDelay{50};
     std::mutex transition_mutex_;
     mutable std::mutex mutex_;
 
