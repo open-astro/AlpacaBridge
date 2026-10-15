@@ -8830,7 +8830,13 @@ int main() {
         class AsyncSwitchStub final : public route_table_stubs::SwitchStub {
         public:
             using SwitchStub::SwitchStub;
-            bool get_can_async(int) const override { return true; }
+            int get_max_switch() const override { return 1; }
+            bool get_can_async(int id) const override {
+                if (id < 0 || id >= get_max_switch()) {
+                    throw alpacacore::AlpacaException("Switch id out of range", alpacacore::AlpacaError::InvalidValue);
+                }
+                return true;
+            }
         };
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::DomeStub>(kSchemaDevice)));
@@ -8867,6 +8873,10 @@ int main() {
             const auto [status, json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=0");
             EXPECT(status == 200);
             EXPECT(json.value("ErrorNumber", -1) == 0x400);
+            // An out-of-range Id is still InvalidValue (ConformU checks it).
+            const auto [bad_status, bad_json] = body_of(verb, "/api/v1/switch/" + n + "/cancelasync?Id=-1");
+            EXPECT(bad_status == 200);
+            EXPECT(bad_json.value("ErrorNumber", -1) == 0x401);
         }
 
         registry.unregister_device(alpacacore::DeviceType::Dome, kSchemaDevice);

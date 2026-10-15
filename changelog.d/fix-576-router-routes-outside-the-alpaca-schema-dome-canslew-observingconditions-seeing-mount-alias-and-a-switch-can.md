@@ -4,4 +4,4 @@
 
 ### Fixed
 
-- **Switch: `cancelasync` no longer reports a cancel that never happened**, AlpacaHTTP, issue #576. The switch driver has no cancel member, so the old success cancelled nothing; both verbs now answer `NotImplemented` whatever `CanAsync` is (asserted on an async-capable switch in `AlpacaHTTP/tests/test_routing.cpp`). The dome `get_can_slew()` and observing-conditions `get_seeing()` interface members are removed with their routes.
+- **Switch: `cancelasync` no longer reports a cancel that never happened**, AlpacaHTTP, issue #576. The switch driver has no cancel member, so the old success cancelled nothing; both verbs now answer `NotImplemented` whatever `CanAsync` is, while an out-of-range `Id` still answers `InvalidValue` (asserted on an async-capable switch in `AlpacaHTTP/tests/test_routing.cpp`). The dome `get_can_slew()` and observing-conditions `get_seeing()` interface members are removed with their routes.

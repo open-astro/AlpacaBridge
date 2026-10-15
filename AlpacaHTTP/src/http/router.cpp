@@ -5175,7 +5175,9 @@ Response Router::dispatch_switch_method(
                 return response;
             } else if (method_name == "cancelasync") {
                 // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576).
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
                 throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
                                                   alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "canasync") {
@@ -5251,7 +5253,9 @@ Response Router::dispatch_switch_method(
                 return response;
             } else if (method_name == "cancelasync") {
                 // The switch driver has no cancel member, so succeeding here
-                // would report a cancel that never happened (#576).
+                // would report a cancel that never happened (#576). The Id is
+                // still validated first: an out-of-range one is InvalidValue.
+                (void)sw->get_can_async(parse_int("Id"));
                 throw alpacacore::AlpacaException("Switch does not support cancelling an asynchronous operation",
                                                   alpacacore::AlpacaError::NotImplemented);
             } else if (method_name == "setasync") {
