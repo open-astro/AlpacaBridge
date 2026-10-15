@@ -24,6 +24,22 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
     alpacacore::test::LockedQHYSDK sdk(fake);
     auto camera = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
 
+    // DriverException is deliberately NOT expected (open-astro#980). Only a worker
+    // failure, the watchdog, or a failed image build in get_image_array() publishes
+    // QHYExposureStatus::Failed, which makes get_image_ready() and
+    // get_image_array() throw DriverException, and none can happen in this storm:
+    //  - set_connected(false) holds exposure_lifecycle_mutex_, cancels and joins the
+    //    worker BEFORE close_camera() and keeps the mutex through the close, so
+    //    start_exposure() cannot spawn a worker in the gap and a live worker never
+    //    meets a closed handle (FakeQHYSDK::require_open). A join that times out
+    //    marks the worker superseded before detaching it.
+    //  - With the real SDK the cancel makes GetQHYCCDSingleFrame fail, so the worker
+    //    would publish Failed while connected_ is still true. FakeQHYSDK::cancel_exposure
+    //    is a no-op and frame_ok defaults to true, so no SDK call fails here. If a case
+    //    changes either (frame_ok, throw_from, before_call), or makes the frame invalid
+    //    (frame_width, frame_height, frame_bpp, frame_channels), widen this set.
+    //  - expire_overdue_exposure_locked() needs the exposure duration plus the default
+    //    60 s watchdog margin to pass; this case never passes one, and the fake is instant.
     alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
                                             alpacacore::AlpacaError::InvalidOperation};
     alpacacore::test::run_lifecycle_stress(*camera, [&guard](alpacacore::AlpacaDriver& device) {
