@@ -858,7 +858,7 @@ public:
         }
         stop_duty_worker();
         bool need_duty = false;
-        {
+        try {
             std::unique_lock<std::mutex> lock(mutex_);
             check_writable_locked();
             if (tracking_rate_ != 0) {
@@ -886,6 +886,9 @@ public:
                 apply_dec_rate_offset_locked(lock, /*defer_motion=*/busy);
             }
             need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
+        } catch (...) {
+            restart_duty_worker_if_armed();  // stop_duty_worker() above joined it
+            throw;
         }
         if (need_duty) {
             start_duty_worker();
@@ -948,6 +951,21 @@ public:
     // Stop the duty worker and wait for it (the setters call this before they
     // re-derive the duty rates). Call with no mutexes held.
     void stop_duty_worker() { duty_.cancel_all_and_join(); }
+
+    // For a setter that throws after stop_duty_worker() (a refusal on a link
+    // that faulted while the mutex was released, or a rate-mode change): put
+    // back the worker the join stopped, so a live sub-floor duty rate is not
+    // left with no worker. Call with no mutexes held.
+    void restart_duty_worker_if_armed() {
+        bool need_duty = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
+        }
+        if (need_duty) {
+            start_duty_worker();
+        }
+    }
 
     double get_focal_length() const override { return focal_length_m_; }
 
@@ -1161,7 +1179,7 @@ public:
         }
         stop_duty_worker();
         bool need_duty = false;
-        {
+        try {
             std::unique_lock<std::mutex> lock(mutex_);
             // Re-checked under the new lock: another thread may have stopped
             // tracking or taken the axes while the mutex was released.
@@ -1198,6 +1216,9 @@ public:
             // sub-floor rate with no worker until the next rate write or
             // tracking toggle (round-2 review note).
             need_duty = ra_duty_rate_deg_s_ != 0.0 || dec_duty_rate_deg_s_ != 0.0;
+        } catch (...) {
+            restart_duty_worker_if_armed();  // stop_duty_worker() above joined it
+            throw;
         }
         if (need_duty) {
             start_duty_worker();
@@ -3374,8 +3395,10 @@ private:
 
     // open-astro#505: refuse to serve the cache — or the dead-reckoned model —
     // while the link fault is latched, and surface the board-reset case the
-    // latch alone cannot catch. Callers are the read paths; a faulted link is
-    // NOT a disconnection, so this is DriverException and Connected stays true.
+    // latch alone cannot catch. Callers are the read paths and, through
+    // throw_if_link_faulted_locked(), the write gate check_writable_locked()
+    // (open-astro#882); a faulted link is NOT a disconnection, so this is
+    // DriverException and Connected stays true.
     void throw_comms_compromised_locked(const std::string& reason) const {
         throw AlpacaException("Sky-Watcher mount communications compromised: " + reason, AlpacaError::DriverException);
     }
