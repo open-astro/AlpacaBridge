@@ -459,6 +459,16 @@ function deviceStatus(device) {
     return { state: 'error', text: 'Status unavailable' };
 }
 
+// Site coordinates in the Configured Settings list: finite numbers print at a
+// fixed 6 decimals (about 0.11 m); display only, the stored value keeps full
+// precision. Any other type returns null so the caller keeps its own path.
+// A value that rounds to zero from below prints "0.000000", never "-0.000000".
+function formatSiteCoordinate(value) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const text = value.toFixed(6);
+    return text === '-0.000000' ? '0.000000' : text;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -466,5 +476,5 @@ if (typeof module !== 'undefined' && module.exports) {
                        updateStatusText, installerStateText, renderReleaseNotes,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
-                        normalizeAlignmentMode, deviceStatus };
+                        normalizeAlignmentMode, deviceStatus, formatSiteCoordinate };
 }

@@ -336,3 +336,15 @@ test('deviceStatus maps Connected, LoadError, LastConnectError and unknown', () 
     // Any fault is red, connected or not.
     assert.strictEqual(deviceStatus({ Connected: false, LinkFault: 'late read' }).state, 'error');
 });
+
+test('formatSiteCoordinate prints finite numbers at 6 decimals and defers other values', () => {
+    const { formatSiteCoordinate } = require('../../web/format.js');
+    assert.strictEqual(formatSiteCoordinate(-33.8567844444444), '-33.856784');
+    assert.strictEqual(formatSiteCoordinate(151.215297171661), '151.215297');
+    assert.strictEqual(formatSiteCoordinate(0), '0.000000');
+    // Rounds to zero from the negative side: no negative zero.
+    assert.strictEqual(formatSiteCoordinate(-0.0000001), '0.000000');
+    for (const v of ['12.5', null, undefined, true, NaN, Infinity, {}]) {
+        assert.strictEqual(formatSiteCoordinate(v), null);
+    }
+});
