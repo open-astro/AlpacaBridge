@@ -1042,7 +1042,13 @@ public:
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
+        const DriverMotion motion = driver_motion_;
         supersede_slew_dispatch_locked();
+        // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
+        // RS-232 command language v3.10), so a Park or FindHome keeps moving after a rate-0 MoveAxis.
+        if (rate == 0.0) {
+            driver_motion_ = motion;
+        }
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -2884,8 +2890,8 @@ private:
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those):
     // keeps get_slewing() true when a PulseGuide arrives mid-motion. Set by park()/find_home(),
     // cleared by refresh_status_cache_locked() once a fresh status reports at home after a FindHome,
-    // or no motion past the initiator's override, and by AbortSlew, any new initiator
-    // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
+    // or no motion past the initiator's override, and by AbortSlew, any new initiator except a rate-0
+    // MoveAxis (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
     enum class DriverMotion : std::uint8_t { None, Park, Home };
     mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned

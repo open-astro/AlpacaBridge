@@ -772,6 +772,26 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
     driver->set_connected(false);
 }
 
+// Review of #843: MoveAxis(axis, 0) sends :qR#/:qD#, which stop arrow motion only; the iOptron RS-232 command
+// language says other slewing is not affected, so the park keeps moving and must not be masked by a PulseGuide.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis rate 0 during a park",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->park();
+    driver->move_axis(0, 0.0);
+    driver->move_axis(1, 0.0);
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
 // Review of #843: a client that waits for FindHome through AtHome never reads Slewing until guiding starts.
 // The end of the home motion must still be seen, or the next PulseGuide is not masked.
 TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after a FindHome seen through AtHome",
