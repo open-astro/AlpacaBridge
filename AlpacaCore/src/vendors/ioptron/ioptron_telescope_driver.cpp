@@ -296,6 +296,7 @@ public:
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_in_progress_ = false;
+                driver_motion_ = DriverMotion::None;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -374,6 +375,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             slew_override_until_ = std::chrono::steady_clock::time_point{};
             slew_in_progress_ = false;
+            driver_motion_ = DriverMotion::None;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -560,7 +562,15 @@ public:
         }
         return false;
     }
-    
+
+    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed. Does not
+    // clear the flag (get_is_pulse_guiding() does).
+    bool pulse_window_open() const {
+        return pulse_guiding_active_.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now().time_since_epoch().count() <
+                   pulse_guiding_end_ns_.load(std::memory_order_relaxed);
+    }
+
     bool get_can_set_declination_rate() const override {
         return false;  // iOptron doesn't support setting Dec rate directly
     }
@@ -1032,7 +1042,13 @@ public:
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
+        const DriverMotion motion = slew_in_progress_ ? DriverMotion::Goto : driver_motion_;
         supersede_slew_dispatch_locked();
+        // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
+        // RS-232 command language v3.10), so a GOTO, Park or FindHome the driver started keeps moving after
+        // MoveAxis. Keep it as driver motion (a jog too: the protocol does not say it ends one) so a PulseGuide
+        // does not mask it; the next fresh no-motion status ends it, the override being cleared above.
+        driver_motion_ = motion;
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1078,7 +1094,11 @@ public:
         }
         refresh_status_cache_locked();
         if (cached_status_.is_slewing) {
-            return true;
+            // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
+            // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
+            // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
+            // dispatching and no Park/FindHome still moving (driver_motion_).
+            return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
         }
         if (slew_override_until_ > now) {
             return true;
@@ -1271,6 +1291,7 @@ public:
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
         protocol.go_to_home();
         supersede_slew_dispatch_locked();
+        driver_motion_ = DriverMotion::Home;
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
@@ -1297,6 +1318,7 @@ public:
                                   AlpacaError::DriverException);
         }
         supersede_slew_dispatch_locked();
+        driver_motion_ = DriverMotion::Park;
         park_override_until_ = std::chrono::steady_clock::time_point{};
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
@@ -1359,6 +1381,7 @@ public:
                                   AlpacaError::DriverException);
         }
         slew_in_progress_ = false;
+        driver_motion_ = DriverMotion::None;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
     }
@@ -1970,6 +1993,7 @@ private:
         // generation mismatch, preventing a ghost slew/trim after newer motion.
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
+        driver_motion_ = DriverMotion::None;
         clear_slew_override_locked();
     }
 
@@ -2147,6 +2171,15 @@ private:
                                   AlpacaError::DriverException);
         }
         finalize_wedged_park_locked();
+        // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
+        // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
+        // initiator's override (the firmware can still report its old status just after the command). A Park
+        // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
+        // Runs after the finalizer, which may have re-read the status.
+        const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
+        if (reached_home || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
+            driver_motion_ = DriverMotion::None;
+        }
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
@@ -2854,6 +2887,14 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
+    // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
+    // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by
+    // refresh_status_cache_locked() once a fresh status reports at home after a FindHome, or no motion
+    // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
+    // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
+    enum class DriverMotion : std::uint8_t { None, Park, Home, Goto };
+    mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
