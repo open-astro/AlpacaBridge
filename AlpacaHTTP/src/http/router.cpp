@@ -8391,16 +8391,32 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                     if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
                         continue;
                     }
+                    const std::string subject =
+                        persisted_device_subject(vendor, device_type_str, other_key->device_number);
                     try {
                         nlohmann::json neighbour = with_object_record_entries(other, view->fields);
                         if (view->forget_dropped_selectors) drop_unreadable_selectors(neighbour, view->fields);
+                        // A hand-edited neighbour with a wrong-typed field stays a peer without
+                        // that field, so its other identity fields (a uniqueId) are still claimed.
+                        for (const auto& f : view->fields) {
+                            const auto it = neighbour.find(f.key);
+                            if (it == neighbour.end()) continue;
+                            nlohmann::json single = nlohmann::json::object();
+                            single[f.key] = *it;
+                            try {
+                                (void)catalog_json::config_from_json(single, view->fields);
+                            } catch (const std::exception& ex) {
+                                util::log_debug("register_device_from_config: ignoring field " + std::string(f.key) +
+                                                " of a stored " + subject + " as a peer (" +
+                                                util::escape_for_log(ex.what()) + ")");
+                                neighbour.erase(f.key);
+                            }
+                        }
                         peers.push_back(
                             {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
                     } catch (const std::exception& ex) {
-                        // A hand-edited neighbour with a wrong-typed field is not a peer.
-                        util::log_debug("register_device_from_config: ignoring a stored " +
-                                        persisted_device_subject(vendor, device_type_str, other_key->device_number) +
-                                        " as a peer (" + util::escape_for_log(ex.what()) + ")");
+                        util::log_debug("register_device_from_config: ignoring a stored " + subject + " as a peer (" +
+                                        util::escape_for_log(ex.what()) + ")");
                     }
                 }
             }
