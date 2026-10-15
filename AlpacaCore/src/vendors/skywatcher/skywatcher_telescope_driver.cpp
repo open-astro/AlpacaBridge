@@ -530,7 +530,10 @@ public:
                 connection_info_, connection_resolved_, connection_resolver_,
                 [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
-                        const std::string reason = protocol.connect_failure();
+                        std::string reason = protocol.connect_failure();
+                        if (reason.empty()) {
+                            reason = "unknown error";
+                        }
                         const bool serial = info.type == ConnectionType::Serial;
                         const std::string where =
                             serial ? info.port_path : info.host + ":" + std::to_string(info.udp_port);
@@ -634,6 +637,18 @@ public:
                 // so an axis still turning after a cable pull was neither
                 // stopped nor reported.
                 adopt_surviving_motion_locked(lock, entry_status);
+            } catch (const AlpacaException& e) {
+                session_open_.store(false);
+                protocol.disconnect();
+                connected_ = false;
+                reset_runtime_state_locked();
+                if (connection_info_.type == ConnectionType::Serial) {
+                    throw AlpacaException(std::string("The Sky-Watcher mount on ") + connection_info_.port_path +
+                                              " did not reply (" + e.what() +
+                                              "). Check the Serial Port setting and that the mount is on.",
+                                          e.error_code());
+                }
+                throw;
             } catch (...) {
                 session_open_.store(false);
                 protocol.disconnect();

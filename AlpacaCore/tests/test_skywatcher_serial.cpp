@@ -1374,3 +1374,26 @@ TEST_CASE("SkyWatcher serial - a refused connect names the port or host:port and
         CHECK(last.find("did not reply to the handshake") != std::string::npos);
     }
 }
+
+TEST_CASE("SkyWatcher serial - a muted board's refused connect names the port and the setting",
+          "[skywatcher][serial][connect-error]") {
+    FakeSkyWatcherSerialBoard board;
+    board.set_muted(true);
+    const std::string path = board.slave_path();
+    auto driver = serial_driver(path);
+    try {
+        driver->set_connected(true);
+        FAIL("connect to a silent board must throw");
+    } catch (const alpacacore::AlpacaException& e) {
+        const std::string what = e.what();
+        INFO(what);
+        CHECK(what.find(path) != std::string::npos);
+        CHECK(what.find("Serial Port setting") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+    driver->connect();
+    REQUIRE(wait_until_true([&] { return !driver->get_connecting(); }, 15000));
+    const std::string last = driver->get_last_connect_error();
+    CHECK(last.find(path) != std::string::npos);
+    CHECK(last.find("Serial Port setting") != std::string::npos);
+}
