@@ -46,6 +46,8 @@ public:
     virtual void stop(int focuser_id) = 0;
 
     virtual int get_max_step(int focuser_id) = 0;
+    /// Writes the focuser's stored max step (EAFSetMaxStep); the unit clamps moves at it.
+    virtual void set_max_step(int focuser_id, int max_step) = 0;
     virtual int get_step_range(int focuser_id) = 0;
 
     virtual double get_temperature(int focuser_id) = 0;

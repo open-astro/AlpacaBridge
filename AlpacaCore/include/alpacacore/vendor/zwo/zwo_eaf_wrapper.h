@@ -37,6 +37,7 @@ public:
     void stop(int focuser_id) override;
 
     int get_max_step(int focuser_id) override;
+    void set_max_step(int focuser_id, int max_step) override;
     int get_step_range(int focuser_id) override;
 
     double get_temperature(int focuser_id) override;

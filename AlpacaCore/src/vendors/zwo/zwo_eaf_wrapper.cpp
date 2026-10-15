@@ -255,6 +255,11 @@ int ZWOEAFSDKWrapper::get_max_step(int focuser_id) {
     return max_step;
 }
 
+void ZWOEAFSDKWrapper::set_max_step(int focuser_id, int max_step) {
+    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
+    throw_on_error(EAFSetMaxStep(focuser_id, max_step), "EAFSetMaxStep");
+}
+
 int ZWOEAFSDKWrapper::get_step_range(int focuser_id) {
     std::lock_guard<std::mutex> lock(pimpl_->mutex_);
     int range = 0;

@@ -33,7 +33,7 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     ZWOEAFFocuserDriver(int device_number, std::optional<int> focuser_id, std::optional<int> focuser_index,
-                        ZWOEAFSDK& sdk)
+                        ZWOEAFSDK& sdk, std::optional<int> configured_max_step)
         : AsyncConnectable("ZWO"),
           sdk_(sdk),
           device_number_(device_number),
@@ -42,6 +42,7 @@ public:
           serial_number_(),
           focuser_info_(),
           focuser_info_valid_(false),
+          configured_max_step_(configured_max_step),
           connected_(false),
           status_cache_("ZWO EAF", kStatusTtl, 3, "ZWO") {}
 
@@ -151,6 +152,14 @@ public:
                     step_range_ = sdk.get_step_range(resolved_id);
                 } catch (const std::exception&) {
                     step_range_ = 0;  // unavailable: MaxIncrement falls back to MaxStep
+                }
+                apply_configured_max_step_locked(sdk, resolved_id);
+                if (max_step_ <= 0) {
+                    // Every Move would fail the range check with no hint; the unit stops moves at its
+                    // stored max step too, so a driver-only limit cannot repair this.
+                    ALPACA_LOG_WARN("ZWO", "EAF reports max step 0 and no Max Step is configured");
+                    throw AlpacaException("The EAF reports max step 0. Set Max Step in the focuser's device settings.",
+                                          AlpacaError::DriverException);
                 }
                 status_cache_.reset();
                 try {
@@ -288,6 +297,25 @@ public:
     }
 
 private:
+    // Writes the configured max step to the unit when it differs from the stored one, and
+    // adopts it. Caller holds mutex_ and has read max_step_ and step_range_. A value above
+    // the unit's step range is refused before any write; an unavailable range (0) is no bound.
+    void apply_configured_max_step_locked(ZWOEAFSDK& sdk, int focuser_id) {
+        if (!configured_max_step_.has_value() || *configured_max_step_ == max_step_) {
+            return;
+        }
+        const int wanted = *configured_max_step_;
+        if (step_range_ > 0 && wanted > step_range_) {
+            throw AlpacaException("The configured Max Step " + std::to_string(wanted) +
+                                      " is above the EAF's step range " + std::to_string(step_range_) +
+                                      ". Lower Max Step in the focuser's device settings.",
+                                  AlpacaError::DriverException);  // connect refusal, as the CGX missing-site one
+        }
+        sdk.set_max_step(focuser_id, wanted);
+        max_step_ = wanted;
+        ALPACA_LOG_INFO("ZWO", "EAF max step set to " + std::to_string(wanted));
+    }
+
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
         bool moving{};
@@ -380,6 +408,7 @@ private:
     std::string serial_number_;
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
+    const std::optional<int> configured_max_step_;  // config "maxStep"; unset = leave the stored value
     int max_step_{0};
     int step_range_{0};
     std::atomic<bool> connected_;
@@ -387,20 +416,23 @@ private:
     mutable util::TtlStatusCache<Status> status_cache_;
 };
 
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt, sdk);
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk,
+                                                      std::optional<int> max_step) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, focuser_id, std::nullopt, sdk, max_step);
 }
 
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk) {
-    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index, sdk);
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk,
+                                                               std::optional<int> max_step) {
+    return std::make_unique<ZWOEAFFocuserDriver>(device_number, std::nullopt, focuser_index, sdk, max_step);
 }
 
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id) {
-    return create_zwo_eaf_focuser(device_number, focuser_id, ZWOEAFSDKWrapper::instance());
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, std::optional<int> max_step) {
+    return create_zwo_eaf_focuser(device_number, focuser_id, ZWOEAFSDKWrapper::instance(), max_step);
 }
 
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index) {
-    return create_zwo_eaf_focuser_by_index(device_number, focuser_index, ZWOEAFSDKWrapper::instance());
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index,
+                                                               std::optional<int> max_step) {
+    return create_zwo_eaf_focuser_by_index(device_number, focuser_index, ZWOEAFSDKWrapper::instance(), max_step);
 }
 
 } // namespace alpacacore::vendor::zwo

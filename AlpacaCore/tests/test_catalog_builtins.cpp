@@ -3059,7 +3059,8 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
 
     CHECK(keys_of(find_view(views, kZwoWheelKey)) ==
           std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
-    CHECK(keys_of(find_view(views, kZwoFocuserKey)) == std::vector<std::string>{"focuserIndex", "focuserId"});
+    CHECK(keys_of(find_view(views, kZwoFocuserKey)) ==
+          std::vector<std::string>{"focuserIndex", "focuserId", "maxStep"});
     CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
     CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
                                                                                "gpioChip", "devicePath",
@@ -3070,6 +3071,39 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
                       std::string{"dewheater"}));
     CHECK(same_scalar(find_field(find_view(views, kZwoTelescopeKey)->fields, "tcpPort")->default_value,
                       std::int64_t{4030}));
+}
+
+// open-astro#1152. Falsified by: zwo_fields.h kZwoFocuserMaxStep dropping .min = 1 (maxStep 0 is accepted)
+// or filling a default when the key is absent (the persisted config gains maxStep).
+TEST_CASE("Builtin catalog - the ZWO focuser maxStep is optional and range-checked", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig absent;
+    absent.set("focuserIndex", std::int64_t{0});
+    const auto unset = catalog.normalize(kZwoFocuserKey, absent, Source::Persisted);
+    CHECK(unset.warnings.empty());
+    CHECK_FALSE(unset.config.has("maxStep"));  // absent stays absent: no default is written
+    CHECK_FALSE(catalog.normalize(kZwoFocuserKey, absent, Source::Api).rejection.has_value());
+
+    for (const std::int64_t bad : {std::int64_t{0}, std::int64_t{-5}, std::int64_t{2000001}}) {
+        INFO(bad);
+        DeviceConfig config = absent;
+        config.set("maxStep", bad);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "maxStep is out of range (min 1) (max 2000000)");
+        const auto persisted = catalog.normalize(kZwoFocuserKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.config.has("maxStep"));  // dropped to unset
+    }
+    for (const std::int64_t good : {std::int64_t{1}, std::int64_t{60000}, std::int64_t{2000000}}) {
+        INFO(good);
+        DeviceConfig config = absent;
+        config.set("maxStep", good);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(api.config.has("maxStep"));
+    }
 }
 
 TEST_CASE("Builtin catalog - register_builtin_factories makes the ZWO devices available only when built",
