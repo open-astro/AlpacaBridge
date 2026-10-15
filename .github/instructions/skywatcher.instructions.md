@@ -564,7 +564,7 @@ below was one of them.
   open-astro#1025; an earlier ~3.1 s figure for a 350-count goto was wrong). A 20 deg goto whose
   estimate ran 1.2 s long read as 6 arcsec off at the deadband check and resumed tracking 1.03 s
   ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly 1.03 s of RA). Fixing only
-  the restart latency made every refinement land 0.6 s late (`SlewToCoordinates` "10.8 arc seconds
+  the restart latency made every refinement land ~0.6 s off (`SlewToCoordinates` "10.8 arc seconds
   away"). Both are now EMAs measured per goto (`goto_overhead_seconds_`, `resume_latency_seconds_`),
   seeded from the constants so the first goto of a session is unchanged on every mount; the
   refinement loop remains the safety net.
