@@ -1998,6 +1998,7 @@ private:
     void invalidate_readback_tick_locked() const {
         readback_tick_valid_until_ = util::TaskClock::clock::time_point::min();
         readback_top_valid_ = false;
+        readback_tick_absent_ = false;  // the handset's regime may have changed: hunt again (open-astro#1107)
     }
 
     void invalidate_readback_top_locked() const { readback_top_valid_ = false; }
@@ -2047,6 +2048,13 @@ private:
         auto& protocol = SynScanProtocolWrapper::instance();
         const auto start = clock_.now();
         TickHunt hunt;
+        if (readback_tick_absent_) {
+            // A hunt on this connection already spent its first-jump budget with no jump: one plain read.
+            check_connected();
+            hunt.raw = protocol.get_ra_dec_raw(true);
+            hunt.read_at = clock_.now();
+            return hunt;
+        }
         bool have_previous = false;
         double previous_hours = 0.0;
         auto previous_at = start;
@@ -2091,6 +2099,7 @@ private:
                 hunt.raw = raw;
                 hunt.read_at = read_at;
                 if (read_at - start >= kReadbackTickFirstJumpBudget) {
+                    readback_tick_absent_ = true;
                     return hunt;
                 }
             } else if (read_at - start >= kReadbackTickHuntBudget) {
@@ -2812,6 +2821,9 @@ private:
     // side of the tick for a read inside its uncertainty. Dropped by motion of unknown size (AbortSlew, MoveAxis).
     mutable double readback_top_hours_ = 0.0;
     mutable bool readback_top_valid_ = false;
+    // open-astro#1107: a hunt's first-jump budget expired with no jump, so this handset shows no sawtooth; later
+    // landings on the connection read once instead of hunting. Dropped with the anchor (connect, tracking, time).
+    mutable bool readback_tick_absent_ = false;
 
     mutable double site_latitude_cached_;
     mutable double site_longitude_cached_;
