@@ -8293,6 +8293,18 @@ std::string vendor_label(const alpacacore::catalog::DescriptorView& view) {
     const auto space = name.find(' ');
     return space == std::string::npos ? name : name.substr(0, space);
 }
+
+// #508 item 2: connectionType is compared in lower case everywhere, so the
+// config is folded once on the way into registration and into the stored entry
+// (catalog::fold_connection_type_value). An unknown value stays unknown.
+nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
+    if (!config.is_object()) return config;
+    auto it = config.find("connectionType");
+    if (it == config.end() || !it->is_string()) return config;
+    nlohmann::json folded = config;
+    folded["connectionType"] = alpacacore::catalog::fold_connection_type_value(it->get<std::string>());
+    return folded;
+}
 }  // namespace
 
 bool Router::reject_invalid_config(ConfigSource source, const char* reason, const std::string& vendor,
@@ -8327,8 +8339,9 @@ std::string Router::normalize_persisted_connection_type(ConfigSource source, con
     return "serial";
 }
 
-bool Router::register_device_from_config(const nlohmann::json& config, std::string& error_message, ConfigSource source,
-                                         nlohmann::json* learned_config) {
+bool Router::register_device_from_config(const nlohmann::json& raw_config, std::string& error_message,
+                                         ConfigSource source, nlohmann::json* learned_config) {
+    const nlohmann::json config = with_folded_connection_type(raw_config);
     std::string device_type_str = config_get(config, "deviceType", "");
     std::string vendor = config_get(config, "vendor", "");
     int device_number = config_get(config, "deviceNumber", -1);
@@ -8775,7 +8788,8 @@ nlohmann::json sanitize_fields_json(const nlohmann::json& config,
 }
 }  // namespace
 
-nlohmann::json Router::sanitize_device_config(const nlohmann::json& config) const {
+nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) const {
+    const nlohmann::json config = with_folded_connection_type(raw_config);
     nlohmann::json sanitized = nlohmann::json::object();
 
     auto copy_if_present = [&](const char* key) {

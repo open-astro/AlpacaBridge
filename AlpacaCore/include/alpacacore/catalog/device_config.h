@@ -69,4 +69,11 @@ private:
     std::vector<std::pair<std::string, ConfigValue>> entries_;
 };
 
+// The one fold rule for "connectionType" (#508 item 2): ASCII lower case.
+// Catalog normalize() and the router both call it.
+std::string fold_connection_type_value(std::string_view value);
+
+// Applies fold_connection_type_value to a string "connectionType" in place.
+void fold_connection_type(DeviceConfig& config);
+
 }  // namespace alpacacore::catalog
