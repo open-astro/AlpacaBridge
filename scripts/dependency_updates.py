@@ -644,13 +644,19 @@ SARIF_PACKAGE_RE = re.compile(r"Package '([^@']+)@[^']*' is vulnerable to '([^']
 
 def filter_sarif(sarif: dict, report: dict, direct: set[str]) -> dict:
     """The SARIF with only findings in ``direct`` source packages that Debian does not rate
-    unimportant: what code scanning shows. Rules stay as they are (results refer to them by index)."""
+    unimportant: what code scanning shows. Rules stay as they are (results refer to them by index).
+
+    Each kept result's fingerprint becomes a hash of its source package and advisory alone.
+    osv-scanner's own includes the package version, so every Debian security update to a package
+    (8.14.1-2+deb13u5 -> +deb13u7) closed its alerts and opened them again, dismissals lost."""
     out = json.loads(json.dumps(sarif))
     for run in out.get("runs") or []:
         kept = []
         for r in run.get("results") or []:
             m = SARIF_PACKAGE_RE.search((r.get("message") or {}).get("text", ""))
             if m and m.group(1) in direct and not osv_unimportant(report, m.group(2), m.group(1)):
+                key = f"{m.group(1)}|{m.group(2)}".encode()
+                r["partialFingerprints"] = {"primaryLocationLineHash": hashlib.sha256(key).hexdigest()}
                 kept.append(r)
         run["results"] = kept
     return out
@@ -992,6 +998,17 @@ def self_test() -> int:
                      "Package 'libgphoto2@1.0' is vulnerable to 'DEBIAN-CVE-2026-11'."], texts
     assert len(kept["runs"][0]["tool"]["driver"]["rules"]) == 5, "rules stay: results refer to them by index"
     assert len(sarif["runs"][0]["results"]) == 5, "the input SARIF is not modified"
+    # Code scanning matches an alert across scans by its fingerprint. osv-scanner's hashes the package
+    # version, so a Debian security update (curl 8.14.1-2+deb13u5 -> +deb13u7) reopened every dismissed
+    # alert as a new one; the fingerprint is the source package and advisory only.
+    def fingerprint(version, pkg_name="curl", vid="DEBIAN-CVE-2026-10"):
+        r = {"ruleId": vid, "partialFingerprints": {"primaryLocationLineHash": version},
+             "message": {"text": f"Package '{pkg_name}@{version}' is vulnerable to '{vid}'."}}
+        one = {"runs": [{"tool": {"driver": {"rules": [{"id": vid}]}}, "results": [r]}]}
+        return filter_sarif(one, {"results": []}, {"curl", "libgphoto2"})["runs"][0]["results"][0]["partialFingerprints"]
+    assert fingerprint("8.14.1-2+deb13u5") == fingerprint("8.14.1-2+deb13u7"), "one alert across Debian revisions"
+    assert fingerprint("1.0") != fingerprint("1.0", vid="DEBIAN-CVE-2026-11"), "each advisory is its own alert"
+    assert fingerprint("1.0") != fingerprint("1.0", pkg_name="libgphoto2"), "each source package is its own alert"
     # Every alternative of an "a | b" dependency counts: the image may have installed either.
     assert direct_sources("libcurl4t64 | libcurl3t64-gnutls, adduser",
                           "libcurl4t64 curl\nlibcurl3t64-gnutls curl-gnutls\n") == {"curl", "curl-gnutls", "adduser"}
