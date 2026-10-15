@@ -486,21 +486,22 @@ if(ALPACAHTTP_BUILD_TESTS)
     # print and exit before anything starts (TIMEOUT: a regression that starts
     # the server hangs, so it fails instead); a flag it does not know and an
     # unreadable config path must exit non-zero.
-    add_test(NAME server_cli_help COMMAND alpacahttp_server --help)
-    set_tests_properties(server_cli_help PROPERTIES
-        PASS_REGULAR_EXPRESSION "Usage: alpacabridge.*ALPACAHTTP_PORT" TIMEOUT 20)
-    add_test(NAME server_cli_help_short COMMAND alpacahttp_server -h)
-    set_tests_properties(server_cli_help_short PROPERTIES
-        PASS_REGULAR_EXPRESSION "Usage: alpacabridge" TIMEOUT 20)
-    add_test(NAME server_cli_version COMMAND alpacahttp_server --version)
-    set_tests_properties(server_cli_version PROPERTIES
-        PASS_REGULAR_EXPRESSION "^[0-9]+\\.[0-9]+\\.[0-9]+" TIMEOUT 20)
-    # WILL_FAIL cannot be combined with a message check (a match inverts to a
-    # failure), so these two pin the exact exit status through sh.
-    # $1 server, $2 expected exit status, $3 expected stderr text, rest the arguments.
+    # PASS_REGULAR_EXPRESSION would make CTest ignore the exit status, so every
+    # case goes through sh and pins the exact exit status and the stream.
+    # $1 server, $2 expected exit status, $3 expected text, rest the arguments.
+    set(SERVER_CLI_EXPECT_OUT [=[server=$1; want=$2; text=$3; shift 3
+out=$("$server" "$@" 2>/dev/null); rc=$?
+test "$rc" = "$want" && printf '%s' "$out" | tr '\n' ' ' | grep -q -- "$text"]=])
     set(SERVER_CLI_EXPECT [=[server=$1; want=$2; text=$3; shift 3
 err=$("$server" "$@" 2>&1 >/dev/null); rc=$?
 test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
+    add_test(NAME server_cli_help
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "Usage: alpacabridge.*ALPACAHTTP_PORT" --help)
+    add_test(NAME server_cli_help_short
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "Usage: alpacabridge" -h)
+    add_test(NAME server_cli_version
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "^[0-9]*[.][0-9]*[.][0-9]*" --version)
+    set_tests_properties(server_cli_help server_cli_help_short server_cli_version PROPERTIES TIMEOUT 20)
     add_test(NAME server_cli_unknown_option
         COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "unknown option '--bogus'" --bogus)
     add_test(NAME server_cli_extra_argument
