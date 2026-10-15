@@ -2886,7 +2886,7 @@ private:
     // cleared by refresh_status_cache_locked() once a fresh status reports at home after a FindHome,
     // or no motion past the initiator's override, and by AbortSlew, any new initiator
     // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
-    enum class DriverMotion { None, Park, Home };
+    enum class DriverMotion : std::uint8_t { None, Park, Home };
     mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
