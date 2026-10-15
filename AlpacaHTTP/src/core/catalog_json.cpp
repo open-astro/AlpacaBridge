@@ -46,9 +46,9 @@ using alpacacore::catalog::Role;
 // shape of number, not the wrong kind of JSON, so say what the field needs and
 // what it got (`9600.5`, `true`).
 [[noreturn]] void throw_not_whole_number(const std::string& name, const nlohmann::json& value) {
-    throw AlpacaException(std::string("Device config field '") + name + "' must be a whole number (got " +
-                              value.dump() + ")",
-                          alpacacore::AlpacaError::InvalidValue);
+    throw AlpacaException(
+        std::string("Device config field '") + name + "' must be a whole number (got " + value.dump() + ")",
+        alpacacore::AlpacaError::InvalidValue);
 }
 
 // A JSON float with no fractional part that fits an int64 (e.g. 1.0), as the

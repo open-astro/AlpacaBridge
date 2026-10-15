@@ -7321,12 +7321,12 @@ int main() {
         EXPECT(fractional.message == "Device config field 'baudRate' must be a whole number (got 9600.5)");
         EXPECT(listed_entry(router, "Telescope", 9259).is_null());
 
-        const auto boolean = api_attempt(
-            router,
-            nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
-                                  R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":true,)"
-                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
-            "Telescope");
+        const auto boolean =
+            api_attempt(router,
+                        nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
+                                              R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":true,)"
+                                              R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                        "Telescope");
         EXPECT(!boolean.ok);
         EXPECT(boolean.message == "Device config field 'baudRate' must be a whole number (got true)");
 
