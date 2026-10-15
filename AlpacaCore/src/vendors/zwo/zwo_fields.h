@@ -103,13 +103,11 @@ inline const Field<std::int64_t> kZwoRotatorId{
 // entry binds by (#914): the serial, not the enumeration order, says which
 // physical body it is. They reach log lines and the file, so normalize refuses
 // control bytes and a non-hex serial (zwo_identity_text_valid, zwo_serial_valid).
-inline const Field<std::int64_t> kZwoCamIndex{.key = "cameraIndex",
-                                              .default_value = -1,
-                                              .role = Role::EnumerationIndex,
-                                              .min = kZwoSelectorMin,
-                                              .max = kZwoSelectorMax};
-inline const Field<std::int64_t> kZwoCamId{
-    .key = "cameraId", .default_value = -1, .role = Role::DeviceId, .min = kZwoSelectorMin, .max = kZwoSelectorMax};
+// No declared range: normalize_camera checks -1 to INT_MAX itself, to keep the text the
+// router arm gave an out-of-range selector (the per-field rule has its own).
+inline const Field<std::int64_t> kZwoCamIndex{
+    .key = "cameraIndex", .default_value = -1, .role = Role::EnumerationIndex};
+inline const Field<std::int64_t> kZwoCamId{.key = "cameraId", .default_value = -1, .role = Role::DeviceId};
 inline const Field<std::string> kZwoCamSerial{.key = "serialNumber", .default_value = ""};
 inline const Field<std::string> kZwoCamName{.key = "cameraName", .default_value = ""};
 inline const Field<std::string> kZwoCamUniqueId{.key = "uniqueId", .default_value = ""};

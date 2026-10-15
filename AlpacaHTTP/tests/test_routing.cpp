@@ -2517,6 +2517,9 @@ int main() {
                 route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body());
             EXPECT(result.value("ErrorNumber", 0) == 0x401);
             EXPECT(result.value("ErrorMessage", std::string()).find(field) != std::string::npos);
+            // The camera keeps the arm's text for an out-of-range selector.
+            EXPECT(result.value("ErrorMessage", std::string()) ==
+                   std::string("Invalid value for ") + field + ": expected an integer from -1 to 2147483647");
         }
         for (const auto& [field, value, other_field] :
              {std::tuple{"cameraIndex", 0.0, "cameraId"}, std::tuple{"cameraId", 7.0, "cameraIndex"}}) {
@@ -2667,6 +2670,41 @@ int main() {
                 remove_device(second_startup, "zwo", selector.device_type, device_number++);
             }
         }
+    }
+    {
+        // case: zwo persisted selectors that are not integers are dropped and the entry still loads
+        // The arm dropped a stored "1" or true or 1.5 and registered the camera; the typed read
+        // refuses the wrong type, so the router drops the key first and forgets it in the file.
+        struct BadSelector {
+            const char* device_type;
+            const char* listed_type;
+            const char* field;
+        };
+        constexpr BadSelector selectors[]{{"camera", "Camera", "cameraIndex"},
+                                          {"camera", "Camera", "cameraId"},
+                                          {"filterwheel", "FilterWheel", "filterwheelIndex"},
+                                          {"focuser", "Focuser", "focuserId"},
+                                          {"rotator", "Rotator", "rotatorIndex"},
+                                          {"switch", "Switch", "cameraId"}};
+        int device_number = 9680;
+        for (const auto& selector : selectors) {
+            for (const nlohmann::json& bad : {nlohmann::json("1"), nlohmann::json(true), nlohmann::json(1.5)}) {
+                nlohmann::json entry = {
+                    {"vendor", "zwo"}, {"deviceType", selector.device_type}, {"deviceNumber", device_number++}};
+                entry[selector.field] = bad;
+                const auto persisted = persisted_attempt(entry, selector.listed_type);
+                EXPECT(persisted.listed);
+                EXPECT(!persisted.config.contains(selector.field));
+                EXPECT(any_warning_contains(persisted.warnings, selector.field));
+            }
+        }
+        // An API request with such a selector is still refused.
+        const nlohmann::json api_body = {
+            {"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", device_number}, {"cameraIndex", "1"}};
+        const auto refused = nlohmann::json::parse(
+            route_request(router, "POST", "/management/v1/configuredevice", api_body.dump()).body());
+        EXPECT(refused.value("ErrorNumber", 0) == 0x401);
+        EXPECT(refused.value("ErrorMessage", std::string()).find("cameraIndex") != std::string::npos);
     }
     {
         // case: zwo camera identity keys round trip and refuse control bytes (#914)
@@ -8566,6 +8604,22 @@ int main() {
         EXPECT(off.message == "SVBONY support not enabled. Rebuild with -DALPACACORE_ENABLE_SVBONY=ON");
         EXPECT(off.error_number == 0x400);  // NotImplemented
         EXPECT(listed_entry(router, "Camera", 9265).is_null());
+    }
+#endif
+
+#ifndef ALPACACORE_ENABLE_ZWO
+    // With the vendor built out, the catalog path reports the deleted arm's text.
+    {
+        // case: zwo camera vendors-OFF refusal text
+        alpacahttp::Router router;
+        const auto off = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"zwo","deviceType":"camera","deviceNumber":9266,"cameraIndex":0})"),
+            "Camera");
+        EXPECT(!off.ok);
+        EXPECT(off.message == "ZWO support not enabled. Rebuild with -DALPACACORE_ENABLE_ZWO=ON");
+        EXPECT(off.error_number == 0x400);  // NotImplemented
+        EXPECT(listed_entry(router, "Camera", 9266).is_null());
     }
 #endif
 

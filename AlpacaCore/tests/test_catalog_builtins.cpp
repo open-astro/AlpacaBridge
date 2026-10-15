@@ -3371,12 +3371,34 @@ TEST_CASE("Builtin catalog - ZWO camera identity strings and selector rule", "[c
     long_serial.set("serialNumber", std::string(65, 'a'));
     CHECK(catalog.normalize(kZwoCameraKey, long_serial, Source::Api).rejection.has_value());
 
-    // The selector range is the declared field's: -1 to INT_MAX.
-    DeviceConfig too_big;
-    too_big.set("cameraIndex", std::int64_t{std::int64_t{1} << 32});
-    const auto out_of_range = catalog.normalize(kZwoCameraKey, too_big, Source::Api);
-    REQUIRE(out_of_range.rejection.has_value());
-    CHECK(out_of_range.rejection->find("cameraIndex") != std::string::npos);
-    const auto dropped = catalog.normalize(kZwoCameraKey, too_big, Source::Persisted);
-    CHECK_FALSE(dropped.config.has("cameraIndex"));
+    // The selector range is -1 to INT_MAX and keeps the arm's text, cameraId read before cameraIndex.
+    struct Range {
+        const char* field;
+        std::int64_t value;
+    };
+    for (const Range& r : {Range{"cameraIndex", std::int64_t{1} << 32}, Range{"cameraId", -2},
+                           Range{"cameraIndex", std::int64_t{std::numeric_limits<int>::max()} + 1}}) {
+        INFO(r.field << "=" << r.value);
+        DeviceConfig out_of_range;
+        out_of_range.set(r.field, r.value);
+        const auto api = catalog.normalize(kZwoCameraKey, out_of_range, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              std::string("Invalid value for ") + r.field + ": expected an integer from -1 to 2147483647");
+        // A saved entry loses the selector and still registers.
+        const auto saved = catalog.normalize(kZwoCameraKey, out_of_range, Source::Persisted);
+        CHECK_FALSE(saved.rejection.has_value());
+        CHECK_FALSE(saved.config.has(r.field));
+        REQUIRE(saved.warnings.size() == 1);
+        CHECK(saved.warnings.front().find(r.field) == 0);
+    }
+    DeviceConfig both_bad;
+    both_bad.set("cameraIndex", std::int64_t{-2});
+    both_bad.set("cameraId", std::int64_t{-2});
+    CHECK(catalog.normalize(kZwoCameraKey, both_bad, Source::Api).rejection.value_or("").find("cameraId") !=
+          std::string::npos);
+    // INT_MAX itself is a valid selector.
+    DeviceConfig max_index;
+    max_index.set("cameraIndex", std::int64_t{std::numeric_limits<int>::max()});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, max_index, Source::Api).rejection.has_value());
 }

@@ -90,12 +90,24 @@ NormalizeResult normalize_telescope(const DeviceConfig& in, Source source) {
     return result;
 }
 
-// The camera's identity strings and its selector rule, in the router arm's order.
-// The API refuses an invalid string ("Invalid value for <field>"); a saved config
+// The camera's selector range, identity strings and selector rule, in the router arm's
+// order. The API refuses an invalid value ("Invalid value for <field>"); a saved config
 // loses it and relearns it at registration, so the camera stays listed.
 NormalizeResult normalize_camera(const DeviceConfig& in, Source source) {
     NormalizeResult result;
     result.config = in;
+    // The selectors first, cameraId before cameraIndex, as the arm read them.
+    for (const Field<std::int64_t>* selector : {&kZwoCamId, &kZwoCamIndex}) {
+        const std::optional<std::int64_t> value = in.find(*selector);
+        if (!value || (*value >= kZwoSelectorMin && *value <= kZwoSelectorMax)) continue;
+        if (source == Source::Api) {
+            result.rejection = std::string("Invalid value for ") + selector->key + ": expected an integer from -1 to " +
+                               std::to_string(kZwoSelectorMax);
+            return result;
+        }
+        result.warnings.push_back(std::string(selector->key) + " is outside -1 to " + std::to_string(kZwoSelectorMax));
+        result.config.erase(selector->key);
+    }
     const struct {
         const Field<std::string>& field;
         bool (*valid)(const std::string&);

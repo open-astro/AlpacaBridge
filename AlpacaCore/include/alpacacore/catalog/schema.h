@@ -165,9 +165,10 @@ struct Schema {
     // at are borrowed, not copied. They must be static or outlive the catalog.
     std::function<NormalizeResult(const DeviceConfig&, Source)> normalize;
     // A persisted selector (a Role::EnumerationIndex or Role::DeviceId field) that
-    // normalize dropped is also forgotten in the stored entry, through the
-    // registration's learned config, so the next start does not warn about it
-    // again. Off by default: another vendor's stored entry keeps the key it has.
+    // cannot be used -- not an integer, or one normalize dropped -- is dropped, and
+    // forgotten in the stored entry through the registration's learned config, so
+    // the entry still registers and the next start does not warn about it again.
+    // Off by default: another vendor's stored entry keeps the key it has.
     bool forget_dropped_selectors = false;
 };
 

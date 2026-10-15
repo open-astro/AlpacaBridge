@@ -6915,6 +6915,41 @@ nlohmann::json with_object_record_entries(const nlohmann::json& config,
     return out;
 }
 
+// Whether config_from_json can read `value` as the integer an Int selector holds: a
+// JSON integer, or a float with no fractional part, inside the int64 range.
+bool is_readable_integer(const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        return value.get<std::uint64_t>() <= static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    }
+    if (value.is_number_integer()) return true;
+    if (!value.is_number_float()) return false;
+    const double d = value.get<double>();
+    constexpr double kTwo63 = 9223372036854775808.0;
+    return std::isfinite(d) && d == std::trunc(d) && d >= -kTwo63 && d < kTwo63;
+}
+
+// A stored selector (an enumeration index or device id) that is not an integer
+// config_from_json can read -- "1", true, 1.5 -- is removed from `config` and its
+// key returned, so the entry still registers and stays listed with the selector
+// unset, as it did before the selectors were catalog fields. Used only for a
+// schema with forget_dropped_selectors, whose callers also forget the key in the
+// stored entry.
+std::vector<std::string> drop_unreadable_selectors(nlohmann::json& config,
+                                                   std::span<const alpacacore::catalog::FieldRef> fields) {
+    std::vector<std::string> dropped;
+    if (!config.is_object()) return dropped;
+    for (const auto& f : fields) {
+        if (f.role != alpacacore::catalog::Role::EnumerationIndex && f.role != alpacacore::catalog::Role::DeviceId) {
+            continue;
+        }
+        const auto it = config.find(f.key);
+        if (it == config.end() || it->is_null() || is_readable_integer(*it)) continue;
+        config.erase(it);
+        dropped.emplace_back(f.key);
+    }
+    return dropped;
+}
+
 // Reads siteLatitude/siteLongitude out of a device config and range-checks
 // them (issue #398).
 //
@@ -8292,9 +8327,16 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
     if (device_type_key) {
         const alpacacore::catalog::DeviceKey key{vendor, *device_type_key};
         if (auto view = find_descriptor(catalog_, key)) {
-            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(
-                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields),
-                view->fields);
+            nlohmann::json prepared =
+                with_object_record_entries(without_unknown_alignment_mode(config, view->fields), view->fields);
+            if (view->forget_dropped_selectors && source == ConfigSource::Persisted) {
+                for (const std::string& dropped : drop_unreadable_selectors(prepared, view->fields)) {
+                    util::log_warning(persisted_device_subject(vendor, device_type_str, device_number) +
+                                      " has invalid '" + dropped + "' (expected an integer); dropping it");
+                    if (learned_config != nullptr) (*learned_config)[dropped] = nullptr;
+                }
+            }
+            const alpacacore::catalog::DeviceConfig typed = catalog_json::config_from_json(prepared, view->fields);
             const auto result =
                 catalog_.normalize(key, typed,
                                    source == ConfigSource::Api ? alpacacore::catalog::Source::Api
@@ -8350,9 +8392,10 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                         continue;
                     }
                     try {
-                        peers.push_back({other_key->device_number,
-                                         catalog_json::config_from_json(with_object_record_entries(other, view->fields),
-                                                                        view->fields)});
+                        nlohmann::json neighbour = with_object_record_entries(other, view->fields);
+                        if (view->forget_dropped_selectors) drop_unreadable_selectors(neighbour, view->fields);
+                        peers.push_back(
+                            {other_key->device_number, catalog_json::config_from_json(neighbour, view->fields)});
                     } catch (const std::exception& ex) {
                         // A hand-edited neighbour with a wrong-typed field is not a peer.
                         util::log_debug("register_device_from_config: ignoring a stored " +
