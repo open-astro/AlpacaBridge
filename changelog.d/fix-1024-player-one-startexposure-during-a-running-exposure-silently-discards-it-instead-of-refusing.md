@@ -1,0 +1,5 @@
+### Breaking changes
+- **Player One and iCAM cameras: `StartExposure` during an exposure now returns `InvalidOperation`** (AlpacaCore, issue #1024): a client that restarted an exposure without `AbortExposure` used to succeed and now fails. **After upgrading:** call `AbortExposure` (or wait for the frame) before the next `StartExposure`.
+
+### Fixed
+- **Player One and iCAM `StartExposure` during an exposure is refused** (AlpacaCore, issue #1024): the driver throws `InvalidOperation` ("Camera is finishing a previous exposure; try again shortly", the QHY wording) while an exposure or its download is in progress, instead of silently discarding the running frame and starting a new one; the camera is left untouched, with no SDK stop or start (test `StartExposure during an exposure is refused`). A camera whose last exposure was aborted or finished still starts (test `StartExposure after abort or a finished frame succeeds`), and so does one whose last exposure failed, including a failed SDK stop (test `StartExposure after a failed exposure succeeds`). For the behaviour change, see Breaking changes.

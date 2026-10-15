@@ -26,8 +26,23 @@ jobs:
         with:
           persist-credentials: false
 
+      # debian/control and ci.yml's apt tools are unpinned (>= or bare names), so report the
+      # version apt would install today: debian:trixie (the image release.yml builds the .deb
+      # in) for debian/control, this Ubuntu 24.04 runner for the CI tools.
+      - name: Resolve apt candidate versions
+        run: |
+          mapfile -t deb_pkgs < <(python3 scripts/dependency_snapshot.py --apt-packages debian)
+          docker run --rm -e LC_ALL=C debian:trixie \
+            sh -c 'apt-get update -qq >/dev/null && apt-cache policy "$@"' sh "${deb_pkgs[@]}" > debian-policy.txt
+          mapfile -t ubuntu_pkgs < <(python3 scripts/dependency_snapshot.py --apt-packages ubuntu)
+          sudo apt-get update -qq
+          LC_ALL=C apt-cache policy "${ubuntu_pkgs[@]}" > ubuntu-policy.txt
+
       - name: Build snapshot
-        run: python3 scripts/dependency_snapshot.py --check && python3 scripts/dependency_snapshot.py --output snapshot.json
+        run: |
+          python3 scripts/dependency_snapshot.py --check
+          python3 scripts/dependency_snapshot.py --debian-policy debian-policy.txt \
+            --ubuntu-policy ubuntu-policy.txt --output snapshot.json
 
       - name: Submit snapshot
         env:
