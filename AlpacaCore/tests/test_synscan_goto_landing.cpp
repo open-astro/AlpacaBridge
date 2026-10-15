@@ -646,7 +646,8 @@ TEST_CASE("SynScan GOTO landing - a tracking write, a time write and a reconnect
 }
 
 // A handset without the sawtooth: the first landing spends the hunt's 1.3 s first-jump budget (6 or 7 reads, the
-// fake handset answers in about 0.2 s), a later one on the same connection reads once (#1107). Returns the reads a landing took.
+// fake handset answers in about 0.2 s), a later one on the same connection reads once (#1107). Returns the reads a
+// landing took.
 int landing_reads(alpacacore::TelescopeDriver& driver, LandingOffsetHandset& st) {
     const int before = st.position_reads.load();
     REQUIRE_NOTHROW(driver.slew_to_coordinates(kTargetRa, kTargetDec));
