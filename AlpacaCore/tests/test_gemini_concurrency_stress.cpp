@@ -44,13 +44,10 @@
 //     a cover call would widen this past a registration PR; also a
 //     follow-up.
 //
-// The focuser stays on the accepted fail-fast bar (the ZWO/iOptron
-// precedent): a serial path that cannot exist, so every connect fails fast
-// and the storm still covers the AsyncConnectable machinery and the
-// connect-failure cleanup. Note that a pty-backed fake DOES now exist for it
-// -- AlpacaCore/tests/fake_gemini_focuser.h, added with the transition-mutex
-// fix (open-astro#333) -- it is simply not wired into this storm yet. Wire
-// that up rather than writing a second seam.
+// The focuser runs over fake_gemini_focuser.h too (open-astro#1067): it is
+// request/response like the flat panel, so the storm reaches its connected
+// getters, move/halt and the connect/disconnect transitions rather than a
+// connect that fails at once on an absent port.
 
 #include <alpacacore/covercalibrator_driver.h>
 #include <alpacacore/focuser_driver.h>
@@ -65,10 +62,12 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_gemini_flatpanel.h"
+#include "fake_gemini_focuser.h"
 #include "fake_gemini_pdh.h"
 
 using alpacacore::AlpacaDriver;
 using alpacacore::test::FakeGeminiFlatPanel;
+using alpacacore::test::FakeGeminiFocuser;
 using alpacacore::test::FakeGeminiPdh;
 
 namespace {
@@ -153,11 +152,6 @@ void focuser_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) 
     guard([&] { focuser.move(1234); });
     guard([&] { focuser.halt(); });
 }
-
-// Never a real device path: the storm connects hundreds of times, so a
-// plausible port (/dev/ttyUSB0) could open whatever is actually plugged in
-// and take the MyFocuserPro2 handshake to it.
-constexpr const char* kAbsentSerialPort = "/dev/gemini-alpacabridge-absent";
 
 }  // namespace
 
@@ -264,14 +258,20 @@ TEST_CASE("Gemini Flat Panel Pro - racing disconnect is never dropped", "[gemini
 }
 
 TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gemini][focuser][stress]") {
-    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, kAbsentSerialPort);
+    FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+
+    // Prove the fake connects before storming it, so this cannot degrade into
+    // a fail-fast case that never reaches the connected paths. 15 s covers the
+    // handshake retry ladder (100 ms + 2 s + 1 s of sleeps plus read
+    // timeouts); the fake answers the first attempt, so it is never spent.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+    CHECK_NOTHROW(driver->set_connected(false));
 
     alpacacore::test::StressCallGuard guard;
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { focuser_operate(guard, d); });
 
-    // The port cannot exist, so no connect in the storm can have succeeded.
-    CHECK(driver->get_connected() == false);
-    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
     INFO(guard.report());
@@ -280,6 +280,16 @@ TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gem
 }
 
 TEST_CASE("Gemini focuser - destruction races an in-flight connect", "[gemini][focuser][stress]") {
+    FakeGeminiFocuser fake;
+    const std::string port = fake.slave_path();
+    // 25 not 100, same reasoning as the PDH destruction case above: every
+    // iteration reaches a real handshake.
     alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::gemini::create_gemini_focuser(0, kAbsentSerialPort); });
+        [&port]() { return alpacacore::vendor::gemini::create_gemini_focuser(0, port); }, 25);
+}
+
+TEST_CASE("Gemini focuser - racing disconnect is never dropped", "[gemini][focuser][stress]") {
+    FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
 }
