@@ -703,8 +703,31 @@ TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still r
     CHECK(driver->get_slewing());
 
     // A driver-initiated GOTO started during a pulse keeps Slewing true.
-    driver->pulse_guide(3, 5000);
+    driver->pulse_guide(3, 9000);
     driver->slew_to_coordinates_async(13.0, 20.0);
     CHECK(driver->get_slewing());
+
+    // Past the 5 s Slewing override only the firmware status (still 2) holds Slewing true; the open pulse
+    // window must not mask it while the GOTO is in flight.
+    std::this_thread::sleep_for(std::chrono::milliseconds(7000));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - Slewing stays false in the settle window after a PulseGuide",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // The pulse duration has passed but the driver's 1 s completion delay has not: the firmware is still
+    // reporting the pulse, as a guider reading Slewing right after its pulse sees it.
+    driver->pulse_guide(3, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
 }
