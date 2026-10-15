@@ -146,17 +146,6 @@ std::string format_bound(FieldRef::Kind kind, double bound) {
     return std::string(buf, res.ptr);
 }
 
-void fold_connection_type(DeviceConfig& config) {
-    const ConfigValue* v = config.find_value("connectionType");
-    const auto* text = v ? std::get_if<std::string>(v) : nullptr;
-    if (!text) return;
-    std::string lower = *text;
-    for (char& c : lower) {
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    }
-    if (lower != *text) config.set("connectionType", std::move(lower));
-}
-
 std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;
     views.reserve(schemas_.size());

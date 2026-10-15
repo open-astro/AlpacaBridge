@@ -8296,17 +8296,13 @@ std::string vendor_label(const alpacacore::catalog::DescriptorView& view) {
 
 // #508 item 2: connectionType is compared in lower case everywhere, so the
 // config is folded once on the way into registration and into the stored entry
-// (same rule as catalog::fold_connection_type). An unknown value stays unknown.
+// (catalog::fold_connection_type_value). An unknown value stays unknown.
 nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
     if (!config.is_object()) return config;
     auto it = config.find("connectionType");
     if (it == config.end() || !it->is_string()) return config;
     nlohmann::json folded = config;
-    std::string lower = it->get<std::string>();
-    for (char& c : lower) {
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    }
-    folded["connectionType"] = std::move(lower);
+    folded["connectionType"] = alpacacore::catalog::fold_connection_type_value(it->get<std::string>());
     return folded;
 }
 }  // namespace
