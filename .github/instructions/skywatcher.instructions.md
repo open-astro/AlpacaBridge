@@ -538,8 +538,10 @@ below was one of them.
   ~0.13 arcsec frozen, stable to +/-0.1 across runs; the case asserts a 2 arcsec floor.
   **And the seam disagrees with the hardware about which is better**: on the loopback fake the
   frozen constants land at about -0.8 arcsec and the measured EMAs at -3 to -13, because the
-  fake has no equivalent of the real MC's ~3 s floor on even a 350-count refinement goto --
-  which is precisely the fact that made the constants wrong on an EQM-35. So the test pins that
+  fake's goto and restart timing is not the real MC's (the EQM-35 measures ~0.26 s for a
+  259-count refinement goto and ~0.2 s landing-to-`:J1`, which is why the Wave 100i constants
+  were wrong there; an earlier "~3 s floor" explanation for the gap was wrong and is dropped,
+  and the loopback fake has not been shown to reproduce the real timing). So the test pins that
   the aim-ahead is driven by something that moves, and says in its own comment that the
   evidence measuring HELPS is the hardware ConformU run, not the fake. **Rule:** when a fake
   cannot reproduce the quantity a change was made for, pin the mechanism and name the real
@@ -560,14 +562,14 @@ below was one of them.
   stays green, the seam models the wrong failure.
 - **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
   `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
-  restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
-  so 2.5 + 0.7 happened to equal 3.1 + 0.2 for refinements (which is why they landed to 0.6 arcsec)
-  while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
-  resumed tracking 1.03 s ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly
-  1.03 s of RA). Fixing only the restart latency made every refinement land 0.6 s late
-  (`SlewToCoordinates` "10.8 arc seconds away"). Both are now EMAs measured per goto
-  (`goto_overhead_seconds_`, `resume_latency_seconds_`), seeded from the constants so the first
-  goto of a session is unchanged on every mount; the refinement loop remains the safety net.
+  restart takes ~0.2 s and a 259-count refinement goto only ~0.26 s (measured on the rig,
+  open-astro#1025; an earlier ~3.1 s figure for a 350-count goto was wrong). A 20 deg goto whose
+  estimate ran 1.2 s long read as 6 arcsec off at the deadband check and resumed tracking 1.03 s
+  ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly 1.03 s of RA). Fixing only
+  the restart latency made every refinement land ~0.6 s off (`SlewToCoordinates` "10.8 arc seconds
+  away"). Both are now EMAs measured per goto (`goto_overhead_seconds_`, `resume_latency_seconds_`),
+  seeded from the constants so the first goto of a session is unchanged on every mount; the
+  refinement loop remains the safety net.
 - **Run chrony on the machine running ConformU. A stepped clock is an RA error.** RA = LST - HA
   with LST from the host clock. Lima's host agent steps the guest clock by ~100 ms whenever the
   drift passes its threshold (every 2-3 min at the ~500 ppm a vz guest drifts; no knob in Lima

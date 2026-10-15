@@ -1,0 +1,4 @@
+### Changed (tests)
+
+- **Gemini focuser stress cases run over the pty-backed fake** (AlpacaCore tests, issue #1067): the lifecycle and destruction `[stress]` cases in `AlpacaCore/tests/test_gemini_concurrency_stress.cpp` build the driver on `FakeGeminiFocuser` instead of an absent port, the lifecycle case proves a connect before and a disconnect after the storm, and a new "racing disconnect is never dropped" case asserts the driver settles disconnected after a connect followed at once by a disconnect.
+- **Gemini flat panel stress case storms the cover** (AlpacaCore tests, issue #1067): `flatpanel_operate` in `AlpacaCore/tests/test_gemini_concurrency_stress.cpp` alternates `open_cover()` and `close_cover()` behind a `get_cover_moving()` gate and calls `halt_cover()`, and the lifecycle guard expects `{NotConnected, InvalidOperation}`, the latter from `start_cover_task()` refusing a losing submitter.

@@ -4268,9 +4268,10 @@ TEST_CASE("SkyWatcher async - the goto aim-ahead is measured, not the seeded con
     //
     // What this case does NOT claim is that the measured estimate lands the
     // mount BETTER. On this fake it does not: frozen residuals run about
-    // -0.8 arcsec and measured ones about -3 to -13, because the fake has no
-    // equivalent of the real MC's ~3 s floor on even a 350-count goto, which
-    // is the whole reason the constants were wrong on an EQM-35. The evidence
+    // -0.8 arcsec and measured ones about -3 to -13, because the fake's goto
+    // and restart timing is not the real MC's (the EQM-35 measures ~0.26 s for
+    // a 259-count goto, see kGotoRampSeconds); the gap is not shown to be a
+    // missing floor, and the constants were wrong on an EQM-35. The evidence
     // that measuring helps is the hardware ConformU run in this PR
     // ("SlewToCoordinates 10.8 arc seconds away" -> clean), not this file.
     // Pinned here: that the aim-ahead is driven by something that moves.
