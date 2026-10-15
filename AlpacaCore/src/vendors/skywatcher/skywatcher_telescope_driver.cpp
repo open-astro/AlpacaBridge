@@ -2106,7 +2106,11 @@ public:
         // and between them a recovery of kAxisStopTimeout (5 s worst case) +
         // kLandingSettleTimeout (2 s) -- about 7.5 s past the landing if
         // every bound is hit, against ~450 ms when the first sample agrees,
-        // which is the ordinary case.
+        // which is the ordinary case. Before that budget starts, the landing
+        // refinement (refine_goto_landing(): up to three re-gotos, each
+        // with its own wait_for_slew_complete, plus a hold of up to
+        // kMaxLandingHoldSeconds, 5 s) has already run, so the whole call
+        // can take that much longer.
         goto_in_progress_ = false;
         restoring_tracking_ = true;
         try {
@@ -4437,12 +4441,14 @@ private:
     // LST advances 24 sidereal hours per sidereal day of SI seconds.
     static constexpr double kLstHoursPerSecond = 24.0 / 86164.0905;
     // Fixed goto overhead beyond distance/max-rate (ramp up + down, the
-    // pre-dispatch stop-wait, landing detection). INITIAL estimate only: an
-    // EQM-35 Pro takes ~3.1 s for even a 350-count refinement goto and
-    // ~3.7 s of overhead on a 15 deg one, so goto_overhead_seconds_ is
-    // measured on every goto (see wait_for_slew_complete). With this fixed
-    // at 2.5 s each refinement landed ~0.6 s late and the loop never
-    // converged (ConformU SlewToCoordinates "10.8 arc seconds away").
+    // pre-dispatch stop-wait, landing detection). INITIAL estimate only: the
+    // overhead differs by mount and by goto length. An EQM-35 Pro measured
+    // 0.26 s for a 259-count refinement goto (open-astro#1025) and ~3.7 s of
+    // overhead on a 15 deg one, so goto_overhead_seconds_ is measured on
+    // every goto (see wait_for_slew_complete). A fixed value mis-aims one of
+    // the two: an earlier fixed 2.5 s made each refinement land ~0.6 s off
+    // and the loop never converged (ConformU SlewToCoordinates "10.8 arc
+    // seconds away").
     static constexpr double kGotoRampSeconds = 2.5;
     // After the goto lands, the RA axis sits stopped while tracking restarts;
     // aim that far ahead so the drift-back lands ON target. 0.7 s is the
@@ -4506,6 +4512,12 @@ private:
     // stopped, until the sky is one resume latency away, and only a landing
     // that is behind, off in Dec, or ahead by more than
     // kMaxLandingHoldSeconds gets another goto.
+    //
+    // The hold also runs when tracking was off before the slew, and it still
+    // subtracts resume_latency_seconds_ although no restart follows. With
+    // tracking off the stopped mount drifts against the sky from the moment
+    // Slewing clears, whether or not the hold ran, so the subtracted latency
+    // only shifts where that drift starts. Nothing measures or corrects it.
     bool refine_goto_landing(std::unique_lock<std::mutex>& lock, double ra, double dec,
                              uint64_t* expected_generation = nullptr) {
         const double deadband_seconds = kLandingDeadbandDeg / (kHoursToDegrees * kLstHoursPerSecond);
