@@ -42,6 +42,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -2910,6 +2911,96 @@ int main() {
         // are not stored and differ on the second load) or clearing only the serial of a pair.
         // Falsified by: making the Persisted arm of check_identity_field or the duplicate block return
         // false (the entry would be skipped and not listed).
+    }
+    {
+        // case: zwo camera stored entry with one wrong-typed field still claims its uniqueId
+        // A hand-edited numeric serialNumber fails that entry's own load, but must not hide
+        // its uniqueId from the duplicate check: the API refuses a second camera reusing it.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9716},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", 5},
+                                           {"uniqueId", "ZWO_UID_00112233445566aa"}}})
+                       .dump();
+        }
+        alpacahttp::Router stored;
+        EXPECT(listed_entry(stored, "Camera", 9716).is_null());
+        const nlohmann::json body = {{"vendor", "zwo"},
+                                     {"deviceType", "camera"},
+                                     {"deviceNumber", 9717},
+                                     {"cameraIndex", 1},
+                                     {"uniqueId", "ZWO_UID_00112233445566aa"}};
+        const auto reply =
+            nlohmann::json::parse(route_request(stored, "POST", "/management/v1/configuredevice", body.dump()).body());
+        EXPECT(reply.value("ErrorNumber", 0) != 0);
+        EXPECT(reply.value("ErrorMessage", std::string()).find("uniqueId") != std::string::npos);
+        EXPECT(listed_entry(stored, "Camera", 9717).is_null());
+        // Falsified by: skipping the whole stored entry as a peer when one of its fields has the
+        // wrong JSON type (its uniqueId is then not claimed and the reuse is accepted).
+    }
+    {
+        // case: zwo camera stored entries sharing only a uniqueId clear the duplicate in the file
+        // Two stored cameras with their own serials and one uniqueId: the first start clears the
+        // first entry's copy in the file (as for a shared serial), the second keeps it, and the
+        // next start finds no duplicate.
+        const ScopedCwd scratch;
+        const std::filesystem::path file = std::filesystem::path("config") / "registered_devices.json";
+        std::filesystem::create_directories(file.parent_path());
+        {
+            std::ofstream out(file, std::ios::trunc);
+            out << nlohmann::json::array({{{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9718},
+                                           {"cameraIndex", 0},
+                                           {"serialNumber", "0c190e111d020901"},
+                                           {"uniqueId", "ZWO_UID_00112233445566bb"}},
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9719},
+                                           {"cameraIndex", 1},
+                                           {"serialNumber", "0c190e111d020902"},
+                                           {"uniqueId", "ZWO_UID_00112233445566bb"}}})
+                       .dump();
+        }
+        const auto stored_unique_ids = [&] {
+            std::ifstream in(file);
+            std::map<int, std::string> ids;
+            for (const auto& entry : nlohmann::json::parse(in)) {
+                ids[entry.value("deviceNumber", -1)] = entry.value("uniqueId", std::string());
+            }
+            return ids;
+        };
+        {
+            alpacahttp::Router stored;
+            // A camera with a serial reports ZWO_SN_<serial>; the stored uniqueId is only its fallback.
+            EXPECT(listed_entry(stored, "Camera", 9718).value("UniqueID", std::string()) == "ZWO_SN_0c190e111d020901");
+            EXPECT(listed_entry(stored, "Camera", 9719).value("UniqueID", std::string()) == "ZWO_SN_0c190e111d020902");
+            EXPECT(listed_config(stored, "Camera", 9718).value("uniqueId", std::string()).empty());
+            EXPECT(listed_config(stored, "Camera", 9719).value("uniqueId", std::string()) ==
+                   "ZWO_UID_00112233445566bb");
+            const auto ids = stored_unique_ids();
+            EXPECT(ids.at(9718).empty());
+            EXPECT(ids.at(9719) == "ZWO_UID_00112233445566bb");
+        }
+        {
+            // The next start finds no duplicate: the file is unchanged.
+            alpacahttp::Router again;
+            EXPECT(listed_config(again, "Camera", 9719).value("uniqueId", std::string()) == "ZWO_UID_00112233445566bb");
+            const auto ids = stored_unique_ids();
+            EXPECT(ids.at(9718).empty());
+            EXPECT(ids.at(9719) == "ZWO_UID_00112233445566bb");
+            for (const int number : {9718, 9719}) {
+                remove_device(again, "zwo", "camera", number);
+            }
+        }
+        // Falsified by: writing back only a cleared serial, not a cleared uniqueId (both entries
+        // keep the shared id in the file and the duplicate is found again on every start).
     }
     {
         // zwo / filterwheel
