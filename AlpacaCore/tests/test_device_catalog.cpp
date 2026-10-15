@@ -639,3 +639,109 @@ TEST_CASE("Range messages print an int64 extreme bound exactly", "[catalog]") {
     REQUIRE(r.warnings.size() == 1);
     CHECK(r.warnings[0] == "count is out of range (min 0) (max 9223372036854775807)");
 }
+
+// ---------------------------------------------------------------------------
+// Factory::bind: the optional registration hook (peers in, learned config out).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A stub factory whose bind hook reports what it was handed in the driver's number
+// and in the learned config, so a test sees the context the catalog passed through.
+void add_bind_factory(DeviceCatalog& catalog, std::optional<std::string> rejection = std::nullopt) {
+    Factory factory;
+    factory.key = kStubKey;
+    factory.bind = [rejection](const DeviceConfig&, int number, const BindContext& context) {
+        BindResult result;
+        result.rejection = rejection;
+        result.driver = std::unique_ptr<AlpacaDriver>(new StubDriver(number));
+        result.learned.set("peerCount", static_cast<std::int64_t>(context.peers.size()));
+        result.learned.set("fromApi", context.source == Source::Api);
+        result.erased.push_back("stale");
+        return result;
+    };
+    catalog.add(std::move(factory));
+}
+
+}  // namespace
+
+TEST_CASE("Bind hands the hook its peers and source and returns what it learned", "[catalog][bind]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, false);
+    add_bind_factory(catalog);
+    REQUIRE(catalog.has_bind(kStubKey));
+
+    std::vector<PeerEntry> peers;
+    peers.push_back({3, valid_config()});
+    peers.push_back({4, valid_config()});
+    BindResult result = catalog.bind(kStubKey, valid_config(), 7, BindContext{Source::Api, peers});
+    REQUIRE(result.driver != nullptr);
+    CHECK(result.driver->get_device_number() == 7);
+    CHECK_FALSE(result.rejection.has_value());
+    CHECK(result.learned.get(Field<std::int64_t>{.key = "peerCount", .default_value = -1}) == 2);
+    CHECK(result.learned.get(Field<bool>{.key = "fromApi", .default_value = false}));
+    CHECK(result.erased == std::vector<std::string>{"stale"});
+
+    result = catalog.bind(kStubKey, valid_config(), 7, BindContext{Source::Persisted, {}});
+    CHECK_FALSE(result.learned.get(Field<bool>{.key = "fromApi", .default_value = true}));
+}
+
+TEST_CASE("Bind carries a rejection and a bind-only factory is available but not creatable", "[catalog][bind]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, false);
+    add_bind_factory(catalog, "another stub already uses it");
+
+    const auto views = catalog.describe();
+    REQUIRE(views.size() == 1);
+    CHECK(views[0].available);  // a bind hook alone makes the key available
+    REQUIRE(catalog.factory_keys().size() == 1);
+
+    const BindResult result = catalog.bind(kStubKey, valid_config(), 1, BindContext{Source::Api, {}});
+    REQUIRE(result.rejection.has_value());
+    CHECK(*result.rejection == "another stub already uses it");
+
+    try {
+        (void)catalog.create(kStubKey, valid_config(), 1);
+        FAIL("create should have thrown for a bind-only factory");
+    } catch (const std::runtime_error& e) {
+        CHECK(mentions(e.what(), "bind()"));
+    }
+}
+
+TEST_CASE("Bind falls back to create with nothing learned and names the build option", "[catalog][bind]") {
+    DeviceCatalog with;
+    register_test_descriptors(with, true);
+    CHECK_FALSE(with.has_bind(kStubKey));
+    BindResult result = with.bind(kStubKey, valid_config(), 5, BindContext{Source::Persisted, {}});
+    REQUIRE(result.driver != nullptr);
+    CHECK(result.driver->get_device_number() == 5);
+    CHECK_FALSE(result.rejection.has_value());
+    CHECK(result.learned.entries().empty());
+    CHECK(result.erased.empty());
+
+    DeviceCatalog without;
+    register_test_descriptors(without, false);
+    CHECK_FALSE(without.has_bind(kStubKey));
+    try {
+        (void)without.bind(kStubKey, valid_config(), 5, BindContext{Source::Api, {}});
+        FAIL("bind should have thrown");
+    } catch (const std::runtime_error& e) {
+        CHECK(mentions(e.what(), "ALPACACORE_ENABLE_STUB"));
+    }
+}
+
+TEST_CASE("Describe reports forget_dropped_selectors from the schema", "[catalog][bind]") {
+    DeviceCatalog catalog;
+    register_test_descriptors(catalog, true);
+    REQUIRE(catalog.describe().size() == 1);
+    CHECK_FALSE(catalog.describe()[0].forget_dropped_selectors);
+
+    Schema schema;
+    schema.key = kStubKey;
+    schema.display_name = "Stub Switch";
+    schema.build_option = "ALPACACORE_ENABLE_STUB";
+    schema.fields = stub_fields();
+    schema.forget_dropped_selectors = true;
+    catalog.add(std::move(schema));
+    CHECK(catalog.describe()[0].forget_dropped_selectors);
+}

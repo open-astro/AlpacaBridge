@@ -32,6 +32,7 @@ struct DescriptorView {
     bool available;
     std::span<const FieldRef> fields;
     std::string_view vendor_label;  // Schema::vendor_label, empty when the schema sets none
+    bool forget_dropped_selectors;  // Schema::forget_dropped_selectors
 };
 
 class DeviceCatalog {
@@ -67,7 +68,18 @@ public:
 
     // Requires a factory. Throws std::runtime_error naming Schema::build_option
     // when the key has a schema but no factory, or naming the key when unknown.
+    // A factory that has only `bind` cannot be created without its context: it throws
+    // std::runtime_error saying so.
     std::unique_ptr<AlpacaDriver> create(const DeviceKey& key, const DeviceConfig& normalized, int device_number) const;
+
+    // True when the key's factory has a `bind` hook, so the caller must gather the
+    // BindContext peers before bind().
+    bool has_bind(const DeviceKey& key) const;
+
+    // Factory::bind when set, else create() wrapped in a BindResult with nothing
+    // learned. Same errors as create() when the key is unknown or has no factory.
+    BindResult bind(const DeviceKey& key, const DeviceConfig& normalized, int device_number,
+                    const BindContext& context) const;
 
     void add(Schema schema);    // replaces a schema with the same key
     void add(Factory factory);  // replaces a factory with the same key

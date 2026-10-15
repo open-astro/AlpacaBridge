@@ -8359,7 +8359,7 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                       "stays unset if it has none. Registered so it stays listed and editable in "
                                       "the web UI.");
                 }
-                if (key.vendor.compare("zwo") == 0 && learned_config != nullptr) {
+                if (view->forget_dropped_selectors && learned_config != nullptr) {
                     const auto normalized = catalog_json::json_from_config(result.config);
                     for (const auto& field : view->fields) {
                         if (field.role != alpacacore::catalog::Role::EnumerationIndex &&
@@ -8379,8 +8379,49 @@ bool Router::register_device_from_config(const nlohmann::json& config, std::stri
                                 std::string(view->build_option) + "=ON";
                 return false;
             }
-            auto driver = catalog_.create(key, result.config, device_number);
-            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(driver)))) {
+            // A factory with a bind hook sees the other stored entries of its key
+            // (copied under the mutex, which is released before the hook runs: it may
+            // enumerate the SDK) and may hand learned config back. Any other factory
+            // gets no peers and learns nothing.
+            std::vector<alpacacore::catalog::PeerEntry> peers;
+            if (catalog_.has_bind(key)) {
+                const std::string wanted_type = to_lower_copy(device_type_str);
+                std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+                for (const auto& other : persisted_devices_) {
+                    const auto other_key = persisted_key(other);
+                    if (!other_key || other_key->vendor != vendor || other_key->device_type != wanted_type) {
+                        continue;
+                    }
+                    try {
+                        peers.push_back({other_key->device_number,
+                                         catalog_json::config_from_json(with_object_record_entries(other, view->fields),
+                                                                        view->fields)});
+                    } catch (const std::exception& ex) {
+                        // A hand-edited neighbour with a wrong-typed field is not a peer.
+                        util::log_debug("register_device_from_config: ignoring a stored " +
+                                        persisted_device_subject(vendor, device_type_str, other_key->device_number) +
+                                        " as a peer (" + util::escape_for_log(ex.what()) + ")");
+                    }
+                }
+            }
+            auto bound = catalog_.bind(key, result.config, device_number,
+                                       {source == ConfigSource::Api ? alpacacore::catalog::Source::Api
+                                                                    : alpacacore::catalog::Source::Persisted,
+                                        peers});
+            if (bound.rejection) {
+                error_message = *bound.rejection;
+                return false;
+            }
+            if (learned_config != nullptr) {
+                const nlohmann::json learned = catalog_json::json_from_config(bound.learned);
+                for (const auto& [field, value] : learned.items()) {
+                    (*learned_config)[field] = value;
+                }
+                for (const auto& field : bound.erased) {
+                    (*learned_config)[field] = nullptr;
+                }
+            }
+            if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
                 return true;
             }

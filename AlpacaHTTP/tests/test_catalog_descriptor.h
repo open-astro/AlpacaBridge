@@ -123,6 +123,34 @@ inline catalog::Factory make_factory() {
                             }};
 }
 
+// A factory with a bind hook, for the router's peer and learned-config handling:
+// it refuses a `count` another stored entry of the key holds, learns `host`
+// ("peers=<N>", N = the stored entries it was shown, itself included when stored)
+// and erases `ratio`. No `create`: the stub is only reachable through bind.
+inline catalog::Factory make_bind_factory() {
+    catalog::Factory factory;
+    factory.key = kKey;
+    factory.bind = [](const catalog::DeviceConfig& c, int n, const catalog::BindContext& context) {
+        catalog::BindResult result;
+        for (const catalog::PeerEntry& peer : context.peers) {
+            if (peer.device_number != n && peer.config.get(kCount) == c.get(kCount)) {
+                result.rejection = "Invalid value for count: another zzz focuser already uses it";
+                return result;
+            }
+        }
+        result.driver = std::unique_ptr<alpacacore::AlpacaDriver>(new StubFocuser(n, stub_name(c)));
+        result.learned.set(kHost.key, "peers=" + std::to_string(context.peers.size()));
+        result.erased.emplace_back(kRatio.key);
+        return result;
+    };
+    return factory;
+}
+
+inline void add_schema_and_bind_factory(catalog::DeviceCatalog& c) {
+    c.add(make_schema());
+    c.add(make_bind_factory());
+}
+
 inline void add_schema(catalog::DeviceCatalog& c) { c.add(make_schema()); }
 
 inline void add_schema_and_factory(catalog::DeviceCatalog& c) {

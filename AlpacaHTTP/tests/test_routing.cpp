@@ -7638,6 +7638,37 @@ int main() {
         EXPECT(post.status_code() == 405);
     }
 
+    {
+        // case: router hands a catalog bind hook the stored peers and merges what it learns
+        alpacahttp::Router router;
+        alpacahttp::test_catalog::add_schema_and_bind_factory(router.catalog());
+        const auto configure = [&](int number, int count) {
+            return api_attempt(router,
+                               nlohmann::json{{"vendor", "zzz"},
+                                              {"deviceType", "focuser"},
+                                              {"deviceNumber", number},
+                                              {"count", count},
+                                              {"ratio", 3.0}},
+                               "Focuser");
+        };
+        // First entry: nothing stored yet, so no peers; the hook's learned host is
+        // stored and its erased ratio is dropped from the saved entry.
+        const auto first = configure(9260, 2);
+        EXPECT(first.ok);
+        EXPECT(first.config.value("host", std::string()) == "peers=0");
+        EXPECT(!first.config.contains("ratio"));
+        // Second entry: the stored first entry is a peer (count 2 already used).
+        const auto clash = configure(9261, 2);
+        EXPECT(!clash.ok);
+        EXPECT(clash.message == "Invalid value for count: another zzz focuser already uses it");
+        EXPECT(listed_entry(router, "Focuser", 9261).is_null());
+        const auto second = configure(9261, 3);
+        EXPECT(second.ok);
+        EXPECT(second.config.value("host", std::string()) == "peers=1");
+        remove_device(router, "zzz", "focuser", 9260);
+        remove_device(router, "zzz", "focuser", 9261);
+    }
+
     // open-astro#664 Part C: the router consults the catalog before its arm
     // chain. "zzz" has no arm, so every outcome below is the catalog path.
     {

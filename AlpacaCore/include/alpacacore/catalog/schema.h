@@ -164,11 +164,47 @@ struct Schema {
     // Lifetime: display_name, build_option, vendor_label, fields and everything FieldRef points
     // at are borrowed, not copied. They must be static or outlive the catalog.
     std::function<NormalizeResult(const DeviceConfig&, Source)> normalize;
+    // A persisted selector (a Role::EnumerationIndex or Role::DeviceId field) that
+    // normalize dropped is also forgotten in the stored entry, through the
+    // registration's learned config, so the next start does not warn about it
+    // again. Off by default: another vendor's stored entry keeps the key it has.
+    bool forget_dropped_selectors = false;
 };
 
+// Another persisted entry with the same DeviceKey, as the router holds it.
+struct PeerEntry {
+    int device_number;
+    DeviceConfig config;
+};
+
+// What bind() is told about the registration it is part of. `peers` is every
+// persisted entry with the same DeviceKey, the one being registered included
+// (its device_number is the bound one). Valid for the call only.
+struct BindContext {
+    Source source;
+    std::span<const PeerEntry> peers;
+};
+
+// The outcome of Factory::bind. A `rejection` means no device: the router
+// reports it (Source::Api) or skips the entry, and the other members are
+// ignored. `learned` holds config keys the entry should store (written over the
+// stored entry); `erased` names keys to remove from it.
+struct BindResult {
+    std::unique_ptr<AlpacaDriver> driver;
+    std::optional<std::string> rejection;
+    DeviceConfig learned;
+    std::vector<std::string> erased;
+};
+
+// `create` builds a driver from one normalized config and touches no hardware.
+// `bind` is optional, for a device whose registration depends on the other
+// persisted entries or learns something about its device: it runs instead of
+// `create` (DeviceCatalog::bind), may reach the SDK to do so, and is the only
+// way to return learned config. A factory with neither is not a factory.
 struct Factory {
     DeviceKey key;
     std::function<std::unique_ptr<AlpacaDriver>(const DeviceConfig&, int device_number)> create;
+    std::function<BindResult(const DeviceConfig&, int device_number, const BindContext&)> bind;
 };
 
 }  // namespace alpacacore::catalog

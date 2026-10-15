@@ -43,6 +43,8 @@ void add_schema(DeviceCatalog& catalog, DeviceType type, std::string_view displa
     schema.build_option = kZwoBuildOption;
     schema.fields = fields;
     schema.normalize = std::move(normalize);
+    // The ZWO selectors are catalog fields now: a stored one normalize drops is forgotten in the file.
+    schema.forget_dropped_selectors = true;
     catalog.add(std::move(schema));
 }
 
