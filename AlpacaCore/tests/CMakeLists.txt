@@ -50,6 +50,7 @@ set(TEST_SOURCES
 if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
     list(APPEND TEST_SOURCES test_zwo_camera_identity.cpp)
+    list(APPEND TEST_SOURCES test_zwo_camera_catalog.cpp)
     list(APPEND TEST_SOURCES test_zwo_fake_sdk.cpp)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)

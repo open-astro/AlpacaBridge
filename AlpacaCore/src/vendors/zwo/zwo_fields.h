@@ -12,13 +12,12 @@
 
 #pragma once
 
-// ZWO catalog field declarations for the telescope (AM mounts), EFW filter
-// wheel, EAF focuser, CAA rotator and the three switch backends (dew heater,
-// ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568), shared by zwo_schema.cpp (no
-// vendor header) and zwo_catalog.cpp (the factory, vendor header allowed). No
-// vendor header here either: the schema file includes this one and compiles in
-// every build (including vendors-OFF). The camera stays in the router until its
-// own slice.
+// ZWO catalog field declarations for the telescope (AM mounts), camera, EFW
+// filter wheel, EAF focuser, CAA rotator and the three switch backends (dew
+// heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568), shared by zwo_schema.cpp
+// (no vendor header) and zwo_catalog.cpp (the factory, vendor header allowed).
+// No vendor header here either: the schema file includes this one and compiles
+// in every build (including vendors-OFF).
 
 #include <alpacacore/catalog/device_catalog.h>
 #include <alpacacore/util/hardware_config_refusal.h>
@@ -99,6 +98,22 @@ inline const Field<std::int64_t> kZwoRotatorIndex{.key = "rotatorIndex",
 inline const Field<std::int64_t> kZwoRotatorId{
     .key = "rotatorId", .default_value = -1, .role = Role::DeviceId, .min = kZwoSelectorMin, .max = kZwoSelectorMax};
 
+// Camera. The selectors are the switch dew heater's (-1 = not set) but belong to
+// the camera alone: no applies_when. The three identity strings are what a camera
+// entry binds by (#914): the serial, not the enumeration order, says which
+// physical body it is. They reach log lines and the file, so normalize refuses
+// control bytes and a non-hex serial (zwo_identity_text_valid, zwo_serial_valid).
+inline const Field<std::int64_t> kZwoCamIndex{.key = "cameraIndex",
+                                              .default_value = -1,
+                                              .role = Role::EnumerationIndex,
+                                              .min = kZwoSelectorMin,
+                                              .max = kZwoSelectorMax};
+inline const Field<std::int64_t> kZwoCamId{
+    .key = "cameraId", .default_value = -1, .role = Role::DeviceId, .min = kZwoSelectorMin, .max = kZwoSelectorMax};
+inline const Field<std::string> kZwoCamSerial{.key = "serialNumber", .default_value = ""};
+inline const Field<std::string> kZwoCamName{.key = "cameraName", .default_value = ""};
+inline const Field<std::string> kZwoCamUniqueId{.key = "uniqueId", .default_value = ""};
+
 // Switch. "dewheater" (a camera's heater through the camera SDK, the default),
 // "asiair" (Pro, Pi 4), "asiair-plus-picm4" (Plus, Pi CM4; same wiring) and
 // "asiair-plus-rk3568" (kernel module). normalize owns the enum rule so the
@@ -147,6 +162,12 @@ inline const std::vector<FieldRef>& zwo_telescope_fields() {
     return fields;
 }
 
+inline const std::vector<FieldRef>& zwo_camera_fields() {
+    static const std::vector<FieldRef> fields{kZwoCamIndex.ref(), kZwoCamId.ref(), kZwoCamSerial.ref(),
+                                              kZwoCamName.ref(), kZwoCamUniqueId.ref()};
+    return fields;
+}
+
 inline const std::vector<FieldRef>& zwo_filterwheel_fields() {
     static const std::vector<FieldRef> fields{kZwoFilterwheelIndex.ref(), kZwoFilterwheelId.ref(),
                                               kZwoFilterNames.ref()};
@@ -182,6 +203,20 @@ inline std::optional<std::string> zwo_bound_refusal(const DeviceConfig& config, 
                                                     const Field<std::int64_t>& index, const char* message) {
     if (config.get(id) >= 0 || config.get(index) >= 0) return std::nullopt;
     return std::string(message);
+}
+
+// No control byte (a forged log line) in a name or UniqueID.
+inline bool zwo_identity_text_valid(const std::string& text) {
+    return std::none_of(text.begin(), text.end(), [](char ch) {
+        const auto byte = static_cast<unsigned char>(ch);
+        return byte < 0x20 || byte == 0x7f;
+    });
+}
+
+// A serial is hexadecimal, at most 64 digits.
+inline bool zwo_serial_valid(const std::string& text) {
+    return text.size() <= 64 && std::all_of(text.begin(), text.end(),
+                                            [](char ch) { return std::isxdigit(static_cast<unsigned char>(ch)) != 0; });
 }
 
 // The switch's cross-field refusals, in the router arm's order. normalize reports

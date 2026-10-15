@@ -1798,9 +1798,8 @@ TEST_CASE("Contract sweep - every available catalog descriptor has a registry en
 // The reverse direction, which the gate's ORPHAN ENTRY rule no longer covers for catalog vendors: a
 // registry entry whose vendor has descriptors or factories names one of them. A vendor counts by its
 // factories too, so dropping its whole schema registration leaves its entries checked, not skipped.
-// A vendor that builds some device types through the catalog and others through a router arm lists its
-// router pairs in `router_pairs` below. ZWO's camera stays a router arm until its catalog slice lands,
-// which removes the entry.
+// ZWO's camera was the last pair of a catalog vendor still built by a router arm (open-astro#999), so
+// every entry of a catalog vendor is expected to have a descriptor.
 TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descriptor",
           "[contract][contract-sweep-guard]") {
     alpacacore::catalog::DeviceCatalog catalog;
@@ -1812,10 +1811,8 @@ TEST_CASE("Contract sweep - every registry entry of a catalog vendor has a descr
         catalog_vendors.insert(v.key.vendor);
     }
     for (const auto& k : catalog.factory_keys()) catalog_vendors.insert(k.vendor);
-    const std::set<CatalogPair> router_pairs = {{"zwo", "camera"}};
     for (const auto& e : alpacacore::test::contract::contract_entries()) {
         if (catalog_vendors.count(e.vendor) == 0) continue;
-        if (router_pairs.count({e.vendor, e.device_type}) == 1) continue;
         INFO(e.id << " is in the registry but the catalog has no " << e.vendor << "/" << e.device_type
                   << " descriptor");
         CHECK(described.count({e.vendor, e.device_type}) == 1);

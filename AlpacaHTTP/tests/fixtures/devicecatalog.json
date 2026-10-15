@@ -385,6 +385,20 @@
   },
   {
     "vendor": "zwo",
+    "deviceType": "camera",
+    "displayName": "ZWO Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_ZWO",
+    "fields": [
+      {"key": "cameraIndex", "type": "int", "default": -1, "required": false, "secret": false, "role": "EnumerationIndex", "range": {"min": -1, "max": 2147483647}},
+      {"key": "cameraId", "type": "int", "default": -1, "required": false, "secret": false, "role": "DeviceId", "range": {"min": -1, "max": 2147483647}},
+      {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
+      {"key": "cameraName", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
+      {"key": "uniqueId", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
+    ]
+  },
+  {
+    "vendor": "zwo",
     "deviceType": "filterwheel",
     "displayName": "ZWO EFW Filter Wheel",
     "available": true,
