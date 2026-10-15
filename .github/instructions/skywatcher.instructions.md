@@ -560,9 +560,9 @@ below was one of them.
   stays green, the seam models the wrong failure.
 - **Goto aim-ahead constants are rig-specific: measure them.** `kGotoRampSeconds` (2.5 s) and
   `kTrackingResumeSeconds` (0.7 s) were tuned on the Wave 100i. On the EQM-35 the landing-to-`:J1`
-  restart takes ~0.2 s and even a 350-count refinement goto ~3.1 s (the MC's minimum goto time),
-  so 2.5 + 0.7 happened to equal 3.1 + 0.2 for refinements (which is why they landed to 0.6 arcsec)
-  while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
+  restart takes ~0.2 s and a 259-count refinement goto only ~0.26 s (measured on the rig,
+  open-astro#1025; an earlier ~3.1 s figure for a 350-count goto was wrong). The Wave 100i
+  constants happened to suit refinements there at one time (they landed to 0.6 arcsec) while a 20 deg goto whose estimate ran 1.2 s long read as 6 arcsec off at the deadband check and
   resumed tracking 1.03 s ahead of the sky (`SyncToCoordinates` "15.4 arc seconds away", exactly
   1.03 s of RA). Fixing only the restart latency made every refinement land 0.6 s late
   (`SlewToCoordinates` "10.8 arc seconds away"). Both are now EMAs measured per goto
