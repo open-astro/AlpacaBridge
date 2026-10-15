@@ -2518,10 +2518,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     } catch (const std::exception& e) {
         util::log_error("Error getting configured devices: " + std::string(e.what()));
         AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+            client_tx_id, server_tx_id, util::exception_to_error_code(e), util::exception_to_error_message(e));
         response.set_body(alpaca_response);
     }
 
