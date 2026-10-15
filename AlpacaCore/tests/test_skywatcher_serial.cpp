@@ -904,6 +904,16 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     expect_compromised([&] { driver->find_home(); });
     expect_compromised([&] { driver->set_right_ascension_rate(0.5); });
     expect_compromised([&] { driver->set_declination_rate(1.0); });
+    // State getters answer from commanded state, which is no more trustworthy
+    // than the stale frame once the link is down.
+    expect_compromised([&] { driver->get_tracking(); });
+    expect_compromised([&] { driver->get_tracking_rate(); });
+    expect_compromised([&] { driver->get_right_ascension_rate(); });
+    expect_compromised([&] { driver->get_declination_rate(); });
+    expect_compromised([&] { driver->get_is_pulse_guiding(); });
+    expect_compromised([&] { driver->get_at_home(); });
+    expect_compromised([&] { driver->get_at_park(); });
+    expect_compromised([&] { driver->get_side_of_pier(); });
     const auto frames = board.frames();
     for (std::size_t i = frames_before; i < frames.size(); ++i) {
         INFO("unexpected frame on a faulted link: " << frames[i]);
@@ -913,11 +923,21 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire wri
     CHECK(driver->get_connected());               // DriverException, not NotConnected
     CHECK_NOTHROW(driver->get_alignment_mode());  // static metadata keeps answering
     CHECK_NOTHROW(driver->get_equatorial_system());
+    CHECK_NOTHROW(driver->get_guide_rate());  // driver-side configuration, not mount state
+    CHECK_NOTHROW(driver->get_can_pulse_guide());
 
     board.set_muted(false);
     REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
     CHECK_NOTHROW(driver->get_slewing());
     CHECK_NOTHROW(driver->set_tracking(true));
+    CHECK_NOTHROW(driver->get_tracking());
+    CHECK_NOTHROW(driver->get_tracking_rate());
+    CHECK_NOTHROW(driver->get_right_ascension_rate());
+    CHECK_NOTHROW(driver->get_declination_rate());
+    CHECK_NOTHROW(driver->get_is_pulse_guiding());
+    CHECK_NOTHROW(driver->get_at_home());
+    CHECK_NOTHROW(driver->get_at_park());
+    CHECK_NOTHROW(driver->get_side_of_pier());
     driver->set_connected(false);
 }
 

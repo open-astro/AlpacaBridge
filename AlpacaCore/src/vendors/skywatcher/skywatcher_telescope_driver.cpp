@@ -764,12 +764,14 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return at_home_;
     }
 
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return parked_;
     }
 
@@ -789,6 +791,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         const auto now = clock_.now();
         for (int i = 0; i < 2; ++i) {
             if (pulse_axis_active_[i] && now >= pulse_guide_end_time_[i]) {
@@ -828,6 +831,7 @@ public:
 
     double get_declination_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return dec_rate_arcsec_per_sec_;
     }
 
@@ -890,6 +894,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return tracking_;
     }
 
@@ -982,6 +987,7 @@ public:
 
     double get_right_ascension_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return ra_rate_sec_per_sidereal_sec_;
     }
 
@@ -1039,6 +1045,7 @@ public:
     int get_side_of_pier() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         serve_position_locked();
         // ASCOM convention derived from the dec-axis branch: the side the goto
         // picks for HA >= 0 targets is pierEast (0), the mirror side
@@ -1263,6 +1270,7 @@ public:
 
     int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
         return tracking_rate_;
     }
 
