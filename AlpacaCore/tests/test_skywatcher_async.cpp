@@ -4983,13 +4983,12 @@ TEST_CASE("FakeSkyWatcherMount - a steady reply latency is paid by every transac
     const int before = mount.transactions_served();
     mount.set_reply_latency(std::chrono::milliseconds(40));
     const auto slow = timed_reads(5);
-    // The count follows the send, so the last reply can reach the client first.
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 5; }, 2000));
+    CHECK(mount.transactions_served() - before == 5);
     CHECK(slow >= std::chrono::milliseconds(5 * 40));
 
     mount.set_reply_latency(std::chrono::milliseconds(0));
     const auto fast = timed_reads(5);
-    CHECK(wait_until([&] { return mount.transactions_served() - before == 10; }, 2000));
+    CHECK(mount.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     proto.disconnect();
 }
