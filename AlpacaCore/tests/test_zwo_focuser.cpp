@@ -379,8 +379,8 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step equal to the stored on
     CHECK(driver->get_max_step() == 60000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp set_connected() writing a default when no
-// max step is configured (set_max_step_calls 1, not 0).
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() calling
+// sdk.set_max_step(id, 64000) when no max step is configured (set_max_step_calls 1, not 0).
 TEST_CASE("ZWO EAF Focuser Driver - Without a configured max step the stored value is left alone",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
@@ -411,8 +411,8 @@ TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured 
     CHECK(sdk.close_calls == sdk.open_calls);  // the opened handle is released
 }
 
-// Falsified by: zwo_focuser_driver.cpp connect() path not recording the throw
-// (get_last_connect_error() stays empty after the async connect fails).
+// Falsified by: zwo_focuser_driver.cpp removing the stored-zero throw (the async
+// connect succeeds and get_last_connect_error() stays empty).
 TEST_CASE("ZWO EAF Focuser Driver - The stored-zero refusal reaches LastConnectError",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;

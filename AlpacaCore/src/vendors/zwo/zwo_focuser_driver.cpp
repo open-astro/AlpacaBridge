@@ -309,7 +309,7 @@ private:
             throw AlpacaException("The configured Max Step " + std::to_string(wanted) +
                                       " is above the EAF's step range " + std::to_string(step_range_) +
                                       ". Lower Max Step in the focuser's device settings.",
-                                  AlpacaError::InvalidValue);
+                                  AlpacaError::DriverException);  // connect refusal, as the CGX missing-site one
         }
         sdk.set_max_step(focuser_id, wanted);
         max_step_ = wanted;
