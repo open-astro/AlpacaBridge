@@ -1,0 +1,3 @@
+### Fixed
+
+- **A gphoto camera whose USB session timed out while idle reconnects on the next exposure** (GPhoto, issue #1064): when the first call of an exposure fails because the camera's PTP session is gone (the body powered off or timed the session out between frames), the driver closes and reopens the session once, rewrites the RAW format and ISO, and carries on; a second failure ends the exposure as before. Untested on hardware. Pinned by `GPhoto camera fake - exposure reopens a lost session once and captures` and `GPhoto camera fake - failed session reopen ends the exposure without a capture` in `test_gphoto_fake_sdk.cpp`.

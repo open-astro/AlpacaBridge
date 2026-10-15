@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -37,6 +39,19 @@ struct GPhotoCaptureResult {
     std::vector<std::uint8_t> data;
     std::string filename;
     std::string mime_type;
+};
+
+/**
+ * @brief A call failed because the camera session is gone (USB I/O error, PTP session closed by the
+ * body's auto power-off or a timeout), not because of the request itself.
+ *
+ * Still an AlpacaException with the DriverException number, so every caller that does not know about it
+ * sees the failure it saw before. The driver catches it to close and reopen the session once before the
+ * shutter fires.
+ */
+class GPhotoSessionLostException : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
 };
 
 /**

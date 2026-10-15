@@ -698,3 +698,112 @@ TEST_CASE("GPhoto camera fake - Canon shutter list with only auto does not enabl
 
     driver->set_connected(false);
 }
+
+namespace {
+
+int count_calls(const FakeGPhotoSDK& fake, const std::string& name) {
+    return static_cast<int>(std::count(fake.call_log.begin(), fake.call_log.end(), name));
+}
+
+}  // namespace
+
+TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and captures",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    const int opens = fake.open_count;
+    const int closes = fake.close_count;
+    const int captures = count_calls(fake, "capture_and_download");
+
+    bool dropped = false;
+    fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value" && !dropped) {
+            dropped = true;
+            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
+                                                                          alpacacore::AlpacaError::DriverException);
+        }
+    };
+
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(dropped);
+    CHECK(driver->get_image_ready() == true);
+    CHECK(fake.open_count == opens + 1);
+    CHECK(fake.close_count == closes + 1);
+    CHECK(count_calls(fake, "capture_and_download") == captures + 1);
+    CHECK(driver->get_connected() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - failed session reopen ends the exposure without a capture",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    const int opens = fake.open_count;
+    const int captures = count_calls(fake, "capture_and_download");
+
+    fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value") {
+            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
+                                                                          alpacacore::AlpacaError::DriverException);
+        }
+    };
+    fake.throw_from.insert("open_camera");
+
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    // The session is gone and could not be reopened: the camera reports disconnected, no frame exists.
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.open_count == opens);
+    CHECK(count_calls(fake, "capture_and_download") == captures);
+    CHECK(count_calls(fake, "open_camera") == 2);  // connect + the one reopen attempt, never a second
+
+    fake.before_call = nullptr;
+    fake.throw_from.clear();
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - a non-session error before the shutter is not retried",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    const int opens = fake.open_count;
+    const int closes = fake.close_count;
+    const int captures = count_calls(fake, "capture_and_download");
+
+    fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value") {
+            throw AlpacaException("Failed to set shutterspeed2 = 1/200: Bad parameters",
+                                  alpacacore::AlpacaError::DriverException);
+        }
+    };
+
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == false);
+    CHECK(fake.open_count == opens);
+    CHECK(fake.close_count == closes);
+    CHECK(count_calls(fake, "capture_and_download") == captures);
+
+    fake.before_call = nullptr;
+    driver->set_connected(false);
+}

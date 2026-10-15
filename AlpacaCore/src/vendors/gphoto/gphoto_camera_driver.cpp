@@ -1371,12 +1371,75 @@ private:
                                                                  decoded.bayer_offset_y, decoded.max_adu});
     }
 
+    // The shutter-speed write is the first SDK call of an exposure and cannot fire the shutter. A body
+    // that powered off or timed the PTP session out while idle fails it as a lost session; close the
+    // session, reopen the same model and port, rewrite the RAW format and ISO and retry the write
+    // once (issue #1064). Nothing after this point retries: once the capture starts the shutter may
+    // have fired. A second failure, or any other error, propagates as before. `handle` is updated
+    // for the caller. Runs on the exposure worker; stop_exposure()/disconnect join it before they
+    // close handle_, so handle_ is only changed here under mutex_.
+    void set_shutter_choice_reopening_lost_session(int& handle, const std::string& widget,
+                                                   const std::string& choice) {
+        auto& sdk = sdk_;
+        try {
+            sdk.set_choice_value(handle, widget, choice);
+            return;
+        } catch (const GPhotoSessionLostException& lost) {
+            ALPACA_LOG_INFO(kLogTag, std::string("Camera session lost before the exposure (") + lost.what() +
+                                         "); reopening it once");
+        }
+        std::string model;
+        std::string port;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!camera_info_valid_ || handle_ != handle || !connected_.load()) {
+                throw AlpacaException("Camera session lost and the camera is no longer connected",
+                                      AlpacaError::DriverException);
+            }
+            model = camera_info_.model;
+            port = camera_info_.port;
+        }
+        int reopened = -1;
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (handle_ != handle) {
+                throw AlpacaException("Camera disconnected while reopening its session", AlpacaError::NotConnected);
+            }
+            sdk.close_camera(handle);
+            handle_ = -1;
+            reopened = sdk.open_camera(model, port);
+            try {
+                // Only the camera-side settings the driver wrote: not configure_after_connect_locked(),
+                // which would also reset the learned geometry and the client's ROI.
+                if (format_widget_name_.has_value() && raw_format_choice_.has_value()) {
+                    sdk.set_choice_value(reopened, *format_widget_name_, *raw_format_choice_);
+                }
+                if (current_iso_index_ >= 0 && current_iso_index_ < static_cast<int>(iso_choices_.size())) {
+                    sdk.set_choice_value(reopened, "iso", iso_choices_[static_cast<std::size_t>(current_iso_index_)]);
+                }
+            } catch (...) {
+                sdk.close_camera(reopened);
+                throw;
+            }
+            handle_ = reopened;
+            handle = reopened;
+            sdk.set_choice_value(handle, widget, choice);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_INFO(kLogTag, std::string("Camera session reopen failed: ") + e.what());
+            // The old handle is closed and no new one exists: report disconnected so the client
+            // reconnects instead of calling a camera that has no handle.
+            connected_.store(false);
+            throw;
+        }
+        ALPACA_LOG_INFO(kLogTag, "Camera session reopened; exposure continues");
+    }
+
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
                       bool use_bulb, double duration) {
         auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
-                sdk.set_choice_value(handle, shutter_widget_name, shutter_choice);
+                set_shutter_choice_reopening_lost_session(handle, shutter_widget_name, shutter_choice);
             }
 
             GPhotoCaptureResult capture;
