@@ -774,3 +774,45 @@ TEST_CASE("ZWO fake SDK - disconnect waits for the lazy download before close", 
     CHECK_FALSE(sdk.closed_during_download());
     CHECK(sdk.open_count() == 0);
 }
+
+TEST_CASE("ZWO fake SDK - first CCDTemperature read after connect skips the SDK's placeholder 0",
+          "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.zero_temperature_reads_after_open = 2;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    // The control cache is only reachable through the SDK: seed the real reading.
+    camera->set_connected(true);
+    sdk.set_control_value(sdk.camera.camera_id, FakeZWOSDK::ControlType::Temperature, 215, false);
+
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(21.5));
+    CHECK(sdk.call_count("get_control_value") >= 2);
+
+    // Later reads: one SDK call each, no added delay.
+    const int before = sdk.call_count("get_control_value");
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(21.5));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(40));
+    CHECK(sdk.call_count("get_control_value") == before + 1);
+
+    // Reconnect re-arms the first-read handling.
+    camera->set_connected(false);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(21.5));
+}
+
+TEST_CASE("ZWO fake SDK - a first CCDTemperature read that stays 0 returns 0.0 within the bound",
+          "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.zero_temperature_reads_after_open = 1000;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(0.0));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(600));
+    CHECK(sdk.call_count("get_control_value") == 6);
+
+    // The retry is spent: the next read is a single SDK call.
+    CHECK(camera->get_ccd_temperature() == Catch::Approx(0.0));
+    CHECK(sdk.call_count("get_control_value") == 7);
+}

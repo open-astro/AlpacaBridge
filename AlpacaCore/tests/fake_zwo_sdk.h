@@ -54,6 +54,8 @@ public:
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
     bool fail_exposure_start{false};
+    // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
+    int zero_temperature_reads_after_open{0};
 
     static CameraInfo default_camera() {
         CameraInfo info;
@@ -163,6 +165,7 @@ public:
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         std::lock_guard lock(mutex_);
         ++open_count_;
+        temperature_reads_since_open_ = 0;
     }
 
     void init_camera(int camera_id) override {
@@ -203,6 +206,9 @@ public:
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         value = controls_[type];
+        if (type == ControlType::Temperature && temperature_reads_since_open_++ < zero_temperature_reads_after_open) {
+            value = 0;
+        }
         is_auto = false;
         return true;
     }
@@ -362,13 +368,15 @@ private:
     std::condition_variable download_cv_;
     std::map<std::string, int> calls_;
     mutable std::condition_variable calls_cv_;
-    std::map<ControlType, long> controls_;
+    // Non-zero so a default connect+read takes the plain path; 0 is the #722 placeholder.
+    std::map<ControlType, long> controls_{{ControlType::Temperature, 150}};
     ROIDescription roi_{};
     StartPosition start_pos_{};
     ExposureStatus status_{ExposureStatus::Idle};
     std::deque<ExposureStatus> status_script_;
     std::string exposure_status_error_;
     int open_count_{0};
+    int temperature_reads_since_open_{0};
     bool download_held_{false};
     bool download_entered_{false};
     bool download_in_progress_{false};
