@@ -745,6 +745,75 @@ TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and capture
     driver->set_connected(false);
 }
 
+TEST_CASE("GPhoto camera fake - reopen finds the camera on a new port", "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    const int opens = fake.open_count;
+    const int closes = fake.close_count;
+
+    // The body powered off and came back on another USB port.
+    fake.cameras[0].port = "usb:001,006";
+    bool dropped = false;
+    fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value" && !dropped) {
+            dropped = true;
+            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
+                                                                         alpacacore::AlpacaError::DriverException);
+        }
+    };
+
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == true);
+    CHECK(fake.open_count == opens + 1);
+    CHECK(fake.close_count == closes + 1);
+
+    fake.before_call = nullptr;
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - failed retried write after reopen keeps the new session closable",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    const int captures = count_calls(fake, "capture_and_download");
+
+    // 1st write: the lost session; 2nd and 3rd: format and ISO on the new session; 4th: the retried write.
+    int writes = 0;
+    fake.before_call = [&](const std::string& name) {
+        if (name != "set_choice_value") return;
+        ++writes;
+        if (writes == 1 || writes == 4) {
+            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
+                                                                         alpacacore::AlpacaError::DriverException);
+        }
+    };
+
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(writes == 4);
+    CHECK(count_calls(fake, "capture_and_download") == captures);
+    // Either still connected with the new session open, or disconnected with nothing left open.
+    if (driver->get_connected()) {
+        driver->set_connected(false);
+    }
+    CHECK(fake.close_count == fake.open_count);
+
+    fake.before_call = nullptr;
+}
+
 TEST_CASE("GPhoto camera fake - failed session reopen ends the exposure without a capture",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

@@ -1386,26 +1386,25 @@ private:
         } catch (const GPhotoSessionLostException&) {
             // Not logged here: the outcome line below is the one INFO line per re-init.
         }
-        std::string model;
-        std::string port;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!camera_info_valid_ || handle_ != handle || !connected_.load()) {
-                throw AlpacaException("Camera session lost and the camera is no longer connected",
-                                      AlpacaError::DriverException);
-            }
-            model = camera_info_.model;
-            port = camera_info_.port;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!camera_info_valid_ || handle_ != handle || !connected_.load()) {
+            throw AlpacaException("Camera session lost and the camera is no longer connected",
+                                  AlpacaError::NotConnected);
         }
         int reopened = -1;
         try {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (handle_ != handle) {
-                throw AlpacaException("Camera disconnected while reopening its session", AlpacaError::NotConnected);
-            }
             sdk.close_camera(handle);
             handle_ = -1;
-            reopened = sdk.open_camera(model, port);
+            // Resolve the camera as set_connected(true) does: a body that powered off comes back on a
+            // new USB port, so the port stored at connect cannot be reused.
+            auto cameras = sdk.enumerate_cameras();
+            if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
+                throw AlpacaException(
+                    "No DSLR / mirrorless camera found at this camera index (is it plugged in and powered on?)",
+                    AlpacaError::NotConnected);
+            }
+            const auto info = cameras[static_cast<std::size_t>(camera_index_)];
+            reopened = sdk.open_camera(info.model, info.port);
             try {
                 // Only the camera-side settings the driver wrote: not configure_after_connect_locked(),
                 // which would also reset the learned geometry and the client's ROI.
@@ -1419,9 +1418,9 @@ private:
                 sdk.close_camera(reopened);
                 throw;
             }
+            camera_info_ = info;
             handle_ = reopened;
             handle = reopened;
-            sdk.set_choice_value(handle, widget, choice);
         } catch (const std::exception& e) {
             (void)e;  // libgphoto2 text stays out of the log line; the failure still propagates
             ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopening it failed");
@@ -1430,6 +1429,9 @@ private:
             connected_.store(false);
             throw;
         }
+        // The new session is live and published in handle_. A failure here keeps connected_ true so
+        // set_connected(false) still closes it.
+        sdk.set_choice_value(handle, widget, choice);
         ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopened it and continuing");
     }
 
