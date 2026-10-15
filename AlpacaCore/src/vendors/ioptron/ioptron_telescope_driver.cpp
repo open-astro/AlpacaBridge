@@ -2158,11 +2158,6 @@ private:
             cached_status_ = protocol.get_status();
             status_cache_valid_ = true;
             last_status_update_ = now;
-            // A fresh status with no motion, past the initiator's override, ends a driver-started Park or
-            // FindHome whichever getter fetched it (AtHome, AtPark, Tracking or Slewing).
-            if (!cached_status_.is_slewing && slew_override_until_ <= now) {
-                driver_motion_active_ = false;
-            }
             note_device_read_ok_locked();
         } catch (const std::exception& e) {
             record_device_fault_locked("Status", e.what());
@@ -2170,6 +2165,12 @@ private:
                                   AlpacaError::DriverException);
         }
         finalize_wedged_park_locked();
+        // A fresh status with no motion (the finalizer may have re-read it), past the initiator's override,
+        // ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark, Tracking or
+        // Slewing).
+        if (!cached_status_.is_slewing && slew_override_until_ <= now) {
+            driver_motion_active_ = false;
+        }
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
