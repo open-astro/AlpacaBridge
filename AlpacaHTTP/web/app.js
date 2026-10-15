@@ -4653,7 +4653,7 @@ function renderDeviceSettings(config) {
         }
         const value = key === 'filterNames'
             ? formatFilterNamesShort(config[key])
-            : formatSettingValue(config[key]);
+            : formatConfigSettingValue(key, config[key]);
         rows.push(`
             <div class="setting-row">
                 <span class="setting-label">${escapeHtml(label)}</span>
@@ -4707,6 +4707,18 @@ function renderDeviceSettings(config) {
             </div>
         </div>
     `;
+}
+
+const SITE_COORDINATE_KEYS = new Set(['siteLatitude', 'siteLongitude']);
+
+function formatConfigSettingValue(key, value) {
+    if (SITE_COORDINATE_KEYS.has(key)) {
+        const site = formatSiteCoordinate(value);
+        if (site !== null) {
+            return site;
+        }
+    }
+    return formatSettingValue(value);
 }
 
 function formatSettingValue(value) {
