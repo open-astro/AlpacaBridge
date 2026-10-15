@@ -863,6 +863,57 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire write without sending",
+          "[skywatcher][serial][linkhealth]") {
+    // open-astro#882: AGENTS.md "Cache-backed reads must track link health" —
+    // value reads AND writes throw the same DriverException while latched.
+    FakeSkyWatcherSerialBoard board;
+    auto driver = serial_driver(board.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->get_slewing());
+
+    board.set_muted(true);
+    REQUIRE(wait_until_true([&] { return !driver->get_link_fault().empty(); }, 6000));
+
+    const auto expect_compromised = [&](const std::function<void()>& fn) {
+        try {
+            fn();
+            FAIL("expected a DriverException");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()).find("communications compromised") != std::string::npos);
+        }
+    };
+    // The status poll keeps probing a faulted link ('f'/'j'); anything else on
+    // the wire after this point is a command the driver should have refused.
+    const std::size_t frames_before = board.frames().size();
+    expect_compromised([&] { driver->get_slewing(); });
+    expect_compromised([&] { driver->set_tracking(true); });
+    expect_compromised([&] { driver->move_axis(0, 1.0); });
+    expect_compromised([&] { driver->pulse_guide(0, 500); });
+    expect_compromised([&] { driver->sync_to_coordinates(1.0, 10.0); });
+    expect_compromised([&] { driver->slew_to_coordinates_async(1.0, 10.0); });
+    expect_compromised([&] { driver->abort_slew(); });
+    expect_compromised([&] { driver->set_tracking_rate(1); });
+    expect_compromised([&] { driver->command_string("j1", true); });
+    const auto frames = board.frames();
+    for (std::size_t i = frames_before; i < frames.size(); ++i) {
+        INFO("unexpected frame on a faulted link: " << frames[i]);
+        CHECK((frames[i][0] == 'f' || frames[i][0] == 'j'));
+    }
+
+    CHECK(driver->get_connected());               // DriverException, not NotConnected
+    CHECK_NOTHROW(driver->get_alignment_mode());  // static metadata keeps answering
+    CHECK_NOTHROW(driver->get_equatorial_system());
+
+    board.set_muted(false);
+    REQUIRE(wait_until_true([&] { return driver->get_link_fault().empty(); }, 6000));
+    CHECK_NOTHROW(driver->get_slewing());
+    CHECK_NOTHROW(driver->set_tracking(true));
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher serial - a board that restarted while the link was down is not silently resumed",
           "[skywatcher][serial][linkhealth]") {
     // The hardware run's sharpest finding (EQM-35 Pro, 2026-09-17): after a

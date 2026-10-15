@@ -1,0 +1,3 @@
+### Fixed
+
+- **Sky-Watcher mount commands refuse a faulted link** (Sky-Watcher, issue #882): while the link-fault latch is set, `Tracking`, `TrackingRate`, the rate offsets, `MoveAxis`, `PulseGuide`, the slew, sync, park, unpark, find-home and abort commands, and the raw `Command*` calls throw the same "communications compromised" `DriverException` as the position reads, and send nothing to the mount. Before, they ran into raw transport timeouts. `Slewing` also refuses while faulted. `Connected` stays true and service returns on the first good reply. Covered by "SkyWatcher serial - a faulted link refuses Slewing and every wire write without sending".

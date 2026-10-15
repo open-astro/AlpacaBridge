@@ -709,7 +709,7 @@ public:
     std::string command_blind(std::string_view command, bool raw) override {
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         protocol_->send_raw_command(std::string(command) + "\r");
         return "";
     }
@@ -717,7 +717,7 @@ public:
     bool command_bool(std::string_view command, bool raw) override {
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         std::string reply = protocol_->send_raw_command(std::string(command) + "\r");
         return !reply.empty() && reply[0] == '=';
     }
@@ -725,7 +725,7 @@ public:
     std::string command_string(std::string_view command, bool raw) override {
         (void)raw;
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         return protocol_->send_raw_command(std::string(command) + "\r");
     }
 
@@ -842,7 +842,7 @@ public:
             // Idempotence check BEFORE reaping: a same-value rewrite must not
             // tear down a running duty worker it would never restart.
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             if (tracking_rate_ != 0) {
                 throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
                                       AlpacaError::InvalidOperation);
@@ -855,7 +855,7 @@ public:
         bool need_duty = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             if (tracking_rate_ != 0) {
                 throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
                                       AlpacaError::InvalidOperation);
@@ -898,7 +898,7 @@ public:
         bool started = false;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             if (tracking) {
                 check_not_parked_locked("Tracking");
             }
@@ -991,7 +991,7 @@ public:
     // the axis, which needs a stop-and-restart (":I" cannot change direction).
     void set_right_ascension_rate(double rate) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         if (tracking_rate_ != 0) {
             throw AlpacaException("RightAscensionRate can only be set at the Sidereal drive rate",
                                   AlpacaError::InvalidOperation);
@@ -1141,6 +1141,9 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             crossing = connected_ && tracking_ && hemisphere_south_locked() != (latitude < 0.0) &&
                        !(axis_busy_locked(kAxisRa) && axis_busy_locked(kAxisDec));
+            if (crossing) {
+                check_writable_locked();  // the re-apply below writes to the board
+            }
             if (!crossing) {
                 site_latitude_ = latitude;
                 site_latitude_set_ = true;
@@ -1262,7 +1265,7 @@ public:
 
     void set_tracking_rate(int rate) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         if (rate < 0 || rate > 2) {
             throw AlpacaException("Unsupported tracking rate", AlpacaError::InvalidValue);
         }
@@ -1339,7 +1342,7 @@ public:
             // Validate before claiming the slot: a refused FindHome during
             // Park must not cancel the park task.
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("FindHome");
             if (homing_) {
                 return;
@@ -1353,7 +1356,7 @@ public:
         uint64_t home_error_epoch = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("FindHome");
             if (homing_) {
                 return;  // already homing
@@ -1461,7 +1464,7 @@ public:
             // operation), so a second Park would restart the slew instead of
             // being the documented no-op.
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             if (parked_ || parking_) {
                 return;  // calling Park twice (or while parking) is harmless
             }
@@ -1563,7 +1566,7 @@ public:
         std::uint64_t my_seq = 0;  // this pulse's pulse_seq_[axis-1], taken under the dispatch lock
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("PulseGuide");
             if (duration < 0) {
                 throw AlpacaException("PulseGuide duration must be >= 0", AlpacaError::InvalidValue);
@@ -2052,7 +2055,7 @@ public:
 
     void set_park() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         refresh_position_cache_locked(true);
         park_ra_axis_deg_ = cached_ra_axis_deg_;
         park_dec_axis_deg_ = cached_dec_axis_deg_;
@@ -2211,14 +2214,14 @@ public:
             // A refused sync must not cancel a pulse in flight (open-astro#630),
             // so gate BEFORE reaping (the copies below re-check after it).
             std::lock_guard<std::mutex> gate(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("SyncToCoordinates");
             validate_ra_dec(ra, dec, "SyncToCoordinates");
             refuse_sync_during_move_axis_locked();
         }
         stop_pulse_ops();
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
         refuse_sync_during_move_axis_locked();
@@ -2299,14 +2302,14 @@ public:
         bool was_parking = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             was_parking = parking_;
         }
         if (was_parking) {
             slew_.cancel_all_and_join();
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         if (was_parking) {
             // The park slew may still be moving the axes; stop them.
             try {
@@ -2340,7 +2343,7 @@ public:
             // MoveAxis(axis, 0) with no manual motion (which commands
             // nothing), must not cancel a pulse it will never stop.
             std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
             if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
@@ -2359,7 +2362,7 @@ public:
         int channel = kAxisRa;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
 
@@ -2552,7 +2555,7 @@ public:
         // re-slews after the abort's stop).
         slew_.cancel();
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_writable_locked();
         check_not_fully_parked_locked("AbortSlew");
         // AbortSlew is itself a motion command: bump the generation so any
         // stop-wait sleeping in an unlock window observes the supersession
@@ -2608,6 +2611,20 @@ private:
         // cannot keep answering from a mount that is no longer there.
         if (!connected_ || !protocol_->link_alive() || frame_lost_locked()) {
             throw AlpacaException("Not connected to Sky-Watcher mount", AlpacaError::NotConnected);
+        }
+    }
+
+    // open-astro#882: the write-side twin of the read gate. A command that
+    // reaches the wire refuses with the read paths' "communications
+    // compromised" DriverException while the fault latch is set (or the board
+    // restarted under a recovered link), and sends nothing. Reads keep their
+    // own gates: on a polled link they are the traffic that clears the latch.
+    void check_writable_locked() const {
+        check_connected();
+        throw_if_board_reset_locked();
+        const std::string fault = protocol_->link_fault();
+        if (!fault.empty()) {
+            throw_comms_compromised_locked(fault);
         }
     }
 
@@ -5653,7 +5670,7 @@ private:
     std::unique_lock<std::mutex> start_goto(const char* who, double ra, double dec,
                                             std::function<void(util::OperationContext&, uint64_t)> body) {
         const auto check_request_locked = [&] {
-            check_connected();
+            check_writable_locked();
             check_not_parked_locked(who);
             validate_ra_dec(ra, dec, who);
             check_target_altitude_locked(ra, dec, who);
