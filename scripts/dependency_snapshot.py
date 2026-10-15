@@ -778,6 +778,18 @@ def self_test() -> int:
         assert "versionInfo" not in rt["adduser"], "a runtime dep not installed stays unversioned"
         rt_purls = {p["externalRefs"][0]["referenceLocator"] for p in doc_rt["packages"]}
         assert deb_purl("libc6", "2.41-12") in rt_purls and deb_purl("libc6", None) not in rt_purls
+        assert "versionInfo" not in rt["libgpiod3"], "a >= constraint is never recorded as a version"
+        assert deb_purl("libgpiod3", None) in rt_purls
+        rt_rels = {(x["spdxElementId"], x["relationshipType"], x["relatedSpdxElement"]) for x in doc_rt["relationships"]}
+        rt_root = next(p["SPDXID"] for p in doc_rt["packages"] if p["name"] == "alpacabridge")
+        assert (rt_root, "DEPENDS_ON", rt["libc6"]["SPDXID"]) in rt_rels
+        # An alternative "a | b" is recorded as its first branch; installing only b changes nothing.
+        alt = dict(deb, Depends="liba | libb")
+        for inst, want in (({"libb": "1"}, None), ({"liba": "2"}, "2")):
+            dalt = build_spdx(r, alt, "x.deb", "f" * 64, "t", "n", installed=inst)
+            names = {p["name"]: p for p in dalt["packages"]}
+            assert "liba" in names and "libb" not in names, names.keys()
+            assert names["liba"].get("versionInfo") == want, (inst, names["liba"])
         for p in doc["packages"]:
             assert {"name", "SPDXID", "downloadLocation", "filesAnalyzed"} <= set(p), p
         # --- Vendored file pins and the shipped-file gate ---
