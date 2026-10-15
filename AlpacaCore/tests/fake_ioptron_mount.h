@@ -58,6 +58,10 @@ public:
     /// open-astro#728: reset the driver's connection, so its next send (a blind ":Q#" included) fails.
     void reset_link() { server_.reset_connections(); }
 
+    /// Firmware system status the ":GLS" read reports: 1 = tracking (default), 2 = slewing. Lets a test make the
+    /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
+    void set_system_status(int status) { system_status_.store(status); }
+
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
@@ -124,7 +128,7 @@ private:
             // sign + 16 digits (site), then 6 status digits: GPS, system
             // status (1 = tracking, 2 = slewing), rate, speed, time source,
             // hemisphere.
-            return "+0000000000000000010001#";
+            return std::string("+00000000000000000") + std::to_string(system_status_.load()) + "0001#";
         }
         if (cmd == ":GUT#") {
             return "+00000000000000000#";
@@ -172,6 +176,7 @@ private:
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
     }
 
+    std::atomic<int> system_status_{1};
     std::string model_code_;
     double landing_error_arcsec_;
     std::atomic<int> hold_ms_{0};

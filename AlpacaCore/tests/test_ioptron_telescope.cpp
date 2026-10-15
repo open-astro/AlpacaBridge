@@ -663,3 +663,232 @@ TEST_CASE("iOptron mount serial - the connected port is claimed exclusively and 
     CHECK(fd >= 0);
     if (fd >= 0) close(fd);
 }
+
+// Issue #843: a HAE29C reports system status 2 (slewing) while a long PulseGuide runs, and the guider
+// stopped on Slewing == true. Slewing stays false for the pulse window (duration plus the driver's
+// settle delay); IsPulseGuiding reports the pulse.
+TEST_CASE("iOptron Telescope Driver - Slewing stays false while a PulseGuide runs",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    // The firmware already reports "slewing" when the driver first reads the status (the read is cached).
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->pulse_guide(3, 2704);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still reports Slewing",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    // The firmware already reports "slewing" when the driver first reads the status (the read is cached).
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // A slew started from the handset: firmware moving, no driver-initiated motion, no pulse.
+    CHECK(driver->get_slewing());
+
+    // A short pulse that has ended (duration plus settle delay) no longer masks the firmware status.
+    driver->pulse_guide(3, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+
+    // A driver-initiated GOTO started during a pulse keeps Slewing true.
+    driver->pulse_guide(3, 9000);
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    CHECK(driver->get_slewing());
+
+    // Past the 5 s Slewing override only the firmware status (still 2) holds Slewing true; the open pulse
+    // window must not mask it while the GOTO is in flight.
+    std::this_thread::sleep_for(std::chrono::milliseconds(7000));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron Telescope Driver - Slewing stays false in the settle window after a PulseGuide",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // The pulse duration has passed but the driver's 1 s completion delay has not: the firmware is still
+    // reporting the pulse, as a guider reading Slewing right after its pulse sees it.
+    driver->pulse_guide(3, 50);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Review of #843: Park and FindHome set no slew_in_progress_, so once their 5 s Slewing override ended only
+// the firmware status held Slewing true, and a PulseGuide accepted mid-motion masked it.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arrives during a park",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    for (const char* model : {"0036", "0040"}) {
+        CAPTURE(model);
+        alpacacore::test::FakeIoptronMount mount(model, /*landing_ra_error_arcsec=*/0.0);
+        REQUIRE(mount.ok());
+        mount.set_system_status(2);
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+
+        driver->park();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5500));
+        CHECK(driver->get_slewing());
+        driver->pulse_guide(3, 3000);
+        CHECK(driver->get_is_pulse_guiding());
+        CHECK(driver->get_slewing());
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arrives during a FindHome",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->find_home();
+    std::this_thread::sleep_for(std::chrono::milliseconds(5500));
+    CHECK(driver->get_slewing());
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Review of #843: MoveAxis(axis, 0) sends :qR#/:qD#, which stop arrow motion only; the iOptron RS-232 command
+// language says other slewing is not affected, so the park keeps moving and must not be masked by a PulseGuide.
+// A jog before the stop does not end it either.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis during a park",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->park();
+    driver->move_axis(0, driver->get_axis_rate_range(0).first);
+    driver->move_axis(0, 0.0);
+    driver->move_axis(1, 0.0);
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Same for a GOTO: MoveAxis supersedes the dispatch (slew_in_progress_ cleared), but the mount keeps slewing.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after MoveAxis rate 0 during a GOTO",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->slew_to_coordinates_async(13.0, 20.0);
+    driver->move_axis(0, 0.0);
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// Review of #843: a client that waits for FindHome through AtHome never reads Slewing until guiding starts.
+// The end of the home motion must still be seen, or the next PulseGuide is not masked.
+TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after a FindHome seen through AtHome",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(2);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto connected_at = std::chrono::steady_clock::now();
+
+    driver->find_home();
+    // Past the 5 s Slewing override and the driver's 30 s post-connect status cache, so the reads below
+    // reach the mount.
+    std::this_thread::sleep_until(connected_at + std::chrono::seconds(31));
+    mount.set_system_status(7);
+    CHECK(driver->get_at_home());
+
+    driver->set_tracking(true);
+    mount.set_system_status(2);
+    driver->pulse_guide(3, 3000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// The firmware can still report its old status for a moment after the home command, so a status read
+// inside the 5 s Slewing override must not end the FindHome motion window.
+TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide during a FindHome read early through AtHome",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto connected_at = std::chrono::steady_clock::now();
+    // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
+    std::this_thread::sleep_until(connected_at + std::chrono::seconds(31));
+
+    driver->find_home();
+    CHECK_FALSE(driver->get_at_home());  // still the old tracking status
+    mount.set_system_status(2);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5500));
+    driver->pulse_guide(3, 3000);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// A FindHome that lands inside its 5 s Slewing override: the at-home status read then ends the motion window,
+// so a PulseGuide sent right after is masked once the override has passed.
+TEST_CASE("iOptron Telescope Driver - Slewing stays false for a PulseGuide after a quick FindHome",
+          "[ioptron][telescope][unit][fake][pulseguide]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(1);
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto connected_at = std::chrono::steady_clock::now();
+    // Past the driver's 30 s post-connect status cache, so the reads below reach the mount.
+    std::this_thread::sleep_until(connected_at + std::chrono::seconds(31));
+
+    driver->find_home();
+    const auto home_at = std::chrono::steady_clock::now();
+    mount.set_system_status(7);
+    CHECK(driver->get_at_home());
+
+    driver->set_tracking(true);
+    mount.set_system_status(2);
+    std::this_thread::sleep_until(home_at + std::chrono::seconds(2));
+    driver->pulse_guide(3, 3000);
+    std::this_thread::sleep_until(home_at + std::chrono::milliseconds(5500));
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
