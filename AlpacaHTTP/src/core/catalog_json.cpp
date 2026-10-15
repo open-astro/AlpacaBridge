@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <variant>
@@ -54,6 +55,12 @@ std::optional<std::int64_t> whole_number(const nlohmann::json& v) {
     return static_cast<std::int64_t>(d);
 }
 
+// An unsigned JSON integer above INT64_MAX: get<std::int64_t>() would wrap it to a negative number.
+bool exceeds_int64(const nlohmann::json& v) {
+    return v.is_number_unsigned() &&
+           v.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+}
+
 DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<const FieldRef> fields,
                                      const std::string& prefix) {
     DeviceConfig out;
@@ -68,7 +75,7 @@ DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<con
                 out.set(f.key, v.get<bool>());
                 break;
             case FieldRef::Kind::Int:
-                if (v.is_number_integer()) {
+                if (v.is_number_integer() && !exceeds_int64(v)) {
                     out.set(f.key, v.get<std::int64_t>());
                 } else if (const auto whole = whole_number(v)) {
                     out.set(f.key, *whole);
@@ -78,7 +85,7 @@ DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<con
                 break;
             case FieldRef::Kind::Double:
                 if (!v.is_number()) throw_wrong_type(name, v);
-                if (v.is_number_integer())
+                if (v.is_number_integer() && !exceeds_int64(v))
                     out.set(f.key, v.get<std::int64_t>());
                 else
                     out.set(f.key, v.get<double>());

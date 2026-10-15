@@ -136,6 +136,20 @@ int main() {
         EXPECT(invalid_value_message(R"({"count":1e300})").find("count") != std::string::npos);
     }
 
+    {
+        // case: an unsigned integer above INT64_MAX is the wrong type, not a wrapped negative
+        // 2^64 - 1 wrapped to -1, which a "not set" sentinel field (ZWO's -1 selectors) accepts.
+        EXPECT(invalid_value_message(R"({"count":18446744073709551615})").find("count") != std::string::npos);
+        EXPECT(invalid_value_message(R"({"count":9223372036854775808})").find("count") != std::string::npos);
+        EXPECT(invalid_value_message(R"({"count":9223372036854775807})").empty());
+        // In a double field the same number stays a (large) double instead of wrapping negative.
+        const DeviceConfig big =
+            cj::config_from_json(nlohmann::json::parse(R"({"ratio":18446744073709551615})"), schema);
+        const auto* big_value = big.find_value("ratio");
+        EXPECT(big_value != nullptr && std::holds_alternative<double>(*big_value) &&
+               std::get<double>(*big_value) > 1e19);
+    }
+
     // 4. An integer in a double field is accepted; normalize widens it.
     {
         const DeviceConfig c = cj::config_from_json(nlohmann::json::parse(R"({"ratio":2})"), schema);
