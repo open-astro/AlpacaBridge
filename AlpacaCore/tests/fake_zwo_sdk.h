@@ -368,7 +368,8 @@ private:
     std::condition_variable download_cv_;
     std::map<std::string, int> calls_;
     mutable std::condition_variable calls_cv_;
-    std::map<ControlType, long> controls_;
+    // Non-zero so a default connect+read takes the plain path; 0 is the #722 placeholder.
+    std::map<ControlType, long> controls_{{ControlType::Temperature, 150}};
     ROIDescription roi_{};
     StartPosition start_pos_{};
     ExposureStatus status_{ExposureStatus::Idle};
