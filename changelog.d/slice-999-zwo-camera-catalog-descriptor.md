@@ -3,3 +3,6 @@
 
 ### Fixed
 - **A JSON integer above 9223372036854775807 in a device config was read as a negative number** (AlpacaHTTP, issue #999): `config_from_json` wrapped `18446744073709551615` to -1, which an integer field with a "not set" sentinel (the ZWO -1 selectors) accepted. An integer field now refuses it as the wrong type, and a double field keeps it as a large double (`AlpacaHTTP/tests/test_catalog_json.cpp`, "an unsigned integer above INT64_MAX is the wrong type").
+
+### Documentation
+- **ZWO ASI533MC Pro and ASI120MM Mini re-validated with ConformU 4.5.1** (issue #999): both Linux arm64 reports under `AlpacaCore/conformu/ZWO/ASI/` are replaced by runs on ASI Camera SDK 1.41 with the camera on the device catalog, and the ZWO notes in `SUPPORTED-DRIVERS.md` name both cameras (the ASI120MM Mini report ends "no errors, warnings or issues found", the ASI533MC Pro report "all members returned within their target response times").
