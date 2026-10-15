@@ -351,6 +351,8 @@ install(DIRECTORY include/alpacahttp
 # Example application
 add_executable(alpacahttp_server examples/simple_server/main.cpp)
 target_link_libraries(alpacahttp_server alpacahttp)
+# --version prints alpacacore::kVersion, which needs the definition AlpacaCore sets directory-scoped.
+target_compile_definitions(alpacahttp_server PRIVATE ALPACACORE_VERSION="${ALPACABRIDGE_VERSION}")
 
 # Tests
 if(ALPACAHTTP_BUILD_TESTS)
@@ -479,4 +481,30 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_compile_definitions(test_software_update PRIVATE
         ALPACAHTTP_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME test_software_update COMMAND test_software_update)
+
+    # Issue #1015: the server binary's command line. --help and --version must
+    # print and exit before anything starts (TIMEOUT: a regression that starts
+    # the server hangs, so it fails instead); a flag it does not know and an
+    # unreadable config path must exit non-zero.
+    add_test(NAME server_cli_help COMMAND alpacahttp_server --help)
+    set_tests_properties(server_cli_help PROPERTIES
+        PASS_REGULAR_EXPRESSION "Usage: alpacabridge.*ALPACAHTTP_PORT" TIMEOUT 20)
+    add_test(NAME server_cli_help_short COMMAND alpacahttp_server -h)
+    set_tests_properties(server_cli_help_short PROPERTIES
+        PASS_REGULAR_EXPRESSION "Usage: alpacabridge" TIMEOUT 20)
+    add_test(NAME server_cli_version COMMAND alpacahttp_server --version)
+    set_tests_properties(server_cli_version PROPERTIES
+        PASS_REGULAR_EXPRESSION "^[0-9]+\\.[0-9]+\\.[0-9]+" TIMEOUT 20)
+    # WILL_FAIL cannot be combined with a message check (a match inverts to a
+    # failure), so these two pin the exact exit status through sh.
+    # $1 server, $2 expected exit status, $3 expected stderr text, rest the arguments.
+    set(SERVER_CLI_EXPECT [=[server=$1; want=$2; text=$3; shift 3
+err=$("$server" "$@" 2>&1 >/dev/null); rc=$?
+test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
+    add_test(NAME server_cli_unknown_option
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "unknown option '--bogus'" --bogus)
+    add_test(NAME server_cli_missing_config
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
+            ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
+    set_tests_properties(server_cli_unknown_option server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()
