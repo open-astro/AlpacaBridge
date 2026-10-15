@@ -296,6 +296,7 @@ public:
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_in_progress_ = false;
+                driver_motion_active_ = false;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -374,6 +375,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             slew_override_until_ = std::chrono::steady_clock::time_point{};
             slew_in_progress_ = false;
+            driver_motion_active_ = false;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -1089,12 +1091,14 @@ public:
             // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
             // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
             // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
-            // dispatching; every driver-initiated motion is caught by the checks above.
-            return !(pulse_window_open() && !slew_in_progress_);
+            // dispatching and no Park/FindHome still moving (driver_motion_active_).
+            return !(pulse_window_open() && !slew_in_progress_ && !driver_motion_active_);
         }
         if (slew_override_until_ > now) {
             return true;
         }
+        // The firmware reports no motion: a Park/FindHome the driver started has ended.
+        driver_motion_active_ = false;
         // HAE29C/HAE16 firmware quirk (hardware-verified 2026-07-14 / 2026-08-25): GOTO stops
         // compensating sidereal motion during its final ~1 s approach, so
         // slews settle a consistent ~11-16 arcsec east of the RA target
@@ -1283,6 +1287,7 @@ public:
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
         protocol.go_to_home();
         supersede_slew_dispatch_locked();
+        driver_motion_active_ = true;
         slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
@@ -1309,6 +1314,7 @@ public:
                                   AlpacaError::DriverException);
         }
         supersede_slew_dispatch_locked();
+        driver_motion_active_ = true;
         park_override_until_ = std::chrono::steady_clock::time_point{};
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
@@ -1371,6 +1377,7 @@ public:
                                   AlpacaError::DriverException);
         }
         slew_in_progress_ = false;
+        driver_motion_active_ = false;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
     }
@@ -1982,6 +1989,7 @@ private:
         // generation mismatch, preventing a ghost slew/trim after newer motion.
         invalidate_slew_error_locked();
         slew_in_progress_ = false;
+        driver_motion_active_ = false;
         clear_slew_override_locked();
     }
 
@@ -2866,6 +2874,11 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those):
+    // keeps get_slewing() true when a PulseGuide arrives mid-motion. Set by park()/find_home(),
+    // cleared once the status cache reports no motion, and by AbortSlew, any new initiator
+    // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
+    mutable bool driver_motion_active_ = false;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
