@@ -720,7 +720,9 @@ TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and capture
     const int captures = count_calls(fake, "capture_and_download");
 
     bool dropped = false;
+    int choice_writes = 0;
     fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value") ++choice_writes;
         if (name == "set_choice_value" && !dropped) {
             dropped = true;
             throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
@@ -732,6 +734,8 @@ TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and capture
     wait_for_exposure_to_finish(*driver);
 
     CHECK(dropped);
+    // The failed shutter-speed write, the RAW format and ISO rewritten on the new session, the retried write.
+    CHECK(choice_writes == 4);
     CHECK(driver->get_image_ready() == true);
     CHECK(fake.open_count == opens + 1);
     CHECK(fake.close_count == closes + 1);

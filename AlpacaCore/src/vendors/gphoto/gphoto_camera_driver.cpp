@@ -1383,9 +1383,8 @@ private:
         try {
             sdk.set_choice_value(handle, widget, choice);
             return;
-        } catch (const GPhotoSessionLostException& lost) {
-            ALPACA_LOG_INFO(kLogTag, std::string("Camera session lost before the exposure (") + lost.what() +
-                                         "); reopening it once");
+        } catch (const GPhotoSessionLostException&) {
+            // Not logged here: the outcome line below is the one INFO line per re-init.
         }
         std::string model;
         std::string port;
@@ -1424,13 +1423,14 @@ private:
             handle = reopened;
             sdk.set_choice_value(handle, widget, choice);
         } catch (const std::exception& e) {
-            ALPACA_LOG_INFO(kLogTag, std::string("Camera session reopen failed: ") + e.what());
+            (void)e;  // libgphoto2 text stays out of the log line; the failure still propagates
+            ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopening it failed");
             // The old handle is closed and no new one exists: report disconnected so the client
             // reconnects instead of calling a camera that has no handle.
             connected_.store(false);
             throw;
         }
-        ALPACA_LOG_INFO(kLogTag, "Camera session reopened; exposure continues");
+        ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopened it and continuing");
     }
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
@@ -1439,6 +1439,11 @@ private:
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
                 set_shutter_choice_reopening_lost_session(handle, shutter_widget_name, shutter_choice);
+                // A stop that landed during a reopen must not be followed by a shutter release.
+                if (abort_requested_.load()) {
+                    exposure_active_.store(false);
+                    return;
+                }
             }
 
             GPhotoCaptureResult capture;
