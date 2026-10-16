@@ -596,22 +596,16 @@ TEST_CASE("SkyWatcher serial - Connected=true on a stale link reconnects instead
     driver->set_connected(true);
     CHECK(board->frames().size() == frames_before);
 
-    // Captured BEFORE sever_link(): PtyPair::sever() clears slave_path_, so
-    // reading it off `board` after severing would always be empty and the
-    // guard below would compare against "" -- true for any pty and unable
-    // to catch the reorder it exists to catch.
-    const std::string old_path = board->slave_path();
-    board->sever_link();
     // devpts assigns st_ino = index + 3, so link_alive() would call a
-    // recycled index the same node -- this only works because the driver
-    // still holds `board`'s old slave fd here, which keeps devpts from
-    // reusing its index before `replugged` is constructed below. Do not
-    // reorder sever_link() / construction / repoint().
+    // recycled index the same node. The test owns the old index itself: the
+    // replacement is built while `board` still holds its master, so the index
+    // cannot be reused whatever the driver's reader does with its own fd
+    // (open-astro#1245). old_path is captured first because PtyPair::sever()
+    // clears slave_path_.
+    const std::string old_path = board->slave_path();
     FakeSkyWatcherSerialBoard replugged;
-    // Self-checking: if a future edit moves construction earlier or drops the
-    // driver's fd first, devpts could recycle the index and hand back the
-    // severed board's own path, which would let this case pass vacuously.
     REQUIRE(replugged.slave_path() != old_path);
+    board->sever_link();
     link.repoint(replugged.slave_path());
     REQUIRE(replugged.frames().empty());
 
@@ -1238,17 +1232,19 @@ namespace {
 
 // Relink under the same by-id style symlink, as udev does: sever the board,
 // stand up a replacement, repoint. Returns the replacement, which the caller
-// keeps alive. Ordering matters for devpts index reuse — see the #445 case.
+// keeps alive. The replacement is built first so devpts cannot reuse the old
+// index — see the #445 case.
 std::unique_ptr<FakeSkyWatcherSerialBoard> relink_board(std::unique_ptr<FakeSkyWatcherSerialBoard>& board,
                                                         const PortLink& link, alpacacore::TelescopeDriver& driver) {
+    // The test owns the severed board's pty index itself: the replacement is
+    // built while `board` still holds its master, so devpts cannot hand back
+    // the old path whatever the driver does. Building it after sever_link()
+    // depended on the driver's fd outliving the loss, which its reader can
+    // close at any moment (open-astro#1245).
     const std::string old_path = board->slave_path();
-    board->sever_link();
-    // Stand the replacement up BEFORE anything observes the loss: noticing it
-    // closes the driver's fd, and that fd is the only thing keeping devpts
-    // from recycling the severed board's index and handing back its own path
-    // (the #445 case documents the same ordering hazard). Do not reorder.
     auto replugged = std::make_unique<FakeSkyWatcherSerialBoard>();
     REQUIRE(replugged->slave_path() != old_path);
+    board->sever_link();
     // Observing the loss is what stamps it, and the stamp is what the relink
     // decision measures its outage from.
     CHECK_FALSE(driver.get_connected());
