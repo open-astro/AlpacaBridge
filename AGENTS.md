@@ -231,7 +231,8 @@ vendor-agnostic; do them in the driver from the start.
   otherwise throws `NotConnected` when disconnected (no early-return that skips it).
 
 **Config round-trip (silent data loss on save)**
-- Every persisted field allowlisted per device type in `sanitize_device_config`, every
+- Every persisted field declared per device type in the vendor's catalog schema
+  (`<vendor>_fields.h`; `sanitize_device_config` drops undeclared keys), every
   non-ZWO form field `name` vendor-prefixed — the full rules live in ONE place:
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors).
   The round-trip test (Required Test Case #9) is the automated catch.
@@ -847,9 +848,9 @@ Failing this check means guiding will fail at runtime, no matter how green the A
 
 When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 
-1. **Router registration** — add vendor/device case to `Router::register_device_from_config` in `AlpacaHTTP/src/http/router.cpp`. This is the dispatch that creates driver instances from persisted JSON config. **Read config fields through `config_has()` / `config_get()`, never `config.contains()` / `config.value()`** (#388): `contains()` is true for an explicit JSON `null` and `value()` THROWS `type_error` rather than returning the default when the stored value is not convertible, so `{"siteLatitude": null}` — trivial to produce from a client that serialises an unset value instead of omitting the key — escaped the vendor branch and came back as an nlohmann type complaint instead of the specific message the field has. The helpers treat null as absence and report a genuinely wrong type as an `AlpacaException` naming the field. **Scope**: this is done for the TOP-LEVEL config fields. The nested `ports[]` sub-objects on the iMate PowerBox switch branch still use `p.contains(...)` / `p.value(...)`, so `{"ports":[{"pwm": null}]}` still surfaces a raw `type_error` -- the same #388 shape one level down. Use the helpers for new fields at either level; converting the existing `ports[]` readers is tracked separately.
-2. **Router includes** — add `#include <alpacacore/vendor/<vendor>/<vendor>_<device>_driver.h>` at the top of `router.cpp`, guarded by `#ifdef ALPACACORE_ENABLE_<VENDOR>`.
-3. **Config sanitization fields** — ensure vendor-specific config keys are preserved through sanitization.
+1. **Catalog descriptor** — declare the vendor/device type in `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (fields), `<vendor>_schema.cpp` (schema, compiled in every build, no vendor header) and `<vendor>_catalog.cpp` (factory, compiled only under `ALPACACORE_ENABLE_<VENDOR>`), and register them in `AlpacaCore/src/catalog/builtin_catalog.cpp`. `Router::register_device_from_config` has no vendor arm any more (the last one, iOptron, moved in #1228): it consults the catalog and answers "not yet supported" for anything else. **Fields are read through `DeviceConfig::get()` / `find()`, never raw JSON** (#388): `contains()` is true for an explicit JSON `null` and `value()` THROWS `type_error` rather than returning the default when the stored value is not convertible, so `{"siteLatitude": null}` — trivial to produce from a client that serialises an unset value instead of omitting the key — came back as an nlohmann type complaint instead of the specific message the field has. The catalog reader treats null as absence and reports a genuinely wrong type as an `AlpacaException` naming the field; a nested `ports[]` list is a `RecordList` read the same way.
+2. **No vendor include in `router.cpp`** — the router includes no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` baseline 0); the factory file is the only place the driver header is included.
+3. **Config sanitization fields** — a declared, non-secret field is preserved by the catalog's sanitize; an undeclared key is dropped, so declare every persisted field.
 4. **Web UI vendor dropdown** — add the vendor to the device-type dropdown in the web frontend (`AlpacaHTTP/web/app.js`) so users can select it.
 5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form.
 6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and register it in the `INDEX_FIELDS` array so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; a missing registry entry reuses index 0 on the next device).
@@ -921,17 +922,21 @@ vendor that ignores either ships a silently broken form:
   index 0. This is distinct from the Alpaca **device number** (auto-assigned per device
   type, vendor-agnostic, and what clients address). Serial/network devices (port path or
   host) have no index and belong in neither place.
-- **Allowlist EVERY persisted field in `sanitize_device_config` (`router.cpp`), per device type**
+- **Declare EVERY persisted field in the vendor's catalog schema, per device type (`sanitize_device_config` in `router.cpp` keeps exactly the declared fields)**
   (bit us three times: ZWO ASIAIR PWM ports, ToupTek `switchType`, ToupTek AFW filter fields).
-  `sanitize_device_config` is a strict allowlist — anything not explicitly `copy_if_present`-ed
-  is silently dropped on save, so the config round-trips lossily and the setting reverts (a
-  filter-wheel binding resets to index 0, custom filter names vanish, PWM toggles revert). When
-  you add a config field that a driver reads in its registration branch, you MUST also add a
-  matching `copy_if_present` in that vendor's `sanitize_device_config` branch. If a vendor
-  serves multiple device types through one branch (ToupTek: camera/focuser/filterwheel/switch),
-  split on `device_type` so each type keeps its own fields — don't let a shared `else` copy only
-  the camera/focuser fields. Cross-check the driver's `config.value(...)` / `config.contains(...)`
-  reads in the registration function against the sanitizer branch; they must list the same keys.
+  `sanitize_device_config` is a strict allowlist. It keeps the vendor-agnostic keys it names
+  (`vendor`, `deviceType`, `deviceNumber`, the site and timing keys) and, for everything else,
+  exactly the fields the device's catalog descriptor declares in
+  `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (`sanitize_fields_json`; a `Secret` field
+  is never written). An undeclared key is silently dropped on save, so the config round-trips
+  lossily and the setting reverts (a filter-wheel binding resets to index 0, custom filter names
+  vanish, PWM toggles revert). When the factory in `<vendor>_catalog.cpp` reads a new config key,
+  you MUST declare that field in `<vendor>_fields.h` for every device type that reads it: the
+  descriptor is per (vendor, device type), so a field declared only for the camera is dropped
+  from the focuser's saved config. Cross-check the keys each factory reads against its
+  descriptor's field list; they must match. There is no vendor branch in
+  `sanitize_device_config` and no registration arm to edit any more (the last, iOptron, moved
+  in #1228).
 
 ## Debian Packaging
 

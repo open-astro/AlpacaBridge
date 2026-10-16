@@ -51,23 +51,23 @@ datagrams before each send so replies cannot get off-by-one.
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
-  Since #380 that rule is not left to each branch to remember: `Router::reject_invalid_config()`
-  takes the source and the reason and returns whether the caller must refuse, and
-  `Router::normalize_persisted_connection_type()` does the same for an unrecognised
-  `connectionType`, which has no value to carry forward — it returns `"serial"` for a persisted
-  config, never `"auto"`, so the connect fails on the port path instead of auto-probing and
-  attaching to whatever mount answers. Use them rather than an inline `return false`; the
-  `portPath`, `host` and `connectionType` checks in every telescope branch do. Since #744 the
-  Sky-Watcher direct driver has no router branch: its device-catalog descriptor
-  (`AlpacaCore/src/vendors/skywatcher/skywatcher_schema.cpp`) applies the same source rule in
-  `Schema::normalize`, and the factory (`skywatcher_catalog.cpp`) logs the missing-site WARN.
+  Since #380 that rule was one helper pair in the router (`reject_invalid_config()`, which took
+  the source and the reason, and `normalize_persisted_connection_type()`, which turned an
+  unrecognised persisted `connectionType` into `"serial"`, never `"auto"`, so the connect fails on
+  the port path instead of auto-probing and attaching to whatever mount answers). Every vendor is
+  a device-catalog descriptor now and those helpers are gone: each descriptor's
+  `Schema::normalize` applies the same source rule (reject `Source::Api`, warn on
+  `Source::Persisted`), and the telescope schemas' `portPath`, `host` and `connectionType` checks
+  do. The Sky-Watcher direct driver's descriptor
+  (`AlpacaCore/src/vendors/skywatcher/skywatcher_schema.cpp`) is one; its factory
+  (`skywatcher_catalog.cpp`) logs the missing-site WARN.
   Both coordinates are also **range-checked** (#398), inclusive of ±90/±180 since the poles and
   the antimeridian are real places, and rejecting NaN and the infinities: presence alone let a
   config carry latitude 200, which reads as northern to `hemisphere_south_locked()`, while the
   ASCOM setters have always refused exactly that at runtime — a validation a client cannot bypass
-  but a config can is not a validation. The reads and the check live in one shared
-  `read_site_coordinates()` used by the six router branches that take a site (for Sky-Watcher
-  the catalog's per-field min/max applies the same range since #744), and on the
+  but a config can is not a validation. The check was one shared
+  `read_site_coordinates()` in the router, and is now each telescope schema's per-field range
+  (the catalog's min/max for Sky-Watcher since #744, a normalize check for iOptron), and on the
   persisted path the offending coordinate is **cleared** so the driver's unset handling covers it. `0.0` is a real coordinate, so the driver tracks whether each
   was ever set rather than testing for the value — an unset southern rig would otherwise
   run northern pointing math: the #432 sky frame (both the `a1` term and dec), the RA

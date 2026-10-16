@@ -548,9 +548,9 @@ Checklist:
 ## Step 6 — AlpacaHTTP integration
 
 All 9 steps required for end-to-end functionality:
-1. Router registration in `AlpacaHTTP/src/http/router.cpp`.
-2. Router includes with `#ifdef ALPACACORE_ENABLE_<VENDOR>` guard.
-3. Config sanitization fields preserved.
+1. Catalog descriptor: `<vendor>_fields.h`, `<vendor>_schema.cpp` and `<vendor>_catalog.cpp` under `AlpacaCore/src/vendors/<vendor>/`, registered in `AlpacaCore/src/catalog/builtin_catalog.cpp` (the router has no vendor arm).
+2. No vendor include in `AlpacaHTTP/src/http/router.cpp` (`scripts/check_layering.py`).
+3. Config sanitization: every persisted field declared in the schema.
 4. Web UI vendor dropdown in `AlpacaHTTP/web/app.js`.
 5. Web UI vendor-specific form fields.
    - **Unique vendor-prefixed `name` on EVERY field** (not just filter wheels): hidden

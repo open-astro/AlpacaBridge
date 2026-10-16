@@ -33,6 +33,7 @@ void register_builtin_schemas(DeviceCatalog& catalog) {
     register_gemini_schema(catalog);
     register_wandererastro_schema(catalog);
     register_zwo_schema(catalog);
+    register_ioptron_schema(catalog);
 }
 
 void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
@@ -56,6 +57,7 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
     register_playerone_factory(catalog);
+    register_ioptron_icam_factory(catalog);
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
     register_bisque_factory(catalog);
@@ -83,6 +85,9 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
     register_zwo_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    register_ioptron_factory(catalog);
 #endif
 }
 

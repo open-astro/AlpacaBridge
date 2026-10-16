@@ -1053,8 +1053,8 @@ int main() {
                 "Content-Type: application/json\r\nContent-Length: " +
                 std::to_string(cfg_body.size()) + "\r\n\r\n" + cfg_body);
             EXPECT(count_logged("register_device_from_config: device type \"cam\\x0aHTTP GET /forged\" is not "
-                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); falling "
-                                "through to the arm chain") == 1);
+                                "catalog-recognized (Unknown device type: cam\\x0aHTTP GET /forged); the device "
+                                "is answered as not supported") == 1);
             EXPECT(!raw_byte_logged('\n'));
         }
 
@@ -5093,11 +5093,13 @@ int main() {
             with_tail(
                 R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1,"host":"h")")
                 .c_str(),
-            with_tail(R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1)")
+            with_tail(
+                R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":115200,"mountIndex":1,"host":"h")")
                 .c_str());
+        // The catalog sanitize keeps every declared field whatever the connection type (ADR 0004).
         add("ioptron", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})",
-            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2})");
+            R"({"connectionType":"network","host":"192.168.1.9","tcpPort":4030,"mountIndex":2,"portPath":"/dev/x"})");
         // #659: the auto arms construct without a scan, so they register here.
         add("ioptron", "telescope", "Telescope", "auto", R"({"connectionType":"auto","mountIndex":1})",
             R"({"connectionType":"auto","mountIndex":1})");
@@ -5376,15 +5378,15 @@ int main() {
             // sanitize keeps every declared field (ADR 0004: portPath / host
             // survive whatever the connection type), and a saved config's
             // cross-field refusal is logged through the catalog's "config
-            // normalized" wrapper, not reject_invalid_config()'s "will refuse
-            // to connect" text.
+            // normalized" wrapper, not the deleted reject_invalid_config()'s
+            // "will refuse to connect" text.
             bool catalog;
         };
         std::vector<Mount> mounts;
         const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", false});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
         mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
@@ -5440,15 +5442,14 @@ int main() {
                     {warned_serial, "Skipping persisted device"});
             }
 
-            // #508 item 1 (the six mount arms that go through
-            // reject_invalid_config): an empty portPath on serial is rejected
-            // by the API and, from a saved config, WARNED about and registered
-            // anyway. Contrast the arms further down that drop the entry.
-            // open-astro#744 rule 6: for a catalog vendor the saved config is
-            // still registered, but the WARN is the catalog's wrapper
+            // #508 item 1 (every mount, all catalog descriptors now): an empty
+            // portPath on serial is rejected by the API and, from a saved
+            // config, WARNED about and registered anyway. Contrast the entries
+            // further down that drop the entry.
+            // open-astro#744 rule 6: the WARN is the catalog's wrapper
             // ("Persisted <vendor> telescope N config normalized: Serial port
-            // path is required. The saved value is not used: ..."), not
-            // reject_invalid_config()'s "will refuse to connect" text.
+            // path is required. The saved value is not used: ..."), not the
+            // deleted reject_invalid_config()'s "will refuse to connect" text.
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
@@ -5516,29 +5517,28 @@ int main() {
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        // The router-owned arm still words both the API refusal and the saved
-        // config's WARN through read_site_coordinates(): short numbers in both.
+        // The ioptron schema's normalize words both the API refusal and the saved
+        // config's WARN with the text read_site_coordinates() had: short numbers in both.
         pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":151.215297})",
             "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLongitude":151.215297})",
-            {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
+            {"config normalized: siteLatitude 200 is out of range: must be between -90 and 90 degrees"},
+            {"200.000000"});
 #endif
 
-        // #508 item 1, the arms that still DROP a saved entry on an empty portPath
-        // instead of registering it with a WARN (only the iOptron filterwheel now): it is rejected by the API and
-        // is NOT registered after a restart. It is still listed, as a
+        // #508 item 1, the factories that still DROP a saved entry on an empty portPath
+        // instead of registering it with a WARN (the iOptron filterwheel): it is rejected by
+        // the API and is NOT registered after a restart. It is still listed, as a
         // "<vendor> (failed to load)" row (LoadError true, lower-case
         // DeviceType), which is how the web UI can show and edit it.
         const std::string kPortRequired = "portPath is required when connectionType is 'serial' (or use 'auto').";
-        const auto drop_pin = [&](const std::string& vendor, const std::string& device_type,
-                                  const std::string& alpaca_type, const std::string& message) {
-            pin("serial with empty portPath is DROPPED (#508 item 1)", vendor, device_type, alpaca_type,
-                R"({"connectionType":"serial","portPath":""})", message, "{}", false, "{}",
-                {"Skipping persisted device: " + message}, {});
-        };
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        drop_pin("ioptron", "filterwheel", "FilterWheel", kPortRequired);
+        // The catalog turns the refusal into a normalize warning for a saved config, and the
+        // factory then throws the same text, so the wheel is dropped as before.
+        pin("serial with empty portPath is DROPPED (#508 item 1)", "ioptron", "filterwheel", "FilterWheel",
+            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
+            {"config normalized: " + kPortRequired}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
         // The catalog turns the refusal into a normalize warning for a saved config and the
@@ -7528,8 +7528,8 @@ int main() {
 #endif  // ALPACACORE_ENABLE_SKYWATCHER
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
-    // read_site_coordinates() still words the refusal for the router-owned
-    // vendors: the numbers print in their short form, not std::to_string's
+    // The iOptron schema's normalize words the refusal with the text the router's
+    // read_site_coordinates() had: the numbers print in their short form, not std::to_string's
     // "200.000000" / "-90.000000".
     {
         alpacahttp::Router router;
@@ -7813,7 +7813,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 34);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 39);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -7895,6 +7895,25 @@ int main() {
 #else
                 entry["available"] = false;
 #endif
+            }
+            if (entry.value("vendor", "") == "ioptron") {
+                // The iCAM camera is built by the Player One option; the other four follow the
+                // iOptron option (the PowerBox switch is registered without libgpiod too and
+                // refuses with its "not built" text).
+                const std::string type = entry.value("deviceType", "");
+                if (type == "camera") {
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+                    entry["available"] = true;
+#else
+                    entry["available"] = false;
+#endif
+                } else {
+#ifdef ALPACACORE_ENABLE_IOPTRON
+                    entry["available"] = true;
+#else
+                    entry["available"] = false;
+#endif
+                }
             }
             if (entry.value("vendor", "") == "gemini") {
 #ifdef ALPACACORE_ENABLE_GEMINI
@@ -7992,8 +8011,8 @@ int main() {
         remove_device(router, "zzz", "focuser", 9261);
     }
 
-    // open-astro#664 Part C: the router consults the catalog before its arm
-    // chain. "zzz" has no arm, so every outcome below is the catalog path.
+    // open-astro#664 Part C: the router consults the catalog and has no vendor
+    // arm left, so every outcome below is the catalog path.
     {
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
@@ -8050,7 +8069,7 @@ int main() {
         EXPECT(listed_entry(router, "Focuser", 9255).is_null());
 
         // API, out of range: normalize's rejection is the error message, the
-        // outcome reject_invalid_config() produces, and nothing registers.
+        // outcome the deleted reject_invalid_config() produced, and nothing registers.
         const auto rejected = api_attempt(
             router, nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":99})"),
             "Focuser");
@@ -8058,7 +8077,7 @@ int main() {
         EXPECT(rejected.message.find("count is out of range") != std::string::npos);
         EXPECT(listed_entry(router, "Focuser", 9255).is_null());
 
-        // A key with no schema falls through to the arm chain unchanged.
+        // A key with no schema is refused as not yet supported.
         const auto unknown = api_attempt(
             router, nlohmann::json::parse(R"({"vendor":"yyy","deviceType":"focuser","deviceNumber":9255})"), "Focuser");
         EXPECT(!unknown.ok);
@@ -8066,8 +8085,8 @@ int main() {
     }
     {
         // Persisted: the catalog consult's own warning text, one line per
-        // warning -- distinct from reject_invalid_config()'s "will refuse to
-        // connect" wording (that text is false here: normalize() has already
+        // warning -- distinct from the deleted reject_invalid_config()'s "will
+        // refuse to connect" wording (that text is false here: normalize() has already
         // substituted a usable value, so the device is not refusing anything).
         // The device registers anyway with the normalized config (count
         // dropped to its default, mode substituted) while configureddevices

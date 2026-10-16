@@ -14,7 +14,7 @@ The descriptor is two files in the vendor's directory. The schema half compiles 
 
 AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor headers; the layering gate enforces zero once the migration is done. It serves the schema at /management/v1/devicecatalog in the management envelope, as a compact custom shape pinned by a committed fixture.
 
-API configs are rejected on validation failure; persisted configs are normalized with a warning, as `Router::reject_invalid_config()` does today (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
+API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router's `reject_invalid_config()` did (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
 
 ## Alternatives rejected
 

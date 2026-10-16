@@ -26,7 +26,7 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
 - **Persisted config**: an entry loaded from `registered_devices.json` at startup
   (`ConfigSource::Persisted`). A validation failure is normalized with a warning and
   the device is still registered, so it stays listed and editable in the web UI and
-  refuses to connect until fixed (`Router::reject_invalid_config()`, #380).
+  refuses to connect until fixed (each descriptor's `Schema::normalize`, applied by `DeviceCatalog::normalize`, #380).
 - Avoid: "saved config" for both, or "invalid config" without saying which source;
   the same fault has two different outcomes.
 

@@ -65,7 +65,7 @@ ALLOWLIST: dict[tuple[str, str], str] = {}
 
 # Pairs the router builds under another vendor's build flag.
 GUARD_OVERRIDE = {
-    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (router.cpp)
+    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (playerone_catalog.cpp)
 }
 
 # (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every
@@ -156,6 +156,18 @@ def strip_comments(text: str) -> str:
             out.append(c)
             i += 1
     return "".join(out)
+
+
+def router_function_parsed(router_text: str) -> bool:
+    """Whether register_device_from_config() was found and its braces matched. Zero arms inside it is
+    legitimate once every vendor is a catalog descriptor (open-astro#664 Part D, the last arm left in
+    #1228); a function the parser cannot find or match is not."""
+    text = strip_comments(router_text)
+    start = text.find(ROUTER_FUNCTION)
+    if start < 0:
+        return False
+    open_idx = text.find("{", text.find(")", start))
+    return open_idx >= 0 and matching_brace(text, open_idx) >= 0
 
 
 def router_pairs(router_text: str) -> set[tuple[str, str]]:
@@ -333,7 +345,7 @@ def check(root: pathlib.Path) -> list[str]:
         return failures
 
     pairs = router_pairs(router_text)
-    if not pairs:
+    if not pairs and not router_function_parsed(router_text):
         failures.append("NO ROUTER ARMS FOUND in %s (%s): the parser is broken or the function moved"
                         % (ROUTER, ROUTER_FUNCTION))
     failures.extend(unparsed_arm_findings(router_text))
@@ -724,6 +736,11 @@ def self_test() -> int:
         expect("not expanded", _run(sweep="// nothing\n"), "SWEEP DOES NOT EXPAND THE REGISTRY")
         # Robustness: a moved router function is a finding, not a silent pass.
         expect("router moved", _run(router="int x;\n"), "NO ROUTER ARMS FOUND")
+        # ... but a router whose function holds no arm at all is the end state of the catalog
+        # migration, not a broken parser: it must not raise the finding.
+        no_arms = _run(router="bool Router::register_device_from_config(const nlohmann::json& c) {\n    return false;\n}\n")
+        if any("NO ROUTER ARMS FOUND" in f for f in no_arms):
+            problems.append("armless router: raised NO ROUTER ARMS FOUND, got %r" % (no_arms,))
         expect("empty registry", _run(header="// empty\n"), "EMPTY REGISTRY")
         # open-astro#664: catalog files. Their pairs are checked in C++ (module docstring); here a
         # catalog file supplies backends for UNSWEPT BACKEND and exempts its vendor's entries from

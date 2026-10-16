@@ -184,7 +184,7 @@ TEST_CASE("Persisted normalize warns and keeps the device registrable", "[catalo
     DeviceCatalog catalog;
     register_test_descriptors(catalog, true);
 
-    // Required missing: kept raw (absent). Router::reject_invalid_config() warns and
+    // Required missing: kept raw (absent). The router's reject_invalid_config() warned and
     // still registers with an empty port path; connect fails later.
     DeviceConfig missing = valid_config();
     missing.erase("portPath");
@@ -195,7 +195,7 @@ TEST_CASE("Persisted normalize warns and keeps the device registrable", "[catalo
     CHECK_FALSE(r1.config.find(kPortPath).has_value());
     CHECK(r1.config.get(kPortPath).empty());
 
-    // Out-of-enum: replaced by the field default, like normalize_persisted_connection_type()
+    // Out-of-enum: replaced by the field default, like the router's normalize_persisted_connection_type()
     // substituting "serial".
     DeviceConfig bad_enum = valid_config();
     bad_enum.set("switchType", std::string{"bogus"});
@@ -206,7 +206,7 @@ TEST_CASE("Persisted normalize warns and keeps the device registrable", "[catalo
     REQUIRE(r2.config.find(kSwitchType).has_value());
     CHECK(*r2.config.find(kSwitchType) == "basic");
 
-    // Out-of-range: dropped to unset, like read_site_coordinates() ignoring the coordinate.
+    // Out-of-range: dropped to unset, like the router's read_site_coordinates() ignoring the coordinate.
     DeviceConfig bad_range = valid_config();
     bad_range.set("pollMs", std::int64_t{5});
     auto r3 = catalog.normalize(kStubKey, bad_range, Source::Persisted);

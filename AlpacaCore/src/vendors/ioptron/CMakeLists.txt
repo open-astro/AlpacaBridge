@@ -16,6 +16,7 @@ if(ALPACACORE_ENABLE_IOPTRON)
         ioptron_ieaf_focuser_driver.cpp
         ioptron_iefw_protocol_wrapper.cpp
         ioptron_filterwheel_driver.cpp
+        ioptron_catalog.cpp
     )
 
     # Probe for libgpiod >= 2.0 (the iMate PowerBox Switch backend). pkg-config
@@ -95,6 +96,8 @@ if(ALPACACORE_ENABLE_IOPTRON)
 
         find_package(Threads REQUIRED)
         target_link_libraries(alpacacore_ioptron PRIVATE Threads::Threads)
+        # ioptron_catalog.cpp builds the PowerBox switch only where libgpiod is found.
+        target_compile_definitions(alpacacore_ioptron PRIVATE ALPACACORE_IOPTRON_POWERBOX)
 
         message(STATUS "iOptron driver: Serial/TCP mount + iMate PowerBox (libgpiod) Switch support enabled")
     else()

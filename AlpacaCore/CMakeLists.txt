@@ -153,6 +153,7 @@ add_library(alpacacore_builtins STATIC
     src/vendors/gemini/gemini_schema.cpp
     src/vendors/wandererastro/wandererastro_schema.cpp
     src/vendors/zwo/zwo_schema.cpp
+    src/vendors/ioptron/ioptron_schema.cpp
 )
 target_link_libraries(alpacacore_builtins PUBLIC alpacacore)
 add_library(AlpacaCore::alpacacore_builtins ALIAS alpacacore_builtins)
@@ -181,6 +182,12 @@ if(ALPACACORE_ENABLE_IOPTRON)
     add_subdirectory(src/vendors/ioptron)
     if(TARGET alpacacore_ioptron)
         target_link_libraries(alpacacore_builtins PRIVATE alpacacore_ioptron)
+        # register_builtin_factories() guards its iOptron factory behind this macro; the
+        # schema's gpioChip check follows the second (the PowerBox needs libgpiod).
+        target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_ENABLE_IOPTRON)
+        if(ALPACACORE_IOPTRON_POWERBOX)
+            target_compile_definitions(alpacacore_builtins PRIVATE ALPACACORE_IOPTRON_POWERBOX)
+        endif()
     endif()
 endif()
 

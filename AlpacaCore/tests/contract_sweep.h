@@ -294,7 +294,7 @@ inline ContractEntry contract_entry_zwo_switch() {
                 return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
             },
             "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-            "router arm have their own entries below"),
+            "descriptor have their own entries below"),
         DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
         "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
         "ensure_connected()");
@@ -413,7 +413,7 @@ inline ContractEntry contract_entry_ioptron_camera() {
     return with_playerone_actions(make_entry(
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
-        "assumption: the router's ioptron/camera arm reuses the Player One camera driver (router.cpp); "
+        "assumption: the ioptron/camera descriptor reuses the Player One camera driver (playerone_catalog.cpp); "
         "protocol document: AGENTS.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {

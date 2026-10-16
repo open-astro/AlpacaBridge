@@ -20,6 +20,7 @@
 #include <alpacacore/vendor/playerone/playerone_switch_driver.h>
 
 #include "../../catalog/builtin_descriptors.h"
+#include "../ioptron/ioptron_camera_fields.h"
 #include "playerone_fields.h"
 
 namespace alpacacore::catalog {
@@ -50,6 +51,20 @@ void register_playerone_factory(DeviceCatalog& catalog) {
                                                           static_cast<int>(config.get(kPlayerOneCameraIndex)));
     };
     catalog.add(std::move(sw));
+}
+
+// The iOptron iCAM cameras (e.g. iCAM178M) are rebadged Player One cameras (USB
+// VID a0a0; the Player One SDK enumerates them by name), so the ioptron/camera
+// descriptor builds the Player One driver. It sits here, not in ioptron_catalog.cpp,
+// because it needs only the Player One build, as the router arm it replaces did.
+void register_ioptron_icam_factory(DeviceCatalog& catalog) {
+    Factory camera;
+    camera.key = DeviceKey{"ioptron", DeviceType::Camera};
+    camera.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
+        return vendor::playerone::create_playerone_camera(device_number,
+                                                          static_cast<int>(config.get(kIoptronCameraIndex)));
+    };
+    catalog.add(std::move(camera));
 }
 
 }  // namespace alpacacore::catalog
