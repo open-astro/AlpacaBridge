@@ -19,6 +19,11 @@
 # SPDX SBOM attestation (Actions > Attestations); `gh attestation verify` on
 # the file proves it was built here, by this workflow, from the named commit.
 #
+# The built package's resolved Depends and Recommends also go to the
+# dependency graph (scripts/dependency_snapshot.py --deb-snapshot): this is
+# the only workflow that builds the .deb from main, so the only place
+# ${shlibs:Depends} is known.
+#
 # Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
 # -f force=true`), so the public nightly-build release always names a main
 # commit. Forks never build on the cron; a manual run there builds the branch
@@ -213,3 +218,14 @@ jobs:
                 gh release delete-asset nightly-build "${name}" --repo "${GITHUB_REPOSITORY}" --yes
               fi
             done
+
+      - name: Submit the package's runtime dependencies
+        # Last, so a failed submission never holds back the nightly. Its own
+        # correlator keeps it beside dependency-submission.yml's snapshot.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          python3 scripts/dependency_snapshot.py --deb-snapshot "dist/${ASSET}" --output deb-snapshot.json
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots" --input deb-snapshot.json

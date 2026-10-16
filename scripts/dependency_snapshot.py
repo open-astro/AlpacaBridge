@@ -4,26 +4,31 @@
 GitHub's dependency graph only parses manifests it knows (here: the workflow
 action pins). This script reports what actually ships: the Debian packages in
 debian/control, the CMake FetchContent libraries and the vendored SDKs in
-AlpacaCore/external/ (versions from scripts/dependency_sdk_versions.json), plus
-the tools .github/workflows/ci.yml installs outside debian/control (cppcheck,
+AlpacaCore/external/ (versions from scripts/dependency_sdk_versions.json), and
+the system packages the daemon needs that Depends does not name (RUNTIME_SYSTEM),
+plus, as development dependencies, the tools .github/workflows/ci.yml installs outside debian/control (cppcheck,
 zizmor, and the CI_APT_TOOLS such as Catch2), the ConformU beta build .claude/commands/conformu.md pins,
-and every workflow job's container image (pkg:docker), as development dependencies.
+every workflow job's container image (pkg:docker), and the action pins of each
+workflow file the snapshot names (GitHub stops listing them itself once it does).
 
   dependency_snapshot.py [--sha S] [--ref R] [--debian-policy F] [--ubuntu-policy F] [--output FILE]
                                                                write the snapshot
   dependency_snapshot.py --apt-packages debian|ubuntu          package names to pass to apt-cache policy
   dependency_snapshot.py --check                               drift check
   dependency_snapshot.py --spdx DEB [--output FILE]            SPDX SBOM for a built .deb
+  dependency_snapshot.py --deb-snapshot DEB [--output FILE]    snapshot of a built .deb's Depends and Recommends
   dependency_snapshot.py --pin                                 rewrite the SDK sha256 pins
   dependency_snapshot.py --self-test
 
-Rules: Build-Depends become scope "development", Depends become "runtime".
+Rules: Build-Depends become scope "development", Depends and Recommends become "runtime".
 For an alternative group ``a | b`` the FIRST alternative is reported. A version
 is put in a deb purl for an exact ``(= X)`` pin, else the apt candidate from
 ``--debian-policy``/``--ubuntu-policy`` (``apt-cache policy`` output) when one is
 given; with neither the purl carries no version. ``${...}`` substitutions
 and ``debhelper-compat`` are skipped. ``${shlibs:Depends}`` is resolved only at
-package build time and is out of scope. deb and generic purls raise no
+package build time, so the main snapshot cannot report it; ``--deb-snapshot``
+reports a built package's resolved Depends under its own correlator
+(nightly-build.yml submits it). deb and generic purls raise no
 Dependabot alerts; they document the inventory.
 """
 
@@ -70,6 +75,24 @@ CONFORMU_BUILD_RE = re.compile(r"`(\d+\.\d+\.\d+)\.\d+, Build time:")
 CONFORMU_BETA_URL = "download.ascom-standards.org/beta/"
 DETECTOR = {"name": "alpacabridge-dependency-snapshot", "version": "1",
             "url": "https://github.com/open-astro/AlpacaBridge/blob/main/scripts/dependency_snapshot.py"}
+# Packages the installed daemon needs that debian/control's Depends does not name, each with the
+# evidence for it: (package, file glob, regex). A package is reported while its regex matches a
+# file the glob finds; --check fails once it matches none, so a dropped need is never kept silently.
+RUNTIME_MANIFEST = "runtime system packages (not in Depends)"
+RUNTIME_SYSTEM = (
+    ("systemd", "debian/alpacabridge.service", r"^ExecStart=/usr/bin/alpacabridge$"),
+    ("dbus", "AlpacaHTTP/src/util/software_update.cpp", r"\bsd_bus_open_system\("),
+    ("udev", "debian/rules", r"/usr/lib/udev/rules\.d"),
+    ("apt", "debian/alpacabridge-software-update", r"^apt-get "),
+    ("dpkg", "debian/alpacabridge-software-update", r"\bdpkg-query\b"),
+    ("bash", "debian/alpacabridge-software-update", r"^#!/bin/bash"),
+    # The vendor udev rules the package installs run /bin/sh, /bin/echo and /bin/sleep.
+    ("dash", f"{EXTERNAL}/**/*.rules", r'RUN\+="/bin/sh '),
+    ("coreutils", f"{EXTERNAL}/**/*.rules", r'RUN\+="[^"]*/bin/(?:echo|sleep)\b'),
+)
+# --deb-snapshot: the built package's own runtime dependencies, in a snapshot beside the main one.
+DEB_CORRELATOR = "dependency-submission-deb"
+DEB_MANIFEST = "alpacabridge .deb (resolved Depends and Recommends)"
 
 
 def parse_relations(value: str) -> list[tuple[str, str | None]]:
@@ -89,7 +112,7 @@ def parse_relations(value: str) -> list[tuple[str, str | None]]:
 
 
 def parse_control(text: str) -> dict[str, list[tuple[str, str | None]]]:
-    """Return {"development": Build-Depends, "runtime": Depends of the binary stanza}."""
+    """Return {"development": Build-Depends, "runtime": Depends, "recommends": Recommends of the binary stanza}."""
     fields: dict[str, dict[str, str]] = {}
     for stanza in re.split(r"\n\s*\n", text.strip()):
         key = "source" if stanza.startswith("Source:") else "binary"
@@ -101,7 +124,8 @@ def parse_control(text: str) -> dict[str, list[tuple[str, str | None]]]:
                 cur, _, val = line.partition(":")
                 fields.setdefault(key, {})[cur] = val.strip()
     return {"development": parse_relations(fields.get("source", {}).get("Build-Depends", "")),
-            "runtime": parse_relations(fields.get("binary", {}).get("Depends", ""))}
+            "runtime": parse_relations(fields.get("binary", {}).get("Depends", "")),
+            "recommends": parse_relations(fields.get("binary", {}).get("Recommends", ""))}
 
 
 def parse_fetchcontent(text: str) -> list[tuple[str, str]]:
@@ -236,6 +260,33 @@ def parse_containers(text: str) -> list[str]:
     return out
 
 
+def parse_uses(text: str) -> list[str]:
+    """A githubactions purl per remote ``uses:`` pin in a workflow; ``./`` paths and ``docker://`` are skipped."""
+    out = []
+    for m in re.finditer(r"^\s*(?:-\s+)?uses:\s*[\"']?([^\s\"'#]+)", text, re.M):
+        ref = m.group(1)
+        if ref.startswith(("./", "docker://")) or "@" not in ref:
+            continue
+        purl = f"pkg:githubactions/{ref}"
+        if purl not in out:
+            out.append(purl)
+    return out
+
+
+def parse_runtime_system(root: Path) -> tuple[list[str], list[str]]:
+    """Return (package names, errors) for RUNTIME_SYSTEM: a package whose evidence is gone is an error."""
+    names, errors = [], []
+    for name, pattern, rx in RUNTIME_SYSTEM:
+        if any(re.search(rx, f.read_text(encoding="utf-8", errors="replace"), re.M)
+               for f in sorted(root.glob(pattern)) if f.is_file()):
+            names.append(name)
+        else:
+            errors.append(f"{pattern}: nothing matches {rx!r}, the evidence that the daemon needs {name}: "
+                          "update RUNTIME_SYSTEM in scripts/dependency_snapshot.py, or drop the package "
+                          "if nothing needs it any more")
+    return names, errors
+
+
 def parse_apt_policy(text: str) -> dict[str, str]:
     """{package: candidate version} from `LC_ALL=C apt-cache policy PKG...`; no candidate, no entry."""
     out: dict[str, str] = {}
@@ -255,7 +306,8 @@ def apt_packages(root: Path, distro: str) -> list[str]:
     if distro == "ubuntu":
         return list(CI_APT_TOOLS)
     control = parse_control((root / "debian/control").read_text(encoding="utf-8"))
-    return list(dict.fromkeys(n for rels in control.values() for n, _ in rels))
+    names = [n for rels in control.values() for n, _ in rels] + [n for n, _, _ in RUNTIME_SYSTEM]
+    return list(dict.fromkeys(names))
 
 
 def deb_purl(name: str, version: str | None) -> str:
@@ -287,8 +339,13 @@ def build_snapshot(root: Path, sha: str, ref: str, job_id: str, scanned: str,
     deb_cand, ubuntu_cand = candidates.get("debian", {}), candidates.get("ubuntu", {})
     manifests = {}
     control = parse_control((root / "debian/control").read_text(encoding="utf-8"))
-    entries = [(deb_purl(n, v or deb_cand.get(n)), scope) for scope, rels in control.items() for n, v in rels]
+    entries = [(deb_purl(n, v or deb_cand.get(n)), "development" if key == "development" else "runtime")
+               for key, rels in control.items() for n, v in rels]
     manifests["debian/control"] = manifest("debian/control", entries)
+    names, _ = parse_runtime_system(root)
+    manifests[RUNTIME_MANIFEST] = {**manifest("scripts/dependency_snapshot.py",
+                                              [(deb_purl(n, deb_cand.get(n)), "runtime") for n in names]),
+                                   "name": RUNTIME_MANIFEST}
     cm = "AlpacaHTTP/CMakeLists.txt"
     fetched = parse_fetchcontent((root / cm).read_text(encoding="utf-8"))
     manifests[cm] = manifest(cm, [(f"pkg:github/{repo}@{tag}", "runtime") for repo, tag in fetched])
@@ -319,9 +376,40 @@ def build_snapshot(root: Path, sha: str, ref: str, job_id: str, scanned: str,
             if rel in manifests:  # ci.yml also carries the CI tools
                 m["resolved"] = {**manifests[rel]["resolved"], **m["resolved"]}
             manifests[rel] = m
+    # The dependency graph listed no action pins for the workflows this snapshot names, while it
+    # listed them for every workflow it does not (2026-10-16), so each workflow manifest here
+    # carries its own workflow's pins.
+    for rel, m in manifests.items():
+        if rel.startswith(".github/workflows/"):
+            pins = parse_uses((root / rel).read_text(encoding="utf-8"))
+            m["resolved"] = {**m["resolved"], **manifest(rel, [(p, "development") for p in pins])["resolved"]}
     return {"version": 0, "job": {"correlator": "dependency-submission", "id": job_id},
             "sha": sha, "ref": ref, "detector": DETECTOR, "scanned": scanned,
             "manifests": manifests}
+
+
+def build_deb_snapshot(deb: dict[str, str], installed: dict[str, str], sha: str, ref: str,
+                       job_id: str, scanned: str) -> dict:
+    """Snapshot of one built .deb's runtime dependencies.
+
+    deb: the package's control fields (dpkg-deb -f). Its Depends, where ${shlibs:Depends} is
+    resolved, and its Recommends are reported at the version in installed (dpkg-query in the build
+    environment) when one is given. The snapshot has its own correlator, so submitting it does not
+    replace the main snapshot build_snapshot() writes.
+    """
+    entries = [(deb_purl(n, installed.get(n, v)), "runtime")
+               for field in ("Depends", "Recommends") for n, v in parse_relations(deb.get(field, ""))]
+    m = {**manifest("debian/control", entries), "name": DEB_MANIFEST}
+    return {"version": 0, "job": {"correlator": DEB_CORRELATOR, "id": job_id},
+            "sha": sha, "ref": ref, "detector": DETECTOR, "scanned": scanned,
+            "manifests": {DEB_MANIFEST: m}}
+
+
+def installed_packages() -> dict[str, str]:
+    """{package: version} installed in this environment, from dpkg-query."""
+    query = subprocess.run(["dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Package}\\t${Version}\\n"],
+                           check=True, capture_output=True, text=True).stdout
+    return parse_installed(query)
 
 
 def parse_deb_fields(text: str) -> dict[str, str]:
@@ -533,6 +621,7 @@ def check_drift(root: Path) -> list[str]:
                           "fix its 'path' or remove the entry")
     if (root / CONFORMU_DOC).is_file():
         errors += parse_conformu((root / CONFORMU_DOC).read_text(encoding="utf-8"))[1]
+    errors += parse_runtime_system(root)[1]
     return errors
 
 
@@ -676,6 +765,15 @@ def self_test() -> int:
         (r / "scripts").mkdir()
         for p in ("A/sdk-1", "B", "Q/deep"):
             (r / EXTERNAL / p).mkdir(parents=True)
+        # One evidence line per RUNTIME_SYSTEM package, so the tree below is drift-free.
+        evidence = {"debian/alpacabridge.service": "ExecStart=/usr/bin/alpacabridge\n",
+                    "AlpacaHTTP/src/util/software_update.cpp": "int r = sd_bus_open_system(&bus.bus);\n",
+                    "debian/rules": "\tinstall -d $(STAGING)/usr/lib/udev/rules.d\n",
+                    "debian/alpacabridge-software-update": "#!/bin/bash\napt-get update\ndpkg-query -W x\n",
+                    f"{EXTERNAL}/x.rules": "RUN+=\"/bin/sh -c '/bin/echo 256 >/sys/x'\"\nRUN+=\"/bin/sleep 5\"\n"}
+        for p, text in evidence.items():
+            (r / p).parent.mkdir(parents=True, exist_ok=True)
+            (r / p).write_text(text)
         subprocess.run(["git", "-C", d, "init", "-q"], check=True)  # vendored files are git-tracked files
         up = {"provider": "release-page", "url": "https://example.test/", "pattern": r"sdk-(\d+)"}
         (r / TABLE).write_text(json.dumps({"sdks": [
@@ -810,12 +908,70 @@ def self_test() -> int:
         ct = snap["manifests"][CI]["resolved"]
         assert f"pkg:deb/ubuntu/catch2@3.4.0-1build1?{CI_APT_QUALIFIERS}" in ct, ct
         assert f"pkg:deb/ubuntu/gcovr?{CI_APT_QUALIFIERS}" in ct, ct
-        assert apt_packages(r, "debian") == ["cmake", "g++", "libgpiod-dev", "libfoo",
-                                             "libcurl4-openssl-dev", "libusb-1.0-0", "adduser"], apt_packages(r, "debian")
+        runtime_names = ["systemd", "dbus", "udev", "apt", "dpkg", "bash", "dash", "coreutils"]
+        assert [n for n, _, _ in RUNTIME_SYSTEM] == runtime_names
+        assert apt_packages(r, "debian") == ["cmake", "g++", "libgpiod-dev", "libfoo", "libcurl4-openssl-dev",
+                                             "libusb-1.0-0", "adduser", "polkitd", *runtime_names], apt_packages(r, "debian")
         assert apt_packages(r, "ubuntu") == list(CI_APT_TOOLS)
+        # Recommends are runtime, and so is every package the daemon needs that Depends does not name.
+        assert dc[deb_purl("polkitd", None)]["scope"] == "runtime", dc
+        rs = snap["manifests"][RUNTIME_MANIFEST]
+        assert rs["file"]["source_location"] == "scripts/dependency_snapshot.py", rs
+        assert set(rs["resolved"]) == {deb_purl(n, None) for n in runtime_names}, rs
+        assert all(x["scope"] == "runtime" for x in rs["resolved"].values())
+        # Evidence that goes away is a --check error naming the package, never a silent drop.
+
+        def drift():
+            return [e for e in check_drift(r) if "no sha256 pin" not in e]
+
+        assert drift() == [], drift()
+        (r / "debian/alpacabridge.service").write_text("ExecStart=/usr/bin/other\n")
+        errs = drift()
+        assert len(errs) == 1 and "systemd" in errs[0] and "debian/alpacabridge.service" in errs[0], errs
+        gone = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")
+        assert deb_purl("systemd", None) not in gone["manifests"][RUNTIME_MANIFEST]["resolved"]
+        (r / "debian/alpacabridge.service").write_text(evidence["debian/alpacabridge.service"])
+        (r / EXTERNAL / "x.rules").unlink()
+        errs = drift()
+        assert len(errs) == 2 and "dash" in errs[0] and "coreutils" in errs[1], errs
+        (r / EXTERNAL / "x.rules").write_text(evidence[f"{EXTERNAL}/x.rules"])
+        # Every workflow manifest the snapshot submits also carries that workflow's action pins:
+        # GitHub drops its own scan of a workflow file a submitted snapshot names.
+        pin = "c" * 40
+        assert parse_uses(f"      - uses: actions/checkout@{pin}  # v7.0.1\n"
+                          "      - uses: ./.github/actions/local\n"
+                          "      - uses: docker://alpine@sha256:ab\n"
+                          "    uses: o/r/.github/workflows/w.yml@v1\n"
+                          "      - uses: \"o/q@v2\"\n"
+                          "      # - uses: o/commented@v3\n") == [
+            f"pkg:githubactions/actions/checkout@{pin}",
+            "pkg:githubactions/o/r/.github/workflows/w.yml@v1", "pkg:githubactions/o/q@v2"]
+        (r / CI).write_text(ci + f"      - uses: actions/checkout@{pin}  # v7.0.1\n")
+        (r / ".github/workflows/rel.yml").write_text(
+            f"jobs:\n  a:\n    container: debian:trixie\n    steps:\n      - uses: o/upload-sarif@{pin}\n")
+        (r / ".github/workflows/plain.yml").write_text(f"jobs:\n  a:\n    steps:\n      - uses: o/plain@{pin}\n")
+        ms = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")["manifests"]
+        assert ms[CI]["resolved"][f"pkg:githubactions/actions/checkout@{pin}"]["scope"] == "development", ms[CI]
+        assert "pkg:github/danmar/cppcheck@2.17.1" in ms[CI]["resolved"], "the tools stay"
+        assert f"pkg:githubactions/o/upload-sarif@{pin}" in ms[".github/workflows/rel.yml"]["resolved"]
+        assert ".github/workflows/plain.yml" not in ms, "a workflow the snapshot does not name stays GitHub's"
+        (r / ".github/workflows/rel.yml").unlink()
+        (r / ".github/workflows/plain.yml").unlink()
         (r / CI).unlink()
         deb = {"Package": "alpacabridge", "Version": "5.0.0~beta2", "Architecture": "arm64",
                "Depends": "libc6 (>= 2.38), libgpiod3 (>= 2.1), libusb-1.0-0 (>= 2:1.0.16), adduser"}
+        # --deb-snapshot: the BUILT package's Depends (shlibs resolved) and Recommends, in a snapshot of
+        # its own so it never replaces the main one, at the build environment's installed versions.
+        ds = build_deb_snapshot({**deb, "Recommends": "network-manager, polkitd"}, {"libc6": "2.41-12"},
+                                "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")
+        assert ds["job"]["correlator"] == "dependency-submission-deb" and ds["detector"] == DETECTOR, ds
+        assert ds["sha"] == "a" * 40 and ds["ref"] == "refs/heads/main" and ds["version"] == 0
+        (dm,) = ds["manifests"].values()
+        assert dm["file"]["source_location"] == "debian/control" and dm["name"] != "debian/control", dm
+        assert set(dm["resolved"]) == {deb_purl("libc6", "2.41-12"), deb_purl("libgpiod3", None),
+                                       deb_purl("libusb-1.0-0", None), deb_purl("adduser", None),
+                                       deb_purl("network-manager", None), deb_purl("polkitd", None)}, dm
+        assert all(x["scope"] == "runtime" and x["relationship"] == "direct" for x in dm["resolved"].values())
         doc = build_spdx(r, deb, "x.deb", "f" * 64, "2026-01-01T00:00:00Z", "https://example.test/sbom")
         assert doc["spdxVersion"] == "SPDX-2.3" and doc["SPDXID"] == "SPDXRef-DOCUMENT"
         assert doc["dataLicense"] == "CC0-1.0" and doc["documentNamespace"] == "https://example.test/sbom"
@@ -987,6 +1143,7 @@ def main() -> int:
     ap.add_argument("--ref")
     ap.add_argument("--output")
     ap.add_argument("--spdx", metavar="DEB")
+    ap.add_argument("--deb-snapshot", metavar="DEB", help="snapshot of a built .deb's Depends and Recommends")
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--apt-packages", choices=("debian", "ubuntu"))
     ap.add_argument("--debian-policy", metavar="FILE", help="apt-cache policy output from debian:trixie")
@@ -1017,9 +1174,7 @@ def main() -> int:
                         p = Path(dirpath) / n
                         if p.is_file() and not p.is_symlink():
                             payload[p.relative_to(tmp).as_posix()] = file_digests(p.read_bytes())
-        query = subprocess.run(["dpkg-query", "-W", "-f=${db:Status-Abbrev}\\t${Package}\\t${Version}\\n"],
-                               check=True, capture_output=True, text=True).stdout
-        installed = parse_installed(query)
+        installed = installed_packages()
         repo = os.environ.get("GITHUB_REPOSITORY", "open-astro/AlpacaBridge")
         created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
@@ -1045,6 +1200,16 @@ def main() -> int:
     ref = a.ref or os.environ.get("GITHUB_REF") or "refs/heads/main"
     job_id = os.environ.get("GITHUB_RUN_ID", "local")
     scanned = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if a.deb_snapshot:
+        out = subprocess.run(["dpkg-deb", "-f", a.deb_snapshot, "Depends", "Recommends"],
+                             check=True, capture_output=True, text=True).stdout
+        snap = build_deb_snapshot(parse_deb_fields(out), installed_packages(), sha, ref, job_id, scanned)
+        text = json.dumps(snap, indent=2) + "\n"
+        if a.output:
+            Path(a.output).write_text(text, encoding="utf-8")
+        else:
+            sys.stdout.write(text)
+        return 0
     candidates = {}
     for distro, path in (("debian", a.debian_policy), ("ubuntu", a.ubuntu_policy)):
         if path:
