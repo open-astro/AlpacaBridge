@@ -79,7 +79,7 @@ tar -xf "${TARBALL}" -C "${BUILD_DIR}"
   # -z relro -z now gives full RELRO, as Debian's own libgphoto2 build has; the
   # caller's LDFLAGS (debian/rules exports dpkg-buildflags) are kept in front.
   ./configure --prefix="${GPHOTO_PREFIX}" --disable-static --disable-nls --disable-docs \
-    --with-camlibs=standard --with-libexif=auto --with-libxml-2.0=auto \
+    --with-camlibs=standard --with-libexif=auto --with-libxml-2.0=no \
     --with-libcurl=no --with-gdlib=no --with-libtiff-4=no \
     LDFLAGS="${LDFLAGS:-} -Wl,-z,relro -Wl,-z,now -Wl,-rpath,${GPHOTO_PREFIX}/lib -Wl,--disable-new-dtags"
   make -j"${JOBS}"
