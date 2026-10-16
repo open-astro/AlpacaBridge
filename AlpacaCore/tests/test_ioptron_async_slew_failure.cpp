@@ -293,8 +293,7 @@ TEST_CASE("iOptron async - a stale worker cannot publish over a newer accepted s
     gate.arm(/*reject_after_release=*/true, /*accept_second=*/true);
     alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
-        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {},
-        clock);
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -353,8 +352,7 @@ TEST_CASE("iOptron - MoveAxis clears a superseded dispatch before its stale work
     gate.arm();
     alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
-        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {},
-        clock);
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(0.001, 0.0));

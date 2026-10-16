@@ -759,7 +759,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true when a PulseGuide arriv
         REQUIRE(mount.ok());
         mount.set_system_status(2);
         alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+        auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
         driver->set_connected(true);
         REQUIRE(driver->get_connected());
 
