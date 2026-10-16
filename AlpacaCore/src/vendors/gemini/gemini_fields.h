@@ -85,7 +85,8 @@ inline const std::vector<FieldRef>& gemini_switch_fields() {
 // normalize reports them (rejected from the API, warned about for a saved
 // config) and the factory throws the same text, so a saved config normalize
 // could only warn about is never built into a hub that would auto-detect behind
-// the user's back.
+// the user's back. One exception: a serial entry with no port (#508 item 1) is
+// built so it stays registered, and the hub's connect refuses with that text.
 inline constexpr const char* kGeminiSerialPortRequired =
     "portPath is required when connectionType is 'serial' (or use 'auto').";
 

@@ -95,7 +95,9 @@ inline const std::vector<FieldRef>& wandererastro_switch_fields() {
 // The schema's normalize reports them (rejected from the API, warned about for a
 // saved config) and the factory throws the same text, so a saved config
 // normalize could only warn about is never built into a device that would
-// auto-detect behind the user's back. `switch_type` is null for the other three.
+// auto-detect behind the user's back. One exception: a serial entry with no
+// port (#508 item 1) is built so it stays registered, and the device's connect
+// refuses with that text. `switch_type` is null for the other three.
 inline constexpr const char* kWandererSerialPortRequired =
     "portPath is required when connectionType is 'serial' (or use 'auto').";
 

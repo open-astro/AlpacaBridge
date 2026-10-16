@@ -112,7 +112,9 @@ inline const std::vector<FieldRef>& qhy_focuser_fields() {
 // reports them (rejected from the API, warned about for a saved config), and the
 // factory throws the same text so a saved config that normalize could only warn
 // about is never built into a driver that would auto-probe instead (the CFW3
-// probe DTR-resets every CP210x on the box).
+// probe DTR-resets every CP210x on the box). One exception: a CFW3 serial entry
+// with no port (#508 item 1) is built so it stays registered, and the wheel's
+// connect refuses with that text.
 inline std::optional<std::string> qhy_camera_handle_refusal(const DeviceConfig& config, const char* subject) {
     const auto index = config.find(kQhyCameraIndex);
     if (config.get(kQhyCameraId).empty() && !(index && *index >= 0)) {
