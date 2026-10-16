@@ -382,7 +382,7 @@ public:
         if (connected == connected_) {
             return;
         }
-        ++motion_generation_;
+        bump_motion_generation();
 
         auto& protocol = SynScanProtocolWrapper::instance();
         if (connected) {
@@ -1163,7 +1163,7 @@ public:
             manual_axis_slewing_[1] = false;
             at_home_ = false;
             parking_ = true;
-            ++motion_generation_;
+            bump_motion_generation();
             clear_pulse_guiding_locked();
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that calls Park after a failed GOTO must not be told the OLD
@@ -1480,7 +1480,7 @@ public:
         clear_pulse_guiding_locked();
         check_not_parked_locked("SlewToCoordinates");
         do_slew_to_coordinates_locked(ra, dec);
-        const uint64_t owner_generation = ++motion_generation_;
+        const uint64_t owner_generation = bump_motion_generation();
         // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
         const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
@@ -1529,7 +1529,7 @@ public:
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
-            owner_generation = ++motion_generation_;
+            owner_generation = bump_motion_generation();
             prev_refining = refining_generation_;
             if (use_precise_commands_) {
                 refining_generation_ = owner_generation;
@@ -1749,7 +1749,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
-        ++motion_generation_;
+        bump_motion_generation();
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1839,7 +1839,7 @@ public:
                     throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
                 }
                 parking_ = false;  // an aborted park never reaches AtPark
-                ++motion_generation_;
+                bump_motion_generation();
                 slewing_cached_ = false;
                 clear_pulse_guiding_locked();
                 // open-astro#575: AbortSlew is a valid clearing command for a stored
@@ -1953,7 +1953,7 @@ private:
                              "stop after refused slew start failed: " + stop_error + "; the mount may still be moving");
         }
         parking_ = false;
-        ++motion_generation_;
+        bump_motion_generation();
         slew_force_until_ = util::TaskClock::clock::time_point::min();
         position_override_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
@@ -2154,6 +2154,13 @@ private:
         }
     }
 
+    // Supersedes every in-flight motion and wakes a synchronous landing nudge waiting on `motion_cv_`.
+    uint64_t bump_motion_generation() {
+        const uint64_t generation = ++motion_generation_;
+        motion_cv_.notify_all();
+        return generation;
+    }
+
     // Moves one axis by `delta_arcsec` (RA: east positive; Dec: north positive) at the guide rate and stops,
     // restoring tracking after an RA move as a pulse does. Returns false when superseded or cancelled.
     bool nudge_axis_locked(std::unique_lock<std::mutex>& lock, int axis, double delta_arcsec, uint64_t owner_generation,
@@ -2177,15 +2184,17 @@ private:
             signed_rate = -signed_rate;
         }
         protocol.move_axis_variable_rate(axis, signed_rate);
-        lock.unlock();
         bool keep = true;
         const auto move_time = std::chrono::milliseconds(static_cast<int>(seconds * 1000.0));
         if (ctx != nullptr) {
+            lock.unlock();
             keep = ctx->wait_for(move_time);
+            lock.lock();
         } else {
-            clock_.sleep_for(move_time);
+            // The wait releases mutex_ while parked; every initiator that bumps motion_generation_ signals
+            // motion_cv_, so a superseded synchronous nudge returns at once instead of sleeping out move_time.
+            clock_.wait_for(lock, motion_cv_, move_time, [&] { return motion_generation_ != owner_generation; });
         }
-        lock.lock();
         if (motion_generation_ != owner_generation) {
             // A newer initiator (AbortSlew, MoveAxis, a slew, park, disconnect) has commanded the axes itself and
             // owns them now; ending this move would end its motion.
@@ -2896,6 +2905,7 @@ private:
     // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
     // released compares it to learn it was superseded (Sky-Watcher shape, #832).
     uint64_t motion_generation_ = 0;
+    std::condition_variable motion_cv_;  // signalled by bump_motion_generation(); ends a synchronous landing nudge
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
     double park_azimuth_degrees_ = 0.0;
