@@ -1156,7 +1156,8 @@ public:
         // used to write the rate captured at dispatch, which made even the
         // RA skip unsafe while autoguiding: PHD2 kept the old whole-mount
         // pulse_guiding_active_ flag (then shared by both axes) true for
-        // most of every guide cycle), and the MoveAxis stop task
+        // most of every guide cycle) and decides the direction once more
+        // under the lock that releases the axis, and the MoveAxis stop task
         // re-applies the Dec offset for a Dec nudge. So a whole-mount skip
         // let a DEC-axis operation in flight (a North/South pulse, or
         // MoveAxis(Dec, r) -> MoveAxis(Dec, 0)) block the RA re-apply while
@@ -1702,6 +1703,31 @@ public:
                     pulse_axis_in_motion_[ai] = false;
                 }
             };
+            // The pulse owns RA until it lets go here, and set_site_latitude()
+            // skips a busy RA axis, so a crossing after the restore's last
+            // direction decision (inside the post-stop rate check, or between
+            // a dispatch-failure recovery and this release) was never
+            // applied. Decide again under the lock that hands the axis back.
+            // Not for a cancelled pulse (its reaper owns the axes) or a failed
+            // stop (nothing was restored).
+            auto release_pulse_locked = [this, axis, ai, my_seq, &stopped_by_other,
+                                         &end_pulse_locked](std::unique_lock<std::mutex>& lock) {
+                if (axis == kAxisRa && pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other() &&
+                    tracking_effectively_on_locked() && ra_duty_rate_deg_s_ == 0.0 && cmd_axis_rate_deg_s_[0] != 0.0 &&
+                    (effective_ra_rate_locked() > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
+                    try {
+                        restart_ra_in_current_direction_locked(lock);
+                    } catch (const std::exception& e) {
+                        if (!lock.owns_lock()) {
+                            lock.lock();
+                        }
+                        ALPACA_LOG_WARN(
+                            "SkyWatcher",
+                            std::string("Pulse end: failed to turn RA round after a hemisphere change: ") + e.what());
+                    }
+                }
+                end_pulse_locked();
+            };
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -1821,14 +1847,14 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
                 recover_ra_drive_rate();
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_pulse_locked();
+                std::unique_lock<std::mutex> lock(mutex_);
+                release_pulse_locked(lock);
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
                 recover_ra_drive_rate();
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_pulse_locked();
+                std::unique_lock<std::mutex> lock(mutex_);
+                release_pulse_locked(lock);
                 return;
             }
             // open-astro#770: Tracking=false landed while a rate check below
@@ -2067,14 +2093,14 @@ public:
                 // for false and then wrote DeclinationRate/RightAscensionRate
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 // open-astro#770: Tracking=false after the restore, either
                 // during the rate check above or between stop_axis()'s
                 // tracking_ read and its unlocked ":I"+":J".
                 if (restore_still_wanted) {
                     stop_ra_if_tracking_off_locked();
                 }
-                end_pulse_locked();
+                release_pulse_locked(lock);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +

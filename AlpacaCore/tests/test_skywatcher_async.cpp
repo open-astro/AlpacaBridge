@@ -5245,6 +5245,35 @@ TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the pulse-end restart
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the post-restore rate check reverses RA",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);  // northern site
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+
+    std::atomic<bool> restored{false};
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] { restored = true; });
+    struct HookReset {
+        ~HookReset() { alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr); }
+    } hook_reset;
+    driver->pulse_guide(2, 2000);  // East, long enough for the post-stop rate check
+    REQUIRE(wait_until([&] { return restored.load(); }, 8000));
+    // Inside the ~450 ms check: the pulse still holds RA, so the setter skips it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_site_latitude(-33.856784);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I restores the drive in the new hemisphere",
           "[skywatcher][async]") {
     FakeSkyWatcherMount mount;
