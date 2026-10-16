@@ -512,7 +512,7 @@ public:
             }
             if (!image_failure_.empty()) throw_image_failure_locked();
             if (!last_exposure_valid_ || !exposure_frame_.has_value()) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
             if (image_cached_) return last_image_;
             if (!camera_id_.has_value()) {
@@ -534,7 +534,7 @@ public:
                 throw AlpacaException("Exposure stopped during image retrieval", AlpacaError::InvalidOperation);
             }
             if (status != ZWOExposureStatus::Success) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
         }
 

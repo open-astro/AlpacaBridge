@@ -1063,6 +1063,72 @@ int main() {
     }
 
     {
+        // case: ImageArray asked too early is logged at DEBUG, a fault InvalidOperation at ERROR (#1167)
+        constexpr int kCameraNumber = 8981;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        EXPECT(registry.register_device(camera));
+
+        struct CapturedLine {
+            alpacacore::logging::LogLevel level;
+            std::string message;
+        };
+        std::vector<CapturedLine> captured;
+        std::mutex captured_mutex;
+        struct LoggingRestore {
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~LoggingRestore() {
+                alpacacore::logging::set_log_sink(sink);
+                alpacacore::logging::set_log_level(level);
+            }
+        } logging_restore;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Debug);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.push_back({level, std::string(message)});
+            });
+        // The level of the one router line about this exception, and the client's view of it.
+        auto read_image = [&](const std::string& method, const std::string& text) {
+            {
+                std::lock_guard<std::mutex> lock(captured_mutex);
+                captured.clear();
+            }
+            const auto resp =
+                route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method);
+            EXPECT(resp.status_code() == 200);
+            const auto body = nlohmann::json::parse(resp.body());
+            EXPECT(body.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+            EXPECT(body.value("ErrorMessage", "") == text);
+            const std::string line = "AlpacaException in camera method '" + method + "': " + text;
+            std::lock_guard<std::mutex> lock(captured_mutex);
+            int matched = 0;
+            alpacacore::logging::LogLevel level = alpacacore::logging::LogLevel::Trace;
+            for (const auto& c : captured) {
+                if (c.message == line) {
+                    ++matched;
+                    level = c.level;
+                }
+            }
+            EXPECT(matched == 1);
+            return level;
+        };
+
+        for (const std::string method : {"imagearray", "imagearrayvariant"}) {
+            camera->set_image_array_error(alpacacore::AlpacaException::asked_too_early("Image not ready"));
+            EXPECT(read_image(method, "Image not ready") == alpacacore::logging::LogLevel::Debug);
+
+            camera->set_image_array_error(alpacacore::AlpacaException("Exposure stopped during image retrieval",
+                                                                      alpacacore::AlpacaError::InvalidOperation));
+            EXPECT(read_image(method, "Exposure stopped during image retrieval") ==
+                   alpacacore::logging::LogLevel::Error);
+        }
+        camera->set_image_array_error(std::nullopt);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
         // case: ImageBytes preserves metadata, ordering, and element bytes
         constexpr int kCameraNumber = 8980;
         auto& registry = alpacacore::management::DeviceRegistry::instance();
@@ -5859,6 +5925,36 @@ int main() {
             std::string(65536, 'x');
         EXPECT(at_64k_request.parse(at_64k));
         EXPECT(at_64k_request.body().size() == 65536);
+    }
+
+    {
+        // case: Telescope DeviceState UTCDate matches the UTCDate endpoint
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto scope = std::make_shared<TelescopeClockStubDriver>(9802);
+        EXPECT(registry.register_device(scope));
+        scope->set_connected(true);
+        alpacahttp::Router clock_router;
+        const std::string base = "/api/v1/telescope/9802";
+        for (const auto ms : {0, 123, 999}) {
+            const std::string fraction = ms == 0 ? "000" : ms == 123 ? "123" : "999";
+            scope->set_utc_date(std::chrono::system_clock::from_time_t(978307200) + std::chrono::milliseconds{ms});
+            const auto utc = nlohmann::json::parse(route_request(clock_router, "GET", base + "/utcdate").body());
+            const auto state = nlohmann::json::parse(route_request(clock_router, "GET", base + "/devicestate").body());
+            EXPECT(utc.at("ErrorNumber") == 0);
+            EXPECT(state.at("ErrorNumber") == 0);
+            EXPECT(state.at("Value").is_array());
+            int utc_entries = 0;
+            for (const auto& entry : state.at("Value")) {
+                if (entry.at("Name") == "UTCDate") {
+                    ++utc_entries;
+                    EXPECT(entry.at("Value").is_string());
+                    EXPECT(entry.at("Value") == utc.at("Value"));
+                    EXPECT(entry.at("Value") == "2001-01-01T00:00:00." + fraction + "Z");
+                }
+            }
+            EXPECT(utc_entries == 1);
+        }
+        EXPECT(registry.unregister_device(alpacacore::DeviceType::Telescope, 9802));
     }
 
     // Host-clock wiring (issue #302). The decision logic inside HostClock is

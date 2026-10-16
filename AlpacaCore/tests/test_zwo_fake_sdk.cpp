@@ -212,6 +212,30 @@ TEST_CASE("ZWO fake SDK - geometry changes preserve last-exposure metadata", "[z
     CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
 }
 
+TEST_CASE("ZWO fake SDK - ImageArray while exposing is asked too early", "[zwo][camera][unit]") {
+    FakeZWOSDK sdk;
+    sdk.auto_complete_exposure = false;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    camera->start_exposure(0.001, true);
+    REQUIRE_FALSE(camera->get_image_ready());
+
+    // Issue #1167: the "still exposing" answer is the ICameraV4 InvalidOperation, logged at DEBUG.
+    bool thrown = false;
+    try {
+        static_cast<void>(camera->get_image_array());
+    } catch (const AlpacaException& ex) {
+        thrown = true;
+        CHECK(ex.error_code() == AlpacaError::InvalidOperation);
+        CHECK(ex.is_asked_too_early());
+    }
+    CHECK(thrown);
+
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    CHECK(camera->get_image_ready());
+    CHECK_FALSE(camera->get_image_array().data.empty());
+}
+
 TEST_CASE("ZWO fake SDK - overlapping start is rejected without replacing the active exposure", "[zwo][camera][unit]") {
     FakeZWOSDK sdk;
     sdk.auto_complete_exposure = false;

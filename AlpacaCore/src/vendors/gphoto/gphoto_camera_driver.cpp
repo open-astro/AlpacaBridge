@@ -813,7 +813,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("Image not ready");
         }
         return last_image_;
     }

@@ -22,6 +22,7 @@
 #include <alpacacore/telescope_driver.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -538,4 +539,50 @@ TEST_CASE("DeviceState carries the TimeStamp once connected, per base class", "[
     SECTION("SafetyMonitor") { require_timestamp_once_connected<DisconnectedSafetyMonitor>(); }
     SECTION("Switch") { require_timestamp_once_connected<DisconnectedSwitch>(); }
     SECTION("Telescope") { require_timestamp_once_connected<DisconnectedTelescope>(); }
+}
+
+TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads", "[driver][utcdate]") {
+    class TelescopeWithClock final : public DisconnectedTelescope {
+    public:
+        std::chrono::system_clock::time_point get_utc_date() const override {
+            ++utc_reads;
+            if (failure == 1) {
+                throw alpacacore::AlpacaException("clock unavailable", alpacacore::AlpacaError::DriverException);
+            }
+            if (failure == 2) {
+                throw std::runtime_error("clock unavailable");
+            }
+            return std::chrono::sys_days{std::chrono::year{2024} / 2 / 29} + std::chrono::hours{23} +
+                   std::chrono::minutes{59} + std::chrono::seconds{58} + std::chrono::milliseconds{123};
+        }
+        std::optional<std::chrono::nanoseconds> device_state_age() const override { return std::chrono::seconds{10}; }
+        int failure = 0;
+        mutable int utc_reads = 0;
+    } driver;
+
+    driver.set_connected(true);
+    SECTION("disconnected does not read even a known clock") { driver.set_connected(false); }
+    SECTION("Alpaca failure omits UTCDate") { driver.failure = 1; }
+    SECTION("standard failure omits UTCDate") { driver.failure = 2; }
+    SECTION("known clock is a UTC string independent of snapshot age") {}
+
+    if (!driver.get_connected()) {
+        CHECK(driver.get_device_state().empty());
+        CHECK(driver.utc_reads == 0);
+        return;
+    }
+    const auto before = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    const auto state = driver.get_device_state();
+    const auto after = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    CHECK(driver.utc_reads == 1);
+    REQUIRE(state.size() == (driver.failure ? 1 : 2));
+    if (!driver.failure) {
+        CHECK(state.front().name == "UTCDate");
+        REQUIRE(std::holds_alternative<std::string>(state.front().value));
+        CHECK(std::get<std::string>(state.front().value) == "2024-02-29T23:59:58.123Z");
+    }
+    CHECK(state.back().name == "TimeStamp");
+    const auto stamp = std::get<std::string>(state.back().value);
+    CHECK(stamp >= alpacacore::device_state_timestamp(before));
+    CHECK(stamp <= alpacacore::device_state_timestamp(after));
 }

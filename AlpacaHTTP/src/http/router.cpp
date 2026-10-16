@@ -1137,7 +1137,7 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
 
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
-    if (is_expected_not_implemented(e) || is_expected_validation_error(e)) {
+    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || e.is_asked_too_early()) {
         alpacahttp::util::log_debug(message);
     } else {
         alpacahttp::util::log_error(message);
@@ -3760,21 +3760,12 @@ Response Router::dispatch_telescope_method(
                     client_tx_id, server_tx_id, telescope->get_slew_settle_time());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "utcdate") {
-                auto utc = telescope->get_utc_date();
-                auto time_t = std::chrono::system_clock::to_time_t(utc);
-                std::ostringstream oss;
-                oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    utc.time_since_epoch()) % 1000;
-                oss << "." << std::setfill('0') << std::setw(3) << ms.count() << "Z";
+            } else if (method_name == "utcdate") {
                 AlpacaResponse alpaca_response = make_success_response(
-                    client_tx_id, server_tx_id, oss.str());
+                    client_tx_id, server_tx_id, alpacacore::device_state_timestamp(telescope->get_utc_date()));
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "axisrates") {
+            } else if (method_name == "axisrates") {
                 int axis = parse_int("Axis");
                 // AxisRates must return an array of rate objects, even if only one range.
                 auto ranges = telescope->get_axis_rate_ranges(axis);
@@ -3788,16 +3779,14 @@ Response Router::dispatch_telescope_method(
                 AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "canmoveaxis") {
+            } else if (method_name == "canmoveaxis") {
                 int axis = parse_int("Axis");
                 bool can_move = telescope->get_can_move_axis(axis);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, can_move);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "destinationsideofpier") {
+            } else if (method_name == "destinationsideofpier") {
                 auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
                 if (!ra_value) {
                     throw_invalid_value("Missing parameter: RightAscension");
@@ -3813,75 +3802,63 @@ Response Router::dispatch_telescope_method(
                     client_tx_id, server_tx_id, side);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "athome") {
+            } else if (method_name == "athome") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_at_home());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "atpark") {
+            } else if (method_name == "atpark") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_at_park());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "slewing") {
+            } else if (method_name == "slewing") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_slewing());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "tracking") {
+            } else if (method_name == "tracking") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_tracking());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "altitude") {
+            } else if (method_name == "altitude") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_altitude());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "azimuth") {
+            } else if (method_name == "azimuth") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_azimuth());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "declination") {
+            } else if (method_name == "declination") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_declination());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "rightascension") {
+            } else if (method_name == "rightascension") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_right_ascension());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "declinationrate") {
+            } else if (method_name == "declinationrate") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_declination_rate());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "rightascensionrate") {
+            } else if (method_name == "rightascensionrate") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_right_ascension_rate());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "trackingrate") {
+            } else if (method_name == "trackingrate") {
                 int rate = telescope->get_tracking_rate();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, rate);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "trackingrates") {
+            } else if (method_name == "trackingrates") {
                 auto rates = telescope->get_tracking_rates();
                 nlohmann::json rates_array = nlohmann::json::array();
                 for (int rate : rates) {
@@ -3890,75 +3867,63 @@ Response Router::dispatch_telescope_method(
                 AlpacaResponse alpaca_response = make_success_response(client_tx_id, server_tx_id, rates_array);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "targetdeclination") {
+            } else if (method_name == "targetdeclination") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_target_declination());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "targetrightascension") {
+            } else if (method_name == "targetrightascension") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_target_right_ascension());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "siderealtime") {
+            } else if (method_name == "siderealtime") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_sidereal_time());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "siteelevation") {
+            } else if (method_name == "siteelevation") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_site_elevation());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "sitelatitude") {
+            } else if (method_name == "sitelatitude") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_site_latitude());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "sitelongitude") {
+            } else if (method_name == "sitelongitude") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_site_longitude());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "focallength") {
+            } else if (method_name == "focallength") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_focal_length());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "aperturediameter") {
+            } else if (method_name == "aperturediameter") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_aperture_diameter());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "aperturearea") {
+            } else if (method_name == "aperturearea") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_aperture_area());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "sideofpier") {
+            } else if (method_name == "sideofpier") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, telescope->get_side_of_pier());
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "guideratedeclination") {
+            } else if (method_name == "guideratedeclination") {
                 auto guide_rate = telescope->get_guide_rate();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, guide_rate.dec);
                 response.set_body(alpaca_response);
                 return response;
-            }
-            else if (method_name == "guideraterightascension") {
+            } else if (method_name == "guideraterightascension") {
                 auto guide_rate = telescope->get_guide_rate();
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, guide_rate.ra);

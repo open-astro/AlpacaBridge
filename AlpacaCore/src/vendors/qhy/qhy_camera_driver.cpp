@@ -921,7 +921,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
-            throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("No exposure has been taken");
         }
         if (exposure_status_ == QHYExposureStatus::Success) {
             try {
@@ -942,8 +942,7 @@ public:
         }
         // Still exposing (or idle): there is no image to return, and waiting
         // would hold the HTTP request for the whole exposure.
-        throw AlpacaException("No image is ready; poll ImageReady until the exposure completes",
-                              AlpacaError::InvalidOperation);
+        throw AlpacaException::asked_too_early("No image is ready; poll ImageReady until the exposure completes");
     }
 
     std::string get_image_array_variant() const override {

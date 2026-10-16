@@ -41,6 +41,317 @@ The committed fake-based suites model applied/reply-lost commands, partial-axis
 failures and an explicit per-read drift hook. They do not establish real motor
 dynamics, rate units or physical calibration. Hardware qualification remains separate.
 
+### Issue #1156 contract follow-up
+
+The follow-up to merged PR #1148 accepts AbortSlew and Unpark while an initiator
+has released the motion mutex to drain a guide packet. The existing stop worker
+waits for lifecycle ownership; the interrupted initiator rechecks the pending
+stop before any dispatch and returns `InvalidOperation`. It leaves the transition
+gate owned by that stop, and stop-start failure restores the previous gate.
+Repeated requests still coalesce; stop completion and failure remain observable.
+
+Sibling set: Tracking/TrackingRate, Sync, FindHome/Park and coordinate/target slew
+share `MotionTransition`; PulseGuide and worker stages retain the transition
+gate. AbortSlew/Unpark share the stop initiator. Disconnect/destruction retain
+lifecycle ownership across all reaps. No transport, routing, configuration,
+capability or NexStar-backend change is needed.
+
+Issue #1156 also requests removing all four target-accessor parked guards.
+The canonical [TargetRightAscension](https://ascom-standards.org/newdocs/telescope.html#Telescope.TargetRightAscension)
+and [TargetDeclination](https://ascom-standards.org/newdocs/telescope.html#Telescope.TargetDeclination)
+entries in Master Interfaces 1.0.27 explicitly list `ParkedException` (rechecked
+for this follow-up). The guards remain pending authoritative clarification;
+this portion of the issue is **not claimed resolved**. Tests can independently
+exercise SlewToTargetAsync and SyncToTarget while parked by setting targets before
+Park, avoiding the setter refusal that masked both method checks in the old
+ConformU report (lines 156 and 158).
+
+Native arm64 fake-based validation passed all 445 configured Core CTest cases
+with only Celestron enabled, 93 focused CGX cases / 3060 assertions, and five
+Celestron lifecycle stress cases / 11 assertions (including the two CGX cases).
+The three new cases passed 1013 assertions; the two new concurrency cases passed
+977 assertions on each of ten repeated runs, including guide-timeout recovery. On the unchanged baseline, the
+FindHome handoff section and queued-stop disconnect each fail with the original
+ownership rejection. The parked-method coverage case already passes its 36
+assertions on the baseline. UBSan and TSan with halt-on-error each passed all 93 CGX
+cases / 3059 assertions and five Celestron stress cases / 11 assertions. Counts
+are reported as observed; all three configurations ran the same 93 CGX cases.
+Six production mutations each failed their named test by assertions (exit 42):
+missing post-join refusal, guide-failure priority over stop, lost transition gate,
+restored stop rejection, and the slew and Sync parked guards independently. The
+restored-source three-case run passed all 1013 assertions. No timeout, compile
+failure or no-test run is counted as falsification. ASan and full pre-flight remain pending on a compatible
+arm64 host; the available Pi has the documented 39-bit-VA ASan limitation.
+
+After explicit bare/clear approval, the all-vendors Release build was deployed
+with installed/running SHA-256
+`df854e9ed9ddf98ec5ac15227f10824318344f1925c436178f654a65a4f35a56`.
+It is an uncommitted snapshot based on `782294de`; the frozen Celestron production
+manifest matches the tested driver. No driver version bump is claimed.
+
+The second bounded northern CGX hardware run passed all six combinations of
+AbortSlew/Unpark interrupting FindHome/Park/coordinate slew during a native guide.
+Stop initiation took 2.13–3.97 ms; the interrupted initiator returned
+`InvalidOperation`, and only the small guide displacement remained. Both parked
+target methods were called directly using targets set before Park and returned
+`InvalidWhileParked`. Cleanup confirmed home, tracking/slewing/guiding off.
+The first run timed out waiting for one Park HTTP response despite its expected
+server-side interruption error. Its cleanup was safe; the successful repeat does
+not explain that timeout. It remains a qualification limitation, not a fixed bug.
+
+Both fresh supervised ConformU 4.5.1.54507.3929333 runs failed at extended
+`PulseGuide -9.0 North`: +39.3 arcsec measured versus +37.6 expected, a +1.7
+arcsec difference against 1.0 arcsec tolerance, identically in both runs. The
+second run was explicitly approved with unchanged code and settings. The watchdog stopped each run;
+cleanup confirmed home and no motion/tracking/guiding, restored settings and
+WARNING logging. Ara was restored after each session. This resembles the previously documented
+intermittent guide excess but does not establish its cause. No guide compensation
+or relaxed tolerance was applied. The failed raw reports stay outside the repo;
+fresh qualification is **not complete**. Historical passing run 5 is unchanged.
+Both new-run parked target-method rows still stop at their setter, so the separate
+direct hardware method checks above remain essential evidence.
+
+A separately approved two-pulse diagnostic captured the first pulse's settled
+encoder movement as +39.3963 arcsec against +37.60275 expected. Its excess was
+already present near onset, before the segment boundary; this is not proof of
+optical movement or a particular controller mechanism. The second pulse suffered
+a communication fault and has no valid final measurement. Software could not
+verify final stop/home/settings restoration. The operator visually confirmed the
+mount stationary. A subsequent explicitly approved stop-only recovery verified
+slewing/tracking/guiding off, without home or guide commands, and Ara was restored.
+Home/reference and prior settings restoration remain unverified. No extra pulses or
+compensation were applied. Root-cause and safe-recovery work remain open.
+
+The subsequent stop-only recovery verified slewing, tracking and guiding off;
+no homing was attempted. The operator explicitly confirmed the mount is physically
+not home. Ara was restored. A source-only diagnostic follow-up
+logs the original AUX transaction exception with command/address and elapsed/
+budget timing before generic health failures obscure it. It changes no guide
+rate, deadline, retry or exception semantics and is not a guide-accuracy fix.
+Its fake-based test failed against the old code and passed 60 assertions after
+the change. Native Core CTest passed 446/446; ordinary, UBSan and TSan each passed
+94 CGX cases / 3119 assertions and five Celestron stress cases / 11 assertions.
+Downgrading the error log to DEBUG falsified the new case by assertions (exit 42),
+and restored source passed. The diagnostics-only Release variant was subsequently
+deployed with installed/running SHA-256
+`2a072924af36ed22fdd470e34641007ebef5901ac5606a597c80815dacda7c93`.
+Deployment preserved config, restored Ara and WARNING logging, and sent no device
+commands. At that deployment checkpoint CGX was disconnected and physically not
+home. This improves fault observability only; guide accuracy and hardware
+qualification remain unresolved.
+
+With subsequent operator approval, an untraced two-pulse repeat measured
+38.314819 and 37.465096 arcsec against 37.60275 expected: errors +0.712069 and
+-0.137654 arcsec, both within the unchanged 1 arcsec tolerance. No API fault was
+observed. Cleanup verified home, slewing/tracking/guiding off, original settings
+and config unchanged, WARNING logging and Ara restored. This demonstrates
+variability, not a guide fix or a passing ConformU run.
+
+A later non-moving status-load comparison completed 315/617/312 successful GETs
+in 10 s untraced / 20 s traced / 10 s untraced phases. The traced phase contained
+1,234 matched, checksum-valid AUX guide-status exchanges, maximum captured
+write-entry to reply-read completion 10.064 ms. No communication fault reproduced;
+this does not identify the earlier fault or exonerate tracing. Cleanup verified
+slewing/tracking/guiding off, settings/config unchanged and Ara restored. The
+capture's fd filter cannot establish absence of every descriptor replacement.
+
+A forensic recheck of the earlier failed capture found matching valid replies
+for all 828 recorded requests before its first API fault. The last guide-status
+reply still indicated active; roughly 865 ms then elapsed without another
+captured serial read/write before the worker exited. The failed Declination
+call had no captured position request. That capture omitted poll/open/close and
+syscall durations, so this gap does not identify the cause. Its later cleanup
+also contains an unanswered request despite the decoder's empty `unmatched` list;
+that summary is not proof of complete exchanges or safe cleanup.
+
+Comparison with the NexStar backend found the same native `0x26` signed-percent /
+centisecond guide payload, sent through HC `P` pass-through instead of direct AUX.
+Its getters can substitute expected guide displacement for measured coordinates
+(`celestron_telescope_driver.cpp`, `get_declination` / `get_right_ascension`), so
+its passing guide result is not independent evidence of motor accuracy. Its
+5 s default response budget and read-failure handling also differ from the direct
+backend's bounded, fail-closed exchanges. Neither difference proves the present
+fault's cause; no coordinate correction, retry or timeout increase was copied.
+
+A third fresh ConformU run, on diagnostic binary `2a072924` and the unchanged
+settings, passed HA -9 North (+38.2 arcsec vs +37.6, difference 0.6), then stopped
+at HA -9 South (-40.9 vs -37.6, difference 3.3 against 1.0 tolerance). Its observed
+prefix has one issue, no errors/warnings and no timing violations; the final
+timing table was not reached. Neither daily-file nor journal capture contains an
+AUX transaction failure or compromised-link error. The watchdog's
+`health_fault=true` is its conservative any-finding policy, not a transport-fault
+diagnosis. Child termination preceded one verified stop-only cleanup. Settings,
+config and WARNING were restored/unchanged, Ara restored active. Home was skipped;
+no post-run home/reference verification is claimed. Fresh qualification and the
+intermittent communication fault remain unresolved; no fourth run is scheduled.
+
+A subsequent fixed-order comparison used one matched North/South five-second
+pair per binary. Yesterday's passing `9c353c87` measured errors +0.48033 and
+-0.40308 arcsec; current `2a072924` measured +1.56179 and -0.48033. Only the
+current build's North pulse exceeded 1 arcsec tolerance; its excess appeared
+early, with flat baselines and near-nominal middle slopes. This keeps regression
+in scope: one fixed A→B order cannot separate build effects from controller
+history/time. No communication faults occurred. Current binary restored,
+Home true and slewing/tracking/guiding false verified, settings/config/WARNING
+unchanged, Ara active. No alternative guide commands or compensation added.
+
+The single counterbalanced B→A comparison then measured current B North/South
+errors +0.71207 / -0.24858 arcsec, and old A +1.94803 / -0.48033. The old passing
+binary therefore reproduced excess beyond tolerance; the larger North error
+followed second-phase placement in both orders. This weakens a build-only
+explanation but does not establish an order/controller-history mechanism or
+exclude an intermittent regression. Both baselines were flat and middle slopes
+near nominal; temperature/history were not measured. Exactly four pulses, no
+communication faults. Current B restored with verified hash, explicitly homed at
+04:01:13.502 UTC on 2026-10-15, AtHome true and all motion/tracking/guiding false;
+settings/config/dependencies/WARNING unchanged, Ara active. These bounded encoder
+comparisons are not optical qualification or a replacement ConformU pass.
+
+An alternate absolute-rate command experiment was not implemented: unlike native
+guides those commands have no hardware expiry, and the existing wrapper cannot
+guarantee priority zero-stop dispatch after blocked telemetry or lost ACK. Its
+fail-closed transport behavior was not weakened for a diagnostic experiment.
+
+Celestron's [official firmware history](https://www.celestron.com/pages/firmware-update-history),
+checked 2026-10-15, lists CGX 7.18.2214 fixing rapid slew-button taps opposite
+tracking that cause quarter-degree bumps. The rig reports 7.17.25. This is a
+related manufacturer motion-transient lead, not evidence that the update fixes
+our much smaller native Dec pulse-guide excess. The CGX-L 7.18.5020 performance
+entry is not a CGX claim. No firmware update/reset or mechanical adjustment was
+performed; guide and communication root causes remain unresolved.
+
+#### Operator-approved firmware update — 2026-10-15
+
+The operator subsequently authorized installing Java and updating the mount.
+Official CFM 3.0.6196's universal JAR was checked against its published SHA-256
+and run on the Pi with OpenJDK 21 and an isolated virtual display. AlpacaBridge
+and Ara were stopped before CFM used the mount; no custom flashing code was used.
+
+The standard update wrote and CRC-verified CGX boot 3.1.9120 and motor application
+7.18.2214. USB re-enumeration changed ttyACM0 to ttyACM2; CFM's stale-port attempts
+then failed before updating the switch modules. This partial failure was retained.
+CFM re-discovery verified the new application. Its normal device-selection UI
+then excluded the completed motor update while both remaining switch applications
+were successfully programmed and CRC-verified as 1.0.7060. Final CFM re-discovery
+confirmed the motor and both switch versions.
+
+After CFM exited, AlpacaBridge independently reported **RA 7.18.2214, Dec
+7.18.2214**. Verified stop/tracking-off preceded an explicit successful FindHome;
+AtHome true and AtPark/slewing/tracking/guiding false were verified. Configured
+API settings, persisted config and WARNING logging were preserved/restored;
+Ara restored active. No claim is made about every undocumented EEPROM setting.
+The server remains binary `2a072924`; no driver change or deployment accompanied
+the firmware update. Java/display tools remain installed; CFM and the virtual
+display are closed. Private evidence retains package hashes, both update attempts,
+CFM logs/screenshots, kernel USB events and post-update checks.
+
+The subsequent single supervised ConformU run on 7.18.2214 failed HA -9 North:
++39.2 arcsec measured versus +37.6 expected, difference 1.6 against tolerance 1.0,
+at 2026-10-15 04:28:25.621 UTC. Basic East/North guides and overlap rejection
+passed; the cross-axis RA check passed. The observed prefix has one issue and
+no errors/warnings; remaining extended guides and final timing table were not
+reached. Neither daily-file nor journal records an AUX transaction failure or
+compromised-link error. **This firmware update did not eliminate the guide
+finding in this attempt.**
+
+The child was reaped before one stop-only cleanup; independent checks verified
+slewing/tracking/guiding false, API settings/config/WARNING preserved/restored,
+Ara active. Home was skipped after the finding: the earlier post-update Home is
+not a current position/reference verification. The watchdog's health-fault flag
+is conservative policy, not a communication diagnosis. No further repeat is
+scheduled without a new discriminator. Neither underlying fault is claimed fixed;
+At that checkpoint, the published passing report covered the original 7.17.25
+environment. It has since been replaced by the post-update report described in
+the [DeviceState follow-up](#devicestate-follow-up--15-october-2026).
+
+#### Short native-guide polling comparison — 2026-10-15
+
+The operator permitted short guides but prohibited larger positioning while away,
+and explicitly reported the mount not home. A reviewed private helper used the
+existing wrapper as sole port owner, after stopping Ara and AlpacaBridge. No
+driver source/deployment, Home/GOTO, Sync/labels or tracking enable was involved.
+Both conditions used stopped RA at the existing pose, not the tracking-on
+ConformU geometry. Offline prerequisites passed 21 ordinary and 21 UBSan cases;
+the reviewed cadence queried immediately after ACK then waited 20 ms after each
+reply, rather than a fixed dispatch grid.
+
+Exactly four positive/negative Dec motor pairs were sent in polled/quiet/quiet/
+polled order. Each packet was native `0x26`, signed 50% and 100 centiseconds;
+there was no pilot, retry or warm-up pulse. Settled count deltas were:
+
+| Pair | Mode | Positive | Negative |
+| --- | --- | ---: | ---: |
+| 1 | Polled | +124 | -104 |
+| 2 | Quiet | +100 | -110 |
+| 3 | Quiet | +99 | -105 |
+| 4 | Polled | +102 | -103 |
+
+Nominal magnitude is approximately 97.3564 counts (7.52055 arcsec). The first
+positive pulse's magnitude excess was 2.058155 arcsec; final polled positive
+excess was 0.358707. Matched negative reversals had magnitude excesses
+0.513202/0.976688/0.590450/0.435955 arcsec respectively. Quiet was not consistently
+better; this does not establish polling as cause or justify a guide correction.
+It also does not universally exclude a polling effect under other conditions.
+
+Quiet windows contained no requests until about 1.200 s after dispatch; endpoint
+timing matched within 675 microseconds. RA encoder deltas were zero and all
+endpoints passed stationary checks. The helper exited successfully and was reaped
+before service restoration; no recovery stops or extra guide pulses were needed.
+The restarted server independently verified slewing/tracking/guiding off, with
+API settings/config/WARNING and binary unchanged, Ara active. The mount remains
+physically not home and no reference was established after restart. Larger motion
+is paused for the operator's return; no further comparison scheduled today.
+These are relative motor-encoder observations, not optical or ConformU evidence.
+
+## DeviceState follow-up — 15 October 2026
+
+The operator subsequently authorized a complete bare-mount ConformU run that
+continued past conformance findings while retaining communication and motion
+safety watchdogs. ConformU 4.5.1.54507 completed on the unchanged `2a072924`
+binary and motor firmware 7.18.2214: zero errors, configuration alerts or issues,
+all 16 extended guides passed, and 97 of 98 response-timing rows passed.
+DeviceState took 123 ms against the 100 ms FAST target. Functional validation
+passed; the separate response-time target was missed. This does not establish
+that the earlier intermittent guide excess is fixed. Cleanup verified Home,
+tracking/guiding/slewing off, original settings/config/WARNING and Ara restored.
+The optional throughput benchmark remained off; the normal timing table was on.
+
+Follow-up stationary measurements identified an avoidable server-side cost:
+live guide-status queries between the coordinate getters can consume the shared
+30 ms raw-position-pair lifetime. Isolated traced responses then required six AUX
+queries instead of four, adding approximately 26–29 ms. The historical 123 ms call
+was not traced; these measurements do not account for its entire delay or exclude
+client/host contention. Instrumented measurements are kept distinct from the
+untraced baseline.
+
+The minimal shared-base change groups coordinate reads before live guide status.
+It adds no cache, changes no freshness limit, and retains all getters and health
+checks. A deterministic CGX regression covers Home and Park with the guide reply
+held across 32 ms of fake-clock time: the original order fails four read-count
+assertions, while the reordered private overlay passes eight telemetry cases /
+141 assertions normally and under UBSan on arm64.
+
+The same full report revealed that UTCDate was omitted even though the getter
+works. The shared telescope DeviceState now includes UTCDate when known, using
+the existing UTC formatter also used by its individual GET endpoint. Getter
+failure still omits the field; disconnected state stays empty. Those private
+overlay results preceded combined native validation and deployment; they were
+not themselves deployed timing evidence.
+
+Combined validation subsequently passed all 2168 all-vendor Release Core tests
+and all 16 HTTP tests, with the unchanged HTTP suite run in network isolation to
+exclude live discovery responders. The integrated Release binary
+`f11acde940431dbe2d275af9c112a921ca4bb07383654e7d272dafbbcd7783e8` was deployed.
+The [current published ConformU report](../AlpacaCore/conformu/Celestron/CGX/Linux-arm64-usb.txt)
+records a complete pass on 2026-10-15 with both motors 7.18.2214 / model 0x1788:
+zero errors, issues or configuration alerts, all 16 extended guide tests and all
+98 response-timing rows passing. DeviceState included UTCDate and took 62 ms.
+Cleanup verified Home with slewing, tracking and guiding off; original settings,
+config and WARNING logging were preserved. Ara remained stopped at the operator's
+request. This report qualifies the tested bare northern CGX/backend, not CGX-L,
+southern operation or optical accuracy, and does not establish a fix for the
+intermittent guide excess or AUX faults.
+
 ## Hardware-free follow-up — 2026-10-13
 
 This section records a historical checkpoint, not the current validation status.
