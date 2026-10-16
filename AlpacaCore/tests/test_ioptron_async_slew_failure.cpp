@@ -37,6 +37,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
 #include "fake_ioptron_mount.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -195,13 +196,25 @@ SlewingRead read_slewing(alpacacore::TelescopeDriver& driver, std::string* messa
     }
 }
 
+// Steps the driver's clock until Slewing reads false: the 5 s post-dispatch override and the status-cache
+// age both run on it, so the virtual 20 s the old real-time wait allowed costs no real time.
+bool advance_until_not_slewing(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock) {
+    const auto deadline = clock.now() + std::chrono::seconds(20);
+    while (read_slewing(driver) != SlewingRead::False) {
+        if (clock.now() >= deadline) return false;
+        clock.advance(std::chrono::milliseconds(100));
+    }
+    return true;
+}
+
 }  // namespace
 
 TEST_CASE("iOptron async - a GOTO the mount rejects surfaces through Slewing instead of a silent no-op (#575)",
           "[ioptron][telescope][async][slewfailure]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);
@@ -222,14 +235,15 @@ TEST_CASE("iOptron async - a GOTO the mount rejects surfaces through Slewing ins
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
     const SlewingRead after_retry = read_slewing(*driver);
     CHECK((after_retry == SlewingRead::True || after_retry == SlewingRead::False));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
 
 TEST_CASE("iOptron async - AbortSlew clears a stored slew failure (#575)", "[ioptron][telescope][async][slewfailure]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);
@@ -246,8 +260,9 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     alpacacore::test::FakeIoptronMount mount("0012", 0.0);
     REQUIRE(mount.ok());
     WorkerGate gate;
+    alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
-        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, 45.0, -122.0);
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, 45.0, -122.0, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);
@@ -266,7 +281,7 @@ TEST_CASE("iOptron async AltAz retry clears its prior error before worker prepar
     CHECK(read_slewing(*driver) == SlewingRead::True);
     gate.release();
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 2; }, 5000));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
 
@@ -276,8 +291,9 @@ TEST_CASE("iOptron async - a stale worker cannot publish over a newer accepted s
     REQUIRE(mount.ok());
     WorkerGate gate;
     gate.arm(/*reject_after_release=*/true, /*accept_second=*/true);
+    alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
-        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); });
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
@@ -300,7 +316,7 @@ TEST_CASE("iOptron async - a stale worker cannot publish over a newer accepted s
 
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));
     CHECK(mount.count(":MS1#") == 1);
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
 
@@ -308,7 +324,8 @@ TEST_CASE("iOptron - rejected synchronous GOTO clears the prior async failure",
           "[ioptron][telescope][async][slewfailure]") {
     alpacacore::test::FakeIoptronMount mount("0012", 0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);
@@ -333,8 +350,9 @@ TEST_CASE("iOptron - MoveAxis clears a superseded dispatch before its stale work
     REQUIRE(mount.ok());
     WorkerGate gate;
     gate.arm();
+    alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
-        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); });
+        0, endpoint(mount.port()), [&] { gate.before_worker_lock(mount); }, std::nullopt, std::nullopt, {}, {}, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(0.001, 0.0));
@@ -357,9 +375,10 @@ TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handof
     WorkerGate worker_gate;
     worker_gate.arm();
     SlewHandoffGate handoff;
+    alpacacore::test::FakeTaskClock clock;
     auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_slew_worker_hook(
         0, endpoint(mount.port()), [&] { worker_gate.before_worker_lock(mount); }, 45.0, -122.0,
-        [&] { handoff.before_reap(); }, [&] { handoff.before_lock(); });
+        [&] { handoff.before_reap(); }, [&] { handoff.before_lock(); }, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     std::exception_ptr older_error;
@@ -410,7 +429,7 @@ TEST_CASE("iOptron async - a newer initiator cannot be reaped by an older handof
 
     CHECK(driver->get_target_right_ascension() == 6.5);
     REQUIRE(wait_until([&] { return mount.count(":MS1#") >= 1; }, 5000));
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 15000));
+    REQUIRE(advance_until_not_slewing(*driver, clock));
     driver->set_connected(false);
 }
 
@@ -421,7 +440,8 @@ TEST_CASE("iOptron - a refused GOTO never writes the altitude limit or meridian 
           "[ioptron][telescope][slewfailure]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()));
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, endpoint(mount.port()), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     mount.set_reject_goto(true);

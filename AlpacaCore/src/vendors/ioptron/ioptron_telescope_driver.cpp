@@ -17,6 +17,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -26,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <ctime>
 #include <functional>
@@ -60,8 +62,10 @@ public:
                            std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
                            util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
                            std::function<void()> before_slew_worker_lock = {},
-                           std::function<void()> before_slew_reap = {}, std::function<void()> before_handoff_lock = {})
+                           std::function<void()> before_slew_reap = {}, std::function<void()> before_handoff_lock = {},
+                           util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("iOptron"),
+          clock_(clock),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
@@ -82,21 +86,21 @@ public:
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
-          last_site_info_fetch_(std::chrono::steady_clock::now()),
+          last_site_info_fetch_(clock_.now()),
           cached_ra_hours_(0.0),
           cached_dec_degrees_(0.0),
           cached_side_of_pier_(-1),
           position_cache_valid_(false),
-          last_position_update_(std::chrono::steady_clock::now()),
+          last_position_update_(clock_.now()),
           cached_alt_degrees_(0.0),
           cached_az_degrees_(0.0),
           altaz_cache_valid_(false),
-          last_altaz_update_(std::chrono::steady_clock::now()),
+          last_altaz_update_(clock_.now()),
           cached_guide_rate_(),
           guide_rate_valid_(false),
           cached_status_(),
           status_cache_valid_(false),
-          last_status_update_(std::chrono::steady_clock::now()),
+          last_status_update_(clock_.now()),
           last_utc_set_{},
           last_utc_set_monotonic_(std::chrono::steady_clock::now()),
           last_utc_valid_(false),
@@ -331,7 +335,7 @@ public:
                     mount_info_ = protocol.get_mount_info();
                 } catch (...) {
                 }
-                fast_cache_until_ = std::chrono::steady_clock::now() + kFastCacheGrace;
+                fast_cache_until_ = clock_.now() + kFastCacheGrace;
                 schedule_clock_sync = true;
                 std::string mount_desc = mount_info_.model_name.empty()
                     ? "unknown model"
@@ -521,7 +525,7 @@ public:
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             return false;
         }
@@ -553,7 +557,7 @@ public:
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
         if (pulse_guiding_active_.load(std::memory_order_acquire)) {
-            auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto now_ns = clock_.now().time_since_epoch().count();
             if (now_ns >= pulse_guiding_end_ns_.load(std::memory_order_relaxed)) {
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 return false;
@@ -567,8 +571,7 @@ public:
     // clear the flag (get_is_pulse_guiding() does).
     bool pulse_window_open() const {
         return pulse_guiding_active_.load(std::memory_order_acquire) &&
-               std::chrono::steady_clock::now().time_since_epoch().count() <
-                   pulse_guiding_end_ns_.load(std::memory_order_relaxed);
+               clock_.now().time_since_epoch().count() < pulse_guiding_end_ns_.load(std::memory_order_relaxed);
     }
 
     bool get_can_set_declination_rate() const override {
@@ -627,15 +630,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double dec_value = 0.0;
-        if (pulse_guiding_hold_dec_valid_ &&
-            std::chrono::steady_clock::now() < pulse_guiding_hold_dec_until_) {
+        if (pulse_guiding_hold_dec_valid_ && clock_.now() < pulse_guiding_hold_dec_until_) {
             dec_value = pulse_guiding_hold_dec_degrees_;
         } else {
             refresh_position_cache_locked();
             dec_value = cached_dec_degrees_;
         }
         if (pulse_guiding_dec_correction_valid_) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
             if (now < pulse_guiding_dec_correction_until_) {
                 dec_value = pulse_guiding_dec_baseline_degrees_ +
                             pulse_guiding_dec_expected_delta_degrees_;
@@ -664,7 +666,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (tracking_override_until_ > now && status_cache_valid_) {
             return cached_status_.is_tracking;
         }
@@ -686,7 +688,7 @@ public:
         }
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
@@ -745,15 +747,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double ra_value = 0.0;
-        if (pulse_guiding_hold_ra_valid_ &&
-            std::chrono::steady_clock::now() < pulse_guiding_hold_until_) {
+        if (pulse_guiding_hold_ra_valid_ && clock_.now() < pulse_guiding_hold_until_) {
             ra_value = pulse_guiding_hold_ra_hours_;
         } else {
             refresh_position_cache_locked();
             ra_value = cached_ra_hours_;
         }
         if (pulse_guiding_ra_correction_valid_) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
             if (now < pulse_guiding_ra_correction_until_) {
                 ra_value = normalize_ra_hours(pulse_guiding_ra_baseline_hours_ +
                                               pulse_guiding_ra_expected_delta_hours_);
@@ -801,7 +802,7 @@ public:
         // Slewing/DeviceState poll observes completion, so a client that
         // polls SideOfPier alone keeps live reads after the move as well:
         // never stale, just uncached until it asks whether the slew ended.
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
             (now - last_position_update_) >= kSideOfPierPositionTtl) {
             refresh_position_cache_locked();
@@ -926,7 +927,7 @@ public:
         site_latitude_cached_ = latitude;
         hemisphere_north_ = (latitude >= 0.0);
         site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        last_site_info_fetch_ = clock_.now();
     }
 
     double get_site_longitude() const override {
@@ -950,7 +951,7 @@ public:
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
         site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        last_site_info_fetch_ = clock_.now();
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1025,7 +1026,7 @@ public:
                 }
                 cached_status_.is_tracking = desired_tracking;
                 status_cache_valid_ = true;
-                last_status_update_ = std::chrono::steady_clock::now();
+                last_status_update_ = clock_.now();
                 tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
                 tracking_state_before_move_.reset();
             }
@@ -1088,7 +1089,7 @@ public:
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             return true;
         }
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (slew_override_until_ > now) {
             return true;
         }
@@ -1149,8 +1150,7 @@ public:
                                                    std::to_string(kMaxSlewRefines) + " (" +
                                                    std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
                     protocol.pulse_guide(direction, duration_ms);
-                    slew_override_until_ =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms + 500);
+                    slew_override_until_ = clock_.now() + std::chrono::milliseconds(duration_ms + 500);
                     status_cache_valid_ = false;
                     position_cache_valid_ = false;
                     return true;
@@ -1204,7 +1204,7 @@ public:
     int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (tracking_rate_override_until_ > now && status_cache_valid_) {
             return static_cast<int>(cached_status_.tracking_rate);
         }
@@ -1228,7 +1228,7 @@ public:
         }
         cached_status_.tracking_rate = rate;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
 
@@ -1292,7 +1292,7 @@ public:
         protocol.go_to_home();
         supersede_slew_dispatch_locked();
         driver_motion_ = DriverMotion::Home;
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
@@ -1324,7 +1324,7 @@ public:
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
@@ -1419,10 +1419,8 @@ public:
                 pulse_guiding_hold_ra_hours_ = cached_ra_hours_;
             }
             pulse_guiding_hold_ra_valid_ = true;
-            pulse_guiding_hold_until_ = std::chrono::steady_clock::now() +
-                                       std::chrono::milliseconds(duration) +
-                                       kPulseGuideCompletionDelay +
-                                       kPulseGuideHoldGrace;
+            pulse_guiding_hold_until_ =
+                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
             pulse_guiding_hold_dec_valid_ = false;
             GuideRate guide_rate;
             if (guide_rate_valid_) {
@@ -1442,10 +1440,8 @@ public:
                 pulse_guiding_dec_baseline_degrees_ = cached_dec_degrees_;
             }
             pulse_guiding_dec_correction_valid_ = true;
-            pulse_guiding_dec_correction_until_ = std::chrono::steady_clock::now() +
-                                                  std::chrono::milliseconds(duration) +
-                                                  kPulseGuideCompletionDelay +
-                                                  kPulseGuideCorrectionGrace;
+            pulse_guiding_dec_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
+                                                  kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
         } else if (duration > 0 && is_ra) {
             if (last_dec_read_valid_) {
                 pulse_guiding_hold_dec_degrees_ = last_dec_read_degrees_;
@@ -1453,10 +1449,8 @@ public:
                 pulse_guiding_hold_dec_degrees_ = cached_dec_degrees_;
             }
             pulse_guiding_hold_dec_valid_ = true;
-            pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(duration) +
-                                            kPulseGuideCompletionDelay +
-                                            kPulseGuideHoldGrace;
+            pulse_guiding_hold_dec_until_ =
+                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
             pulse_guiding_hold_ra_valid_ = false;
             GuideRate guide_rate;
             if (guide_rate_valid_) {
@@ -1476,19 +1470,15 @@ public:
                 pulse_guiding_ra_baseline_hours_ = cached_ra_hours_;
             }
             pulse_guiding_ra_correction_valid_ = true;
-            pulse_guiding_ra_correction_until_ = std::chrono::steady_clock::now() +
-                                                 std::chrono::milliseconds(duration) +
-                                                 kPulseGuideCompletionDelay +
-                                                 kPulseGuideCorrectionGrace;
+            pulse_guiding_ra_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
+                                                 kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
         } else {
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_dec_valid_ = false;
         }
         protocol.pulse_guide(calibrated_direction, duration);
         if (duration > 0) {
-            auto end = std::chrono::steady_clock::now() +
-                       std::chrono::milliseconds(duration) +
-                       kPulseGuideCompletionDelay;
+            auto end = clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             pulse_guiding_end_ns_.store(end.time_since_epoch().count(),
                                         std::memory_order_relaxed);
             pulse_guiding_active_.store(true, std::memory_order_release);
@@ -1686,7 +1676,7 @@ public:
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
             // dispatch thread gets the mutex.
-            slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         }
 
         try {
@@ -1796,7 +1786,7 @@ public:
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(2);
         park_override_until_ = last_status_update_ + kUnparkGrace;
         park_finalize_pending_ = false;
@@ -1841,7 +1831,7 @@ private:
     }
 
     void ensure_not_parked_locked(const char* action) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             park_override_until_ = now + kUnparkGrace;
             return;
@@ -1857,7 +1847,7 @@ private:
     }
 
     void ensure_not_parked_fast_locked(const char* action) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             park_override_until_ = now + kUnparkGrace;
             return;
@@ -1917,7 +1907,7 @@ private:
 
     void prefetch_mount_state_locked() {
         auto& protocol = iOptronProtocolWrapper::instance();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         try {
             Position pos = protocol.get_position();
             cached_dec_degrees_ = pos.dec_degrees;
@@ -1980,7 +1970,7 @@ private:
         // the settle refinement against the pre-slew position and report the
         // slew complete before it started (caught by the loopback fake-mount
         // test). Every dispatch-failure path clears it again.
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
     }
 
     void invalidate_slew_error_locked() {
@@ -2023,7 +2013,7 @@ private:
             }
             throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
         }
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
@@ -2034,12 +2024,12 @@ private:
     }
 
     void wait_for_slew_completion(const char* label) {
-        const auto deadline = std::chrono::steady_clock::now() + kSlewTimeout;
+        const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
-            if (std::chrono::steady_clock::now() > deadline) {
+            if (clock_.now() > deadline) {
                 throw AlpacaException(std::string(label) + " timed out waiting for slew to complete");
             }
-            std::this_thread::sleep_for(kSlewPollInterval);
+            clock_.sleep_for(kSlewPollInterval);
         }
 
         // The mount may clear its slewing status well before the physical
@@ -2059,7 +2049,7 @@ private:
             double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
             int stable_count = 0;
 
-            while (std::chrono::steady_clock::now() < deadline) {
+            while (clock_.now() < deadline) {
                 bool target_reached = false;
                 double cur_ra = 0, cur_dec = 0;
                 {
@@ -2091,18 +2081,18 @@ private:
                     break;
                 }
 
-                std::this_thread::sleep_for(kSlewPollInterval);
+                clock_.sleep_for(kSlewPollInterval);
             }
         }
 
         if (slew_settle_time_seconds_ > 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         slew_in_progress_ = false;
     }
     
     void refresh_position_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && position_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2127,7 +2117,7 @@ private:
     }
 
     void refresh_altaz_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && altaz_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2151,7 +2141,7 @@ private:
     }
     
     void refresh_status_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && status_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2212,7 +2202,7 @@ private:
                             "to finalize (HAE firmware quirk)");
             protocol.stop_tracking();
             cached_status_ = protocol.get_status();
-            last_status_update_ = std::chrono::steady_clock::now();
+            last_status_update_ = clock_.now();
             if (cached_status_.is_parked) {
                 park_finalize_pending_ = false;
             }
@@ -2222,7 +2212,7 @@ private:
     }
 
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force_refresh && site_info_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2269,7 +2259,9 @@ private:
         bool dst_active = false;
     };
 
-    bool retry_mount_command(const char* label, const std::function<void()>& fn) {
+    // `cancellable`: the clock-sync thread's retries stop when it is cancelled; the
+    // synchronous connect-path callers keep the plain delay.
+    bool retry_mount_command(const char* label, const std::function<void()>& fn, bool cancellable = false) {
         constexpr int kMaxAttempts = 3;
         const auto delay = std::chrono::milliseconds(750);
         std::string last_error;
@@ -2280,7 +2272,9 @@ private:
             } catch (const std::exception& e) {
                 last_error = e.what();
                 if (attempt < kMaxAttempts) {
-                    std::this_thread::sleep_for(delay);
+                    if (cancellable ? clock_sync_wait(delay) : (clock_.sleep_for(delay), false)) {
+                        break;  // the clock-sync thread was cancelled: stop retrying
+                    }
                 }
             }
         }
@@ -2306,10 +2300,10 @@ private:
             }
             const int sample_duration = std::clamp(duration_ms, 500, 2000);
             protocol.pulse_guide(0, sample_duration);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration + 700));
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
             Position end = protocol.get_position();
             for (int i = 0; i < 2; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                clock_.sleep_for(std::chrono::milliseconds(200));
                 end = protocol.get_position();
             }
 
@@ -2361,26 +2355,26 @@ private:
             const double test_ra_rate = std::clamp(0.5, 0.01, 0.90);
             const double test_dec_rate = std::clamp(original_dec_rate, 0.10, 0.99);
             protocol.set_guide_rates(test_ra_rate, test_dec_rate);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            clock_.sleep_for(std::chrono::milliseconds(300));
 
-            auto read_position_stable = [&protocol]() {
+            auto read_position_stable = [&protocol, this]() {
                 Position pos = protocol.get_position();
                 for (int i = 0; i < 2; ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    clock_.sleep_for(std::chrono::milliseconds(200));
                     pos = protocol.get_position();
                 }
                 return pos;
             };
 
             const Position baseline_start = protocol.get_position();
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position baseline_end = read_position_stable();
             const double baseline_delta_hours =
                 shortest_ra_delta_hours(baseline_end.ra_hours, baseline_start.ra_hours);
 
             const Position pulse_start = protocol.get_position();
             protocol.pulse_guide(2, sample_duration);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position pulse_end = read_position_stable();
 
             const double pulse_delta_hours =
@@ -2478,7 +2472,7 @@ private:
                 site_latitude_cached_ = latitude;
                 hemisphere_north_ = (latitude >= 0.0);
                 site_info_valid_ = true;
-                last_site_info_fetch_ = std::chrono::steady_clock::now();
+                last_site_info_fetch_ = clock_.now();
             }
         }
 
@@ -2487,7 +2481,7 @@ private:
             if (retry_mount_command("site longitude", [&]() { iOptronProtocolWrapper::instance().set_longitude(longitude); })) {
                 site_longitude_cached_ = longitude;
                 site_info_valid_ = true;
-                last_site_info_fetch_ = std::chrono::steady_clock::now();
+                last_site_info_fetch_ = clock_.now();
             }
         }
 
@@ -2560,8 +2554,7 @@ private:
         stop_clock_sync_thread_locked();
         clock_sync_cancel_.store(false);
         clock_sync_thread_ = std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            if (clock_sync_cancel_.load()) {
+            if (clock_sync_wait(std::chrono::milliseconds(250))) {
                 return;
             }
 
@@ -2583,20 +2576,25 @@ private:
 
             if (lat.has_value()) {
                 double latitude = lat.value();
-                retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); });
-                retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); });
+                retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); }, /*cancellable=*/true);
+                retry_mount_command(
+                    "hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); }, /*cancellable=*/true);
             }
             if (lon.has_value()) {
                 double longitude = lon.value();
-                retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); });
+                retry_mount_command(
+                    "site longitude", [&]() { protocol.set_longitude(longitude); }, /*cancellable=*/true);
             }
 
             if (do_clock_sync) {
                 auto tz_info = compute_local_timezone_info();
                 auto now_utc = std::chrono::system_clock::now();
-                retry_mount_command("timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); });
-                retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); });
-                retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); });
+                retry_mount_command(
+                    "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); },
+                    /*cancellable=*/true);
+                retry_mount_command(
+                    "DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, /*cancellable=*/true);
+                retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, /*cancellable=*/true);
             }
 
             {
@@ -2608,12 +2606,12 @@ private:
                     site_latitude_cached_ = lat.value();
                     hemisphere_north_ = (lat.value() >= 0.0);
                     site_info_valid_ = true;
-                    last_site_info_fetch_ = std::chrono::steady_clock::now();
+                    last_site_info_fetch_ = clock_.now();
                 }
                 if (lon.has_value()) {
                     site_longitude_cached_ = lon.value();
                     site_info_valid_ = true;
-                    last_site_info_fetch_ = std::chrono::steady_clock::now();
+                    last_site_info_fetch_ = clock_.now();
                 }
                 if (elev.has_value()) {
                     site_elevation_m_ = elev.value();
@@ -2636,8 +2634,23 @@ private:
         stop_clock_sync_thread_locked();
     }
 
+    // Cancellable wait on the task clock for the clock-sync thread and the
+    // mount-command retry delay: returns true when stop_clock_sync_thread_locked()
+    // cancelled it, so a join never waits out the delay (or, on a FakeTaskClock,
+    // a virtual deadline nobody advances). clock_sync_wait_mutex_ is a leaf lock.
+    bool clock_sync_wait(std::chrono::nanoseconds delay) {
+        std::unique_lock<std::mutex> lock(clock_sync_wait_mutex_);
+        return clock_.wait_for(lock, clock_sync_wait_cv_, delay, [this] { return clock_sync_cancel_.load(); });
+    }
+
     void stop_clock_sync_thread_locked() {
-        clock_sync_cancel_.store(true);
+        {
+            // Set under the wait mutex so the flag cannot slip between the
+            // waiter's predicate check and its block.
+            std::lock_guard<std::mutex> wait_lock(clock_sync_wait_mutex_);
+            clock_sync_cancel_.store(true);
+        }
+        clock_sync_wait_cv_.notify_all();
         if (clock_sync_thread_.joinable()) {
             clock_sync_thread_.join();
         }
@@ -2782,7 +2795,12 @@ private:
         }
         return false;
     }
-    
+
+    // Task waits, settle/poll sleeps and deadlines run on this clock (open-astro#1223,
+    // decision 0005). Real by default; UTC pointing time stays on system_clock
+    // (decision 0001) and serial/TCP I/O timeouts stay real. Declared first:
+    // later members are initialised from it.
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     // Set by the auto-detect factories; empty for an explicit port or host.
@@ -2919,6 +2937,8 @@ private:
     mutable std::chrono::steady_clock::time_point slew_override_until_{};
     std::thread clock_sync_thread_;
     std::atomic<bool> clock_sync_cancel_;
+    std::mutex clock_sync_wait_mutex_;
+    std::condition_variable clock_sync_wait_cv_;
     // Guards clock_sync_thread_ join/assign across overlapping set_connected
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
@@ -2939,47 +2959,45 @@ private:
 };
 
 // Factory function implementation
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info)
-{
-    return std::make_unique<iOptronTelescopeDriver>(
-        device_number, connection_info, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                          util::TaskClock& clock) {
+    return std::make_unique<iOptronTelescopeDriver>(device_number, connection_info, std::nullopt, std::nullopt,
+                                                    std::nullopt, std::nullopt,
+                                                    util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_slew_worker_hook(
     int device_number, const ConnectionInfo& connection_info, std::function<void()> before_worker_lock,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::function<void()> before_slew_reap, std::function<void()> before_handoff_lock) {
+    std::function<void()> before_slew_reap, std::function<void()> before_handoff_lock, util::TaskClock& clock) {
     return std::make_unique<iOptronTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, std::nullopt, std::nullopt,
         util::ConnectionResolver<ConnectionInfo>{}, std::move(before_worker_lock), std::move(before_slew_reap),
-        std::move(before_handoff_lock));
+        std::move(before_handoff_lock), clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect)
-{
-    return std::make_unique<iOptronTelescopeDriver>(
-        device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m,
-        sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
+    return std::make_unique<iOptronTelescopeDriver>(device_number, connection_info, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("iOptron telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<iOptronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                     site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                    std::move(connection_resolver));
+                                                    std::move(connection_resolver), std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
 }
 
 ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
@@ -3037,23 +3055,25 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number
                                                                std::optional<double> site_latitude_deg,
                                                                std::optional<double> site_longitude_deg,
                                                                std::optional<double> site_elevation_m,
-                                                               std::optional<bool> sync_time_on_connect) {
+                                                               std::optional<bool> sync_time_on_connect,
+                                                               util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
     return create_ioptron_telescope_deferred(
         device_number, [mount_index] { return resolve_ioptron_serial_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int device_number, int mount_index,
                                                                        std::optional<double> site_latitude_deg,
                                                                        std::optional<double> site_longitude_deg,
                                                                        std::optional<double> site_elevation_m,
-                                                                       std::optional<bool> sync_time_on_connect) {
+                                                                       std::optional<bool> sync_time_on_connect,
+                                                                       util::TaskClock& clock) {
     // The subnet sweep runs at connect time (#659), not here: at server
     // start-up the mount is usually still joining the access point.
     return create_ioptron_telescope_deferred(
         device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
 }
 
 } // namespace alpacacore::vendor::ioptron
