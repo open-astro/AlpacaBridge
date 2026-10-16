@@ -16,6 +16,7 @@ workflow file the snapshot names (GitHub stops listing them itself once it does)
   dependency_snapshot.py [--sha S] [--ref R] [--deb DEB] [--debian-policy F] [--ubuntu-policy F] [--output FILE]
                                                                write the snapshot
   dependency_snapshot.py --apt-packages debian|ubuntu [--deb DEB]  package names to pass to apt-cache policy
+  dependency_snapshot.py --newest-deb DIR                      path of the newest nightly .deb in DIR
   dependency_snapshot.py --check                               drift check
   dependency_snapshot.py --spdx DEB [--output FILE]            SPDX SBOM for a built .deb
   dependency_snapshot.py --pin                                 rewrite the SDK sha256 pins
@@ -286,13 +287,29 @@ def parse_uses(text: str) -> list[str]:
     return out
 
 
-def installed_udev_rules(root: Path) -> list[Path]:
-    """The vendored udev rules files debian/rules installs, with its make variables expanded."""
+def scan_udev_rules(root: Path) -> tuple[list[Path], list[str]]:
+    """(vendored udev rules files debian/rules installs, errors), its make variables expanded.
+
+    Only ``:=`` and ``=`` assignments are expanded. A ``.rules`` path that uses a variable set any other
+    way (``?=``, ``+=``, ``$(shell ...)``), or that still holds a ``$(VAR)`` after expansion, is an error:
+    skipping it would drop that file's evidence without a message.
+    """
     rules = root / "debian/rules"
     if not rules.is_file():
-        return []
+        return [], []
     text = rules.read_text(encoding="utf-8")
-    values = {m.group(1): m.group(2) for m in re.finditer(r"^([A-Z_][A-Z0-9_]*)\s*:?=\s*(.*?)\s*$", text, re.M)}
+    values: dict[str, str] = {}
+    unsupported: dict[str, str] = {}  # variable -> the form that makes it unexpandable
+    for m in re.finditer(r"^([A-Z_][A-Z0-9_]*)\s*([:?+]?=)\s*(.*?)\s*$", text, re.M):
+        name, op, value = m.groups()
+        if op in ("?=", "+="):
+            unsupported[name] = op
+        elif "$(shell" in value:
+            unsupported[name] = "$(shell ...)"
+        else:
+            values[name] = value
+    for name in unsupported:
+        values.pop(name, None)
     values["CURDIR"] = str(root)
 
     def expand(word: str) -> str:
@@ -304,16 +321,47 @@ def installed_udev_rules(root: Path) -> list[Path]:
         return word
 
     out: list[Path] = []
+    errors: list[str] = []
     for word in re.findall(r"\S+\.rules\b", text):
-        path = Path(expand(word))
+        used = set(re.findall(r"\$\(([A-Z_][A-Z0-9_]*)\)", word))
+        bad = sorted(v for v in used if v in unsupported)
+        expanded = expand(word)
+        if bad:
+            errors.append(f"debian/rules: {word} uses {', '.join(f'{v} ({unsupported[v]})' for v in bad)}, "
+                          "which installed_udev_rules() cannot expand: assign it with := or =")
+            continue
+        if "$(" in expanded or "${" in expanded:
+            prefix = Path(re.split(r"\$[({]", expanded, maxsplit=1)[0])
+            if prefix.is_absolute() and not prefix.is_relative_to(root / EXTERNAL):
+                continue  # resolved far enough to be outside the vendored tree: not vendor evidence
+            errors.append(f"debian/rules: {word} still holds an unresolved variable after expansion "
+                          f"({expanded}): define it with := or = in debian/rules")
+            continue
+        path = Path(expanded)
         if path.is_absolute() and path.is_relative_to(root / EXTERNAL) and path.is_file() and path not in out:
             out.append(path)
-    return out
+    return out, sorted(set(errors))
+
+
+def installed_udev_rules(root: Path) -> list[Path]:
+    return scan_udev_rules(root)[0]
+
+
+def newest_nightly_deb(paths: list[str]) -> tuple[str | None, list[str]]:
+    """(newest path by its ``nightlyYYYYMMDDHHMM`` stamp, warnings). A file without a stamp is never chosen."""
+    stamped, warnings = [], []
+    for p in paths:
+        m = re.search(r"nightly(\d{12})(?!\d)", Path(p).name)
+        if m:
+            stamped.append((m.group(1), p))
+        else:
+            warnings.append(f"{p}: no nightlyYYYYMMDDHHMM stamp, ignored")
+    return (max(stamped)[1] if stamped else None), warnings
 
 
 def parse_runtime_system(root: Path) -> tuple[list[str], list[str]]:
     """Return (package names, errors) for RUNTIME_SYSTEM: a package whose evidence is gone is an error."""
-    names, errors = [], []
+    names, errors = [], list(scan_udev_rules(root)[1])
     for name, pattern, rx in RUNTIME_SYSTEM:
         files = installed_udev_rules(root) if pattern == INSTALLED_UDEV_RULES else sorted(root.glob(pattern))
         if any(re.search(rx, f.read_text(encoding="utf-8", errors="replace"), re.M)
@@ -1009,6 +1057,28 @@ def self_test() -> int:
         (r / EXTERNAL / "B/copy.rules").unlink()
         (r / EXTERNAL / "x.rules").write_text(evidence[f"{EXTERNAL}/x.rules"])
         assert installed_udev_rules(r) == [r / EXTERNAL / "x.rules"], installed_udev_rules(r)
+        assert scan_udev_rules(r)[1] == [] and drift() == [], scan_udev_rules(r)
+        # A .rules path built with a form the expansion cannot follow is an error, not a skipped path.
+        good = evidence["debian/rules"]
+        for form, rule_text in (
+                ("?=", good.replace("RULES_DIR :=", "RULES_DIR ?=")),
+                ("+=", good.replace("RULES_DIR :=", "RULES_DIR +=")),
+                ("$(shell ...)", good.replace("$(CURDIR)/AlpacaCore/external", "$(shell echo x)")),
+                ("unresolved", good.replace("$(RULES_DIR)/x.rules", "$(MISSING_DIR)/x.rules"))):
+            (r / "debian/rules").write_text(rule_text)
+            errs = scan_udev_rules(r)[1]
+            assert len(errs) == 1 and "debian/rules" in errs[0] and "x.rules" in errs[0], (form, errs)
+            assert any("x.rules" in e for e in drift()), (form, drift())
+        (r / "debian/rules").write_text(good)
+        assert drift() == [], drift()
+        # The pick of the newest nightly .deb orders by its stamp, never by the full name.
+        old, new_ = "alpacabridge_5.0.9-nightly202610150300_arm64.deb", "alpacabridge_5.0.10-nightly202610160300_arm64.deb"
+        assert sorted([new_, old])[-1] == old  # the full-name sort this replaces picks the wrong file
+        assert newest_nightly_deb([old, new_]) == (new_, []), newest_nightly_deb([old, new_])
+        assert newest_nightly_deb([new_, old])[0] == new_
+        pick, warns = newest_nightly_deb(["zzz_arm64.deb", old])
+        assert pick == old and len(warns) == 1 and "zzz_arm64.deb" in warns[0], (pick, warns)
+        assert newest_nightly_deb(["zzz_arm64.deb"])[0] is None
         # Every workflow manifest the snapshot submits also carries that workflow's action pins:
         # GitHub drops its own scan of a workflow file a submitted snapshot names.
         pin = "c" * 40
@@ -1226,6 +1296,7 @@ def main() -> int:
     ap.add_argument("--output")
     ap.add_argument("--spdx", metavar="DEB")
     ap.add_argument("--deb", metavar="DEB", help="a built .deb whose resolved Depends and Recommends to report")
+    ap.add_argument("--newest-deb", metavar="DIR", help="print the newest nightlyYYYYMMDDHHMM .deb in DIR")
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--apt-packages", choices=("debian", "ubuntu"))
     ap.add_argument("--debian-policy", metavar="FILE", help="apt-cache policy output from debian:trixie")
@@ -1236,6 +1307,17 @@ def main() -> int:
     deb = read_deb_fields(Path(a.deb)) if a.deb else None
     if a.apt_packages:
         print("\n".join(apt_packages(ROOT, a.apt_packages, deb)))
+        return 0
+    if a.newest_deb:
+        debs = sorted(str(p) for p in Path(a.newest_deb).glob("*.deb"))
+        newest, warnings = newest_nightly_deb(debs)
+        for w in warnings:
+            print(f"::warning::{w}", file=sys.stderr)
+        if debs and newest is None:
+            print("ERROR: no .deb carries a nightlyYYYYMMDDHHMM stamp", file=sys.stderr)
+            return 1
+        if newest:
+            print(newest)
         return 0
     if a.pin:
         pin_sdk_hashes(ROOT)

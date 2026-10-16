@@ -40,17 +40,19 @@ jobs:
           fi
           ls -l nightly
           # The nightly uploads its new .deb before it deletes the old one, so a push in between finds
-          # two. Their names carry a YYYYMMDDHHMM stamp: the steps below take the last in sorted order.
+          # two. Their names carry a nightlyYYYYMMDDHHMM stamp: the newest stamp wins (not the full
+          # name, which sorts 5.0.10 before 5.0.9), and the later steps read it from NIGHTLY_DEB.
           n=$(find nightly -name '*.deb' | wc -l)
           if [ "${n}" -gt 1 ]; then echo "::warning::${n} nightly .deb files; using the newest"; fi
+          newest=$(python3 scripts/dependency_snapshot.py --newest-deb nightly)
+          if [ -n "${newest}" ]; then echo "NIGHTLY_DEB=${newest}" >> "${GITHUB_ENV}"; fi
 
       # debian/control and ci.yml's apt tools are unpinned (>= or bare names), so report the
       # version apt would install today: debian:trixie (the image release.yml builds the .deb
       # in) for debian/control, this Ubuntu 24.04 runner for the CI tools.
       - name: Resolve apt candidate versions
         run: |
-          shopt -s nullglob; debs=(nightly/*.deb); deb_args=()
-          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[-1]}"); fi
+          deb_args=(); if [ -n "${NIGHTLY_DEB:-}" ]; then deb_args=(--deb "${NIGHTLY_DEB}"); fi
           mapfile -t deb_pkgs < <(python3 scripts/dependency_snapshot.py --apt-packages debian "${deb_args[@]}")
           docker run --rm -e LC_ALL=C debian:trixie \
             sh -c 'apt-get update -qq >/dev/null && apt-cache policy "$@"' sh "${deb_pkgs[@]}" > debian-policy.txt
@@ -60,8 +62,7 @@ jobs:
 
       - name: Build snapshot
         run: |
-          shopt -s nullglob; debs=(nightly/*.deb); deb_args=()
-          if [ "${#debs[@]}" -gt 0 ]; then deb_args=(--deb "${debs[-1]}"); fi
+          deb_args=(); if [ -n "${NIGHTLY_DEB:-}" ]; then deb_args=(--deb "${NIGHTLY_DEB}"); fi
           python3 scripts/dependency_snapshot.py --check
           python3 scripts/dependency_snapshot.py "${deb_args[@]}" --debian-policy debian-policy.txt \
             --ubuntu-policy ubuntu-policy.txt --output snapshot.json
