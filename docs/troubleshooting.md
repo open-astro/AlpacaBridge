@@ -159,7 +159,7 @@ Environment=ALPACAHTTP_MOTION_WATCHDOG_SECONDS=0
 
 **Cause**: the driver knows the direction of the Dec axis counts (`eps`) only for boards that were measured: EQ-AL55i Pro (mount code `0x09`), EQM-35 Pro (`0x32`) and Wave 150i (`0x45`). Any other board keeps the shipped model `k = +1` (the home term sign, `eps` times the hemisphere sign), which is `eps = +1` in the north and `eps = -1` in the south, and is wrong for a board wired the other way (issue #582, #579). The connect log says where `eps` came from: `from the measured table`, `from the user override`, `from the unmeasured-board default`, or `Motor board not identified`.
 
-**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, send a Dec-only `MoveAxis` until the Dec axis has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. Then look at which way the dovetail points:
+**Fix**: set **Dec axis sense** (`decAxisSense` in the device config) from one reading on your own mount. With the mount bare (no telescope), at its home position and tracking off, move the Dec axis alone until it has turned about +90 degrees (`a2 = +90`), keeping the RA axis at home. `MoveAxis` is sky-referenced (a positive secondary rate raises Declination, whichever way that turns the axis), so judge by the axis angle `a2`, not by the sign of the rate. Then look at which way the dovetail points:
 
 | Dovetail points | Your site | Dec axis sense |
 | --- | --- | --- |
