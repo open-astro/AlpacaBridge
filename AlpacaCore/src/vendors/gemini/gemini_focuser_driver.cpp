@@ -13,13 +13,18 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -27,14 +32,27 @@
 
 namespace alpacacore::vendor::gemini {
 
+namespace {
+
+// State poll (open-astro#1229, decision 0010). One poll is three request/
+// response exchanges at 9600 baud, so the period leaves the wire mostly free
+// for Move/Halt. The freshness bound is two periods; a stale frame is still
+// served, only one older than util::kLinkStalenessBound is refused.
+constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
+constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
+
+}  // namespace
+
 class GeminiFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     GeminiFocuserDriver(int device_number, ConnectionConfig config,
-                        util::ConnectionResolver<ConnectionConfig> connection_resolver = {})
+                        util::ConnectionResolver<ConnectionConfig> connection_resolver = {},
+                        util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Gemini"),
+          clock_(clock),
           device_number_(device_number),
           config_(std::move(config)),
           connection_resolver_(std::move(connection_resolver)),
@@ -45,6 +63,9 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // Joins the poll body before the members it touches go away; a driver
+        // that never finished a connect has no body, so this is a no-op.
+        state_poll_.cancel_all_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -179,7 +200,14 @@ public:
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
             }
+            // First frame before Connected reads true, so a getter has an
+            // answer the moment Connect returns. A failure leaves the snapshot
+            // empty; the getters then report it and the poll fills it later.
+            snapshot_.reset();
+            temperature_unavailable_ = false;
+            poll_state_once();
             connected_.store(true);
+            start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
             // Driver state first, SDK close second (AGENTS.md, issue #387): a
@@ -193,6 +221,10 @@ public:
                 firmware_.clear();
             }
             connected_.store(false);
+            // Join the poll before the transport closes; its body takes no
+            // lock this thread holds (transition_mutex_, firmware_mutex_).
+            state_poll_.cancel_all_and_join();
+            snapshot_.reset();
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
@@ -230,8 +262,7 @@ public:
     }
 
     bool get_is_moving() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.is_moving();
+        return served_frame().moving;
     }
 
     int get_max_step() const override {
@@ -245,8 +276,7 @@ public:
     }
 
     int get_position() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_position();
+        return served_frame().position;
     }
 
     double get_step_size() const override {
@@ -286,13 +316,17 @@ public:
     }
 
     double get_temperature() const override {
-        ensure_connected();
-        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temperature();
+        const auto frame = served_frame();
+        if (!frame.temperature.has_value()) {
+            throw AlpacaException("Focuser temperature not available", AlpacaError::DriverException);
+        }
+        return *frame.temperature;
     }
 
     void halt() override {
         ensure_connected();
         protocol_.halt();
+        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
@@ -305,15 +339,98 @@ public:
             position = max_step;
         }
         protocol_.move_to(position);
+        // Write-through: IsMoving must read true right after a successful
+        // Move, not after the next poll (decision 0010, point 3).
+        snapshot_.write([](StateFrame& frame) { frame.moving = true; });
     }
 
 private:
+    // What one poll measured; position, motion and temperature only.
+    struct StateFrame {
+        int position = 0;
+        bool moving = false;
+        std::optional<double> temperature;  // empty: the probe did not answer
+    };
+
+    // The frame the getters serve. Stale is served (decision 0010); a frame
+    // older than the link-loss bound means the poll has not measured the
+    // device for that long, which is a fault, not a value.
+    StateFrame served_frame() const {
+        ensure_connected();
+        const auto reading = snapshot_.read();
+        if (!reading.has_value()) {
+            // A disconnect between the check and the read dropped the frame.
+            ensure_connected();
+            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+        }
+        if (clock_.now() - reading->measured_at >= util::kLinkStalenessBound) {
+            throw AlpacaException("Gemini focuser communications compromised: no state from the device for "
+                                      "30 s",
+                                  AlpacaError::DriverException);
+        }
+        return reading->value;
+    }
+
+    // One poll: three exchanges with no driver lock held (the protocol wrapper
+    // serialises them), then publish. A write that landed since begin_poll()
+    // makes publish() drop the frame; the next poll publishes.
+    void poll_state_once() {
+        const auto token = snapshot_.begin_poll();
+        StateFrame frame;
+        try {
+            frame.position = protocol_.get_position();
+            frame.moving = protocol_.is_moving();
+        } catch (const std::exception&) {
+            // The exception text can carry the device's reply; AlpacaCore has
+            // no log escaper (CWE-117), so the line states the fact only.
+            ALPACA_LOG_DEBUG("Gemini", "Focuser state poll failed; the frame keeps its age");
+            return;
+        }
+        // A focuser without a probe never answers a temperature read. Ask
+        // once per session after a failure: a timed-out read holds the wrapper
+        // for the whole serial timeout, which Move and Halt would queue behind.
+        if (!temperature_unavailable_) {
+            try {
+                frame.temperature = protocol_.get_temperature();
+            } catch (const std::exception&) {
+                temperature_unavailable_ = true;
+                ALPACA_LOG_DEBUG("Gemini", "Focuser temperature read failed; not polling it again this session");
+            }
+        }
+        snapshot_.publish(token, frame);
+    }
+
+    void run_state_poll(util::OperationContext& ctx) {
+        for (;;) {
+            // Start to start: a tick a slow poll ran over is skipped.
+            const auto started = clock_.now();
+            if (!ctx.wait_for(kStatePollPeriod)) {
+                return;
+            }
+            poll_state_once();
+            const auto spent = clock_.now() - started - kStatePollPeriod;
+            if (spent > kStatePollPeriod && !ctx.wait_for(kStatePollPeriod - (spent % kStatePollPeriod))) {
+                return;
+            }
+        }
+    }
+
+    // After the store(true), with no driver lock held (AsyncOperation rule 10).
+    void start_state_poll() {
+        try {
+            state_poll_.start([this](util::OperationContext& ctx) { run_state_poll(ctx); });
+        } catch (const std::exception&) {
+            ALPACA_LOG_ERROR("Gemini", "Focuser state poll did not start");
+        }
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionConfig config_;
     // Set by the by-index factory; empty for an explicit port. connection_resolved_
@@ -323,6 +440,13 @@ private:
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     GeminiProtocolWrapper protocol_;
+    // Position, motion and temperature served to the getters (open-astro#1229).
+    // Declared after clock_ and protocol_: state_poll_ is destroyed first and
+    // joins its body while both are still alive.
+    mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
+    bool temperature_unavailable_ = false;  // poll thread and connect only, never concurrent
+    util::OperationGeneration state_poll_generation_;
+    util::AsyncOperation state_poll_{"Gemini focuser state poll", state_poll_generation_, clock_};
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
     // set_connected() runs on the connection thread and caches firmware, while
     // the base joins that thread — sharing one mutex would deadlock.
@@ -340,6 +464,18 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
     config.serial_port = serial_port;
     config.baud_rate = baud_rate;
     return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
+}
+
+std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
+                                                      const std::string& serial_port,
+                                                      int baud_rate,
+                                                      util::TaskClock& clock) {
+    ConnectionConfig config;
+    config.type = ConnectionType::Serial;
+    config.serial_port = serial_port;
+    config.baud_rate = baud_rate;
+    return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config),
+                                                 util::ConnectionResolver<ConnectionConfig>{}, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_gemini_focuser_deferred(int device_number,

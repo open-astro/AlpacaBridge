@@ -156,6 +156,8 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
+    # Getters served from a util::StateSnapshot (open-astro#1229).
+    list(APPEND TEST_SOURCES test_gemini_focuser_snapshot.cpp)
 endif()
 if(TARGET alpacacore_wandererastro)
     list(APPEND TEST_SOURCES test_wandererastro_covercalibrator.cpp test_wandererastro_rotator.cpp
