@@ -268,7 +268,7 @@ def targets(snap: dict, table: dict) -> tuple[list[dict], list[str]]:
     for d in table.get("documents", []):
         c = d["check"]
         base = {"key": "doc:" + d["name"], "name": d["name"], "current": d["baseline"], "where": snapshot.TABLE,
-                "document": True, "path": d.get("path")}
+                "document": True, "path": d.get("path"), "note": d.get("note")}
         if c["provider"] == "github-file":
             out["doc:" + d["name"]] = {**base, "check": ("github-file", c["repo"], c["file"]), "compare": "equal",
                                        "source": f"https://github.com/{c['repo']}/commits/HEAD/{c['file']}"}
@@ -456,7 +456,8 @@ def document_body(r: dict) -> str:
             f"An upstream document a driver is built from has changed: `{r['name']}`.\n\n"
             f"| Field | Value |\n|---|---|\n| Recorded baseline | `{r['current']}` |\n| Upstream now | `{r['latest']}` |\n"
             f"{local}| Source | {r['source']} |\n\n"
-            "Review what changed upstream against the driver (and refresh the local copy if there is one), "
+            + (f"**Note:** {r['note']}\n\n" if r.get("note") else "")
+            + "Review what changed upstream against the driver (and refresh the local copy if there is one), "
             "then set this document's `baseline` in `scripts/dependency_sdk_versions.json` to the upstream "
             "value above. This issue closes by itself once the baseline matches.\n\n"
             "Opened by `.github/workflows/dependency-updates.yml`.\n")
@@ -1185,23 +1186,31 @@ def self_test() -> int:
                   "baseline": "a" * 40},
                  {"name": "pdf", "path": "AlpacaCore/external/x.md", "check": {"provider": "hash", "url": "https://d.test/c.pdf"},
                   "baseline": hashlib.sha256(b"%PDF-1").hexdigest()},
+                 {"name": "noted", "check": {"provider": "hash", "url": "https://d.test/c.pdf"},
+                  "baseline": "c" * 64, "note": "Mirror it first; keep this URL."},
                  {"name": "oasis", "check": {"provider": "page", "url": "https://o.test/dl",
                                              "pattern": r"Astroasis_Oasis_Focuser_ASCOM_(\d+(?:\.\d+)+)_Setup"},
                   "baseline": "2.0.2.1"}]}
     ts, manual = targets({"manifests": {}}, table)
-    assert manual == [] and [t["key"] for t in ts] == ["doc:indi-x", "doc:oasis", "doc:pdf", "zwo-eaf-sdk"], ts
+    assert manual == [] and [t["key"] for t in ts] == ["doc:indi-x", "doc:noted", "doc:oasis", "doc:pdf",
+                                                       "zwo-eaf-sdk"], ts
     results = [check(t, get, fetch) for t in ts]
     res = {r["key"]: r for r in results}
     assert all(r["error"] is None for r in results), results
-    assert [k for k in res if differs(res[k])] == ["doc:indi-x", "doc:oasis", "zwo-eaf-sdk"], \
+    assert [k for k in res if differs(res[k])] == ["doc:indi-x", "doc:noted", "doc:oasis", "zwo-eaf-sdk"], \
         "a changed commit, a newer installer and a newer SDK differ; an unchanged hash does not"
     f = Fake()
     reconcile(results, f, f.issues)
     by_title = {i["title"]: i for i in f.issues}
     assert set(by_title) == {"Upstream document changed: indi-x aaaaaaaaaaaa -> bbbbbbbbbbbb",
+                             "Upstream document changed: noted cccccccccccc -> 21af8e71c870",
                              "Upstream document changed: oasis 2.0.2.1 -> 2.1.0.1",
                              "Update zwo-eaf-sdk 1.7.7 -> V1.8.1"}, set(by_title)
     assert by_title["Upstream document changed: oasis 2.0.2.1 -> 2.1.0.1"]["labels"] == DOC_LABELS
+    # A document's note reaches the issue body; one without a note gets no note line.
+    noted = [i for t, i in by_title.items() if "noted" in t][0]["body"]
+    assert "**Note:** Mirror it first; keep this URL." in noted, noted
+    assert "**Note:**" not in by_title["Upstream document changed: oasis 2.0.2.1 -> 2.1.0.1"]["body"]
     assert by_title["Update zwo-eaf-sdk 1.7.7 -> V1.8.1"]["labels"] == UPDATE_LABELS
     # The baseline is set to upstream in a PR: the document issue closes.
     table["documents"][0]["baseline"] = "b" * 40

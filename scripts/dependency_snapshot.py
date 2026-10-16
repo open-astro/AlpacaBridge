@@ -216,10 +216,15 @@ def parse_conformu(text: str) -> tuple[list[str], list[str]]:
     (``CONFORMU_BETA_URL``) or the project's mirror of one (``CONFORMU_MIRROR_URL``); a pin on
     a GitHub release reports the bare version.
     """
-    m = CONFORMU_BUILD_RE.search(text)
-    if not m:
+    builds = {m.group(0)[1:-len(", Build time:")]: m for m in CONFORMU_BUILD_RE.finditer(text)}
+    if not builds:
         return [], [f"{CONFORMU_DOC}: no pinned ConformU build ('`X.Y.Z.N, Build time:`') found: "
                     "if ConformU is now a GitHub release, update parse_conformu in scripts/dependency_snapshot.py"]
+    if len(builds) > 1:
+        # Taking the first would report whichever build the prose names first, silently.
+        return [], [f"{CONFORMU_DOC}: more than one pinned ConformU build ({', '.join(sorted(builds))}); "
+                    "keep the '`X.Y.Z.N, Build time:`' form for the standard build only"]
+    m = next(iter(builds.values()))
     suffix = "-beta" if CONFORMU_BETA_URL in text or CONFORMU_MIRROR_URL in text else ""
     return [f"pkg:github/ASCOMInitiative/ConformU@{m.group(1)}{suffix}"], []
 
@@ -777,16 +782,21 @@ def self_test() -> int:
     _, errs = parse_ci_tools(ci.replace("          ver=2.17.1\n", ""))
     assert len(errs) == 1 and "cppcheck" in errs[0], errs
     cu_doc = ("curl -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz'\n"
-              "line it prints against the build, `4.5.1.54507, Build time:\nThu 27 August 2026` -- ok\n")
-    assert parse_conformu(cu_doc) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"], [])
+              "line it prints against the build, `4.5.2.56111, Build time:\nFri 16 October 2026` -- ok\n")
+    assert parse_conformu(cu_doc) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"], [])
     # Pinned to a GitHub release (no beta download URL): the bare version, no -beta.
     released = cu_doc.replace("download.ascom-standards.org/beta/", "github.com/ASCOMInitiative/ConformU/")
-    assert parse_conformu(released) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1"], [])
+    assert parse_conformu(released) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2"], [])
     # Installed from the project's tools/ mirror of a beta, with the ASCOM beta URL named
     # nowhere in the doc: still a beta, not a GitHub release.
     mirrored = cu_doc.replace("download.ascom-standards.org/beta/",
                               "github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-4.5.2-rc.1/")
-    assert parse_conformu(mirrored) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"], [])
+    assert parse_conformu(mirrored) == (["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"], [])
+    # Two different pinned builds: the doc is ambiguous, so it is an error, not the first one.
+    cu, errs = parse_conformu("older `4.5.1.54507, Build time: Thu` here\n" + cu_doc)
+    assert cu == [] and len(errs) == 1 and "4.5.1.54507" in errs[0] and "4.5.2.56111" in errs[0], errs
+    # The same build named twice is not ambiguous.
+    assert parse_conformu(cu_doc + cu_doc)[0] == ["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"]
     cu, errs = parse_conformu("go back to the ordinary release asset\n")
     assert cu == [] and len(errs) == 1 and CONFORMU_DOC in errs[0], errs
     wf = ("jobs:\n  a:\n    container: debian:trixie\n  b:\n    container: debian:trixie  # dup\n"
@@ -930,7 +940,7 @@ def self_test() -> int:
         (r / ".claude/commands").mkdir(parents=True)
         (r / CONFORMU_DOC).write_text(cu_doc)
         snap = build_snapshot(r, "a" * 40, "refs/heads/main", "1", "2026-01-01T00:00:00Z")
-        assert snap["manifests"][CONFORMU_DOC]["resolved"]["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"][
+        assert snap["manifests"][CONFORMU_DOC]["resolved"]["pkg:github/ASCOMInitiative/ConformU@4.5.2-beta"][
             "scope"] == "development"
         (r / CONFORMU_DOC).write_text("no pin\n")
         assert any(CONFORMU_DOC in e for e in check_drift(r)), check_drift(r)

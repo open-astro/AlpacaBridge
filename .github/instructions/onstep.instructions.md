@@ -210,11 +210,15 @@ it is never reachable through `router.cpp` or the web UI.
   for `1`/`2`, and a write of the other value throws `PropertyNotImplemented`, since the mode is
   fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
   The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
-- **ConformU-validated on real hardware** (Generic OnStep DIY harmonic-drive mount, firmware
-  "On-Step" v10.23a, Linux arm64, ConformU 4.4.0): 0 errors, 0 timing violations in the saved
-  run. The only remaining findings are the 2 PulseGuide East/West residual issues documented
-  above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
+- **ConformU-validated on real hardware**: the TeSeek HM-17 (OnStepX 10.23a) on Linux arm64,
+  ConformU 4.5.2-rc.1 (build 56111): 0 errors, 0 issues, all members within their timing targets
+  (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`). The older Generic OnStep DIY
+  harmonic-drive mount report (firmware "On-Step" v10.23a) is a ConformU 4.5.0 run on x86-64
+  (Linux Mint 22.3), not arm64 as its `Linux-arm64.txt` name suggests, made before validation
+  became arm64-only: 0 errors, 0 timing violations in the saved run. The only remaining
+  findings are the 2 PulseGuide East/West residual issues documented above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
   runs during this same validation session also hit the DeviceState-cold-start-style FAST
   timing risk described above (via `get_side_of_pier()`'s live position round trip, since
   fixed), which is why that failure mode is documented even though the saved log is clean of it.
-  See `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
+  See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
+  `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.

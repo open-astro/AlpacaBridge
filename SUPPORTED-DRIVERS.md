@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-16
+## Updated 2026-10-17
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -30,7 +30,7 @@ This document lists all hardware vendors and device types that are verified to w
   - **USB/Serial**: USB-to-serial adapter or direct serial connection
 
 - **Linux Notes**:
-  - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers), v4.3.0, v4.4.0, v4.5.0 (see the timing caveat below — treat its timing records as suspect), or v4.5.1 (newer drivers). As new ConformU versions are released this will be adjusted.
+  - **Debian 13 (Trixie) on arm64**: AlpacaBridge is built and validated on arm64 only (Raspberry Pi 3B+/4/5, Rockchip SBCs, OrangePi, iOptron iMate). All drivers have been tested using Debian 13 on arm64 with ConformU v4.2.1 (original drivers), v4.3.0, v4.4.0, v4.5.0 (see the timing caveat below — treat its timing records as suspect), v4.5.1, or v4.5.2-rc.1 (newer drivers). As new ConformU versions are released this will be adjusted.
   - **Avoid ConformU 4.5.0 on arm64**: that release was published without `PublishReadyToRun`, causing spurious "OUTSIDE FAST RESPONSE TIME TARGET" failures on the first Camera-device member of each response type (`CameraState`, `CameraXSize`, `SensorType`) — reproducible on this rig with every vendor's camera driver tried (ToupTek and ZWO), not a real regression. Treat **every** 4.5.0 timing record in this file as suspect -- there are a dozen and more, across cameras, wheels, focusers and mounts, so no list here would stay honest. They all predate the JIT cost being understood, and a clean timing result on 4.5.0 is not evidence of a real pass -- it usually means the first-use penalty had already been paid earlier in the same process, and for some member types (the enum-typed mount members) a warm re-run does not clear it at all. Their error and issue counts stand; only the timing verdicts are in doubt, and re-validation on 4.5.1 is what settles one. Fixed upstream in 4.5.1 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)). The project standard is now 4.5.2-rc.1 (build 56111); until a formal 4.5.2 GitHub release exists, install it from the project's [`tools/conformu-4.5.2-rc.1`](https://github.com/open-astro/AlpacaBridge/releases/tag/tools/conformu-4.5.2-rc.1) pre-release and check its sha256, as `/conformu` does. The ASCOM beta URL is unversioned and no longer serves 4.5.1.
   - **Kernel 6.12.75-v8-16+ or higher.**: Note: kernel 6.12.75-v8-16+ is required to ensure ZWO EAF/EFW hardware compatibility. Without it, devices besides ZWO may or may not be recognized. Please check the kernel version.
 
@@ -763,7 +763,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Tested model (TeSeek HM-17)**: OnStepX 10.23a (TeSeek build), CH340 USB-serial adapter at 9600 baud, ConformU 4.5.2-rc.1 (build 56111) run on the ASIAIR Plus (RK3568) against localhost with chrony; nothing else connected to the mount when the run starts.
 - **Pulse guiding**: Native hardware pulse guide with mount-side timing (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, milliseconds) — no software-timed stop thread required.
 - **SideOfPier**: Always computed from hour angle (same convention as iOptron/SynScan/Celestron) — `:GU#`'s `E`/`W` flag reports the mount's *physical* pier orientation, not ASCOM's hour-angle-defined pointing state, and using it directly failed ConformU's SideofPier check on real hardware (see `.github/instructions/onstep.instructions.md`).
-- **Tested model**: Generic OnStep DIY harmonic-drive mount, firmware "On-Step" v10.23a, Linux arm64.
+- **Tested model**: Generic OnStep DIY harmonic-drive mount, firmware "On-Step" v10.23a. Its saved report is a ConformU 4.5.0 run on x86-64 (Linux Mint 22.3), from before validation became arm64-only, despite its `Linux-arm64.txt` file name; the arm64 validation of this driver is the TeSeek HM-17 report above.
 - **ConformU**: 4.5.0 — 0 errors, 0 issues, 0 timing violations (clean run, 2026-08-08, re-validated on a freshly purged/reinstalled SBC after the auto-detect port-search refactor landed on `serial_by_id_scan.h`). PulseGuide ±9 East-West movement occasionally lands 1-2 residual issues right at the 0.07″ tolerance boundary on other runs — documented in `.github/instructions/onstep.instructions.md` as inherent hardware noise, root-caused via 4 independent tests, not a driver bug — accepted rather than chased with a tolerance/behavior change.
 
 </details>
