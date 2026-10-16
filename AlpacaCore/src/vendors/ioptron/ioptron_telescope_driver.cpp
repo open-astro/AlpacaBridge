@@ -2282,6 +2282,8 @@ private:
         return false;
     }
 
+    // Calibration sleeps on clock_ while holding mutex_ (as do the connect-path retries), so a
+    // FakeTaskClock test must advance the clock from another thread.
     void calibrate_dec_guide_locked(int duration_ms) {
         refresh_status_cache_locked(true);
         if (cached_status_.is_slewing || cached_status_.is_parked) {
