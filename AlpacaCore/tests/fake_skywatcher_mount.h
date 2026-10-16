@@ -241,6 +241,12 @@ public:
         return ax(axis).step_period_inquiries;
     }
 
+    // The direction latched by the last ":G" on the axis ('0' or '1').
+    char axis_dir(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).dir;
+    }
+
     bool axis_running(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);

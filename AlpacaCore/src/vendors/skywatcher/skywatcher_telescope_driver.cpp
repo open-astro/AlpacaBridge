@@ -35,6 +35,7 @@
 #include <numbers>
 #include <optional>
 #include <thread>
+#include <tuple>
 
 namespace alpacacore::vendor::skywatcher {
 
@@ -899,6 +900,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
+        settle_unconfirmed_tracking_stop_locked();
         return tracking_;
     }
 
@@ -1154,7 +1156,8 @@ public:
         // used to write the rate captured at dispatch, which made even the
         // RA skip unsafe while autoguiding: PHD2 kept the old whole-mount
         // pulse_guiding_active_ flag (then shared by both axes) true for
-        // most of every guide cycle), and the MoveAxis stop task
+        // most of every guide cycle) and decides the direction once more
+        // under the lock that releases the axis, and the MoveAxis stop task
         // re-applies the Dec offset for a Dec nudge. So a whole-mount skip
         // let a DEC-axis operation in flight (a North/South pulse, or
         // MoveAxis(Dec, r) -> MoveAxis(Dec, 0)) block the RA re-apply while
@@ -1700,6 +1703,31 @@ public:
                     pulse_axis_in_motion_[ai] = false;
                 }
             };
+            // The pulse owns RA until it lets go here, and set_site_latitude()
+            // skips a busy RA axis, so a crossing after the restore's last
+            // direction decision (inside the post-stop rate check, or between
+            // a dispatch-failure recovery and this release) was never
+            // applied. Decide again under the lock that hands the axis back.
+            // Not for a cancelled pulse (its reaper owns the axes) or a failed
+            // stop (nothing was restored).
+            auto release_pulse_locked = [this, axis, ai, my_seq, &stopped_by_other,
+                                         &end_pulse_locked](std::unique_lock<std::mutex>& lock) {
+                if (axis == kAxisRa && pulse_seq_[ai] == my_seq && connected_ && !stopped_by_other() &&
+                    tracking_effectively_on_locked() && ra_duty_rate_deg_s_ == 0.0 && cmd_axis_rate_deg_s_[0] != 0.0 &&
+                    (effective_ra_rate_locked() > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
+                    try {
+                        restart_ra_in_current_direction_locked(lock);
+                    } catch (const std::exception& e) {
+                        if (!lock.owns_lock()) {
+                            lock.lock();
+                        }
+                        ALPACA_LOG_WARN(
+                            "SkyWatcher",
+                            std::string("Pulse end: failed to turn RA round after a hemisphere change: ") + e.what());
+                    }
+                }
+                end_pulse_locked();
+            };
             // PulseGuide is an asynchronous initiator (ITelescopeV4): the axis
             // dispatch (which can stop-and-wait a ramping axis, plus UDP
             // retries) runs here so pulse_guide() returns inside the STANDARD
@@ -1721,22 +1749,21 @@ public:
                 if (!ra_live_write_sent) {
                     return;
                 }
-                // Deliberately NOT given stop_axis()'s ra_reverses branch: it
-                // writes ":I" + ":J" in place with no ":G", so a re-derived
-                // rate whose SIGN differs from the running one changes the
-                // period and leaves the axis turning the old way. Reached only
-                // when the dispatch ":J" throws after the ":I" went out, and a
-                // pure hemisphere flip preserves the magnitude, so the practical
-                // exposure is a period that is already correct. Recorded so the
-                // asymmetry with stop_axis() reads as a choice rather than an
-                // oversight (round-4 review note).
+                detail::run_pulse_dispatch_failure_hook();
                 constexpr int kRestoreAttempts = 3;
                 std::string last_error;
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
                     try {
-                        std::lock_guard<std::mutex> lock(mutex_);
+                        std::unique_lock<std::mutex> lock(mutex_);
                         const double restore_rate = effective_ra_rate_locked();
                         auto& proto = *protocol_;
+                        if ((restore_rate > 0.0) != (cmd_axis_rate_deg_s_[0] > 0.0)) {
+                            // A SiteLatitude write crossed the equator since the
+                            // ":I" went out: an in-place ":I" cannot turn the axis
+                            // round, so stop and restart it in the new direction.
+                            restart_ra_in_current_direction_locked(lock);
+                            return;
+                        }
                         proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
                                               /*with_readback=*/false);
                         if (live_rate_relatch_) {  // open-astro#666
@@ -1820,14 +1847,14 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("SkyWatcher", std::string("PulseGuide dispatch failed: ") + e.what());
                 recover_ra_drive_rate();
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_pulse_locked();
+                std::unique_lock<std::mutex> lock(mutex_);
+                release_pulse_locked(lock);
                 return;
             } catch (...) {
                 ALPACA_LOG_WARN("SkyWatcher", "PulseGuide dispatch failed with unknown exception");
                 recover_ra_drive_rate();
-                std::lock_guard<std::mutex> lock(mutex_);
-                end_pulse_locked();
+                std::unique_lock<std::mutex> lock(mutex_);
+                release_pulse_locked(lock);
                 return;
             }
             // open-astro#770: Tracking=false landed while a rate check below
@@ -1950,7 +1977,7 @@ public:
                     if (live_rate_relatch_) {
                         proto.start_motion(kAxisRa);
                     }
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::unique_lock<std::mutex> lock(mutex_);
                     // Fold the pulse rate into the model up to now first: a
                     // rate change applied from an older anchor (one the limit
                     // guard takes mid-pulse) drops the pulse distance driven
@@ -1961,6 +1988,15 @@ public:
                     // pulse.
                     anchor_model_locked();
                     cmd_axis_rate_deg_s_[0] = ra_restore_rate_deg_per_sec;
+                    // A SiteLatitude write skips the busy RA axis because this
+                    // restore re-derives the rate, but the read above and the
+                    // ":I" writes ran in separate lock scopes: a crossing in
+                    // between left the axis turning the old way. Decide again
+                    // under this lock and turn it round if the sense moved.
+                    const double fresh_rate = effective_ra_rate_locked();
+                    if ((fresh_rate > 0.0) != (ra_restore_rate_deg_per_sec > 0.0)) {
+                        applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
+                    }
                     // The ":J" above can land inside a Tracking=false
                     // stop-wait (after its ":K"): stop RA again now, not
                     // after the verify below.
@@ -1969,7 +2005,7 @@ public:
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
-                    start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
+                    applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                 } else {
                     proto.stop_motion(axis);
                     // Zero the dead-reckoning rate: this direct stop bypasses
@@ -2057,14 +2093,14 @@ public:
                 // for false and then wrote DeclinationRate/RightAscensionRate
                 // took the busy-axis deferral and waited on a restore this
                 // task had already run: the write was stranded.
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::unique_lock<std::mutex> lock(mutex_);
                 // open-astro#770: Tracking=false after the restore, either
                 // during the rate check above or between stop_axis()'s
                 // tracking_ read and its unlocked ":I"+":J".
                 if (restore_still_wanted) {
                     stop_ra_if_tracking_off_locked();
                 }
-                end_pulse_locked();
+                release_pulse_locked(lock);
             }
             if (!stopped) {
                 ALPACA_LOG_ERROR("SkyWatcher", "PulseGuide STOP FAILED after " + std::to_string(kStopAttempts) +
@@ -2895,6 +2931,7 @@ private:
         parked_ = false;
         at_home_ = false;
         tracking_ = false;
+        tracking_stop_unconfirmed_ = false;
         restore_tracking_after_slew_ = false;
         pulse_axis_active_[0] = false;
         pulse_axis_active_[1] = false;
@@ -3211,8 +3248,13 @@ private:
         return {ra, std::clamp(dec, -90.0, 90.0)};
     }
 
-    std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec,
-                                                            double lst_advance_hours = 0.0) const {
+    // forced_branch: the dec-axis branch (+1/-1, pointing_branch_) to aim at
+    // instead of the one the hour angle picks. The landing check passes the
+    // branch the goto was dispatched on: the dispatch picks it at LST + aim
+    // ahead, so a target within the aim-ahead of HA = 0 would otherwise read
+    // as the other branch at the current LST and draw futile re-gotos.
+    std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec, double lst_advance_hours = 0.0,
+                                                            int forced_branch = 0) const {
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_) + lst_advance_hours;
         double ha = wrap_hour_angle(lst - ra);
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
@@ -3225,7 +3267,7 @@ private:
         // get_destination_side_of_pier() states it directly, so all three
         // agree by construction.
         const double k = home_term_sign_locked();
-        const double side = ha >= 0.0 ? 1.0 : -1.0;
+        const double side = forced_branch != 0 ? k * static_cast<double>(forced_branch) : (ha >= 0.0 ? 1.0 : -1.0);
         const double branch = k * side;
         const double a2 = branch * (90.0 - dec_mech);
         // HA = sky_sign * a1/15 + k * 6 * branch, inverted. k * branch is the
@@ -4098,6 +4140,25 @@ private:
         cmd_axis_rate_deg_s_[channel - 1] = rate;
     }
 
+    // Stop-and-restart RA at the drive rate, re-deriving the rate after every
+    // unlock. start_speed_motion_locked() releases `mutex_` while it waits for
+    // the stop, and a pulse holding the RA axis makes set_site_latitude() skip
+    // it, so an equator crossing inside that wait would otherwise leave RA
+    // latched in the old hemisphere's direction. Bounded: each pass needs a
+    // further crossing to repeat. Returns the rate actually applied.
+    double restart_ra_in_current_direction_locked(std::unique_lock<std::mutex>& lock) {
+        constexpr int kMaxPasses = 4;
+        double applied = effective_ra_rate_locked();
+        for (int pass = 0; pass < kMaxPasses; ++pass) {
+            applied = effective_ra_rate_locked();
+            start_speed_motion_locked(lock, kAxisRa, applied);
+            if ((effective_ra_rate_locked() > 0.0) == (cmd_axis_rate_deg_s_[0] > 0.0)) {
+                break;
+            }
+        }
+        return applied;
+    }
+
     // Base drive rate for the selected ASCOM DriveRate.
     double base_tracking_rate_locked() const {
         switch (tracking_rate_) {
@@ -4418,10 +4479,34 @@ private:
         }
     }
 
+    // A Tracking=false whose stop-wait threw left tracking_ true. Once a poll
+    // measured after that throw shows the RA axis stopped, the stop did land:
+    // Tracking must not read true for a stopped axis. Served from the polled
+    // frame, never the board (decision 0010). Only while that stop still owns
+    // RA: a newer motion command (generation bump) or a pulse, slew or
+    // tracking restore holding RA stopped took the axis over, and settling
+    // then would end the limit guard while a slew is set to restore tracking.
+    void settle_unconfirmed_tracking_stop_locked() const {
+        if (!tracking_stop_unconfirmed_ || !tracking_) {
+            return;
+        }
+        if (motion_generation_ != tracking_stop_unconfirmed_gen_ || axis_busy_locked(kAxisRa) || restoring_tracking_) {
+            return;
+        }
+        const auto reading = snapshot_.read();
+        if (reading && reading->measured_at > tracking_stop_unconfirmed_since_ && reading->value.status_current &&
+            !reading->value.ra_running) {
+            tracking_ = false;
+            tracking_stop_unconfirmed_ = false;
+            restore_tracking_after_slew_ = false;  // no restore without tracking_ (restore_tracking_after_slew_locked)
+        }
+    }
+
     void set_tracking_locked(std::unique_lock<std::mutex>& lock, bool tracking) {
         // Tracking off stops the RA axis: a pending rate-applied check must
         // not resend its ":I"+":J" into the stopped axis and restart it.
         cancel_rate_verify_locked();
+        tracking_stop_unconfirmed_ = false;
         if (tracking) {
             // Track: RA axis in the direction of increasing SKY hour angle
             // (increasing counts north of the equator, decreasing south of
@@ -4437,7 +4522,20 @@ private:
                 ~PendingOffGuard() { --depth; }
             } pending_off_guard{tracking_off_pending_};
             ++tracking_off_pending_;
-            if (!stop_axis_and_wait_locked(lock, kAxisRa, gen)) {
+            bool stopped = false;
+            try {
+                stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
+            } catch (...) {
+                // The ":K" went out and the commanded rate is already zero, but
+                // the stop was not confirmed: Tracking keeps reading true while
+                // the axis may still move, and get_tracking() drops it once a
+                // poll taken after this point sees RA stopped.
+                tracking_stop_unconfirmed_ = true;
+                tracking_stop_unconfirmed_since_ = clock_.now();
+                tracking_stop_unconfirmed_gen_ = gen;
+                throw;
+            }
+            if (!stopped) {
                 // A newer motion command took the axes while the mutex was
                 // released: it owns the tracking state now — do not stomp it.
                 throw AlpacaException("Tracking change superseded by a concurrent motion command");
@@ -4548,6 +4646,20 @@ private:
         last_goto_dist_deg_ = dist;
         double est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
         auto [t1, t2] = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond);
+        if (std::signbit(p2) != std::signbit(t2)) {
+            // The aim-ahead carries the target across HA = 0, so the goto takes
+            // the other dec-axis branch than the one the distance above was
+            // measured on (a 180 deg RA error that fed a 57 s estimate and
+            // aimed the goto that far ahead). Measure on the branch the goto
+            // will take and aim on it; the landing check reads the same branch
+            // back from pointing_branch_.
+            const int branch = std::signbit(t2) ? -1 : 1;
+            std::tie(p1, p2) = ra_dec_to_axis_degrees_locked(ra, dec, 0.0, branch);
+            dist = std::max(std::abs(p1 - cached_ra_axis_deg_), std::abs(p2 - cached_dec_axis_deg_));
+            last_goto_dist_deg_ = dist;
+            est_seconds = dist / kMaxMoveAxisRateDegPerSec + goto_overhead_seconds_ + resume_latency_seconds_;
+            std::tie(t1, t2) = ra_dec_to_axis_degrees_locked(ra, dec, est_seconds * kLstHoursPerSecond, branch);
+        }
         dispatch_goto_locked(lock, t1, t2);  // records the branch of t2 once the goto is on its way
     }
 
@@ -4562,7 +4674,7 @@ private:
     // the hemisphere's direction. Caller holds mutex_ and has refreshed the
     // position cache.
     double landing_lead_seconds_locked(double ra, double dec) const {
-        const double target_now = ra_dec_to_axis_degrees_locked(ra, dec).first;
+        const double target_now = ra_dec_to_axis_degrees_locked(ra, dec, 0.0, pointing_branch_).first;
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double axis_deg_per_second = sky_sign * kHoursToDegrees * kLstHoursPerSecond;
         return (cached_ra_axis_deg_ - target_now) / axis_deg_per_second;
@@ -4601,7 +4713,7 @@ private:
                 break;  // AbortSlew/unpark/disconnect cancelled the slew, or a newer operation replaced it
             }
             refresh_position_cache_locked(true);
-            const double dec_target = ra_dec_to_axis_degrees_locked(ra, dec).second;
+            const double dec_target = ra_dec_to_axis_degrees_locked(ra, dec, 0.0, pointing_branch_).second;
             const bool dec_landed = std::abs(dec_target - cached_dec_axis_deg_) <= kLandingDeadbandDeg;
             // Time to hold before tracking restarts: the sky still has to
             // close the lead, less the restart's own latency.
@@ -5921,7 +6033,11 @@ private:
     mutable std::uint64_t seen_recovery_epoch_ = 0;
     mutable std::chrono::steady_clock::time_point last_position_update_{};
 
-    bool tracking_ = false;
+    // mutable: get_tracking() drops it once a poll confirms a stop whose wait threw.
+    mutable bool tracking_ = false;
+    mutable bool tracking_stop_unconfirmed_ = false;
+    mutable std::chrono::steady_clock::time_point tracking_stop_unconfirmed_since_{};
+    uint64_t tracking_stop_unconfirmed_gen_ = 0;  // motion_generation_ of that stop
     // Number of Tracking=false stop-waits in flight (under mutex_), while
     // tracking_ still reads true. A counter, not a flag: a second setter can
     // enter the wait while the first is in its unlocked poll, and the first
@@ -5933,7 +6049,7 @@ private:
     int tracking_off_pending_ = 0;
     // Caller holds mutex_.
     bool tracking_effectively_on_locked() const { return tracking_ && tracking_off_pending_ == 0; }
-    bool restore_tracking_after_slew_ = false;
+    mutable bool restore_tracking_after_slew_ = false;  // mutable: get_tracking() settle clears it
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool slewing_cached_ = false;
@@ -6119,6 +6235,29 @@ std::function<void()>& pulse_restore_hook_slot() {
 void set_pulse_restore_hook(std::function<void()> hook) {
     std::lock_guard<std::mutex> lock(probe_mutex());
     pulse_restore_hook_slot() = std::move(hook);
+}
+
+namespace {
+std::function<void()>& pulse_dispatch_failure_hook_slot() {
+    static std::function<void()> hook;
+    return hook;
+}
+}  // namespace
+
+void set_pulse_dispatch_failure_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    pulse_dispatch_failure_hook_slot() = std::move(hook);
+}
+
+void run_pulse_dispatch_failure_hook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex());
+        hook = pulse_dispatch_failure_hook_slot();
+    }
+    if (hook) {
+        hook();
+    }
 }
 
 void run_pulse_restore_hook() {

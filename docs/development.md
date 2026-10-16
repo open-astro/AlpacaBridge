@@ -91,7 +91,7 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 sudo apt install git build-essential cmake g++ \
     libusb-1.0-0-dev libudev-dev libgpiod-dev \
     libhidapi-dev \
-    libltdl-dev libexif-dev libjpeg-dev libxml2-dev libraw-dev \
+    libltdl-dev libexif-dev libjpeg-dev libraw-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
     zlib1g-dev libsystemd-dev pkgconf \
     catch2

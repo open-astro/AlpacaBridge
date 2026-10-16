@@ -5176,3 +5176,190 @@ TEST_CASE(
 }
 
 #endif  // _WIN32
+
+TEST_CASE("SkyWatcher async - SiteLatitude crossing the equator inside the pulse-end restore window reverses RA",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);  // northern site
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+
+    std::atomic<bool> fired{false};
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] {
+        if (!fired.exchange(true)) {
+            // After the pulse end's rate read and its ":I", before its ":J".
+            driver->set_site_latitude(-33.856784);
+        }
+    });
+    driver->pulse_guide(2, 600);
+    REQUIRE(wait_until([&] { return fired.load(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 5000));
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr);
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    // South of the equator RA tracks the other way round.
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - SiteLatitude crossing on an idle tracking mount reverses RA", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+    driver->set_site_latitude(-33.856784);
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the pulse-end restart stop-wait reverses RA",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);  // northern site
+    driver->set_guide_rate({FakeSkyWatcherMount::kSiderealDegPerSec,
+                            FakeSkyWatcherMount::kSiderealDegPerSec});  // 1.0x: the restart branch
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+    const int stops_before = mount.stop_count(1);
+
+    driver->pulse_guide(2, 1000);                                                   // East
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 5000));  // the dispatch stop
+    mount.hold_running(1, true);  // the pulse-end stop-wait cannot finish
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before + 1; }, 5000));
+    // The pulse holds RA, so the setter skips it: the restart must notice.
+    driver->set_site_latitude(-33.856784);
+    mount.hold_running(1, false);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the post-restore rate check reverses RA",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);  // northern site
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+
+    std::atomic<bool> restored{false};
+    alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook([&] { restored = true; });
+    struct HookReset {
+        ~HookReset() { alpacacore::vendor::skywatcher::detail::set_pulse_restore_hook(nullptr); }
+    } hook_reset;
+    driver->pulse_guide(2, 2000);  // East, long enough for the post-stop rate check
+    REQUIRE(wait_until([&] { return restored.load(); }, 8000));
+    // Inside the ~450 ms check: the pulse still holds RA, so the setter skips it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    REQUIRE(driver->get_is_pulse_guiding());
+    driver->set_site_latitude(-33.856784);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I restores the drive in the new hemisphere",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+
+    std::atomic<bool> fired{false};
+    alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook([&] {
+        if (!fired.exchange(true)) {
+            // Between the failed dispatch ":J" and the drive-rate recovery.
+            driver->set_site_latitude(-33.856784);
+        }
+    });
+    mount.reject_start_motion(1, 1);  // the dispatch ":J" after the live ":I"
+    driver->pulse_guide(2, 800);
+    REQUIRE(wait_until([&] { return fired.load(); }, 5000));
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    alpacacore::vendor::skywatcher::detail::set_pulse_dispatch_failure_hook(nullptr);
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    CHECK(mount.axis_dir(1) != north_dir);
+    CHECK(mount.axis_running(1));
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - Tracking reads false once a Tracking=false stop-wait that threw sees RA stopped",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.hold_running(1, true);
+    CHECK_THROWS(driver->set_tracking(false));  // the 5 s stop timeout
+    // The axis may still be moving: Tracking stays true.
+    CHECK(driver->get_tracking());
+    mount.hold_running(1, false);
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
+    CHECK(wait_until([&] { return !driver->get_tracking(); }, 3000));
+    // A later Tracking=true is not undone by the settled stop.
+    driver->set_tracking(true);
+    CHECK(driver->get_tracking());
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis(RA) during the RightAscensionRate check is not overridden",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->set_right_ascension_rate(0.5);  // spawns the rate-applied check
+    driver->move_axis(0, 1.0);
+    const uint32_t move_period = mount.step_period(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));  // past settle + window
+    CHECK(mount.step_period(1) == move_period);
+    CHECK(mount.axis_running(1));
+    driver->move_axis(0, 0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - MoveAxis(RA) during the pulse rate check is not overridden", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    mount.stall_live_rate_writes(1, 1);
+    mount.ignore_start_relatches(1, 1);
+    driver->pulse_guide(2, 3000);  // long enough to be rate-verified
+    REQUIRE(wait_until([&] { return mount.step_period(1) != 0 && mount.frames_seen('I') > 0; }, 3000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));  // inside the sample window
+    driver->move_axis(0, 1.0);
+    const uint32_t move_period = mount.step_period(1);
+    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    CHECK(mount.step_period(1) == move_period);
+    CHECK(mount.axis_running(1));
+    driver->move_axis(0, 0.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}

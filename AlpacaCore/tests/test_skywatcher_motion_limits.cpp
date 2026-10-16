@@ -720,6 +720,49 @@ TEST_CASE("SkyWatcher limits - a sync below the floor does not stop tracking",
     driver->set_connected(false);
 }
 
+// A Tracking=false whose stop-wait threw leaves Tracking true until a poll
+// sees RA stopped. A slew that starts first takes the axes and will restore
+// tracking at the end: a Tracking read while it holds RA stopped must not
+// settle the old stop, or the guard exits on its next poll and the restored
+// tracking runs with no limit enforced.
+TEST_CASE("SkyWatcher limits - a slew after a Tracking=false stop that threw keeps the guard running",
+          "[skywatcher][telescope][limits][guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, floor_deg(-80.0));
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    REQUIRE(wait_until([&] { return sw::detail::limit_guard_bodies_running() == 1; }, 2000));
+
+    mount.hold_running(1, true);
+    CHECK_THROWS(driver->set_tracking(false));  // the 5 s stop timeout
+    mount.hold_running(1, false);
+    REQUIRE(wait_until([&] { return !mount.axis_running(1); }, 3000));
+
+    // No Tracking read before the slew: the stop is still unconfirmed. Same
+    // hour angle, 30 deg of declination: RA lands at once, Dec runs ~9 s.
+    driver->slew_to_coordinates_async(driver->get_right_ascension(), 60.0);
+    bool saw_ra_stopped = false;
+    bool tracking_read_false = false;
+    while (driver->get_slewing()) {
+        const bool ra_stopped = !mount.axis_running(1);
+        if (!driver->get_tracking()) {
+            tracking_read_false = true;
+        }
+        saw_ra_stopped = saw_ra_stopped || ra_stopped;
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    REQUIRE(saw_ra_stopped);
+    CHECK_FALSE(tracking_read_false);
+    CHECK(driver->get_tracking());
+    CHECK(wait_until([&] { return mount.axis_running(1); }, 3000));
+    // The guard body started by the first Tracking=true is still the one
+    // watching: the post-slew restore does not start another.
+    CHECK(sw::detail::limit_guard_bodies_running() == 1);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 // The guard re-anchors the position cache on hardware every 2 s while
 // tracking. An RA guide pulse that changed the dead-reckoning rate without
 // re-anchoring then lost the pulse distance driven since that anchor: the read

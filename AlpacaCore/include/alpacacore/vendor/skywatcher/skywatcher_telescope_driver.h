@@ -54,6 +54,12 @@ bool host_synchronized_probe();
 // driver is destroyed. Process-wide; tests clear it afterwards.
 void set_pulse_restore_hook(std::function<void()> hook);
 void run_pulse_restore_hook();
+// Test-only: called by the RA pulse task when the dispatch threw after the
+// live ":I" went out, before the drive-rate recovery takes the lock and with no
+// driver lock held, so a test can change SiteLatitude in that window. Default
+// empty; process-wide; tests clear it afterwards.
+void set_pulse_dispatch_failure_hook(std::function<void()> hook);
+void run_pulse_dispatch_failure_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.

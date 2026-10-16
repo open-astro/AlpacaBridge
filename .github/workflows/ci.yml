@@ -140,7 +140,6 @@ jobs:
             libltdl-dev \
             libexif-dev \
             libjpeg-dev \
-            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -285,7 +284,6 @@ jobs:
             libltdl-dev \
             libexif-dev \
             libjpeg-dev \
-            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -431,7 +429,6 @@ jobs:
             libltdl-dev \
             libexif-dev \
             libjpeg-dev \
-            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -619,7 +616,6 @@ jobs:
             libltdl-dev \
             libexif-dev \
             libjpeg-dev \
-            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
