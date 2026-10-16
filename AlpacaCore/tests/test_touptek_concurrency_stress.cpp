@@ -108,6 +108,7 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
     // open ledger must balance once we settle it disconnected.
     // Read before the settle below opens the device again: a nonzero count
     // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
     CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -187,6 +188,7 @@ TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[toupte
 
     // Read before the settle below opens the device again: a nonzero count
     // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
     CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -238,6 +240,7 @@ TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", 
 
     // Read before the settle below opens the device again: a nonzero count
     // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
     CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -295,6 +298,7 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
 
     // Read before the settle below opens the device again: a nonzero count
     // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
     CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -346,6 +350,8 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     camera_storm.join();
 
     // Both storms are over: a nonzero count means a connect reached the SDK.
+    REQUIRE(alpacacore::test::wait_connect_idle(*camera));
+    REQUIRE(alpacacore::test::wait_connect_idle(*thermal));
     CHECK(fake.physical_opens > 0);
 
     CHECK(alpacacore::test::settle_connected(*camera, false));
