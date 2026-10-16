@@ -239,7 +239,7 @@ public:
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             pulse_guiding_active_ = false;
-            tracking_before_slew_ = true;
+            tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
             {
@@ -768,6 +768,8 @@ public:
             return;
         }
         OnStepProtocolWrapper::instance().find_home();
+        // OnStepX ends a home with tracking off; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_at_home = false;
         cached_status_.is_slewing = true;
         status_cache_valid_ = true;
@@ -782,6 +784,8 @@ public:
             return;  // ASCOM: Park() on an already-parked mount is a no-op.
         }
         OnStepProtocolWrapper::instance().park();
+        // A parked mount must not track; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
@@ -1120,15 +1124,20 @@ private:
         // simple dataflow model doesn't see that the call mutates
         // cached_status_, so it (wrongly) assumes both sides always match.
         if (was_slewing && !cached_status_.is_slewing) {
-            // Slew just completed: caches are stale and, per the SynScan
+            // Slew just completed: caches are stale. Per the SynScan
             // tracking-restoration lesson in
             // .github/instructions/synscan.instructions.md, some LX200-family
-            // mounts stop tracking during a GOTO — best-effort restore it.
-            // TODO: confirm against
-            // real OnStep firmware whether this restoration is needed.
+            // mounts stop tracking during a GOTO, so restore it once, and only
+            // after a coordinate slew that started with tracking on and ended
+            // without it. OnStepX keeps tracking through a GOTO (seen on the
+            // TeSeek HM-17), so there this normally sends nothing. Park and
+            // FindHome clear the flag: they end with tracking off on purpose,
+            // and restarting it moved the mount off home (#1218).
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            if (tracking_before_slew_) {
+            const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
+            tracking_before_slew_ = false;
+            if (restore_tracking) {
                 try {
                     OnStepProtocolWrapper::instance().start_tracking();
                     cached_status_.is_tracking = true;
@@ -1359,7 +1368,8 @@ private:
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
-    mutable bool tracking_before_slew_ = true;
+    // Set only by a coordinate slew; consumed when that slew completes (#1218).
+    mutable bool tracking_before_slew_ = false;
 
     bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
