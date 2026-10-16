@@ -234,20 +234,28 @@ alpacacore::vendor::ioptron::ConnectionInfo loopback_endpoint(int port) {
     return info;
 }
 
-// Slew, then poll Slewing until the driver reports the GOTO complete. The
-// driver holds Slewing true for its 5 s post-dispatch override before it
-// consults the mount, so allow comfortably more than that.
-bool slew_and_settle(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
-                     alpacacore::test::FakeIoptronMount& mount) {
-    driver.slew_to_coordinates_async(12.0, 20.0);
-    // The GOTO is dispatched on the driver's worker thread, over real I/O: wait for it to reach the mount
-    // before stepping the virtual clock past the Slewing override, or the poll can read the mount before the GOTO.
+// The async GOTO is dispatched on the driver's worker thread over real I/O. Wait for it to reach the mount
+// before stepping the virtual clock: a dispatch that lands after the step re-stamps the 5 s Slewing override
+// from the later virtual time, so the case would pass (or fail) on the race and not on the guard it pins.
+bool wait_for_goto_dispatch(alpacacore::test::FakeIoptronMount& mount) {
     const auto dispatch_by = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (mount.count(":MS1#") < 1) {
         if (std::chrono::steady_clock::now() >= dispatch_by) {
             return false;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+
+// Slew, then poll Slewing until the driver reports the GOTO complete. The
+// driver holds Slewing true for its 5 s post-dispatch override before it
+// consults the mount, so allow comfortably more than that.
+bool slew_and_settle(alpacacore::TelescopeDriver& driver, alpacacore::test::FakeTaskClock& clock,
+                     alpacacore::test::FakeIoptronMount& mount) {
+    driver.slew_to_coordinates_async(12.0, 20.0);
+    if (!wait_for_goto_dispatch(mount)) {
+        return false;
     }
     const auto deadline = clock.now() + std::chrono::seconds(20);
     while (clock.now() < deadline) {
@@ -721,6 +729,7 @@ TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still r
     // A driver-initiated GOTO started during a pulse keeps Slewing true.
     driver->pulse_guide(3, 9000);
     driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
     CHECK(driver->get_slewing());
 
     // Past the 5 s Slewing override only the firmware status (still 2) holds Slewing true; the open pulse
@@ -826,6 +835,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     REQUIRE(driver->get_connected());
 
     driver->slew_to_coordinates_async(13.0, 20.0);
+    REQUIRE(wait_for_goto_dispatch(mount));
     driver->move_axis(0, 0.0);
     driver->pulse_guide(3, 3000);
     CHECK(driver->get_is_pulse_guiding());
