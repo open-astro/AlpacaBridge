@@ -50,7 +50,11 @@ void register_qhy_factory(DeviceCatalog& catalog) {
     Factory wheel;
     wheel.key = DeviceKey{"qhy", DeviceType::FilterWheel};
     wheel.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
-        throw_if_refused(qhy_filterwheel_refusal(config));
+        // A saved CFW3 serial entry with no port is built anyway (#508 item 1): normalize warned,
+        // and the wheel's connect refuses with the same text rather than probing.
+        if (const auto refusal = qhy_filterwheel_refusal(config); refusal && *refusal != kQhyCfw3SerialPortRequired) {
+            throw_if_refused(refusal);
+        }
         std::unique_ptr<FilterWheelDriver> driver;
         if (config.get(kQhyWheelType) == "cfw3-usb") {
             if (config.get(kQhyWheelConnectionType) == "serial") {

@@ -31,7 +31,10 @@ namespace alpacacore::catalog {
 namespace {
 
 void refuse_if_invalid(const DeviceConfig& config, const Field<std::int64_t>& index_field, bool is_switch = false) {
-    if (const auto refusal = wandererastro_refusal(config, index_field, is_switch)) {
+    // A saved serial entry with no port is built anyway (#508 item 1): normalize warned, and the
+    // connect refuses with the same text rather than auto-detecting.
+    if (const auto refusal = wandererastro_refusal(config, index_field, is_switch);
+        refusal && *refusal != kWandererSerialPortRequired) {
         throw AlpacaException(*refusal, AlpacaError::InvalidValue);
     }
 }
