@@ -1,0 +1,5 @@
+### Fixed
+- **The ZWO camera library is no longer shipped twice in the .deb** (packaging, ZWO camera SDK): `AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so` was committed in March 2026 as a second regular file with the same bytes as `libASICamera2.so.1.41` instead of a symlink to it, so `debian/rules`' `cp -a` installed two full copies in `/usr/lib/alpacabridge/` (3.4 MB on every rig). It is now a symlink, as the QHY and Player One libraries already are; `libASICamera2.so` still resolves for SmartGuider's `zwoasi`. The unshipped `libEAFFocuser.so`, `libEFWFilter.so` and `libCAA.so` had the same shape and are symlinks too; their `scripts/dependency_sdk_versions.json` pins are rewritten, with versions unchanged.
+
+### Added (tooling)
+- **Docs-drift check 19: vendored shared libraries are not committed twice** (`scripts/check_docs_drift.py`): fails when a `lib*.so` under `AlpacaCore/external/` is a regular file with the same content as another one in its directory, naming the file to keep and the one to turn into a symlink. Read from the git index; 0-byte placeholders are skipped. Five self-test cases.
