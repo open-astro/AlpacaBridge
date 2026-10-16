@@ -552,7 +552,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return camera_info_valid_ && camera_info_.has_cooler && caps_.has_target_temp;
     }
-    bool get_can_stop_exposure() const override { return true; }
+    bool get_can_stop_exposure() const override {
+        // StopExposure would have to hand back the frame acquired so far, but
+        // POAStopExposure discards it: on a Ceres 462M (SDK 3.10.0) the camera
+        // is back in STATE_OPENED 60 ms after the stop, POAImageReady never
+        // turns true and POAGetImageData fails (issue #1023). AbortExposure is
+        // the supported way to end an exposure early.
+        return false;
+    }
 
     double get_ccd_temperature() const override {
         ensure_connected();
@@ -920,7 +927,6 @@ public:
                 }
                 sdk_exposure_started_ = false;
             }
-            pending_stop_exposure_ = false;
             exposure_cancel_requested_.store(true);
         }
         if (exposure_thread_.joinable()) exposure_thread_.join();
@@ -1069,7 +1075,7 @@ public:
         }
 
         // Held through the thread spawn at the end: serialises the spawn against
-        // the joins in stop_exposure and the disconnect's join→close (a spawn
+        // the join in abort_exposure and the disconnect's join→close (a spawn
         // slipping into that gap would run the exposure loop against a closed
         // camera; and join racing the thread-assignment is UB on std::thread).
         // Lock order: exposure_lifecycle_mutex_ -> mutex_ (all locks below nest).
@@ -1134,7 +1140,6 @@ public:
             exposure_deadline_valid_ = true;
             exposure_cancel_requested_.store(false);
             download_active_ = false;
-            pending_stop_exposure_ = false;
             sdk_exposure_started_ = false;
             // Publish exposure_active_ under mutex_ — the same lock the
             // setters hold for ensure_not_exposing_locked() — so a
@@ -1163,7 +1168,6 @@ public:
                 }
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (stopped) sdk_exposure_started_ = false;
-                pending_stop_exposure_ = false;
                 if (exposure_failure_.empty()) exposure_failure_ = std::move(reason);
                 image_ready_ = false;
                 last_image_.reset();
@@ -1271,11 +1275,6 @@ public:
                     exposure_steady_start_ = std::chrono::steady_clock::now();
                     sdk_exposure_started_ = true;
                     sdk.start_exposure(id, /*single_frame=*/true);
-                    if (pending_stop_exposure_) {
-                        pending_stop_exposure_ = false;
-                        sdk.stop_exposure(id);
-                        mark_exposure_stopped_locked();
-                    }
                 }
 
                 // Snapshot ROI (after any SDK alignment) so the buffer size
@@ -1412,25 +1411,8 @@ public:
 
     void stop_exposure() override {
         ensure_connected();
-        // StopExposure preserves the partial frame; the worker performs the
-        // SDK readout and publishes it through ImageReady/ImageArray.
-        // TODO: Verify POAStopExposure preserves partial frame data on Player One hardware.
-        std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
-        ensure_connected_locked();
-        if (!exposure_active_.load() || download_active_) return;
-        if (!sdk_exposure_started_) {
-            pending_stop_exposure_ = true;
-            return;
-        }
-        if (sdk_.image_ready(camera_info_.camera_id)) return;
-        try {
-            sdk_.stop_exposure(camera_info_.camera_id);
-            mark_exposure_stopped_locked();
-        } catch (...) {
-            if (sdk_.image_ready(camera_info_.camera_id)) return;
-            throw;
-        }
+        throw AlpacaException("StopExposure is not supported (CanStopExposure is false); use AbortExposure",
+                              AlpacaError::MethodNotImplemented);
     }
 
 private:
@@ -1469,10 +1451,9 @@ private:
     std::atomic<bool> exposure_cancel_requested_{false};
     bool download_active_{false};
     bool sdk_exposure_started_{false};
-    bool pending_stop_exposure_{false};
     std::thread exposure_thread_;
     // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
-    // (stop_exposure, set_connected(false)'s pre-close stop). Join racing the
+    // (abort_exposure, set_connected(false)'s pre-close stop). Join racing the
     // spawn's thread-assignment is UB on std::thread, and a spawn between the
     // disconnect's join and the SDK close would run the exposure loop against a
     // closed camera. Lock order: exposure_lifecycle_mutex_ -> mutex_. The
@@ -1512,12 +1493,6 @@ private:
         if (exposure_active_.load()) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
-    }
-
-    void mark_exposure_stopped_locked() {
-        if (exposure_steady_start_ == std::chrono::steady_clock::time_point{}) return;
-        exposure_duration_ =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - exposure_steady_start_).count();
     }
 
     void validate_exposure_request_locked(long& exposure_us) const {
@@ -1630,7 +1605,6 @@ private:
         exposure_cancel_requested_.store(false);
         download_active_ = false;
         sdk_exposure_started_ = false;
-        pending_stop_exposure_ = false;
         exposure_deadline_valid_ = false;
     }
 
@@ -1642,7 +1616,6 @@ private:
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (was_active || interrupt) {
                     exposure_cancel_requested_.store(true);
-                    pending_stop_exposure_ = false;
                 }
                 if (camera_info_valid_ && camera_info_.camera_id >= 0 && sdk_exposure_started_) {
                     sdk_.stop_exposure(camera_info_.camera_id);

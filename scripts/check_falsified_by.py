@@ -110,32 +110,55 @@ MAIN_RE = re.compile(r"^int\s+main\s*\(", re.M)
 def hand_rolled_cases(diff_text, head_text):
     """(names, errors) for the added top-level `main()` blocks in a -U0 unified diff.
 
-    An added line that is exactly `    {` and sits after the `int main(` line of
-    `head_text` (the file at HEAD) opens a block; the next added line must be
-    `// case: <name>`. Scoped blocks in helper functions above `main()` are not cases.
+    The diff only says which lines were added; the marker text is read from
+    `head_text` (the file at HEAD), because git may slide an inserted block so
+    that the added `    {` is the next existing block's opener (issue #993). So a
+    block is judged by its body, not its opener: for each `    {` after `main(` in
+    `head_text`, a first body line that is an added `// case: <name>` is collected;
+    a block whose body lines were ALL added and which lacks that marker is an error.
+    Any other block (an untouched body line, no added marker) existed before and is skipped.
+    Scoped blocks in helper functions above `main()` are not cases.
     """
     m = MAIN_RE.search(head_text)
     main_line = head_text.count("\n", 0, m.start()) + 1 if m else None
-    added, lineno, n = [], [], 0
+    if main_line is None:
+        return {}, []
+    head = head_text.splitlines()
+    added, n = [], 0
     for ln in diff_text.splitlines():
         h = HUNK_RE.match(ln)
         if h:
             n = int(h.group(1))
         elif ln.startswith("+") and not ln.startswith("+++"):
-            added.append(ln[1:])
-            lineno.append(n)
+            added.append(n)
             n += 1
+
+    def line(no):
+        return head[no - 1] if 1 <= no <= len(head) else ""
+
+    added_set = set(added)
     names, errors = {}, []
-    for i, ln in enumerate(added):
-        if ln.rstrip() != "    {" or main_line is None or lineno[i] <= main_line:
+    for no in range(main_line + 1, len(head) + 1):
+        if line(no).rstrip() != "    {":
             continue
-        nxt = next((a for a in added[i + 1:i + 3] if a.strip()), "")
-        m = CASE_MARKER_RE.match(nxt)
-        if m:
-            names[m.group("name")] = set()
-        else:
-            errors.append("added top-level block in an AlpacaHTTP test has no `// case: <name>` marker "
-                          "on its first line (block at line %d)" % lineno[i])
+        body = []
+        for k in range(no + 1, len(head) + 1):
+            if line(k).rstrip() == "    }":
+                break
+            if line(k).strip():
+                body.append(k)
+        if not body:
+            continue
+        first = body[0]
+        mk = CASE_MARKER_RE.match(line(first))
+        if mk and first in added_set:
+            # An added marker names a case even when a later body line is unchanged (a split block).
+            names[mk.group("name")] = set()
+        elif not mk and all(k in added_set for k in body):
+            # No marker is an error only for a wholly added block: a shared opener (slider
+            # placement) or an edit to the top of an existing block leaves a body line untouched.
+            errors.append("added or rewritten top-level block in an AlpacaHTTP test has no "
+                          "`// case: <name>` marker on its first line (block at line %d)" % no)
     return names, errors
 
 
@@ -212,7 +235,26 @@ def git(*args, check=True):
     return r.stdout
 
 
+MERGE_PARENT = "merge-parent"
+
+
 def resolve_base(explicit):
+    """Merge-base of HEAD and the first match among `explicit` and the defaults.
+
+    `explicit == "merge-parent"` (the CI job) means HEAD^1 when HEAD is a merge
+    commit: on a pull_request run HEAD is refs/pull/N/merge, built against the
+    CURRENT tip of the base branch, so its first parent is the exact base and a
+    base that moved after the PR opened adds none of the cases other PRs landed
+    (issue #992; pull_request.base.sha is the tip when the PR opened). Anywhere
+    else HEAD has no second parent and the usual defaults apply.
+    """
+    if explicit == MERGE_PARENT:
+        explicit = None
+        if subprocess.run(["git", "-C", ROOT, "rev-parse", "--verify", "-q", "HEAD^2"],
+                          capture_output=True).returncode == 0:
+            r = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD^1"], capture_output=True, text=True)
+            if r.returncode == 0:
+                return r.stdout.strip()
     for ref in ([explicit] if explicit else []) + ["upstream/main", "origin/main", "main"]:
         r = subprocess.run(["git", "-C", ROOT, "merge-base", ref, "HEAD"], capture_output=True, text=True)
         if r.returncode == 0:
@@ -329,6 +371,71 @@ def main(argv):
 
 # --- self-test -------------------------------------------------------------
 
+def moved_base_self_test():
+    """Scratch repo: the base branch gains a case after the PR branched (issue #992)."""
+    global ROOT
+    import tempfile
+    failures = []
+    saved = ROOT
+    # Isolated git: no user config, and no GIT_DIR from an enclosing hook
+    # pointing the scratch repo's git at the real repository.
+    git_env = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    stripped = ("GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+    saved_env = {k: os.environ.get(k) for k in list(git_env) + list(stripped)}
+    os.environ.update(git_env)
+    for name in stripped:
+        os.environ.pop(name, None)
+    with tempfile.TemporaryDirectory() as tmp:
+        ROOT = tmp
+
+        def commit(msg, name, *cases):
+            path = os.path.join(tmp, "AlpacaCore/tests", name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write("".join('TEST_CASE("%s", "[x]") {}\n' % c for c in cases))
+            git("add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg)
+
+        def sha():
+            return git("rev-parse", "HEAD").strip()
+
+        try:
+            git("init", "-q", "-b", "trunk")
+            commit("base", "test_a.cpp", "Old")
+            opened = sha()
+            git("checkout", "-q", "-b", "pr")
+            commit("pr", "test_a.cpp", "Old", "Mine")
+            commit("pr again", "test_c.cpp", "Mine2")
+            git("checkout", "-q", "trunk")
+            commit("other pr", "test_b.cpp", "Other")
+            # refs/pull/N/merge: first parent the moved base tip, second the PR head.
+            git("checkout", "-q", "-B", "merge", "trunk")
+            subprocess.run(["git", "-C", tmp, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false",
+                            "merge", "-q", "--no-ff", "-m", "merge", "pr"], capture_output=True)
+            old = gather_new_cases(resolve_base(opened))[0]
+            new = gather_new_cases(resolve_base(MERGE_PARENT))[0]
+            if set(old) != {"Mine", "Mine2", "Other"}:
+                failures.append("moved base: old base.sha choice flags the other PR's case")
+            if set(new) != {"Mine", "Mine2"}:
+                failures.append("moved base: merge-parent base flags only this PR's cases")
+            # Not a merge commit: falls back to the defaults (main here). The PR has two
+            # commits, so HEAD^1 would drop Mine and a dropped HEAD^2 guard shows.
+            git("branch", "main", opened)
+            git("checkout", "-q", "-B", "plain", "pr")
+            if set(gather_new_cases(resolve_base(MERGE_PARENT))[0]) != {"Mine", "Mine2"}:
+                failures.append("merge-parent falls back when HEAD is not a merge commit")
+        except Exception as exc:  # noqa: BLE001
+            failures.append("moved base scratch repo: %s" % exc)
+        finally:
+            ROOT = saved
+            for k, v in saved_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    return failures
+
+
 def self_test():
     failures = []
 
@@ -374,25 +481,55 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     hr_base = "int main() {\n    {\n        // case: moved block\n        EXPECT(1);\n    }\n}\n"
     hr_names = set(case_names_in(hr, hr_base))
     check("hand-rolled base names collected", hr_names == {"moved block"})
-    hr_diff = lambda: "@@ -0,0 +3,4 @@\n+    {\n+        // case: moved block\n+        EXPECT(1);\n+    }\n"  # noqa: E731
-    moved, errs = new_cases_in(hr, "int main() {\n}\n", hr_names, hr_diff)
+    hr_diff = lambda: "@@ -0,0 +2,4 @@\n+    {\n+        // case: moved block\n+        EXPECT(1);\n+    }\n"  # noqa: E731
+    moved, errs = new_cases_in(hr, hr_base, hr_names, hr_diff)
     check("hand-rolled moved block is not new", not moved and not errs)
-    fresh, errs = new_cases_in(hr, "int main() {\n}\n", set(), hr_diff)
+    fresh, errs = new_cases_in(hr, hr_base, set(), hr_diff)
     check("hand-rolled new block is new", set(fresh) == {"moved block"} and not errs)
-    _n, errs = new_cases_in(hr, "int main() {\n}\n", set(), lambda: "@@ -0,0 +3,2 @@\n+    {\n+        EXPECT(1);\n")
+    _n, errs = new_cases_in(hr, "int main() {\n    {\n        EXPECT(1);\n    }\n}\n", set(),
+                            lambda: "@@ -0,0 +2,2 @@\n+    {\n+        EXPECT(1);\n")
     check("hand-rolled missing marker error", len(errs) == 1)
 
     # Hand-rolled blocks: only after the `int main(` line of the HEAD file.
-    head = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n    }\n}\n"
     diff = "+++ b/f.cpp\n@@ -0,0 +6,4 @@\n+    {\n+        // case: marker one\n+        EXPECT(1);\n+    }\n"
+    head = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: marker one\n        EXPECT(1);\n    }\n}\n"
     names, errs = hand_rolled_cases(diff, head)
     check("hand-rolled marker", "marker one" in names and not errs)
-    names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        EXPECT(1);\n+    }\n", head)
+    nomark = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        EXPECT(1);\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        EXPECT(1);\n+    }\n", nomark)
     check("hand-rolled missing marker", not names and len(errs) == 1)
-    names, errs = hand_rolled_cases("@@ -0,0 +6,2 @@\n+        {\n+            x();\n", head)
+    nested = "int main() {\n    {\n        // case: outer\n        {\n            x();\n        }\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +4,3 @@\n+        {\n+            x();\n+        }\n", nested)
     check("nested block ignored", not names and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +2,3 @@\n+    {\n+        x();\n+    }\n", head)
     check("scoped block in a helper before main is not a case", not names and not errs)
+    # Issue #993: a new block inserted directly before an existing one. Git slides it, so the
+    # added lines are the new block's body plus the NEXT block's `    {`; the old reading
+    # saw that `{` with no added marker after it.
+    slid = ("int main() {\n    {\n        // case: new first\n        EXPECT(1);\n    }\n"
+            "    {\n        // case: old second\n        EXPECT(2);\n    }\n}\n")
+    sdiff = "@@ -2,0 +3,4 @@\n+        // case: new first\n+        EXPECT(1);\n+    }\n+    {\n"
+    names, errs = hand_rolled_cases(sdiff, slid)
+    check("slid block: real case name collected, no false marker error", set(names) == {"new first"} and not errs)
+    unm = ("int main() {\n    {\n        // case: new first\n        EXPECT(1);\n    }\n"
+           "    {\n        EXPECT(2);\n    }\n}\n")
+    names, errs = hand_rolled_cases(sdiff, unm)
+    check("slid block before an unmarked existing block: no false error", set(names) == {"new first"} and not errs)
+    two = "int main() {\n    {\n        EXPECT(1);\n    }\n    {\n        EXPECT(2);\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +3,3 @@\n+        EXPECT(1);\n+    }\n+    {\n", two)
+    check("unmarked new block before an existing one: one error", not names and len(errs) == 1)
+    mid = "int main() {\n    {\n        EXPECT(1);\n        // case: mid\n    }\n        {\n        // case: nest\n        }\n}\n"
+    names, errs = hand_rolled_cases("@@ -0,0 +4,1 @@\n+        // case: mid\n@@ -0,0 +7,1 @@\n+        // case: nest\n", mid)
+    check("marker not right after a top-level opener is not a case", not names and not errs)
+    edit = "int main() {\n    {\n        Router r(cfg);\n        EXPECT(1);\n    }\n}\n"
+    names, errs = hand_rolled_cases("@@ -3 +3 @@\n-        Router r;\n+        Router r(cfg);\n", edit)
+    check("first line of an existing unmarked block replaced: no names, no error", not names and not errs)
+    names, errs = hand_rolled_cases("@@ -2,0 +3 @@\n+        Router r(cfg);\n", edit)
+    check("line inserted at top of an existing unmarked block: no names, no error", not names and not errs)
+    split = ("int main() {\n    {\n        // case: x\n        EXPECT(1);\n    }\n    {\n"
+             "        // case: y\n        EXPECT(2);\n    }\n}\n")
+    names, errs = hand_rolled_cases("@@ -4,0 +5,3 @@\n+    }\n+    {\n+        // case: y\n", split)
+    check("split block: added marker with a later unchanged body line is collected", set(names) == {"y"} and not errs)
     names, errs = hand_rolled_cases("@@ -0,0 +6,3 @@\n+    {\n+        x();\n+    }\n", "void f() {}\n")
     check("file without main has no cases", not names and not errs)
     span = "static void helper() {\n    {\n    }\n}\nint main() {\n    {\n        // case: spans main\n    }\n}\n"
@@ -456,6 +593,8 @@ TEST_CASE("Con" "cat", "[a]" "[b]") { }
     check("stale line with no new cases", len(errs) == 1 and "Ghost" in errs[0])
     errs = evaluate({"A": set()}, [("A", prod, "x y z")], ["malformed line"], always)
     check("body errors carried", errs == ["malformed line"])
+
+    failures.extend(moved_base_self_test())
 
     if failures:
         for f in failures:

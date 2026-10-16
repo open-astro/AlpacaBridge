@@ -36,6 +36,13 @@ namespace alpacacore::test {
 // and is always released by explicit test release or stop_exposure(). The SDK
 // returns only success/timeout, not an actual byte count, so a partial successful
 // write cannot be detected by the driver or faithfully represented here.
+//
+// stop_exposure() discards the frame, as POAStopExposure does on hardware
+// (issue #1023, Ceres 462M, SDK 3.10.0): the camera is back in STATE_OPENED at
+// once, POAImageReady never turns true and POAGetImageData fails with
+// POA_ERROR_OPERATION_FAILED. A download already blocked inside
+// POAGetImageData when the stop lands was not observed on hardware; the fake
+// fails it the same way, the harsher of the two possible answers.
 class FakePlayerOneSDK final : public vendor::playerone::PlayerOneSDK {
 public:
     using CameraInfo = vendor::playerone::PlayerOneCameraInfo;
@@ -206,7 +213,7 @@ public:
         }
         if (exposure_started_) {
             stopped_ = true;
-            ready_ = true;
+            ready_ = false;
             exposure_started_ = false;
             download_cv_.notify_all();
         }
@@ -242,6 +249,10 @@ public:
                 finish_download();
                 return false;
             }
+        }
+        if (stopped_) {
+            finish_download();
+            throw std::runtime_error("POAGetImageData failed: POA_ERROR_OPERATION_FAILED after POAStopExposure");
         }
         if (download_failure_) {
             finish_download();
