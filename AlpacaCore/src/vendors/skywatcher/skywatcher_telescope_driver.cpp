@@ -1721,15 +1721,7 @@ public:
                 if (!ra_live_write_sent) {
                     return;
                 }
-                // Deliberately NOT given stop_axis()'s ra_reverses branch: it
-                // writes ":I" + ":J" in place with no ":G", so a re-derived
-                // rate whose SIGN differs from the running one changes the
-                // period and leaves the axis turning the old way. Reached only
-                // when the dispatch ":J" throws after the ":I" went out, and a
-                // pure hemisphere flip preserves the magnitude, so the practical
-                // exposure is a period that is already correct. Recorded so the
-                // asymmetry with stop_axis() reads as a choice rather than an
-                // oversight (round-4 review note).
+                detail::run_pulse_dispatch_failure_hook();
                 constexpr int kRestoreAttempts = 3;
                 std::string last_error;
                 for (int attempt = 0; attempt < kRestoreAttempts; ++attempt) {
@@ -6119,6 +6111,29 @@ std::function<void()>& pulse_restore_hook_slot() {
 void set_pulse_restore_hook(std::function<void()> hook) {
     std::lock_guard<std::mutex> lock(probe_mutex());
     pulse_restore_hook_slot() = std::move(hook);
+}
+
+namespace {
+std::function<void()>& pulse_dispatch_failure_hook_slot() {
+    static std::function<void()> hook;
+    return hook;
+}
+}  // namespace
+
+void set_pulse_dispatch_failure_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(probe_mutex());
+    pulse_dispatch_failure_hook_slot() = std::move(hook);
+}
+
+void run_pulse_dispatch_failure_hook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(probe_mutex());
+        hook = pulse_dispatch_failure_hook_slot();
+    }
+    if (hook) {
+        hook();
+    }
 }
 
 void run_pulse_restore_hook() {
