@@ -345,6 +345,9 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     });
     camera_storm.join();
 
+    // Both storms are over: a nonzero count means a connect reached the SDK.
+    CHECK(fake.physical_opens > 0);
+
     CHECK(alpacacore::test::settle_connected(*camera, false));
     CHECK(alpacacore::test::settle_connected(*thermal, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);
