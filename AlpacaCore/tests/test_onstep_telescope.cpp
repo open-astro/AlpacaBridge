@@ -640,4 +640,164 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     CHECK(tracking_east.is_tracking);
 }
 
+namespace {
+
+// A fake OnStepX whose :GU# reply the test scripts, recording every command.
+struct ScriptedOnStep {
+    std::mutex mutex;
+    std::string status = "nNpEW180#";
+    std::vector<std::string> log;
+
+    void set_status(const std::string& s) {
+        std::lock_guard<std::mutex> lock(mutex);
+        status = s;
+    }
+    std::size_t count(const char* needle) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<std::size_t>(std::count_if(
+            log.begin(), log.end(), [&](const std::string& c) { return c.find(needle) != std::string::npos; }));
+    }
+    void clear_log() {
+        std::lock_guard<std::mutex> lock(mutex);
+        log.clear();
+    }
+    std::string reply(const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(mutex);
+        log.push_back(chunk);
+        if (chunk.rfind(":GU", 0) == 0) return status;
+        if (chunk.rfind(":S", 0) == 0) return "1";   // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG/:ST)
+        if (chunk.rfind(":MS", 0) == 0) return "0";  // slew accepted
+        if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
+        if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        return "0#";
+    }
+};
+
+// Polls Slewing until the driver has fetched the scripted in-progress status
+// with a :GU# (past its 2 s status cache and slew grace), so it has seen the
+// slew running and will notice the slew end. Call right after set_status().
+void observe_slewing(alpacacore::TelescopeDriver& driver, ScriptedOnStep& mount) {
+    const std::size_t polls_before = mount.count(":GU#");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool slewing = false;
+    while (mount.count(":GU#") == polls_before) {
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        slewing = driver.get_slewing();  // cached answers before the poll may be stale
+    }
+    REQUIRE(slewing);  // the answer from the call that polled
+}
+
+// Polls Slewing (each poll may refresh :GU#) until it reads false.
+bool wait_slew_done(alpacacore::TelescopeDriver& driver, std::chrono::seconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!driver.get_slewing()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not at home or parked
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto finish_home = [&]() {
+        mount->set_status("npHhEo180#");  // homing
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpHEo180#");  // at home, not tracking (HM-17 trace, #1218)
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(driver->get_at_home());
+        CHECK(mount->count(":ST6") == 0);
+        CHECK(mount->count(":Te#") == 0);
+    };
+    // A GOTO whose end the driver never saw, so its tracking flag is still set.
+    const auto abort_a_goto = [&]() {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        REQUIRE_NOTHROW(driver->abort_slew());
+        mount->set_status("NpEW180#");
+    };
+
+    SECTION("FindHome after an aborted GOTO") {
+        abort_a_goto();
+        REQUIRE_NOTHROW(driver->find_home());
+        finish_home();
+    }
+
+    SECTION("Park after an aborted GOTO") {
+        abort_a_goto();
+        REQUIRE_NOTHROW(driver->park());
+        mount->set_status("nIEW180#");  // parking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNPHEo180#");  // parked
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(driver->get_at_park());
+        CHECK(mount->count(":ST6") == 0);
+        CHECK(mount->count(":Te#") == 0);
+    }
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if the mount lost it",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking before the slew
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    REQUIRE(driver->get_tracking());
+
+    SECTION("tracking kept through the GOTO: nothing is sent") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("NpEW180#");  // done, still tracking (OnStepX)
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("a slew already running at connect is left alone") {
+        mount->set_status("npEW180#");  // slewing, not tracking: started elsewhere
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpEW180#");
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("tracking lost during the GOTO: restored once") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpEW180#");  // done, tracking off
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 1);
+    }
+
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
