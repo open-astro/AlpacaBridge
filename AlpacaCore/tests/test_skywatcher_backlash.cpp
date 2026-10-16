@@ -171,6 +171,22 @@ bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = st
 
 double counts_deg(uint32_t counts, const FakeMountProfile& profile) { return counts * 360.0 / profile.cpr; }
 
+// A fake mount on a fake clock and a driver connected to it, on the wall clock
+// or, with `shared_clock`, on the fake's own. Disconnects at the end.
+struct Rig {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    explicit Rig(const sw::BacklashSettings& backlash, const FakeMountProfile& profile = FakeMountProfile::eqm35_pro(),
+                 Site site = kSouth, bool shared_clock = false)
+        : mount(profile, clock) {
+        REQUIRE(mount.ok());
+        driver = shared_clock ? make_driver(mount, backlash, site, clock) : make_driver(mount, backlash, site);
+    }
+    ~Rig() { driver->set_connected(false); }
+};
+
 // ── FindHome runs: a goto to fixed counts from a chosen start ─────────────
 
 struct HomeRun {
@@ -182,22 +198,32 @@ struct HomeRun {
 // (no index sensors on this profile: a goto to the count origin).
 HomeRun home_run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, Site site,
                  const double (&start_deg)[2]) {
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount(profile, clock);
-    REQUIRE(mount.ok());
-    auto driver = make_driver(mount, backlash, site);
-    mount.jump_axis_degrees(1, start_deg[0]);
-    mount.jump_axis_degrees(2, start_deg[1]);
-    mount.clear_motion_log();
-    driver->find_home();
-    pump_until_landed(clock, *driver, mount);
+    Rig rig(backlash, profile, site);
+    rig.mount.jump_axis_degrees(1, start_deg[0]);
+    rig.mount.jump_axis_degrees(2, start_deg[1]);
+    rig.mount.clear_motion_log();
+    rig.driver->find_home();
+    pump_until_landed(rig.clock, *rig.driver, rig.mount);
     HomeRun r;
     for (int axis = 1; axis <= 2; ++axis) {
-        r.frames[axis - 1] = axis_frames(mount.motion_log(), axis);
-        r.register_deg[axis - 1] = mount.axis_degrees(axis);
+        r.frames[axis - 1] = axis_frames(rig.mount.motion_log(), axis);
+        r.register_deg[axis - 1] = rig.mount.axis_degrees(axis);
     }
-    driver->set_connected(false);
     return r;
+}
+
+// The gear-gap cases: register minus shaft at each landing, compensated
+// (`on`) and not. Compensated, each landing is within one gap of the shaft and
+// engages the gears the same way; uncompensated, they engage both ways, which
+// shows the fake's gap is real.
+void check_gap_landings(const std::vector<double>& on, const std::vector<double>& off, double gap_deg) {
+    for (std::size_t i = 0; i < on.size(); ++i) {
+        INFO("landing " << i << ": register minus shaft " << on[i] / gap_deg << " gaps");
+        CHECK(std::abs(on[i]) <= gap_deg + 1e-9);
+        CHECK(std::abs(on[i] - on[0]) <= gap_deg / 4.0);
+    }
+    const auto [lo, hi] = std::minmax_element(off.begin(), off.end());
+    CHECK(*hi - *lo > gap_deg / 2.0);
 }
 
 std::size_t first_target(const Frames& frames) {
@@ -217,10 +243,8 @@ struct Run {
 };
 
 Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, const std::vector<double>& decs) {
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount(profile, clock);
-    REQUIRE(mount.ok());
-    auto driver = make_driver(mount, backlash);
+    Rig rig(backlash, profile);
+    auto& [clock, mount, driver] = rig;
     const double ra = driver->get_sidereal_time();
     Run result;
     for (const double dec : decs) {
@@ -233,7 +257,6 @@ Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, c
     result.dec_counts_deg = mount.axis_degrees(2);
     result.worm_inquiries = mount.frames_seen('s');
     result.position_writes = mount.frames_seen('E');
-    driver->set_connected(false);
     return result;
 }
 
@@ -254,16 +277,11 @@ Run cached_run(const std::string& name, const FakeMountProfile& profile, const s
 
 // A Dec goto against the approach side (FindHome from Dec +4 degrees: down to
 // the count origin), held in its first leg: the fake's clock is frozen.
-struct MidFirstLeg {
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
-    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+struct MidFirstLeg : Rig {
     double gap_deg = counts_deg(kBacklash, FakeMountProfile::eqm35_pro());
 
-    MidFirstLeg() {
-        REQUIRE(mount.ok());
+    MidFirstLeg() : Rig(dec_backlash(kBacklash)) {
         mount.set_gear_gap(2, kBacklash);
-        driver = make_driver(mount, dec_backlash(kBacklash));
         mount.jump_axis_degrees(2, 4.0);
         mount.clear_motion_log();
         driver->find_home();
@@ -276,24 +294,18 @@ struct MidFirstLeg {
     bool final_leg_sent() { return has_final_leg(axis_two(mount.motion_log())); }
     // Register minus shaft: within one gap whenever the register was left alone.
     double register_error_deg() { return mount.axis_degrees(2) - mount.shaft_degrees(2); }
-    ~MidFirstLeg() { driver->set_connected(false); }
 };
 
 // The same FindHome with the driver on the fake's own clock: run() steps it
 // 250 ms at a time, each step once the driver's two waits (the slew body and
 // the status poll) are parked, so the landing wait polls once per step. On
 // construction the first leg is on its way and has been polled once.
-struct SteppedHome {
+struct SteppedHome : Rig {
     static constexpr std::size_t kParked = 2;
     static constexpr std::chrono::milliseconds kStep{250};
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
-    std::unique_ptr<alpacacore::TelescopeDriver> driver;
     std::string failure;  // a failed FindHome reports its error through Slewing (open-astro#631)
 
-    SteppedHome() {
-        REQUIRE(mount.ok());
-        driver = make_driver(mount, dec_backlash(kBacklash), kSouth, clock);
+    SteppedHome() : Rig(dec_backlash(kBacklash), FakeMountProfile::eqm35_pro(), kSouth, /*shared_clock=*/true) {
         mount.jump_axis_degrees(2, 4.0);
         mount.clear_motion_log();
         driver->find_home();
@@ -316,7 +328,6 @@ struct SteppedHome {
             if (!clock.wait_for_woken_settled(std::chrono::milliseconds(2000))) return;
         }
     }
-    ~SteppedHome() { driver->set_connected(false); }
 };
 
 }  // namespace
@@ -487,11 +498,9 @@ TEST_CASE("SkyWatcher backlash - RA landings with tracking on stay within one ge
     const auto profile = FakeMountProfile::eqm35_pro();
     const double gap_deg = counts_deg(kGap, profile);
     const auto landings = [&](const sw::BacklashSettings& backlash) {
-        FakeTaskClock clock;
-        FakeSkyWatcherMount mount(profile, clock);
-        REQUIRE(mount.ok());
+        Rig rig(backlash, profile);
+        auto& [clock, mount, driver] = rig;
         mount.set_gear_gap(1, kGap);
-        auto driver = make_driver(mount, backlash);
         driver->set_tracking(true);
         follow_wall_clock(clock, std::chrono::milliseconds(100));
         clock.advance(std::chrono::seconds(5));  // tracking takes up the gap
@@ -504,19 +513,10 @@ TEST_CASE("SkyWatcher backlash - RA landings with tracking on stay within one ge
                 clock.advance(std::chrono::seconds(5));  // let tracking run past the gap
             }
         }
-        driver->set_connected(false);
         return errors;
     };
     const std::vector<double> on = landings(ra_backlash(kGap));
-    const std::vector<double> off = landings({});
-    for (std::size_t i = 0; i < on.size(); ++i) {
-        INFO("landing " << i << ": register minus shaft " << on[i] / gap_deg << " gaps");
-        CHECK(std::abs(on[i]) <= gap_deg + 1e-9);
-        CHECK(std::abs(on[i] - on[0]) <= gap_deg / 4.0);  // the same engagement every time
-    }
-    // The fake's gap is real: uncompensated, the landings engage both ways.
-    const auto [lo, hi] = std::minmax_element(off.begin(), off.end());
-    CHECK(*hi - *lo > gap_deg / 2.0);
+    check_gap_landings(on, landings({}), gap_deg);
 }
 
 TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one gear gap of the shaft",
@@ -528,11 +528,9 @@ TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one
     const auto profile = FakeMountProfile::eqm35_pro();
     const double gap_deg = counts_deg(kGap, profile);
     const auto landings = [&](const sw::BacklashSettings& backlash, double* pulse_moved_shaft) {
-        FakeTaskClock clock;
-        FakeSkyWatcherMount mount(profile, clock);
-        REQUIRE(mount.ok());
+        Rig rig(backlash, profile);
+        auto& [clock, mount, driver] = rig;
         mount.set_gear_gap(2, kGap);
-        auto driver = make_driver(mount, backlash);
         const double ra = driver->get_sidereal_time();
         const auto pulse = [&](int direction) {
             const double before = mount.axis_degrees(2);
@@ -556,21 +554,13 @@ TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one
                 errors.push_back(mount.axis_degrees(2) - mount.shaft_degrees(2));
             }
         }
-        driver->set_connected(false);
         return errors;
     };
     double moved_on = 0.0;
     double moved_off = 0.0;
     const std::vector<double> on = landings(dec_backlash(kGap), &moved_on);
-    const std::vector<double> off = landings({}, &moved_off);
-    for (std::size_t i = 0; i < on.size(); ++i) {
-        INFO("landing " << i << ": register minus shaft " << on[i] / gap_deg << " gaps");
-        CHECK(std::abs(on[i]) <= gap_deg + 1e-9);
-        CHECK(std::abs(on[i] - on[0]) <= gap_deg / 4.0);
-    }
+    check_gap_landings(on, landings({}, &moved_off), gap_deg);
     CHECK(moved_off > 0.0);  // the pulses crossed the gap
-    const auto [lo, hi] = std::minmax_element(off.begin(), off.end());
-    CHECK(*hi - *lo > gap_deg / 2.0);
 }
 
 TEST_CASE("SkyWatcher backlash - an AbortSlew during the first leg stops it and sends no final leg",
