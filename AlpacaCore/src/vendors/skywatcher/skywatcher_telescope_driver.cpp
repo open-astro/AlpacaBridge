@@ -2349,6 +2349,7 @@ public:
         constexpr double kSyncRestartLatencySeconds = 0.25;
         auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(
             ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
+        backlash_rebase_pending_[0] = backlash_rebase_pending_[1] = false;  // the sync re-stamps both counts
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
         // After the writes, for the same reason dispatch_goto_locked() records
@@ -4123,6 +4124,10 @@ private:
         if (!stop_axis_and_wait_locked(lock, channel, gen)) {
             throw AlpacaException("Motion superseded before dispatch");
         }
+        // An unfinished backlash take-up (a goto of ours was superseded by
+        // this command): the axis is at rest now, put its register back
+        // before any new motion makes the recorded count stale.
+        settle_backlash_rebase_locked(lock);
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
         // No hemisphere handling HERE: this is the mechanical layer, and a
@@ -4569,6 +4574,7 @@ private:
     void read_backlash_rates_locked(SkyWatcherProtocolWrapper& protocol) {
         backlash_rate_deg_s_[0] = backlash_rate_deg_s_[1] = 0.0;
         last_direction_[0] = last_direction_[1] = 0;
+        backlash_rebase_pending_[0] = backlash_rebase_pending_[1] = false;
         const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
         for (int channel = kAxisRa; channel <= kAxisDec; ++channel) {
             if (!cfg[channel - 1]->active()) {
@@ -4637,35 +4643,96 @@ private:
         if (!active[0] && !active[1]) {
             return true;
         }
-        const auto deadline = clock_.now() + std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 std::chrono::duration<double>(longest_s) + kAxisStopTimeout);
-        for (int i = 0; i < 2; ++i) {
-            while (active[i]) {
-                if (motion_generation_ != gen) {
-                    return false;
-                }
-                if (!protocol.inquire_status(i + 1).running) {
-                    break;
-                }
-                if (clock_.now() >= deadline) {
-                    throw AlpacaException("Timed out waiting for the backlash take-up on axis " +
-                                          std::to_string(i + 1));
-                }
-                lock.unlock();
-                clock_.sleep_for(std::chrono::milliseconds(50));
-                lock.lock();
-                check_connected();
-            }
-        }
-        if (motion_generation_ != gen) {
-            return false;
-        }
+        // From here the register is ahead of the output shaft by whatever the
+        // take-up has moved. Every exit (done, superseded, timed out, link
+        // error) must put it back on `origin`: the pending record lets the
+        // next dispatch finish the job if a newer command got in first.
         for (int i = 0; i < 2; ++i) {
             if (active[i]) {
-                protocol.set_position(i + 1, origin[i]);
+                backlash_rebase_pending_[i] = true;
+                backlash_rebase_origin_[i] = origin[i];
             }
         }
+        try {
+            const auto deadline = clock_.now() + std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                     std::chrono::duration<double>(longest_s) + kAxisStopTimeout);
+            for (int i = 0; i < 2; ++i) {
+                while (active[i]) {
+                    if (motion_generation_ != gen) {
+                        settle_backlash_rebase_locked(lock, /*only_if_at_rest=*/true);
+                        return false;
+                    }
+                    if (!protocol.inquire_status(i + 1).running) {
+                        break;
+                    }
+                    if (clock_.now() >= deadline) {
+                        throw AlpacaException("Timed out waiting for the backlash take-up on axis " +
+                                              std::to_string(i + 1));
+                    }
+                    lock.unlock();
+                    clock_.sleep_for(std::chrono::milliseconds(50));
+                    lock.lock();
+                    check_connected();
+                }
+            }
+        } catch (const std::exception&) {
+            settle_backlash_rebase_locked(lock);
+            throw;
+        }
+        if (motion_generation_ != gen) {
+            settle_backlash_rebase_locked(lock, /*only_if_at_rest=*/true);
+            return false;
+        }
+        settle_backlash_rebase_locked(lock);
         return true;
+    }
+
+    // Put the board's position register back on the count it held before an
+    // unfinished backlash take-up (the output shaft did not move: the take-up
+    // only closes the slack). Stops the axis first and waits for it, so the
+    // value written is not overwritten by a still-running GOTO. With `only_if_at_rest` an axis that is moving is left
+    // alone. Never throws: a disconnect that makes the re-base impossible is logged, and the next connect re-reads the
+    // position from the board, which discards the offset. An axis a newer command already moved is left alone (its own
+    // dispatch settles it before reading the position).
+    void settle_backlash_rebase_locked(std::unique_lock<std::mutex>& lock, bool only_if_at_rest = false) {
+        for (int i = 0; i < 2; ++i) {
+            if (!backlash_rebase_pending_[i]) {
+                continue;
+            }
+            const int channel = i + 1;
+            try {
+                auto& protocol = *protocol_;
+                // A finished take-up is already at rest: send nothing extra.
+                if (protocol.inquire_status(channel).running) {
+                    if (only_if_at_rest) {
+                        // A newer command is moving the axis: stopping it
+                        // would kill that command, and its own dispatch has
+                        // already re-based (it does so before reading the
+                        // position). Anything else leaves the offset until
+                        // the next sync or connect.
+                        continue;  // the record stays for that command's dispatch
+                    }
+                    protocol.instant_stop(channel);
+                }
+                const auto deadline = clock_.now() + kAxisStopTimeout;
+                while (protocol.inquire_status(channel).running) {
+                    if (clock_.now() >= deadline) {
+                        throw AlpacaException("axis did not stop");
+                    }
+                    lock.unlock();
+                    clock_.sleep_for(std::chrono::milliseconds(20));
+                    lock.lock();
+                    check_connected();
+                }
+                protocol.set_position(channel, backlash_rebase_origin_[i]);
+                backlash_rebase_pending_[i] = false;
+            } catch (const std::exception& e) {
+                backlash_rebase_pending_[i] = false;
+                ALPACA_LOG_WARN("SkyWatcher", std::string("Could not restore the ") + (i == 0 ? "RA" : "Dec") +
+                                                  " axis position after an unfinished backlash take-up (" + e.what() +
+                                                  "); the next connect re-reads it (open-astro#437)");
+            }
+        }
     }
 
     // `compensate_backlash` is false for the AutoHome hunt, whose moves read
@@ -4690,6 +4757,9 @@ private:
         if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
+        // A take-up an earlier goto left unfinished (we superseded it) must be
+        // re-based before the position is read below.
+        settle_backlash_rebase_locked(lock);
         refresh_position_cache_locked(true);
 
         struct AxisGoto {
@@ -6150,6 +6220,9 @@ private:
     // moved in under any command; unknown after a connect, so the first goto
     // of a session is never compensated.
     int last_direction_[2]{};
+    // An unfinished take-up's pre-move count, to put back (see settle_backlash_rebase_locked).
+    bool backlash_rebase_pending_[2]{};
+    uint32_t backlash_rebase_origin_[2]{};
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.

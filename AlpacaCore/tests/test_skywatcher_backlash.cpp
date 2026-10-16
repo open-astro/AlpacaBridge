@@ -37,6 +37,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -87,9 +88,8 @@ Frames axis_two(const Frames& all) {
 // wall clock): while an axis runs a GOTO, jump virtual time so it lands at once;
 // otherwise let it follow wall time. The rendezvous is the board's next frame.
 // Under util::kLinkStalenessBound (30 s) per jump.
-void land(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount,
-          double ra, double dec) {
-    driver.slew_to_coordinates_async(ra, dec);
+void pump_until_landed(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
+                       FakeSkyWatcherMount& mount) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     auto last = std::chrono::steady_clock::now();
     while (driver.get_slewing()) {
@@ -103,6 +103,73 @@ void land(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& d
         last = t;
     }
 }
+
+void land(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount,
+          double ra, double dec) {
+    driver.slew_to_coordinates_async(ra, dec);
+    pump_until_landed(clock, driver, mount);
+}
+
+Frames axis_one(const Frames& all) {
+    Frames out;
+    std::copy_if(all.begin(), all.end(), std::back_inserter(out), [](const std::string& f) { return f[2] == '1'; });
+    return out;
+}
+
+bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = std::chrono::seconds(20)) {
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (!done()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return true;
+}
+
+bool has_takeup(const Frames& frames) {
+    return std::any_of(frames.begin(), frames.end(), [](const std::string& f) {
+        return f.rfind(":E", 0) == 0 || (f.rfind(":G", 0) == 0 && f[3] == '2');
+    });
+}
+
+// A mount with Dec backlash on, Dec carried upward by two gotos, then a third
+// (reversing) goto started and held part-way through its take-up: the fake's
+// clock is frozen, so the slack is closed by `partial_s` virtual seconds only
+// (the fake slews at 3.3 deg/s: 0.0015 s covers under half of a 300-count slack).
+struct MidTakeUp {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    double ra = 0.0;
+    double before_deg = 0.0;  // register angle before the reversing goto
+    double moved_deg = 0.0;   // how far the register ran ahead during the take-up
+    double partial_s;
+
+    // `start_goto` false: the caller issues the reversing goto itself.
+    explicit MidTakeUp(bool start_goto = true, double partial = 0.0015) : partial_s(partial) {
+        REQUIRE(mount.ok());
+        driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
+                                                 alpacacore::util::default_task_clock(), sw::DecAxisSenseSetting::Auto,
+                                                 dec_backlash(kBacklash));
+        driver->set_connected(true);
+        ra = driver->get_sidereal_time();
+        land(clock, *driver, mount, ra, -80.0);
+        land(clock, *driver, mount, ra, -79.0);
+        before_deg = mount.axis_degrees(2);
+        mount.clear_motion_log();
+        if (start_goto) {
+            driver->slew_to_coordinates_async(ra, -79.5);
+            run_partial_takeup();
+        }
+    }
+    // Wait for the take-up to start, then let it run `partial_s` virtual seconds.
+    void run_partial_takeup() {
+        REQUIRE(wait_for([&] { return mount.axis_in_goto(2) && has_takeup(axis_two(mount.motion_log())); }));
+        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(partial_s)));
+        moved_deg = mount.axis_degrees(2) - before_deg;
+        REQUIRE(std::abs(moved_deg) > 0.0);  // the register is ahead of the shaft
+    }
+    ~MidTakeUp() { driver->set_connected(false); }
+};
 
 struct Run {
     std::vector<Frames> dec_frames;  // per goto, Dec axis only
@@ -148,12 +215,6 @@ Run cached_run(const std::string& name, const FakeMountProfile& profile, const s
         it = runs.emplace(name, run(profile, backlash, kReversal)).first;
     }
     return it->second;
-}
-
-bool has_takeup(const Frames& frames) {
-    return std::any_of(frames.begin(), frames.end(), [](const std::string& f) {
-        return f.rfind(":E", 0) == 0 || (f.rfind(":G", 0) == 0 && f[3] == '2');
-    });
 }
 
 // The second goto continues the first one's way; the third turns Dec round.
@@ -321,6 +382,115 @@ TEST_CASE("SkyWatcher backlash - guide pulses and MoveAxis reversals send no tak
         CHECK_FALSE((f.rfind(":G", 0) == 0 && f[3] == '2'));
     }
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher backlash - an AbortSlew during the take-up leaves the register where the shaft is",
+          "[skywatcher][telescope][backlash]") {
+    MidTakeUp rig;
+    rig.driver->abort_slew();
+    REQUIRE(wait_for([&] { return rig.mount.frames_seen('E') >= 1; }));
+    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
+}
+
+TEST_CASE("SkyWatcher backlash - a take-up that times out leaves the register where the shaft is",
+          "[skywatcher][telescope][backlash]") {
+    MidTakeUp rig(false);
+    // The clock stays frozen after the partial run: the axis never reports
+    // done and the driver's wait (about five wall-clock seconds) gives up. A
+    // synchronous goto hands the failure to this thread, so the register is
+    // read at the moment the call returns, with no later dispatch to fix it.
+    std::thread helper([&] { rig.run_partial_takeup(); });
+    CHECK_THROWS_AS(rig.driver->slew_to_coordinates(rig.ra, -79.5), alpacacore::AlpacaException);
+    helper.join();
+    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
+}
+
+TEST_CASE("SkyWatcher backlash - a second goto during the take-up lands on its own target",
+          "[skywatcher][telescope][backlash]") {
+    MidTakeUp rig;
+    rig.driver->slew_to_coordinates_async(rig.ra, -70.0);
+    pump_until_landed(rig.clock, *rig.driver, rig.mount);
+    const Run plain = run(FakeMountProfile::eqm35_pro(), {}, {-80.0, -79.0, -70.0});
+    CHECK(rig.mount.axis_degrees(2) == plain.dec_counts_deg);
+    // The cut-short take-up moved the shaft; the re-base left that displacement
+    // in the frame (an unrestored register would leave none). Same way as the
+    // partial run, no further than the slack.
+    const double slack_deg = kBacklash * 360.0 / FakeMountProfile::eqm35_pro().cpr;
+    const double shaft = rig.mount.physical_degrees(2) - plain.dec_physical_deg;
+    CHECK(shaft * rig.moved_deg > 0.0);
+    CHECK(std::abs(shaft) <= slack_deg + 1e-9);
+}
+
+TEST_CASE("SkyWatcher backlash - a MoveAxis during the take-up leaves the register where the shaft is",
+          "[skywatcher][telescope][backlash]") {
+    MidTakeUp rig;
+    rig.driver->move_axis(1, 0.5);  // the clock is frozen: the axis has not moved yet
+    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
+    rig.driver->move_axis(1, 0.0);
+    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
+}
+
+// Command letters and modes only: RA targets follow the host clock.
+Frames shape(const Frames& frames) {
+    Frames out;
+    for (const std::string& f : frames) out.push_back(f.substr(0, f.rfind(":G", 0) == 0 ? 5 : 3));
+    return out;
+}
+
+TEST_CASE("SkyWatcher backlash - a reversing RA goto takes up the slack first and lands on the same target",
+          "[skywatcher][telescope][backlash]") {
+    struct Result {
+        std::vector<Frames> gotos;
+        double shaft_before = 0.0;  // physical minus register angle, before the last goto
+        double shaft_after = 0.0;
+    };
+    const auto ra_run = [](const sw::BacklashSettings& backlash) {
+        alpacacore::test::FakeTaskClock clock;
+        FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
+                                                      alpacacore::util::default_task_clock(),
+                                                      sw::DecAxisSenseSetting::Auto, backlash);
+        driver->set_connected(true);
+        const double lst = driver->get_sidereal_time();
+        Result r;
+        for (const double hours : {0.5, 1.0, 0.75}) {  // on, on, back
+            r.shaft_before = mount.physical_degrees(1) - mount.axis_degrees(1);
+            mount.clear_motion_log();
+            land(clock, *driver, mount, std::fmod(lst + hours, 24.0), -80.0);
+            r.gotos.push_back(axis_one(mount.motion_log()));
+            r.shaft_after = mount.physical_degrees(1) - mount.axis_degrees(1);
+        }
+        driver->set_connected(false);
+        return r;
+    };
+    sw::BacklashSettings ra_only;
+    ra_only.ra = {kBacklash, true};
+    const Result on = ra_run(ra_only);
+    const Result off = ra_run({});
+
+    CHECK_FALSE(has_takeup(on.gotos[1]));  // continues the second goto's way
+    const Frames& with = on.gotos[2];
+    const Frames& without = off.gotos[2];
+    REQUIRE(with.size() == without.size() + 5);
+    // Stop, then slow GOTO + period + target + start + re-base, then the
+    // unchanged real move (same command letters, modes and directions).
+    CHECK(shape(with)[0] == shape(without)[0]);
+    REQUIRE(with[1].rfind(":G12", 0) == 0);
+    CHECK(with[2].rfind(":I1", 0) == 0);
+    REQUIRE(with[3].rfind(":S1", 0) == 0);
+    CHECK(with[4].rfind(":J1", 0) == 0);
+    REQUIRE(with[5].rfind(":E1", 0) == 0);
+    CHECK(shape(Frames(with.begin() + 6, with.end())) == shape(Frames(without.begin() + 1, without.end())));
+    // Magnitude and direction of the take-up: the slack, the real move's way.
+    const int64_t takeup = static_cast<int64_t>(payload(with[3])) - static_cast<int64_t>(payload(with[5]));
+    const char real_dir = without[1][4];
+    CHECK(with[1][4] == real_dir);
+    CHECK(takeup == (real_dir == '0' ? 1 : -1) * static_cast<int64_t>(kBacklash));
+    // The shaft really moved the slack extra, in that direction.
+    const double slack_deg = kBacklash * 360.0 / FakeMountProfile::eqm35_pro().cpr;
+    CHECK(std::abs(std::abs(on.shaft_after - on.shaft_before) - slack_deg) < 1e-6);
+    CHECK(std::abs(off.shaft_after - off.shaft_before) < 1e-6);
 }
 
 TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-checked and reach the driver",
