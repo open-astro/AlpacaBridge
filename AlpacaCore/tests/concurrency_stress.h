@@ -435,6 +435,22 @@ inline void run_lifecycle_stress(AlpacaDriver& driver, const std::function<void(
     }
 }
 
+/// Wait until no async connect/disconnect task is in flight. Storm threads are
+/// joined, but the last `connect()` may still own a connection thread; reading
+/// a fake's plain counters before this returns races that task. Reading
+/// `get_connecting()` (an atomic the task tail publishes) orders the task's
+/// last write before the caller's read.
+inline bool wait_connect_idle(AlpacaDriver& driver, std::chrono::milliseconds budget = std::chrono::seconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (driver.get_connecting()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return true;
+}
+
 /// Post-storm convergence: drive the driver to the wanted connected state
 /// with sync retries. Right after a storm the last async task may still be in
 /// flight, so a single sync set_connected can legitimately no-op against the
@@ -462,6 +478,18 @@ inline bool settle_connected(AlpacaDriver& driver, bool want,
     return driver.get_connected() == want && !driver.get_connecting();
 }
 
+/// One iteration of the destruction race: connect (and on odd iterations race a
+/// disconnect), then destroy the driver with the task possibly still running.
+inline void destroy_driver_during_connect(std::unique_ptr<AlpacaDriver>& driver, int iteration) {
+    driver->connect();  // spawns the async connection task
+    if ((iteration % 2) != 0) {
+        // Half the time, also race a disconnect against the connect so the
+        // pending-disconnect machinery is live at destruction time.
+        driver->disconnect();
+    }
+    driver.reset();  // ~Driver must join the in-flight task, every time
+}
+
 /// The issue-#100 destructor race: destroy the driver while its async connect
 /// task is (or may still be) in flight. A driver missing the shutting_down_
 /// teardown contract leaves an unjoined thread -> std::terminate; a driver
@@ -470,13 +498,24 @@ inline void run_destruction_during_connect_stress(const std::function<std::uniqu
                                                   int iterations = 100) {
     for (int i = 0; i < iterations; ++i) {
         auto driver = make();
-        driver->connect();  // spawns the async connection task
-        if ((i % 2) != 0) {
-            // Half the time, also race a disconnect against the connect so the
-            // pending-disconnect machinery is live at destruction time.
-            driver->disconnect();
-        }
-        driver.reset();  // ~Driver must join the in-flight task, every time
+        destroy_driver_during_connect(driver, i);
+    }
+}
+
+/// Same race, but one FRESH fake per iteration. A pty-backed fake shared across
+/// iterations keeps the replies it wrote to a driver destroyed mid-connect
+/// queued on the pty, so the next iteration's driver can read the previous
+/// one's answers and the case stops testing a cold connect. `make_fake` returns
+/// a std::unique_ptr<Fake>; `make_driver` takes `Fake&`. The driver is destroyed
+/// first, then the fake, every iteration.
+template <typename MakeFake, typename MakeDriver>
+void run_destruction_during_connect_stress_fresh_fake(MakeFake&& make_fake, MakeDriver&& make_driver,
+                                                      int iterations = 100) {
+    for (int i = 0; i < iterations; ++i) {
+        auto fake = make_fake();
+        std::unique_ptr<AlpacaDriver> driver = make_driver(*fake);
+        destroy_driver_during_connect(driver, i);
+        fake.reset();
     }
 }
 
