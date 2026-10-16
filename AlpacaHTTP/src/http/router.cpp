@@ -8372,13 +8372,18 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                                       "the web UI.");
                 }
                 if (learned_config != nullptr) {
-                    // #508 item 5: a saved site coordinate normalize() dropped as out of
-                    // range is forgotten in the stored entry too, so the entry holds what
-                    // the driver uses and the next save does not write it back.
+                    // #508 item 5: a saved site coordinate that the descriptor declares and
+                    // normalize() dropped as out of range is forgotten in the stored entry
+                    // too, so the entry holds what the driver uses and the next save does not
+                    // write it back. A coordinate the descriptor does not declare is never in
+                    // `normalized`, so it is left alone.
                     const auto normalized = catalog_json::json_from_config(result.config);
                     for (const char* key : {"siteLatitude", "siteLongitude"}) {
                         const auto original = config.find(key);
-                        if (original != config.end() && original->is_number() &&
+                        const bool declared =
+                            std::any_of(view->fields.begin(), view->fields.end(),
+                                        [key](const auto& field) { return std::string_view{field.key} == key; });
+                        if (declared && original != config.end() && original->is_number() &&
                             normalized.find(key) == normalized.end()) {
                             (*learned_config)[key] = nullptr;
                         }

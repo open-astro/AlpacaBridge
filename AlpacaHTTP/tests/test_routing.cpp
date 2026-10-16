@@ -5539,6 +5539,9 @@ int main() {
         };
 #ifdef ALPACACORE_ENABLE_GEMINI
         silent_pin("gemini", "covercalibrator", "CoverCalibrator", "");
+        // #508 item 5 must not widen: a coordinate the descriptor does not declare
+        // (sanitize_device_config keeps it for every device type) stays in the entry.
+        silent_pin("gemini", "covercalibrator", "CoverCalibrator", R"("siteLatitude":-33.856784)");
 #endif
 
         for (const auto& p : pins) {
