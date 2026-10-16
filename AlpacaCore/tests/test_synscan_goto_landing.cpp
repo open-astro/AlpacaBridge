@@ -721,9 +721,10 @@ TEST_CASE("SynScan GOTO landing - a tracking write, a time write and a reconnect
     driver->set_connected(false);
 }
 
-// A handset without the sawtooth: the first landing spends the hunt's 1.3 s first-jump budget (6 or 7 reads, the
-// fake handset answers in about 0.2 s), a later one on the same connection reads once (#1107). Returns the reads a
-// landing took.
+// A handset without the sawtooth: the first landing spends the hunt's 1.3 s first-jump budget. On the fake clock a
+// handset reply costs no virtual time and only the 50 ms hunt interval advances it, so that is about 27 reads; a
+// later landing on the same connection reads once (#1107). Callers check >= 4 reads for a hunt and < 4 for a skipped
+// one, which holds with wide margin on both sides. Returns the reads a landing took.
 int landing_reads(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
                   LandingOffsetHandset& st) {
     const int before = st.position_reads.load();

@@ -207,14 +207,13 @@ void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, const std::fun
         }
         done.store(true);
     });
-    if (started) {
-        REQUIRE(wait_until([&] { return started() || done.load(); }, 5000));
-    }
-    const bool finished = advance_until(clock, [&] { return done.load(); });
+    const bool began = !started || wait_until([&] { return started() || done.load(); }, 5000);
+    const bool finished = began && advance_until(clock, [&] { return done.load(); });
     if (!finished) {
         clock.advance(std::chrono::hours(1));  // release a hung caller so the thread can join
     }
     caller.join();
+    REQUIRE(began);
     REQUIRE(finished);
     if (error) std::rethrow_exception(error);
 }
