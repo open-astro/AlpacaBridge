@@ -434,6 +434,11 @@ fi
 # --- gate 4: build + unit tests, all vendors -------------------------------
 
 section "Build + tests (vendors ON)"
+# The gphoto driver links the bundled libgphoto2 (decision 0012): hint when
+# it is not installed instead of leaving a bare CMake error.
+if [ ! -e /usr/lib/alpacabridge/libgphoto2/lib/libgphoto2.so ]; then
+  echo "bundled libgphoto2 not installed: run 'sudo scripts/build_bundled_gphoto.sh' once before the vendors-ON gates"
+fi
 if ALPACACORE_ENABLE_ALL_VENDORS=ON ./run_all_tests.sh; then
   record PASS "build+test (vendors ON)"
 else

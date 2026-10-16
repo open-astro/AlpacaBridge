@@ -305,6 +305,28 @@ else
   PARALLEL="4"
 fi
 
+# libgphoto2 is bundled: the gphoto driver links the copy that
+# scripts/build_bundled_gphoto.sh builds from the vendored tarball into
+# /usr/lib/alpacabridge/libgphoto2 (the distro's libgphoto2 is not used). Build it
+# when it is missing or at another version; otherwise skip. Keep this function
+# identical in build_and_run.sh and install_alpaca_service.sh.
+ensure_bundled_gphoto() {
+  [[ "${CORE_VENDORS}" == "ON" && "${OSTYPE:-}" == "linux"* ]] || return 0
+  local pins LIBGPHOTO2_VER pc
+  pins="$("${ROOT_DIR}/scripts/build_bundled_gphoto.sh" --print-pins)"
+  LIBGPHOTO2_VER="$(sed -n 's/^LIBGPHOTO2_VER=//p' <<<"${pins}")"
+  pc="/usr/lib/alpacabridge/libgphoto2/lib/pkgconfig/libgphoto2.pc"
+  if [[ "$(sed -n 's/^Version: //p' "${pc}" 2>/dev/null)" == "${LIBGPHOTO2_VER}" ]]; then
+    return 0
+  fi
+  echo "Building bundled libgphoto2 ${LIBGPHOTO2_VER}"
+  sudo "${ROOT_DIR}/scripts/build_bundled_gphoto.sh"
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+}
+
+ensure_bundled_gphoto
+
 # Build AlpacaHTTP only -- it pulls AlpacaCore as a subdirectory, so we don't
 # need to build AlpacaCore standalone. CMake's reconfigure step is cheap when
 # nothing changed; the build step is incremental and skips up-to-date files.

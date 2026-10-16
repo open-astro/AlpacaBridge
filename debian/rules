@@ -34,13 +34,24 @@ endif
 %:
 	dh $@
 
-override_dh_auto_configure:
+# libgphoto2 is built from the vendored tarball into a staging tree first; the
+# CMake configure below links it from there (scripts/build_bundled_gphoto.sh).
+GPHOTO_STAGE := $(BUILD_DIR)/gphoto-stage
+
+override_dh_auto_configure: bundled-gphoto
 	cmake -S $(CURDIR)/AlpacaHTTP -B $(BUILD_DIR) \
 	  -DCMAKE_BUILD_TYPE=Release \
 	  -DALPACACORE_ENABLE_ALL_VENDORS=ON \
+	  -DALPACACORE_GPHOTO_STAGE=$(GPHOTO_STAGE) \
+	  -DCMAKE_SKIP_BUILD_RPATH=ON \
 	  -DALPACAHTTP_BUILD_TESTS=OFF \
 	  -DALPACACORE_BUILD_TESTS=OFF \
 	  $(CMAKE_CROSS_FLAGS)
+
+.PHONY: bundled-gphoto
+bundled-gphoto:
+	$(CURDIR)/scripts/build_bundled_gphoto.sh --destdir $(GPHOTO_STAGE) \
+	  --build-dir $(BUILD_DIR)/gphoto-src --jobs $(PARALLEL)
 
 override_dh_auto_build:
 	cmake --build $(BUILD_DIR) --parallel $(PARALLEL)
@@ -72,6 +83,19 @@ override_dh_auto_install:
 	# Player One Phoenix Filter Wheel shared library
 	cp -a $(PLAYERONE_PW_LIB_DIR)/libPlayerOnePW.so* \
 	  $(STAGING)/usr/lib/alpacabridge/
+
+	# libgphoto2 (library, camlibs, iolibs) in its private prefix. Not on the
+	# ldconfig path: the server finds it through its DT_RPATH. The headers,
+	# pkg-config files, *-config scripts, unversioned .so links and the
+	# check-ptp-camera udev helper (the generated rules do not call it) are
+	# build-time only and do not ship.
+	cp -a $(GPHOTO_STAGE)/usr/lib/alpacabridge/. $(STAGING)/usr/lib/alpacabridge/
+	rm -rf $(STAGING)/usr/lib/alpacabridge/libgphoto2/include \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/pkgconfig \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/bin \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/udev \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/libgphoto2.so \
+	  $(STAGING)/usr/lib/alpacabridge/libgphoto2/lib/libgphoto2_port.so
 
 	# --- Register vendor library path with the dynamic linker ---
 	install -d $(STAGING)/etc/ld.so.conf.d
@@ -129,6 +153,9 @@ override_dh_auto_install:
 	install -m 644 \
 	  $(CURDIR)/AlpacaCore/external/oasisastro/99-astroasis-focuser.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
+	# libgphoto2 camera rules, generated from the bundled build
+	install -m 644 $(GPHOTO_STAGE)/usr/lib/udev/rules.d/61-alpacabridge-libgphoto2.rules \
+	  $(STAGING)/usr/lib/udev/rules.d/
 	# RTC write-back (client-corrected time -> /dev/rtcN). Named so dh_installudev
 	# (which only picks up debian/alpacabridge.udev) does not also install it
 	# into /lib/udev/rules.d.
@@ -177,8 +204,12 @@ override_dh_installsystemd:
 	dh_installsystemd alpacabridge.service
 
 # Tell dh_shlibdeps where to find bundled proprietary shared libraries
+# The server's RPATH names only the libgphoto2 bundle (CMAKE_SKIP_BUILD_RPATH),
+# and dh_shlibdeps -l only sets the deprecated LD_LIBRARY_PATH, which
+# dpkg-shlibdeps ignores for build-api >= 1: pass the private library
+# directories to dpkg-shlibdeps itself.
 override_dh_shlibdeps:
-	dh_shlibdeps -l$(STAGING)/usr/lib/alpacabridge
+	dh_shlibdeps -- -l$(STAGING)/usr/lib/alpacabridge -l$(STAGING)/usr/lib/alpacabridge/libgphoto2/lib
 
 # Ship the vendor SDK binaries byte-identical to AlpacaCore/external/: the
 # release SBOM (scripts/dependency_snapshot.py --spdx) refuses a vendor file

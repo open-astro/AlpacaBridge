@@ -226,7 +226,7 @@ jobs:
     # Built on the target distribution so dpkg-shlibdeps derives trixie
     # package names (libgpiod3 and friends), not the runner's Ubuntu ones.
     container: debian:trixie
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       NOTES_NAME: ${{ needs.release.outputs.notes_name }}

@@ -27,11 +27,18 @@ found and fixed the driver's first real bulb defect -- see the bulb bullet below
 bodies (other Canon/Nikon/Sony models, the SDK's other transports) is still only as validated as
 the notes below say for each.
 
-SDK: **system packages**, not vendored — `libgphoto2-dev` + `libraw-dev` via pkg-config
-(`AlpacaCore/src/vendors/gphoto/CMakeLists.txt`). Unlike every other camera vendor, gphoto has no
-`gphoto/` subdirectory under `AlpacaCore/external/`: libgphoto2 and libraw are open-source and
-already packaged for Debian/Ubuntu, so there's no proprietary SDK to vendor or clean up (Step 4's
-SDK cleanup checklist does not apply here).
+SDK: **libgphoto2 is bundled**, `libraw` is a system package (`libraw-dev` via pkg-config). The
+libgphoto2 2.5.34 source tarball is vendored in `AlpacaCore/external/libgphoto2/` (pins and bump
+procedure in its README); `scripts/build_bundled_gphoto.sh` builds it into the private prefix
+`/usr/lib/alpacabridge/libgphoto2` (library, the default `standard` camlibs, iolibs and the
+generated `61-alpacabridge-libgphoto2.rules`), and `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`
+links that copy through `ALPACACORE_GPHOTO_PREFIX` / `ALPACACORE_GPHOTO_STAGE`. The distro's
+libgphoto2 is never linked or loaded: the executables carry a `DT_RPATH` (not `DT_RUNPATH`) to the
+prefix, and the prefix is never added to `/etc/ld.so.conf.d/`, so other programs on the host keep the
+distro library. `scripts/check_bundled_gphoto.sh` is the acceptance check (CI job `package-deb`;
+on the rig add `--pid` of the service). A dev build runs the script once before CMake. Decision:
+[0012](../../docs/decisions/0012-bundled-libgphoto2.md). Unlike the proprietary camera SDKs there is
+no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not apply.
 
 - **Enumeration is USB-autodetect-by-index, matching the other SDK-enumerated cameras**: no
   serial/network auto-detection was implemented (per the driver-build guide's "SDK-enumerated
@@ -137,7 +144,7 @@ SDK cleanup checklist does not apply here).
 - **Offset is unsupported** (`PropertyNotImplemented`/`NotImplemented`, unconditionally, no
   `ensure_connected()` gate) — DSLRs have no analog-offset register concept over PTP.
 - **Bulb capture has two mechanisms: the standalone `"bulb"` toggle widget (Nikon) or, on Canon
-  bodies without it, the `eosremoterelease` `Press Full` / `Release Full` pair plus the
+  bodies without it, the `eosremoterelease` press/release pair (`Press Full MF` / `Release` on the bundled libgphoto2 2.5.34, `Press Full` / `Release Full` before it) plus the
   shutter-speed `"bulb"` choice (see the Canon paragraph below).** The toggle path (confirmed present in
   libgphoto2 2.5.31's `ptp2.so` camlib via `strings`, which is the single camlib handling
   Canon/Nikon/Sony PTP — not a per-vendor code branch, so this should generalize across brands):
@@ -170,14 +177,18 @@ SDK cleanup checklist does not apply here).
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
     first connect).
-  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues.**
-  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists both
-  `Press Full` and `Release Full` (matched by name, never by index), the same
-  `bulb_capture_with_abort` loop runs with `set_choice_value("eosremoterelease", "Press Full")` as
-  the open and `"Release Full"` as the close, so the #569 rules above hold unchanged (events pumped
-  during the hold, release sent on every exit path including a throw, abort closes early, frame
-  waited for by file event). `ExposureMax` is 3600 s only when the `"bulb"` widget exists or both
-  choices were found; a Canon body missing either choice stays at its longest native shutter speed.
+  **Canon bodies (no standalone `"bulb"` widget, issue #640): rig-verified on the EOS 250D (M, shutter Bulb) and the EOS 70D (mode dial B), ConformU 4.5.1 arm64, 0 errors, 0 issues, on libgphoto2 2.5.31 and again on the bundled 2.5.34.**
+  When the shutter-speed list has a `"bulb"` choice and the `eosremoterelease` widget lists a
+  whole press/release pair (matched by name, never by index), the same
+  `bulb_capture_with_abort` loop runs with the press as the open and the release as the close.
+  libgphoto2 2.5.34 renamed the choices: the pair is `Press Full MF` / `Release` there and
+  `Press Full` / `Release Full` up to 2.5.33, both `remotereleaseon(3, 1)` then
+  `remotereleaseoff(3)`. 2.5.34's own `Release Full` is `remotereleaseoff(2)`, which leaves the
+  half press held, so the driver picks the pair as a unit and never mixes the two spellings. The
+  #569 rules above hold unchanged (events pumped during the hold, release sent on every exit path
+  including a throw, abort closes early, frame waited for by file event). `ExposureMax` is 3600 s
+  only when the `"bulb"` widget exists or a whole pair was found; a Canon body without one stays
+  at its longest native shutter speed.
   **B mode:** with the mode dial on B the shutter-speed list holds only `bulb`, so there is no
   native speed to use and every duration, short ones too, takes the bulb path instead of failing
   with "No shutter speed control exposed by this camera". The shutter-speed widget is not written there: the body owns the shutter and refuses the write ("I/O in progress", EOS 70D), so the press/release pair alone drives the exposure. Bench evidence is in #640 (EOS 250D on M

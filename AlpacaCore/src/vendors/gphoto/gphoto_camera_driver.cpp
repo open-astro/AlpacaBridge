@@ -1277,14 +1277,23 @@ private:
         has_bulb_ = sdk.has_widget(handle, "bulb");
         if (!has_bulb_ && to_lower(bulb_choice_) == "bulb" && sdk.has_widget(handle, "eosremoterelease")) {
             const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
-            const bool has_press =
-                std::find(remote_choices.begin(), remote_choices.end(), "Press Full") != remote_choices.end();
-            const bool has_release =
-                std::find(remote_choices.begin(), remote_choices.end(), "Release Full") != remote_choices.end();
-            if (has_press && has_release) {
-                remote_press_choice_ = "Press Full";
-                remote_release_choice_ = "Release Full";
-                has_bulb_ = true;
+            const auto has = [&](const char* choice) {
+                return std::find(remote_choices.begin(), remote_choices.end(), choice) != remote_choices.end();
+            };
+            // The pair is chosen as a unit: both are remotereleaseon(3, 1) then remotereleaseoff(3).
+            // libgphoto2 2.5.34 renamed the choices; its "Release Full" is remotereleaseoff(2), which
+            // leaves the half press held, so it only pairs with the 2.5.31 "Press Full".
+            static constexpr std::pair<const char*, const char*> kRemoteReleasePairs[] = {
+                {"Press Full MF", "Release"},    // libgphoto2 2.5.34 and later
+                {"Press Full", "Release Full"},  // libgphoto2 2.5.33 and earlier
+            };
+            for (const auto& [press, release] : kRemoteReleasePairs) {
+                if (has(press) && has(release)) {
+                    remote_press_choice_ = press;
+                    remote_release_choice_ = release;
+                    has_bulb_ = true;
+                    break;
+                }
             }
         }
         if (!has_bulb_) {

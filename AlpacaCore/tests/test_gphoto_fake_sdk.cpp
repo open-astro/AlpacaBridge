@@ -498,6 +498,35 @@ TEST_CASE("GPhoto camera fake - Canon bulb presses then releases eosremotereleas
     driver->set_connected(false);
 }
 
+// libgphoto2 2.5.34 renamed the choices (NEWS: "canon eos: remoterelease config values changed").
+// "Press Full MF" / "Release" send the same PTP calls as 2.5.31's "Press Full" / "Release Full"
+// (remotereleaseon(3, 1) / remotereleaseoff(3)); 2.5.34's "Release Full" is remotereleaseoff(2),
+// which leaves the half press held, so it must not be the close.
+TEST_CASE("GPhoto camera fake - Canon bulb uses the libgphoto2 2.5.34 eosremoterelease names",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["eosremoterelease"] = {"None",          "Press Half AF", "Press Full AF", "Press Half MF",
+                                       "Press Full MF", "Release Half",  "Release Full",  "Release"};
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    CHECK(driver->get_exposure_max() == 3600.0);
+
+    driver->start_exposure(0.05, true);  // > 1/50 s native ceiling
+    wait_for_exposure_to_finish(*driver);
+
+    REQUIRE(fake.remote_release_history.size() == 2);
+    CHECK(fake.remote_release_history.front() == "Press Full MF");
+    CHECK(fake.remote_release_history.back() == "Release");
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - Canon bulb stop_exposure releases early", "[gphoto][camera][unit][fakesdk][canon]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
@@ -546,6 +575,22 @@ TEST_CASE("GPhoto camera fake - ExposureMax stays native unless both eosremotere
         reset_gphoto_sensor_cache();
         FakeGPhotoSDK fake;
         auto cam = make_canon_camera();
+        auto& list = cam.choices["eosremoterelease"];
+        list.erase(std::remove(list.begin(), list.end(), std::string(missing)), list.end());
+        fake.cameras.push_back(cam);
+        FakeRawDecoder decoder;
+
+        auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+        driver->set_connected(true);
+        CHECK(driver->get_exposure_max() == 1.0 / 50.0);
+        driver->set_connected(false);
+    }
+    // The 2.5.34 pair is matched as a pair too: its "Release Full" alone does not close the press.
+    for (const char* missing : {"Press Full MF", "Release"}) {
+        reset_gphoto_sensor_cache();
+        FakeGPhotoSDK fake;
+        auto cam = make_canon_camera();
+        cam.choices["eosremoterelease"] = {"None", "Press Full AF", "Press Full MF", "Release Full", "Release"};
         auto& list = cam.choices["eosremoterelease"];
         list.erase(std::remove(list.begin(), list.end(), std::string(missing)), list.end());
         fake.cameras.push_back(cam);

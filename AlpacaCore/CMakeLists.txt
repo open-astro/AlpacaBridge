@@ -39,6 +39,14 @@ option(ALPACACORE_ENABLE_PLAYERONE "Enable Player One vendor support" OFF)
 option(ALPACACORE_ENABLE_WANDERERASTRO "Enable WandererAstro CoverCalibrator vendor support" OFF)
 option(ALPACACORE_ENABLE_ASTROASIS "Enable Astroasis Oasis Focuser vendor support" OFF)
 option(ALPACACORE_ENABLE_GPHOTO "Enable libgphoto2 DSLR/mirrorless camera vendor support" OFF)
+# The gphoto driver links the bundled libgphoto2 built by
+# scripts/build_bundled_gphoto.sh from AlpacaCore/external/libgphoto2/. PREFIX is
+# where the library lives (and is loaded from) at run time; STAGE is a DESTDIR
+# root prepended only to find its headers and .so files at build time.
+set(ALPACACORE_GPHOTO_PREFIX "/usr/lib/alpacabridge/libgphoto2" CACHE PATH
+    "Install prefix of the bundled libgphoto2 (run-time location)")
+set(ALPACACORE_GPHOTO_STAGE "" CACHE PATH
+    "DESTDIR root of a staged bundled libgphoto2 (build-time lookup only; empty = the real prefix)")
 
 # If ALPACACORE_ENABLE_ALL_VENDORS is set, enable all implemented vendor drivers
 # Note: Only enable vendors that are actually implemented (have source files)

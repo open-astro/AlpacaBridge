@@ -2,19 +2,13 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: AlpacaBridge
 Upstream-Contact: OpenAstro <support@openastro.net>
 Source: https://github.com/open-astro/AlpacaBridge
-Comment: Dynamically linked system libraries, not part of this source tree
+Comment: Dynamically linked system library, not part of this source tree
  .
- The gphoto camera driver links two LGPL libraries from Debian's own
- packages (Build-Depends libgphoto2-dev, libraw-dev). Neither is vendored
- or redistributed in this package, so no Files paragraph can match them;
- they are recorded here instead.
- .
- libgphoto2: Copyright 2000 Scott Fritzinger, 2001-2002 Lutz Mueller and
- the other libgphoto2 authors (see its AUTHORS file). License:
- LGPL-2.1-or-later (upstream COPYING is the LGPL version 2.1; source
- files grant "version 2 or (at your option) any later version"). On
- Debian systems, the complete text of the GNU Lesser General Public
- License version 2.1 can be found in "/usr/share/common-licenses/LGPL-2.1".
+ The gphoto camera driver links libraw from Debian's own package
+ (Build-Depends libraw-dev). It is not vendored or redistributed in this
+ package, so no Files paragraph can match it; it is recorded here instead.
+ libgphoto2 is NOT in this record: it is bundled, and has its own Files
+ paragraph for AlpacaCore/external/libgphoto2/* below.
  .
  libraw (LibRaw): Copyright 2008-2025 LibRaw LLC. License: LGPL-2.1 or
  CDDL-1.0, at the licensee's choice (upstream COPYRIGHT, LICENSE.LGPL and
@@ -23,9 +17,10 @@ Comment: Dynamically linked system libraries, not part of this source tree
  below. LibRaw also carries code under other permissive licenses (dcraw,
  DCB/FBDD, X3F, Adobe DNG SDK) listed in its own COPYRIGHT file.
  .
- Both are linked dynamically from the distro packages today. If libgphoto2
- 2.5.34 is bundled (issue #933), this record must be extended with the
- bundled files and the LGPL source offer must be added when it lands.
+ libgphoto2 2.5.34 is built from the unmodified upstream source tarball
+ kept in this repository (AlpacaCore/external/libgphoto2/), which is the
+ corresponding source for the LGPL library shipped under
+ /usr/lib/alpacabridge/libgphoto2.
 
 Files: *
 Copyright: 2025-2026 OpenAstro Contributors
@@ -105,6 +100,20 @@ License: LGPL-2.1-or-later
  On Debian systems, the complete text of the GNU Lesser General Public
  License version 2.1 can be found in
  "/usr/share/common-licenses/LGPL-2.1".
+
+Files: AlpacaCore/external/libgphoto2/*
+Copyright: 1999-2026 Scott Fritzinger, Lutz Mueller, Marcus Meissner and
+           libgphoto2 contributors
+License: LGPL-2.1-or-later and GPL-2.0-or-later
+Comment: libgphoto2 is LGPL-2.1-or-later (COPYING in the tarball); some of its
+ camlibs carry their own GPL-2.0-or-later COPYING. Redistributed as an
+ unmodified upstream source tarball and built at package build time into
+ /usr/lib/alpacabridge/libgphoto2 for the gphoto camera driver.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in
+ "/usr/share/common-licenses/LGPL-2.1" and of the GNU General Public
+ License version 2 or later in "/usr/share/common-licenses/GPL-2".
 
 Files: AlpacaCore/external/Bisque/*
 Copyright: Software Bisque, Inc.
