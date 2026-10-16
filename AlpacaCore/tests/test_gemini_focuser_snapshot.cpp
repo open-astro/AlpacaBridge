@@ -20,6 +20,7 @@
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 
 #include <chrono>
+#include <functional>
 #include <string>
 #include <thread>
 
@@ -151,4 +152,83 @@ TEST_CASE("Gemini Focuser Snapshot - disconnect stops the poll and getters throw
             CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
+}
+
+TEST_CASE("Gemini Focuser Snapshot - failed polls latch a link fault and a good poll clears it",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    CHECK(driver->get_position() == 1000);
+
+    fake.set_garbage_state_replies(true);
+    tick(clock);
+    tick(clock);
+    CHECK(driver->get_position() == 1000);  // two failures: still below the threshold
+    tick(clock);
+
+    // Latched: the getters and Move refuse, Connected stays true.
+    CHECK(driver->get_connected());
+    const auto expect_compromised = [](const std::function<void()>& call) {
+        try {
+            call();
+            FAIL("expected DriverException");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()).find("communications compromised") != std::string::npos);
+        }
+    };
+    expect_compromised([&] { (void)driver->get_position(); });
+    expect_compromised([&] { (void)driver->get_is_moving(); });
+    expect_compromised([&] { (void)driver->get_temperature(); });
+    expect_compromised([&] { driver->move(500); });
+    CHECK(fake.count(":05500#") == 0);  // nothing commanded while faulted
+
+    // Halt is the safety stop: never refused.
+    driver->halt();
+    CHECK(wire_saw(fake, ":27#"));
+
+    // The poll keeps asking while faulted; the first good reply restores service.
+    fake.set_garbage_state_replies(false);
+    tick(clock);
+    CHECK(driver->get_position() == 1000);
+    CHECK(driver->get_temperature() == Catch::Approx(12.5));
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("Gemini Focuser Snapshot - a temperature probe that fails keeps Position and backs off",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    fake.set_garbage_temperature(true);
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    CHECK(driver->get_position() == 1000);
+    CHECK(driver->get_is_moving() == false);
+    try {
+        (void)driver->get_temperature();
+        FAIL("expected DriverException");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(fake.count(":06#") == 1);  // the connect-time frame asked once
+
+    tick(clock);
+    tick(clock);
+    CHECK(fake.count(":06#") == 1);  // backed off: Position keeps polling, the probe is not asked
+
+    // After the retry delay the probe is asked again, and a recovered probe is served.
+    fake.set_garbage_temperature(false);
+    clock.advance(31s);
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    CHECK(fake.count(":06#") == 2);
+    CHECK(driver->get_temperature() == Catch::Approx(12.5));
+
+    driver->set_connected(false);
 }

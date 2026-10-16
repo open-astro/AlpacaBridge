@@ -34,12 +34,17 @@ namespace alpacacore::vendor::gemini {
 
 namespace {
 
-// State poll (open-astro#1229, decision 0010). One poll is three request/
-// response exchanges at 9600 baud, so the period leaves the wire mostly free
-// for Move/Halt. The freshness bound is two periods; a stale frame is still
-// served, only one older than util::kLinkStalenessBound is refused.
+// State poll (open-astro#1229, decision 0010), start to start. One poll is
+// three request/response exchanges at 9600 baud, so the period leaves the wire
+// mostly free for Move/Halt. The freshness bound is two periods; a stale frame
+// is still served. Link health follows the #237 rule: kFaultThreshold failed
+// polls in a row latch a fault that the getters report until a poll succeeds.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
 constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
+constexpr int kFaultThreshold = 3;
+// A failed temperature read can cost the whole serial timeout while holding the
+// wrapper, which Move and Halt would queue behind; ask again after this.
+constexpr auto kTemperatureRetry = std::chrono::seconds(30);
 
 }  // namespace
 
@@ -204,7 +209,11 @@ public:
             // answer the moment Connect returns. A failure leaves the snapshot
             // empty; the getters then report it and the poll fills it later.
             snapshot_.reset();
-            temperature_unavailable_ = false;
+            {
+                std::lock_guard<std::mutex> lock(health_mutex_);
+                health_.reset();
+                temperature_retry_at_.reset();
+            }
             poll_state_once();
             connected_.store(true);
             start_state_poll();
@@ -225,6 +234,10 @@ public:
             // lock this thread holds (transition_mutex_, firmware_mutex_).
             state_poll_.cancel_all_and_join();
             snapshot_.reset();
+            {
+                std::lock_guard<std::mutex> lock(health_mutex_);
+                health_.reset();
+            }
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
@@ -321,12 +334,15 @@ public:
 
     void halt() override {
         ensure_connected();
+        // Never refused for a link fault: Halt is the safety stop and the
+        // blind command costs nothing if the link is down.
         protocol_.halt();
         snapshot_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
         ensure_connected();
+        throw_if_faulted();
         int max_step = protocol_.get_max_position();
         // ConformU requires graceful clamping, not exceptions
         if (position < 0) {
@@ -348,22 +364,26 @@ private:
         std::optional<double> temperature;  // empty: the probe did not answer
     };
 
-    // The frame the getters serve. Stale is served (decision 0010); a frame
-    // older than the link-loss bound means the poll has not measured the
-    // device for that long, which is a fault, not a value.
+    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // poll has failed kFaultThreshold times in a row; Connected stays true.
+    void throw_if_faulted() const {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        if (health_.faulted()) {
+            throw AlpacaException("Gemini focuser communications compromised: " + health_.fault(),
+                                  AlpacaError::DriverException);
+        }
+    }
+
+    // The frame the getters serve. A stale frame is still served (decision
+    // 0010); a faulted link is not.
     StateFrame served_frame() const {
         ensure_connected();
+        throw_if_faulted();
         const auto reading = snapshot_.read();
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
             throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
-        }
-        if (clock_.now() - reading->measured_at >= util::kLinkStalenessBound) {
-            throw AlpacaException(
-                "Gemini focuser communications compromised: no state from the device for "
-                "30 s",
-                AlpacaError::DriverException);
         }
         return reading->value;
     }
@@ -379,34 +399,50 @@ private:
             frame.moving = protocol_.is_moving();
         } catch (const std::exception&) {
             // The exception text can carry the device's reply; AlpacaCore has
-            // no log escaper (CWE-117), so the line states the fact only.
-            ALPACA_LOG_DEBUG("Gemini", "Focuser state poll failed; the frame keeps its age");
+            // no log escaper (CWE-117), so the lines state the fact only.
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
+                ALPACA_LOG_ERROR("Gemini", "Focuser communications compromised: " + health_.fault());
+            } else {
+                ALPACA_LOG_DEBUG("Gemini", "Focuser state poll failed; the frame keeps its age");
+            }
             return;
         }
-        // A focuser without a probe never answers a temperature read. Ask
-        // once per session after a failure: a timed-out read holds the wrapper
-        // for the whole serial timeout, which Move and Halt would queue behind.
-        if (!temperature_unavailable_) {
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.on_reply()) {
+                ALPACA_LOG_INFO("Gemini", "Focuser communications restored");
+            }
+        }
+        // The temperature is optional: a failed read leaves it empty (the getter
+        // reports it) without costing Position and IsMoving, and is not retried
+        // for kTemperatureRetry.
+        const auto now = clock_.now();
+        if (!temperature_retry_at_ || now >= *temperature_retry_at_) {
             try {
                 frame.temperature = protocol_.get_temperature();
+                temperature_retry_at_.reset();
             } catch (const std::exception&) {
-                temperature_unavailable_ = true;
-                ALPACA_LOG_DEBUG("Gemini", "Focuser temperature read failed; not polling it again this session");
+                temperature_retry_at_ = now + kTemperatureRetry;
+                ALPACA_LOG_DEBUG("Gemini", "Focuser temperature read failed; retrying in 30 s");
             }
+        } else if (const auto last = snapshot_.read(); last && last->value.temperature) {
+            frame.temperature = last->value.temperature;  // keep the last good value meanwhile
         }
         snapshot_.publish(token, frame);
     }
 
     void run_state_poll(util::OperationContext& ctx) {
+        if (!ctx.wait_for(kStatePollPeriod)) {
+            return;
+        }
         for (;;) {
-            // Start to start: a tick a slow poll ran over is skipped.
             const auto started = clock_.now();
-            if (!ctx.wait_for(kStatePollPeriod)) {
-                return;
-            }
             poll_state_once();
-            const auto spent = clock_.now() - started - kStatePollPeriod;
-            if (spent > kStatePollPeriod && !ctx.wait_for(kStatePollPeriod - (spent % kStatePollPeriod))) {
+            // Start to start: skip any tick a slow poll ran over (no catch-up).
+            const auto spent = clock_.now() - started;
+            const auto ticks = spent / kStatePollPeriod + 1;
+            if (!ctx.wait_for(ticks * kStatePollPeriod - spent)) {
                 return;
             }
         }
@@ -441,7 +477,13 @@ private:
     // Declared after clock_ and protocol_: state_poll_ is destroyed first and
     // joins its body while both are still alive.
     mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
-    bool temperature_unavailable_ = false;  // poll thread and connect only, never concurrent
+    // Link health of the poll (issue #237). health_mutex_ is narrow: held for a
+    // counter or a string, never across an exchange, so a getter never waits
+    // behind the wire.
+    mutable std::mutex health_mutex_;
+    util::PolledLinkHealth health_;
+    // Poll thread, and connect before it starts; never concurrent.
+    std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
     util::OperationGeneration state_poll_generation_;
     util::AsyncOperation state_poll_{"Gemini focuser state poll", state_poll_generation_, clock_};
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
