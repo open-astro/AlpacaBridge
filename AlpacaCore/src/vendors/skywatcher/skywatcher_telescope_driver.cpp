@@ -2349,7 +2349,6 @@ public:
         constexpr double kSyncRestartLatencySeconds = 0.25;
         auto [axis1, axis2] = ra_dec_to_axis_degrees_locked(
             ra, dec, was_tracking ? kSyncRestartLatencySeconds * kLstHoursPerSecond : 0.0);
-        backlash_rebase_pending_[0] = backlash_rebase_pending_[1] = false;  // the sync re-stamps both counts
         protocol.set_position(kAxisRa, degrees_to_counts(axis1, axis_params_[0].counts_per_revolution));
         protocol.set_position(kAxisDec, degrees_to_counts(axis2, axis_params_[1].counts_per_revolution));
         // After the writes, for the same reason dispatch_goto_locked() records
@@ -4124,10 +4123,6 @@ private:
         if (!stop_axis_and_wait_locked(lock, channel, gen)) {
             throw AlpacaException("Motion superseded before dispatch");
         }
-        // An unfinished backlash take-up (a goto of ours was superseded by
-        // this command): the axis is at rest now, put its register back
-        // before any new motion makes the recorded count stale.
-        settle_backlash_rebase_locked(lock);
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
         // No hemisphere handling HERE: this is the mechanical layer, and a
@@ -4140,9 +4135,6 @@ private:
         // the southern reversal back where the sky frame is built.)
         const double rate = signed_rate_deg_per_sec;
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
-        if (rate != 0.0) {
-            last_direction_[channel - 1] = rate > 0.0 ? 1 : -1;  // #437: state only, no take-up here
-        }
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
         protocol.start_motion(channel);
         if (anchor_model) {
@@ -4573,8 +4565,6 @@ private:
     // stays uncompensated, loudly.
     void read_backlash_rates_locked(SkyWatcherProtocolWrapper& protocol) {
         backlash_rate_deg_s_[0] = backlash_rate_deg_s_[1] = 0.0;
-        last_direction_[0] = last_direction_[1] = 0;
-        backlash_rebase_pending_[0] = backlash_rebase_pending_[1] = false;
         const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
         for (int channel = kAxisRa; channel <= kAxisDec; ++channel) {
             if (!cfg[channel - 1]->active()) {
@@ -4594,8 +4584,8 @@ private:
                 continue;
             }
             // INDI's way: the speed follows the worm. A sixteenth of a worm turn
-            // per second, held under the slow-mode ceiling so the take-up is a
-            // plain slow GOTO.
+            // per second, held under the slow-mode ceiling so the final leg is
+            // a plain slow GOTO.
             const double deg_per_s = 360.0 * kBacklashWormTurnsPerSecond * worm /
                                      static_cast<double>(axis_params_[channel - 1].counts_per_revolution);
             backlash_rate_deg_s_[channel - 1] = std::min(deg_per_s, kFastModeThresholdDegPerSec);
@@ -4604,139 +4594,55 @@ private:
 
     static constexpr double kBacklashWormTurnsPerSecond = 1.0 / 16.0;
 
-    // Take the slack out of every axis whose goto reverses its last direction
-    // (open-astro#437), BEFORE the real move. The take-up is `steps` counts in
-    // the new direction at the derived speed; the board's position register
-    // is then put back on the count it held before (":E"), because the output
-    // shaft did not move during the take-up. The real absolute ":S" goto that
-    // follows is therefore the same command it would have been without
-    // compensation, and the register lands on the target.
-    // Returns false when the wait was superseded (the caller aborts).
-    [[nodiscard]] bool take_up_backlash_locked(std::unique_lock<std::mutex>& lock, uint64_t gen,
-                                               const double (&delta_deg)[2]) {
-        auto& protocol = *protocol_;
-        const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
-        bool active[2] = {false, false};
-        uint32_t origin[2] = {0, 0};
-        double longest_s = 0.0;
+    // open-astro#437: the side each axis finishes every compensated goto
+    // from, as a count direction (+1 increasing). RA: the tracking direction
+    // of the site's hemisphere, so tracking resumes with the gears already
+    // engaged; Dec: increasing counts. Fixed here, in one place: a later
+    // change can make them config without touching the config keys.
+    int backlash_approach_sign_locked(int channel) const {
+        return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
+    }
+
+    // open-astro#437: send the final leg a compensated goto still owes each
+    // axis, once that axis has stopped at the end of its first leg: a slow
+    // GOTO (':G' mode '2', the controller ramps, ':I' is the step period) of
+    // the backlash steps in the approach direction, at the derived speed, onto
+    // the goto's own target. Only while the goto that owes it is still the
+    // current motion: any newer motion command (AbortSlew, MoveAxis, a pulse,
+    // a newer goto) bumps motion_generation_, and the record is then dropped
+    // unsent. Returns true while a leg is owed or was just started, so the
+    // caller keeps waiting. The position register is never written: it always
+    // counts the motor, so an unfinished goto leaves nothing to undo.
+    bool advance_final_approach_locked() const {
+        bool owed = false;
         for (int i = 0; i < 2; ++i) {
-            const int channel = i + 1;
-            const double counts = std::abs(delta_deg[i]) * axis_params_[i].counts_per_revolution / 360.0;
-            if (!cfg[i]->active() || backlash_rate_deg_s_[i] <= 0.0 || counts < 0.5) {
-                continue;  // off, no speed, or no move (rounds to 0 counts: not a reversal)
-            }
-            const int dir = delta_deg[i] > 0.0 ? 1 : -1;
-            if (last_direction_[i] == 0 || last_direction_[i] == dir) {
+            FinalApproach& leg = final_approach_[i];
+            if (!leg.pending) {
                 continue;
             }
-            origin[i] = protocol.inquire_position(channel);
-            const uint32_t target = dir > 0 ? origin[i] + cfg[i]->steps : origin[i] - cfg[i]->steps;
-            // '2' = slow GOTO: the controller ramps, and ":I" is the step period.
-            protocol.set_motion_mode(channel, '2', direction_char(delta_deg[i]));
+            if (leg.generation != motion_generation_) {
+                leg.pending = false;
+                continue;
+            }
+            const int channel = i + 1;
+            auto& protocol = *protocol_;
+            owed = true;
+            if (protocol.inquire_status(channel).running) {
+                continue;  // still on its first leg
+            }
+            leg.pending = false;
+            const int approach = backlash_approach_sign_locked(channel);
+            protocol.set_motion_mode(channel, '2', direction_char(approach));
             protocol.set_step_period(channel, step_period_for_locked(channel, backlash_rate_deg_s_[i], false));
-            protocol.set_goto_target(channel, target & kCountsMask);
+            protocol.set_goto_target(channel, leg.target_counts);
             protocol.start_motion(channel);
-            active[i] = true;
-            const double rate_cps = backlash_rate_deg_s_[i] * axis_params_[i].counts_per_revolution / 360.0;
-            longest_s = std::max(longest_s, cfg[i]->steps / rate_cps);
         }
-        if (!active[0] && !active[1]) {
-            return true;
-        }
-        // From here the register is ahead of the output shaft by whatever the
-        // take-up has moved. Every exit (done, superseded, timed out, link
-        // error) must put it back on `origin`: the pending record lets the
-        // next dispatch finish the job if a newer command got in first.
-        for (int i = 0; i < 2; ++i) {
-            if (active[i]) {
-                backlash_rebase_pending_[i] = true;
-                backlash_rebase_origin_[i] = origin[i];
-            }
-        }
-        try {
-            const auto deadline = clock_.now() + std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                     std::chrono::duration<double>(longest_s) + kAxisStopTimeout);
-            for (int i = 0; i < 2; ++i) {
-                while (active[i]) {
-                    if (motion_generation_ != gen) {
-                        settle_backlash_rebase_locked(lock, /*only_if_at_rest=*/true);
-                        return false;
-                    }
-                    if (!protocol.inquire_status(i + 1).running) {
-                        break;
-                    }
-                    if (clock_.now() >= deadline) {
-                        throw AlpacaException("Timed out waiting for the backlash take-up on axis " +
-                                              std::to_string(i + 1));
-                    }
-                    lock.unlock();
-                    clock_.sleep_for(std::chrono::milliseconds(50));
-                    lock.lock();
-                    check_connected();
-                }
-            }
-        } catch (const std::exception&) {
-            settle_backlash_rebase_locked(lock);
-            throw;
-        }
-        if (motion_generation_ != gen) {
-            settle_backlash_rebase_locked(lock, /*only_if_at_rest=*/true);
-            return false;
-        }
-        settle_backlash_rebase_locked(lock);
-        return true;
+        return owed;
     }
 
-    // Put the board's position register back on the count it held before an
-    // unfinished backlash take-up (the output shaft did not move: the take-up
-    // only closes the slack). Stops the axis first and waits for it, so the
-    // value written is not overwritten by a still-running GOTO. With `only_if_at_rest` an axis that is moving is left
-    // alone. Never throws: a disconnect that makes the re-base impossible is logged, and the next connect re-reads the
-    // position from the board, which discards the offset. An axis a newer command already moved is left alone (its own
-    // dispatch settles it before reading the position).
-    void settle_backlash_rebase_locked(std::unique_lock<std::mutex>& lock, bool only_if_at_rest = false) {
-        for (int i = 0; i < 2; ++i) {
-            if (!backlash_rebase_pending_[i]) {
-                continue;
-            }
-            const int channel = i + 1;
-            try {
-                auto& protocol = *protocol_;
-                // A finished take-up is already at rest: send nothing extra.
-                if (protocol.inquire_status(channel).running) {
-                    if (only_if_at_rest) {
-                        // A newer command is moving the axis: stopping it
-                        // would kill that command, and its own dispatch has
-                        // already re-based (it does so before reading the
-                        // position). Anything else leaves the offset until
-                        // the next sync or connect.
-                        continue;  // the record stays for that command's dispatch
-                    }
-                    protocol.instant_stop(channel);
-                }
-                const auto deadline = clock_.now() + kAxisStopTimeout;
-                while (protocol.inquire_status(channel).running) {
-                    if (clock_.now() >= deadline) {
-                        throw AlpacaException("axis did not stop");
-                    }
-                    lock.unlock();
-                    clock_.sleep_for(std::chrono::milliseconds(20));
-                    lock.lock();
-                    check_connected();
-                }
-                protocol.set_position(channel, backlash_rebase_origin_[i]);
-                backlash_rebase_pending_[i] = false;
-            } catch (const std::exception& e) {
-                backlash_rebase_pending_[i] = false;
-                ALPACA_LOG_WARN("SkyWatcher", std::string("Could not restore the ") + (i == 0 ? "RA" : "Dec") +
-                                                  " axis position after an unfinished backlash take-up (" + e.what() +
-                                                  "); the next connect re-reads it (open-astro#437)");
-            }
-        }
-    }
-
-    // `compensate_backlash` is false for the AutoHome hunt, whose moves read
-    // the home index against the count frame and must not re-base it.
+    // `compensate_backlash` is false for the AutoHome hunt: its moves read the
+    // home index against the count frame, and it waits for its own landings
+    // (autohome_wait_axes_stopped), which never send a final leg.
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg, double target_dec_axis_deg,
                               bool compensate_backlash = true) {
         auto& protocol = *protocol_;
@@ -4757,9 +4663,6 @@ private:
         if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
-        // A take-up an earlier goto left unfinished (we superseded it) must be
-        // re-based before the position is read below.
-        settle_backlash_rebase_locked(lock);
         refresh_position_cache_locked(true);
 
         struct AxisGoto {
@@ -4771,27 +4674,36 @@ private:
             {kAxisRa, cached_ra_axis_deg_, target_ra_axis_deg},
             {kAxisDec, cached_dec_axis_deg_, target_dec_axis_deg},
         };
-        if (compensate_backlash && backlash_.any_active()) {
-            const double deltas[2] = {plans[0].target_deg - plans[0].current_deg,
-                                      plans[1].target_deg - plans[1].current_deg};
-            if (!take_up_backlash_locked(lock, gen, deltas)) {
-                throw AlpacaException("Slew superseded before dispatch");
-            }
-        }
+        bool two_legs = false;
         for (const auto& plan : plans) {
-            double delta = plan.target_deg - plan.current_deg;
-            if (std::abs(delta) * axis_params_[static_cast<std::size_t>(plan.channel - 1)].counts_per_revolution /
-                    360.0 >=
-                0.5) {
-                last_direction_[plan.channel - 1] = delta > 0.0 ? 1 : -1;
+            const auto i = static_cast<std::size_t>(plan.channel - 1);
+            const uint32_t cpr = axis_params_[i].counts_per_revolution;
+            const double delta = plan.target_deg - plan.current_deg;
+            const uint32_t target = degrees_to_counts(plan.target_deg, cpr);
+            uint32_t first_leg = target;
+            // open-astro#437: a move against the approach side overshoots the
+            // target by the backlash steps; the final leg comes back onto it
+            // from the approach side (advance_final_approach_locked(), from the
+            // landing wait). A move of under one count has no direction. A
+            // record an earlier goto left unsent is not cleared here: its
+            // generation is no longer current, so it is never sent.
+            const int approach = backlash_approach_sign_locked(plan.channel);
+            if (compensate_backlash && backlash_rate_deg_s_[i] > 0.0 && std::abs(delta) * cpr / 360.0 >= 0.5 &&
+                (delta > 0.0 ? 1 : -1) != approach) {
+                const uint32_t steps = i == 0 ? backlash_.ra.steps : backlash_.dec.steps;
+                first_leg = (approach > 0 ? target - steps : target + steps) & kCountsMask;
+                final_approach_[i] = {true, gen, target};
+                two_legs = true;
             }
             // Motion mode '0' = fast GOTO (the controller manages ramp and the
             // brake point); direction from the signed move.
             protocol.set_motion_mode(plan.channel, '0', direction_char(delta));
-            protocol.set_goto_target(
-                plan.channel,
-                degrees_to_counts(plan.target_deg,
-                                  axis_params_[static_cast<std::size_t>(plan.channel - 1)].counts_per_revolution));
+            protocol.set_goto_target(plan.channel, first_leg);
+        }
+        if (two_legs) {
+            // The landing time of a two-leg goto is no sample of the one-leg
+            // goto overhead the aim-ahead estimate learns (wait_for_slew_complete).
+            last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         }
         protocol.start_motion(kAxisRa);
         protocol.start_motion(kAxisDec);
@@ -5539,7 +5451,9 @@ private:
                 // replaced it; abandon the wait promptly so the join is bounded.
                 throw AlpacaException("Slew wait cancelled");
             }
-            bool slewing = get_hardware_slewing_locked(false);
+            // open-astro#437: a final leg still owed keeps the goto going.
+            const bool leg_owed = advance_final_approach_locked();
+            bool slewing = get_hardware_slewing_locked(false) || leg_owed;
             if (slewing) {
                 saw_slewing = true;
             }
@@ -6211,18 +6125,20 @@ private:
     int dec_axis_sense_ = 0;
     // open-astro#582: the configured decAxisSense; fixed at construction.
     const DecAxisSenseSetting dec_axis_sense_setting_;
-    // open-astro#437: the configured goto backlash take-up; fixed at construction.
+    // open-astro#437: the configured goto backlash compensation; fixed at construction.
     const BacklashSettings backlash_;
-    // Take-up speed per axis in deg/s, derived at connect from ":s" and ":a";
+    // Final-leg speed per axis in deg/s, derived at connect from ":s" and ":a";
     // 0 = this axis is not compensated (off, or the board gave no worm count).
     double backlash_rate_deg_s_[2]{};
-    // Direction (+1 increasing counts, -1 decreasing, 0 unknown) the axis last
-    // moved in under any command; unknown after a connect, so the first goto
-    // of a session is never compensated.
-    int last_direction_[2]{};
-    // An unfinished take-up's pre-move count, to put back (see settle_backlash_rebase_locked).
-    bool backlash_rebase_pending_[2]{};
-    uint32_t backlash_rebase_origin_[2]{};
+    // The final leg a compensated goto still owes each axis, tagged with the
+    // goto's motion generation (see advance_final_approach_locked). Mutable:
+    // the landing wait that sends it is const.
+    struct FinalApproach {
+        bool pending = false;
+        uint64_t generation = 0;
+        uint32_t target_counts = 0;
+    };
+    mutable FinalApproach final_approach_[2]{};
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.

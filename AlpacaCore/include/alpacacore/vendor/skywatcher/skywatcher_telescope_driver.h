@@ -115,9 +115,10 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 /// identify itself. It sets eps, never the hemisphere term k = s * eps.
 enum class DecAxisSenseSetting : std::uint8_t { Auto, Normal, Reversed };
 
-/// open-astro#437: per-axis goto backlash compensation. `steps` is the take-up
-/// in microsteps (the board's own counts); an axis with `enabled` false or
-/// `steps` 0 is never compensated. Applies to gotos only (decision in the
+/// open-astro#437: per-axis goto backlash compensation. `steps` is the
+/// overshoot in microsteps (the board's own counts) a goto against the axis'
+/// approach side makes before its slow final leg back onto the target; an axis
+/// with `enabled` false or `steps` 0 is never compensated. Applies to gotos only (decision in the
 /// Sky-Watcher docs): PulseGuide, MoveAxis and the rate properties are not.
 struct BacklashSettings {
     struct Axis {

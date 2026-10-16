@@ -10,12 +10,18 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// open-astro#437: goto backlash compensation in the Sky-Watcher direct driver.
+// open-astro#437: goto backlash compensation in the Sky-Watcher direct driver,
+// a fixed final approach: a goto whose move runs against the axis' approach
+// side (RA: the tracking direction of the site's hemisphere; Dec: increasing
+// counts) overshoots by the backlash steps and comes back onto the target in a
+// slow final leg. The position register is never re-based.
 //
 // Over the loopback fake mount (EQM-35 Pro profile: its ":s" worm count is a
 // hardware capture). The board's frames are read from the fake's ordered motion
-// log. Only the Dec axis' frames are compared across runs: the RA targets move
-// with the host clock, the Dec targets do not.
+// log. Sky gotos compare only Dec frames across runs (the RA targets move with
+// the host clock); FindHome gotos go to fixed counts, so both axes compare.
+// The fake's gear gap (set_gear_gap) separates the motor, which the register
+// counts, from the output shaft, which the sky sees.
 //
 // Scope the cases pin (decision recorded in
 // .github/instructions/skywatcher.instructions.md and SUPPORTED-DRIVERS.md):
@@ -47,14 +53,22 @@
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
+using alpacacore::test::FakeTaskClock;
 using Frames = std::vector<std::string>;
 
 namespace {
 
-constexpr double kLatitude = -33.856784;
-constexpr double kLongitude = 151.215297;
+// Site privacy: the public landmarks only.
+struct Site {
+    double latitude;
+    double longitude;
+};
+constexpr Site kSouth{-33.856784, 151.215297};
+constexpr Site kNorth{51.477833, -0.001500};
 constexpr double kElevation = 42.0;
 constexpr uint32_t kBacklash = 300;
+constexpr uint32_t kCountsMask = 0xFFFFFF;
+constexpr uint32_t kHomeCounts = 0x800000;
 
 sw::ConnectionInfo endpoint(const FakeSkyWatcherMount& mount) {
     sw::ConnectionInfo info;
@@ -71,25 +85,48 @@ sw::BacklashSettings dec_backlash(uint32_t steps, bool enabled = true) {
     return b;
 }
 
-// ":S2xxxxxx" / ":E2xxxxxx" / ":I2xxxxxx": the 24-bit payload, nibble-swapped.
+sw::BacklashSettings ra_backlash(uint32_t steps) {
+    sw::BacklashSettings b;
+    b.ra = {steps, true};
+    return b;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> make_driver(
+    const FakeSkyWatcherMount& mount, const sw::BacklashSettings& backlash, Site site = kSouth,
+    alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock()) {
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, kElevation, {}, {},
+                                                  clock, sw::DecAxisSenseSetting::Auto, backlash);
+    driver->set_connected(true);
+    return driver;
+}
+
+// ":S2xxxxxx" / ":I2xxxxxx": the 24-bit payload, nibble-swapped.
 uint32_t payload(const std::string& frame) {
     const auto nib = [](char c) { return static_cast<uint32_t>(c <= '9' ? c - '0' : c - 'A' + 10); };
     const std::string d = frame.substr(3, 6);
     return (nib(d[0]) << 4 | nib(d[1])) | (nib(d[2]) << 4 | nib(d[3])) << 8 | (nib(d[4]) << 4 | nib(d[5])) << 16;
 }
 
-Frames axis_two(const Frames& all) {
+Frames axis_frames(const Frames& all, int axis) {
     Frames out;
-    std::copy_if(all.begin(), all.end(), std::back_inserter(out), [](const std::string& f) { return f[2] == '2'; });
+    const char c = static_cast<char>('0' + axis);
+    std::copy_if(all.begin(), all.end(), std::back_inserter(out), [c](const std::string& f) { return f[2] == c; });
     return out;
 }
+
+Frames axis_two(const Frames& all) { return axis_frames(all, 2); }
+
+// A final leg is a slow GOTO (":G<axis>2<dir>"); nothing else the driver sends
+// uses that mode. A ":E" would be a register re-base, which the final-approach
+// model never writes.
+bool is_final_leg(const std::string& f) { return f.rfind(":G", 0) == 0 && f[3] == '2'; }
+bool has_final_leg(const Frames& frames) { return std::any_of(frames.begin(), frames.end(), is_final_leg); }
 
 // The fake integrates motion against a FakeTaskClock (the driver stays on the
 // wall clock): while an axis runs a GOTO, jump virtual time so it lands at once;
 // otherwise let it follow wall time. The rendezvous is the board's next frame.
 // Under util::kLinkStalenessBound (30 s) per jump.
-void pump_until_landed(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver,
-                       FakeSkyWatcherMount& mount) {
+void pump_until_landed(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
     auto last = std::chrono::steady_clock::now();
     while (driver.get_slewing()) {
@@ -104,16 +141,23 @@ void pump_until_landed(alpacacore::test::FakeTaskClock& clock, alpacacore::Teles
     }
 }
 
-void land(alpacacore::test::FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount,
-          double ra, double dec) {
+void land(FakeTaskClock& clock, alpacacore::TelescopeDriver& driver, FakeSkyWatcherMount& mount, double ra,
+          double dec) {
     driver.slew_to_coordinates_async(ra, dec);
     pump_until_landed(clock, driver, mount);
 }
 
-Frames axis_one(const Frames& all) {
-    Frames out;
-    std::copy_if(all.begin(), all.end(), std::back_inserter(out), [](const std::string& f) { return f[2] == '1'; });
-    return out;
+// Lets the fake's virtual time follow wall time for `d` (tracking, a pulse).
+void follow_wall_clock(FakeTaskClock& clock, std::chrono::milliseconds d,
+                       const std::function<bool()>& until = nullptr) {
+    const auto start = std::chrono::steady_clock::now();
+    auto last = start;
+    while (std::chrono::steady_clock::now() - start < d && !(until && until())) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        const auto t = std::chrono::steady_clock::now();
+        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(t - last));
+        last = t;
+    }
 }
 
 bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = std::chrono::seconds(20)) {
@@ -125,91 +169,77 @@ bool wait_for(const std::function<bool()>& done, std::chrono::seconds bound = st
     return true;
 }
 
-bool has_takeup(const Frames& frames) {
-    return std::any_of(frames.begin(), frames.end(), [](const std::string& f) {
-        return f.rfind(":E", 0) == 0 || (f.rfind(":G", 0) == 0 && f[3] == '2');
-    });
+double counts_deg(uint32_t counts, const FakeMountProfile& profile) { return counts * 360.0 / profile.cpr; }
+
+// ── FindHome runs: a goto to fixed counts from a chosen start ─────────────
+
+struct HomeRun {
+    Frames frames[2];  // per axis (index 0 = RA)
+    double register_deg[2] = {0.0, 0.0};
+};
+
+// One fresh mount and driver: the axes jumped to `start_deg`, then FindHome
+// (no index sensors on this profile: a goto to the count origin).
+HomeRun home_run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, Site site,
+                 const double (&start_deg)[2]) {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(profile, clock);
+    REQUIRE(mount.ok());
+    auto driver = make_driver(mount, backlash, site);
+    mount.jump_axis_degrees(1, start_deg[0]);
+    mount.jump_axis_degrees(2, start_deg[1]);
+    mount.clear_motion_log();
+    driver->find_home();
+    pump_until_landed(clock, *driver, mount);
+    HomeRun r;
+    for (int axis = 1; axis <= 2; ++axis) {
+        r.frames[axis - 1] = axis_frames(mount.motion_log(), axis);
+        r.register_deg[axis - 1] = mount.axis_degrees(axis);
+    }
+    driver->set_connected(false);
+    return r;
 }
 
-// A mount with Dec backlash on, Dec carried upward by two gotos, then a third
-// (reversing) goto started and held part-way through its take-up: the fake's
-// clock is frozen, so the slack is closed by `partial_s` virtual seconds only
-// (the fake slews at 3.3 deg/s: 0.0015 s covers under half of a 300-count slack).
-struct MidTakeUp {
-    alpacacore::test::FakeTaskClock clock;
-    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
-    std::unique_ptr<alpacacore::TelescopeDriver> driver;
-    double ra = 0.0;
-    double before_deg = 0.0;  // register angle before the reversing goto
-    double moved_deg = 0.0;   // how far the register ran ahead during the take-up
-    double partial_s;
+std::size_t first_target(const Frames& frames) {
+    const auto it =
+        std::find_if(frames.begin(), frames.end(), [](const std::string& f) { return f.rfind(":S", 0) == 0; });
+    return static_cast<std::size_t>(it - frames.begin());
+}
 
-    // `start_goto` false: the caller issues the reversing goto itself.
-    explicit MidTakeUp(bool start_goto = true, double partial = 0.0015) : partial_s(partial) {
-        REQUIRE(mount.ok());
-        driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
-                                                 alpacacore::util::default_task_clock(), sw::DecAxisSenseSetting::Auto,
-                                                 dec_backlash(kBacklash));
-        driver->set_connected(true);
-        ra = driver->get_sidereal_time();
-        land(clock, *driver, mount, ra, -80.0);
-        land(clock, *driver, mount, ra, -79.0);
-        before_deg = mount.axis_degrees(2);
-        mount.clear_motion_log();
-        if (start_goto) {
-            driver->slew_to_coordinates_async(ra, -79.5);
-            run_partial_takeup();
-        }
-    }
-    // Wait for the take-up to start, then let it run `partial_s` virtual seconds.
-    // Returns false when the take-up never started or never moved the register
-    // (no Catch2 assertion here: the timeout case calls it from a helper thread).
-    bool partial_takeup_ran() {
-        if (!wait_for([&] { return mount.axis_in_goto(2) && has_takeup(axis_two(mount.motion_log())); })) {
-            return false;
-        }
-        clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(partial_s)));
-        moved_deg = mount.axis_degrees(2) - before_deg;
-        return std::abs(moved_deg) > 0.0;  // the register is ahead of the shaft
-    }
-    void run_partial_takeup() { REQUIRE(partial_takeup_ran()); }
-    ~MidTakeUp() { driver->set_connected(false); }
-};
+// ── Sky goto runs (Dec compared) ───────────────────────────────────────────
 
 struct Run {
     std::vector<Frames> dec_frames;  // per goto, Dec axis only
+    std::vector<double> dec_moves;   // per goto, register change in degrees
     double dec_counts_deg = 0.0;     // register angle after the last goto
-    double dec_physical_deg = 0.0;   // where the shaft really is
     int worm_inquiries = 0;
     int position_writes = 0;
 };
 
-// One fresh mount, one fresh driver, one goto per entry of `decs` (all at the
-// same RA, so the Dec axis is the only one that reverses).
 Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, const std::vector<double>& decs) {
-    alpacacore::test::FakeTaskClock clock;
+    FakeTaskClock clock;
     FakeSkyWatcherMount mount(profile, clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
-                                                  alpacacore::util::default_task_clock(), sw::DecAxisSenseSetting::Auto,
-                                                  backlash);
-    driver->set_connected(true);
+    auto driver = make_driver(mount, backlash);
     const double ra = driver->get_sidereal_time();
     Run result;
     for (const double dec : decs) {
         mount.clear_motion_log();
+        const double before = mount.axis_degrees(2);
         land(clock, *driver, mount, ra, dec);
         result.dec_frames.push_back(axis_two(mount.motion_log()));
+        result.dec_moves.push_back(mount.axis_degrees(2) - before);
     }
     result.dec_counts_deg = mount.axis_degrees(2);
-    result.dec_physical_deg = mount.physical_degrees(2);
     result.worm_inquiries = mount.frames_seen('s');
     result.position_writes = mount.frames_seen('E');
     driver->set_connected(false);
     return result;
 }
 
-const std::vector<double> kReversal{-80.0, -79.0, -79.5};
+// Down and up again: whichever way the sky maps onto the Dec counts, one of
+// the moves after the first runs against the approach side and one follows it.
+const std::vector<double> kBackAndForth{-80.0, -79.0, -79.5, -79.0};
 
 // A slew is real time on the loopback fake, so each distinct (board, settings)
 // run is made once and shared by the cases that read it.
@@ -217,79 +247,132 @@ Run cached_run(const std::string& name, const FakeMountProfile& profile, const s
     static std::map<std::string, Run> runs;
     auto it = runs.find(name);
     if (it == runs.end()) {
-        it = runs.emplace(name, run(profile, backlash, kReversal)).first;
+        it = runs.emplace(name, run(profile, backlash, kBackAndForth)).first;
     }
     return it->second;
 }
 
-// The second goto continues the first one's way; the third turns Dec round.
+// A Dec goto against the approach side (FindHome from Dec +4 degrees: down to
+// the count origin), held in its first leg: the fake's clock is frozen.
+struct MidFirstLeg {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    double gap_deg = counts_deg(kBacklash, FakeMountProfile::eqm35_pro());
+
+    MidFirstLeg() {
+        REQUIRE(mount.ok());
+        mount.set_gear_gap(2, kBacklash);
+        driver = make_driver(mount, dec_backlash(kBacklash));
+        mount.jump_axis_degrees(2, 4.0);
+        mount.clear_motion_log();
+        driver->find_home();
+        REQUIRE(wait_for([&] { return mount.axis_in_goto(2); }));
+        const Frames first = axis_two(mount.motion_log());
+        REQUIRE(first_target(first) < first.size());
+        // The first leg overshoots the count origin by the slack.
+        CHECK(payload(first[first_target(first)]) == kHomeCounts - kBacklash);
+    }
+    bool final_leg_sent() { return has_final_leg(axis_two(mount.motion_log())); }
+    // Register minus shaft: within one gap whenever the register was left alone.
+    double register_error_deg() { return mount.axis_degrees(2) - mount.shaft_degrees(2); }
+    ~MidFirstLeg() { driver->set_connected(false); }
+};
 
 }  // namespace
 
-TEST_CASE("SkyWatcher backlash - a reversing goto takes up the slack first and lands on the same target",
+TEST_CASE("SkyWatcher backlash - a goto against the approach side ends with a slow final leg onto the target",
           "[skywatcher][telescope][backlash]") {
+    // Both hemispheres (the RA approach side follows the tracking direction)
+    // and both ways round; FindHome goes to the count origin, so the targets
+    // and the frames of both axes compare across runs.
     const auto profile = FakeMountProfile::eqm35_pro();
-    const Run plain = cached_run("plain", profile, {});
-    const Run comp = cached_run("comp", profile, dec_backlash(kBacklash));
-
-    // The reversing goto: stop, then take-up (slow GOTO ":G2" + period + target
-    // + start), then ":E" re-basing the register, then the unchanged real move.
-    const Frames& on = comp.dec_frames[2];
-    const Frames& off = plain.dec_frames[2];
-    REQUIRE(on.size() == off.size() + 5);
-    CHECK(on[0] == off[0]);  // ":K2"
-    REQUIRE(on[1].rfind(":G22", 0) == 0);
-    REQUIRE(on[2].rfind(":I2", 0) == 0);
-    REQUIRE(on[3].rfind(":S2", 0) == 0);
-    REQUIRE(on[4].rfind(":J2", 0) == 0);
-    REQUIRE(on[5].rfind(":E2", 0) == 0);
-    CHECK(Frames(on.begin() + 6, on.end()) == Frames(off.begin() + 1, off.end()));
-
-    // Direction: the real move's, the opposite of the previous goto's.
-    const char real_dir = off[1][4];
-    CHECK(on[1][4] == real_dir);
-    CHECK(on[1][4] != plain.dec_frames[1][1][4]);
-
-    // Magnitude: exactly `kBacklash` counts from where the axis was, and the
-    // register is put back on that count afterwards.
-    const uint32_t origin = payload(on[5]);
-    const int64_t takeup = static_cast<int64_t>(payload(on[3])) - static_cast<int64_t>(origin);
-    CHECK(takeup == (real_dir == '0' ? 1 : -1) * static_cast<int64_t>(kBacklash));
-
+    sw::BacklashSettings both = dec_backlash(kBacklash);
+    both.ra = {kBacklash, true};
     // Speed: ':s' (68266 microsteps per worm) at a sixteenth of a turn per
     // second = 4266.6 counts/s against the 16 MHz timer.
-    CHECK(payload(on[2]) == static_cast<uint32_t>(std::lround(16000000.0 / (68266.0 / 16.0))));
-
-    // Same target in the controller's frame; the shaft moved the slack extra.
-    CHECK(comp.dec_counts_deg == plain.dec_counts_deg);
-    const double slack_deg = kBacklash * 360.0 / profile.cpr;
-    CHECK(std::abs(std::abs(comp.dec_physical_deg - plain.dec_physical_deg) - slack_deg) < 1e-9);
-    CHECK(comp.worm_inquiries == 1);
+    const uint32_t period = static_cast<uint32_t>(std::lround(16000000.0 / (68266.0 / 16.0)));
+    int final_legs = 0;
+    for (const Site site : {kSouth, kNorth}) {
+        const int approach[2] = {site.latitude < 0.0 ? -1 : 1, 1};
+        for (const double sign : {1.0, -1.0}) {
+            const double start[2] = {4.0 * sign, 4.0 * sign};
+            const HomeRun plain = home_run(profile, {}, site, start);
+            const HomeRun comp = home_run(profile, both, site, start);
+            for (int i = 0; i < 2; ++i) {
+                INFO("latitude " << site.latitude << ", start " << start[i] << ", axis " << i + 1);
+                const Frames& off = plain.frames[i];
+                const Frames& on = comp.frames[i];
+                CHECK(comp.register_deg[i] == plain.register_deg[i]);  // lands on the target
+                const int move = start[i] > 0.0 ? -1 : 1;              // the goto's way: back to the origin
+                if (move == approach[i]) {
+                    CHECK(on == off);  // the approach side already: today's commands
+                    continue;
+                }
+                ++final_legs;
+                const std::size_t s = first_target(off);
+                REQUIRE(s + 1 < off.size());
+                REQUIRE(on.size() == off.size() + 4);
+                CHECK(Frames(on.begin(), on.begin() + static_cast<std::ptrdiff_t>(s)) ==
+                      Frames(off.begin(), off.begin() + static_cast<std::ptrdiff_t>(s)));
+                // First leg: the same fast goto, past the target by the slack.
+                const uint32_t target = payload(off[s]);
+                CHECK(payload(on[s]) == ((target - static_cast<uint32_t>(approach[i]) * kBacklash) & kCountsMask));
+                CHECK(on[s + 1] == off[s + 1]);  // ":J"
+                // Final leg: slow GOTO in the approach direction, at the
+                // derived speed, onto the unchanged target.
+                const char ch = static_cast<char>('0' + i + 1);
+                CHECK(on[s + 2] == std::string(":G") + ch + '2' + (approach[i] > 0 ? '0' : '1'));
+                REQUIRE(on[s + 3].rfind(std::string(":I") + ch, 0) == 0);
+                CHECK(payload(on[s + 3]) == period);
+                CHECK(on[s + 4] == off[s]);  // ":S" target, byte for byte
+                CHECK(on[s + 5] == off[s + 1]);
+                CHECK(Frames(on.begin() + static_cast<std::ptrdiff_t>(s) + 6, on.end()) ==
+                      Frames(off.begin() + static_cast<std::ptrdiff_t>(s) + 2, off.end()));
+                CHECK_FALSE(std::any_of(on.begin(), on.end(), [](const std::string& f) { return f[1] == 'E'; }));
+            }
+        }
+    }
+    CHECK(final_legs == 4);  // one per axis per hemisphere
 }
 
-TEST_CASE("SkyWatcher backlash - the take-up speed follows the board's worm count",
+TEST_CASE("SkyWatcher backlash - the final leg's speed follows the board's worm count",
           "[skywatcher][telescope][backlash]") {
-    auto fast = FakeMountProfile::eqm35_pro();
-    fast.steps_per_worm = *fast.steps_per_worm / 2;  // half the worm steps: half the speed
-    const Run a = cached_run("comp", FakeMountProfile::eqm35_pro(), dec_backlash(kBacklash));
-    const Run b = cached_run("half-worm", fast, dec_backlash(kBacklash));
-    REQUIRE(a.dec_frames[2].size() > 2);
-    REQUIRE(b.dec_frames[2].size() > 2);
-    const double period_a = payload(a.dec_frames[2][2]);
-    const double period_b = payload(b.dec_frames[2][2]);
-    CHECK(std::abs(period_b / period_a - 2.0) < 0.001);
+    auto half = FakeMountProfile::eqm35_pro();
+    half.steps_per_worm = *half.steps_per_worm / 2;  // half the worm steps: half the speed
+    const double start[2] = {0.0, 4.0};
+    const HomeRun a = home_run(FakeMountProfile::eqm35_pro(), dec_backlash(kBacklash), kSouth, start);
+    const HomeRun b = home_run(half, dec_backlash(kBacklash), kSouth, start);
+    const auto final_period = [](const Frames& frames) {
+        const auto it = std::find_if(frames.begin(), frames.end(), is_final_leg);
+        REQUIRE(it != frames.end());
+        REQUIRE(it + 1 != frames.end());
+        return static_cast<double>(payload(*(it + 1)));
+    };
+    CHECK(std::abs(final_period(b.frames[1]) / final_period(a.frames[1]) - 2.0) < 0.001);
 }
 
-TEST_CASE("SkyWatcher backlash - a goto that does not reverse sends the same commands as today",
+TEST_CASE("SkyWatcher backlash - a goto in the approach direction sends the same commands as today",
           "[skywatcher][telescope][backlash]") {
     const auto profile = FakeMountProfile::eqm35_pro();
     const Run plain = cached_run("plain", profile, {});
     const Run comp = cached_run("comp", profile, dec_backlash(kBacklash));
-    // The first goto has no history; the second continues its way.
-    for (const std::size_t i : {std::size_t{0}, std::size_t{1}}) {
-        CHECK(comp.dec_frames[i] == plain.dec_frames[i]);
-        CHECK_FALSE(has_takeup(comp.dec_frames[i]));
+    int approach_gotos_after_a_reversal = 0;
+    for (std::size_t i = 0; i < comp.dec_moves.size(); ++i) {
+        INFO("goto " << i);
+        if (comp.dec_moves[i] > 0.0) {  // Dec approach side: increasing counts
+            CHECK(comp.dec_frames[i] == plain.dec_frames[i]);
+            CHECK_FALSE(has_final_leg(comp.dec_frames[i]));
+            if (i > 0 && comp.dec_moves[i - 1] < 0.0) {
+                ++approach_gotos_after_a_reversal;
+            }
+        } else {
+            CHECK(has_final_leg(comp.dec_frames[i]));
+        }
     }
+    CHECK(approach_gotos_after_a_reversal >= 1);  // the case is not vacuous
+    CHECK(comp.dec_counts_deg == plain.dec_counts_deg);
+    CHECK(comp.position_writes == 0);
 }
 
 TEST_CASE("SkyWatcher backlash - off, or zero steps, sends the same commands as today and never asks ':s'",
@@ -301,7 +384,6 @@ TEST_CASE("SkyWatcher backlash - off, or zero steps, sends the same commands as 
     for (const Run* r : {&disabled, &zero}) {
         CHECK(r->dec_frames == plain.dec_frames);
         CHECK(r->worm_inquiries == 0);
-        CHECK(r->dec_physical_deg == plain.dec_physical_deg);
     }
 }
 
@@ -314,63 +396,27 @@ TEST_CASE("SkyWatcher backlash - a board with no worm count is left uncompensate
     const Run rejected = cached_run("wave", FakeMountProfile::wave_100i(), dec_backlash(kBacklash));
     const Run answered_zero = cached_run("zero-worm", zero, dec_backlash(kBacklash));
     for (const Run* r : {&rejected, &answered_zero}) {
-        for (const Frames& frames : r->dec_frames) CHECK_FALSE(has_takeup(frames));
+        for (const Frames& frames : r->dec_frames) CHECK_FALSE(has_final_leg(frames));
         CHECK(r->worm_inquiries == 1);
         CHECK(r->position_writes == 0);
     }
 }
 
-TEST_CASE("SkyWatcher backlash - a goto reverses against the axis' last motion, whatever command made it",
-          "[skywatcher][telescope][backlash]") {
-    // Two gotos carry Dec upward; a MoveAxis in one direction or the other then
-    // sets the last direction of travel (and sends no extra counts itself); the
-    // next goto, upward again, reverses it in exactly one of the two cases.
-    const auto after_move = [](double rate) {
-        alpacacore::test::FakeTaskClock clock;
-        FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
-        REQUIRE(mount.ok());
-        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
-                                                      alpacacore::util::default_task_clock(),
-                                                      sw::DecAxisSenseSetting::Auto, dec_backlash(kBacklash));
-        driver->set_connected(true);
-        const double ra = driver->get_sidereal_time();
-        land(clock, *driver, mount, ra, -80.0);
-        land(clock, *driver, mount, ra, -79.0);
-        mount.clear_motion_log();
-        driver->move_axis(1, rate);
-        driver->move_axis(1, 0.0);
-        const Frames moved = axis_two(mount.motion_log());
-        mount.clear_motion_log();
-        land(clock, *driver, mount, ra, -78.0);
-        const Frames next = axis_two(mount.motion_log());
-        driver->set_connected(false);
-        return std::make_pair(has_takeup(moved), has_takeup(next));
-    };
-    const auto up = after_move(0.5);
-    const auto down = after_move(-0.5);
-    CHECK_FALSE(up.first);  // MoveAxis itself is never compensated
-    CHECK_FALSE(down.first);
-    CHECK(up.second != down.second);
-}
-
-TEST_CASE("SkyWatcher backlash - a goto that moves the axis by under one count is not a reversal",
+TEST_CASE("SkyWatcher backlash - a goto that moves the axis by under one count sends no final leg",
           "[skywatcher][telescope][backlash]") {
     // The third goto asks for where the second landed: a zero-count move, whose
     // sign carries no direction.
     const Run r = run(FakeMountProfile::eqm35_pro(), dec_backlash(kBacklash), {-80.0, -79.0, -79.0});
-    CHECK_FALSE(has_takeup(r.dec_frames[2]));
+    CHECK_FALSE(has_final_leg(r.dec_frames[2]));
 }
 
-TEST_CASE("SkyWatcher backlash - guide pulses and MoveAxis reversals send no take-up",
+TEST_CASE("SkyWatcher backlash - guide pulses and MoveAxis reversals send no final leg",
           "[skywatcher][telescope][backlash]") {
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro());
     REQUIRE(mount.ok());
     sw::BacklashSettings both = dec_backlash(kBacklash);
     both.ra = {kBacklash, true};
-    auto driver =
-        sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
-                                        alpacacore::util::default_task_clock(), sw::DecAxisSenseSetting::Auto, both);
-    driver->set_connected(true);
+    auto driver = make_driver(mount, both);
     mount.clear_motion_log();
     driver->pulse_guide(0, 200);  // north, then south: a Dec reversal
     while (driver->get_is_pulse_guiding()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -384,120 +430,205 @@ TEST_CASE("SkyWatcher backlash - guide pulses and MoveAxis reversals send no tak
         INFO(f);
         CHECK(f.rfind(":S", 0) != 0);
         CHECK(f.rfind(":E", 0) != 0);
-        CHECK_FALSE((f.rfind(":G", 0) == 0 && f[3] == '2'));
+        CHECK_FALSE(is_final_leg(f));
     }
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher backlash - an AbortSlew during the take-up leaves the register where the shaft is",
+TEST_CASE("SkyWatcher backlash - RA landings with tracking on stay within one gear gap of the shaft",
           "[skywatcher][telescope][backlash]") {
-    MidTakeUp rig;
-    rig.driver->abort_slew();
-    REQUIRE(wait_for([&] { return rig.mount.frames_seen('E') >= 1; }));
-    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
-}
-
-TEST_CASE("SkyWatcher backlash - a take-up that times out leaves the register where the shaft is",
-          "[skywatcher][telescope][backlash]") {
-    MidTakeUp rig(false);
-    // The clock stays frozen after the partial run: the axis never reports
-    // done and the driver's wait (about five wall-clock seconds) gives up. A
-    // synchronous goto hands the failure to this thread, so the register is
-    // read at the moment the call returns, with no later dispatch to fix it.
-    bool ran = false;
-    std::thread helper([&] { ran = rig.partial_takeup_ran(); });
-    CHECK_THROWS_AS(rig.driver->slew_to_coordinates(rig.ra, -79.5), alpacacore::AlpacaException);
-    helper.join();
-    REQUIRE(ran);
-    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
-}
-
-TEST_CASE("SkyWatcher backlash - a second goto during the take-up lands on its own target",
-          "[skywatcher][telescope][backlash]") {
-    MidTakeUp rig;
-    rig.driver->slew_to_coordinates_async(rig.ra, -70.0);
-    pump_until_landed(rig.clock, *rig.driver, rig.mount);
-    const Run plain = run(FakeMountProfile::eqm35_pro(), {}, {-80.0, -79.0, -70.0});
-    CHECK(rig.mount.axis_degrees(2) == plain.dec_counts_deg);
-    // The cut-short take-up moved the shaft; the re-base left that displacement
-    // in the frame (an unrestored register would leave none). Same way as the
-    // partial run, no further than the slack.
-    const double slack_deg = kBacklash * 360.0 / FakeMountProfile::eqm35_pro().cpr;
-    const double shaft = rig.mount.physical_degrees(2) - plain.dec_physical_deg;
-    CHECK(shaft * rig.moved_deg > 0.0);
-    CHECK(std::abs(shaft) <= slack_deg + 1e-9);
-}
-
-TEST_CASE("SkyWatcher backlash - a MoveAxis during the take-up leaves the register where the shaft is",
-          "[skywatcher][telescope][backlash]") {
-    MidTakeUp rig;
-    rig.driver->move_axis(1, 0.5);  // the clock is frozen: the axis has not moved yet
-    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
-    rig.driver->move_axis(1, 0.0);
-    CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
-}
-
-// Command letters and modes only: RA targets follow the host clock.
-Frames shape(const Frames& frames) {
-    Frames out;
-    for (const std::string& f : frames) out.push_back(f.substr(0, f.rfind(":G", 0) == 0 ? 5 : 3));
-    return out;
-}
-
-TEST_CASE("SkyWatcher backlash - a reversing RA goto takes up the slack first and lands on the same target",
-          "[skywatcher][telescope][backlash]") {
-    struct Result {
-        std::vector<Frames> gotos;
-        double shaft_before = 0.0;  // physical minus register angle, before the last goto
-        double shaft_after = 0.0;
-    };
-    const auto ra_run = [](const sw::BacklashSettings& backlash) {
-        alpacacore::test::FakeTaskClock clock;
-        FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
+    // Three cycles of [goto one way, track past the gap, goto back, track]:
+    // each cycle has one goto against the tracking direction. The register is
+    // never re-based, so it stays within one gap of the shaft; the fixed
+    // approach side makes every landing engage the gears the same way.
+    constexpr uint32_t kGap = 200;
+    const auto profile = FakeMountProfile::eqm35_pro();
+    const double gap_deg = counts_deg(kGap, profile);
+    const auto landings = [&](const sw::BacklashSettings& backlash) {
+        FakeTaskClock clock;
+        FakeSkyWatcherMount mount(profile, clock);
         REQUIRE(mount.ok());
-        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), kLatitude, kLongitude, kElevation, {}, {},
-                                                      alpacacore::util::default_task_clock(),
-                                                      sw::DecAxisSenseSetting::Auto, backlash);
-        driver->set_connected(true);
+        mount.set_gear_gap(1, kGap);
+        auto driver = make_driver(mount, backlash);
+        driver->set_tracking(true);
+        follow_wall_clock(clock, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::seconds(5));  // tracking takes up the gap
         const double lst = driver->get_sidereal_time();
-        Result r;
-        for (const double hours : {0.5, 1.0, 0.75}) {  // on, on, back
-            r.shaft_before = mount.physical_degrees(1) - mount.axis_degrees(1);
-            mount.clear_motion_log();
-            land(clock, *driver, mount, std::fmod(lst + hours, 24.0), -80.0);
-            r.gotos.push_back(axis_one(mount.motion_log()));
-            r.shaft_after = mount.physical_degrees(1) - mount.axis_degrees(1);
+        std::vector<double> errors;  // register minus shaft at each landing
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            for (const double hours : {0.5, 1.0}) {
+                land(clock, *driver, mount, std::fmod(lst + hours, 24.0), -80.0);
+                errors.push_back(mount.axis_degrees(1) - mount.shaft_degrees(1));
+                clock.advance(std::chrono::seconds(5));  // let tracking run past the gap
+            }
         }
         driver->set_connected(false);
-        return r;
+        return errors;
     };
-    sw::BacklashSettings ra_only;
-    ra_only.ra = {kBacklash, true};
-    const Result on = ra_run(ra_only);
-    const Result off = ra_run({});
+    const std::vector<double> on = landings(ra_backlash(kGap));
+    const std::vector<double> off = landings({});
+    for (std::size_t i = 0; i < on.size(); ++i) {
+        INFO("landing " << i << ": register minus shaft " << on[i] / gap_deg << " gaps");
+        CHECK(std::abs(on[i]) <= gap_deg + 1e-9);
+        CHECK(std::abs(on[i] - on[0]) <= gap_deg / 4.0);  // the same engagement every time
+    }
+    // The fake's gap is real: uncompensated, the landings engage both ways.
+    const auto [lo, hi] = std::minmax_element(off.begin(), off.end());
+    CHECK(*hi - *lo > gap_deg / 2.0);
+}
 
-    CHECK_FALSE(has_takeup(on.gotos[1]));  // continues the second goto's way
-    const Frames& with = on.gotos[2];
-    const Frames& without = off.gotos[2];
-    REQUIRE(with.size() == without.size() + 5);
-    // Stop, then slow GOTO + period + target + start + re-base, then the
-    // unchanged real move (same command letters, modes and directions).
-    CHECK(shape(with)[0] == shape(without)[0]);
-    REQUIRE(with[1].rfind(":G12", 0) == 0);
-    CHECK(with[2].rfind(":I1", 0) == 0);
-    REQUIRE(with[3].rfind(":S1", 0) == 0);
-    CHECK(with[4].rfind(":J1", 0) == 0);
-    REQUIRE(with[5].rfind(":E1", 0) == 0);
-    CHECK(shape(Frames(with.begin() + 6, with.end())) == shape(Frames(without.begin() + 1, without.end())));
-    // Magnitude and direction of the take-up: the slack, the real move's way.
-    const int64_t takeup = static_cast<int64_t>(payload(with[3])) - static_cast<int64_t>(payload(with[5]));
-    const char real_dir = without[1][4];
-    CHECK(with[1][4] == real_dir);
-    CHECK(takeup == (real_dir == '0' ? 1 : -1) * static_cast<int64_t>(kBacklash));
-    // The shaft really moved the slack extra, in that direction.
-    const double slack_deg = kBacklash * 360.0 / FakeMountProfile::eqm35_pro().cpr;
-    CHECK(std::abs(std::abs(on.shaft_after - on.shaft_before) - slack_deg) < 1e-6);
-    CHECK(std::abs(off.shaft_after - off.shaft_before) < 1e-6);
+TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one gear gap of the shaft",
+          "[skywatcher][telescope][backlash]") {
+    // Three cycles; before each goto a guide pulse moves Dec the other way, so
+    // the pulse ends opposite to the goto. 40 counts of gap: a 1.5 s pulse at
+    // the default guide rate (about 53 counts/s here) crosses it.
+    constexpr uint32_t kGap = 40;
+    const auto profile = FakeMountProfile::eqm35_pro();
+    const double gap_deg = counts_deg(kGap, profile);
+    const auto landings = [&](const sw::BacklashSettings& backlash, double* pulse_moved_shaft) {
+        FakeTaskClock clock;
+        FakeSkyWatcherMount mount(profile, clock);
+        REQUIRE(mount.ok());
+        mount.set_gear_gap(2, kGap);
+        auto driver = make_driver(mount, backlash);
+        const double ra = driver->get_sidereal_time();
+        const auto pulse = [&](int direction) {
+            const double before = mount.axis_degrees(2);
+            const double shaft_before = mount.shaft_degrees(2);
+            driver->pulse_guide(direction, 1500);
+            follow_wall_clock(clock, std::chrono::seconds(10), [&] { return !driver->get_is_pulse_guiding(); });
+            *pulse_moved_shaft = std::max(*pulse_moved_shaft, std::abs(mount.shaft_degrees(2) - shaft_before));
+            return mount.axis_degrees(2) - before;
+        };
+        land(clock, *driver, mount, ra, -80.0);
+        const double north_way = pulse(0) > 0.0 ? 1.0 : -1.0;  // register direction of a north pulse
+        std::vector<double> errors;
+        double from = mount.axis_degrees(2);
+        land(clock, *driver, mount, ra, -79.0);
+        const double up_way = mount.axis_degrees(2) > from ? 1.0 : -1.0;  // register direction of a higher Dec
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            for (const double dec : {-79.5, -79.0}) {
+                const double goto_way = dec > -79.25 ? up_way : -up_way;
+                pulse(north_way == goto_way ? 1 : 0);  // the pulse ends opposite to the goto
+                land(clock, *driver, mount, ra, dec);
+                errors.push_back(mount.axis_degrees(2) - mount.shaft_degrees(2));
+            }
+        }
+        driver->set_connected(false);
+        return errors;
+    };
+    double moved_on = 0.0;
+    double moved_off = 0.0;
+    const std::vector<double> on = landings(dec_backlash(kGap), &moved_on);
+    const std::vector<double> off = landings({}, &moved_off);
+    for (std::size_t i = 0; i < on.size(); ++i) {
+        INFO("landing " << i << ": register minus shaft " << on[i] / gap_deg << " gaps");
+        CHECK(std::abs(on[i]) <= gap_deg + 1e-9);
+        CHECK(std::abs(on[i] - on[0]) <= gap_deg / 4.0);
+    }
+    CHECK(moved_off > 0.0);  // the pulses crossed the gap
+    const auto [lo, hi] = std::minmax_element(off.begin(), off.end());
+    CHECK(*hi - *lo > gap_deg / 2.0);
+}
+
+TEST_CASE("SkyWatcher backlash - an AbortSlew during the first leg stops it and sends no final leg",
+          "[skywatcher][telescope][backlash]") {
+    MidFirstLeg rig;
+    rig.driver->abort_slew();
+    CHECK_FALSE(rig.mount.axis_running(2));  // stopped at once, the clock still frozen
+    REQUIRE(wait_for([&] { return !rig.driver->get_slewing(); }));
+    rig.clock.advance(std::chrono::seconds(20));
+    std::this_thread::sleep_for(std::chrono::milliseconds(600));  // a wait poll or two
+    CHECK_FALSE(rig.final_leg_sent());
+    CHECK(rig.mount.frames_seen('E') == 0);
+    CHECK(std::abs(rig.register_error_deg()) <= rig.gap_deg + 1e-9);
+}
+
+TEST_CASE("SkyWatcher backlash - a slew wait that times out with a final leg owed sends no final leg",
+          "[skywatcher][telescope][backlash]") {
+    // The driver shares the fake's clock here: the slew-complete wait gives up
+    // at 180 s of clock time while the board never reports the first leg done.
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = make_driver(mount, dec_backlash(kBacklash), kSouth, clock);
+    mount.jump_axis_degrees(2, 4.0);
+    mount.clear_motion_log();
+    driver->find_home();
+    // Rendezvous: one step of clock at a time, each once a driver wait is parked.
+    const auto step = [&](std::chrono::milliseconds d) {
+        if (!clock.wait_for_waiters(2, std::chrono::milliseconds(2000))) return false;
+        clock.advance(d);
+        return clock.wait_for_woken_settled(std::chrono::milliseconds(2000));
+    };
+    REQUIRE(wait_for([&] { return mount.start_count(2) >= 1; }));
+    mount.hold_running(2, true);  // the first leg never reports done
+    // A failed FindHome reports its error through Slewing (open-astro#631).
+    std::string failure;
+    const auto slewing = [&] {
+        try {
+            return driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& e) {
+            failure = e.what();
+            return false;
+        }
+    };
+    for (int i = 0; i < 200 * 4 && slewing(); ++i) {
+        if (!step(std::chrono::milliseconds(250))) break;
+    }
+    CHECK(failure.find("Slew timed out") != std::string::npos);  // the wait gave up
+    CHECK_FALSE(driver->get_at_home());
+    mount.hold_running(2, false);
+    CHECK_FALSE(has_final_leg(axis_two(mount.motion_log())));
+    CHECK(mount.frames_seen('E') == 0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher backlash - a second goto during the first leg lands on its own target",
+          "[skywatcher][telescope][backlash]") {
+    MidFirstLeg rig;
+    rig.mount.clear_motion_log();
+    // Three hours west of the meridian: on this board and site that is the
+    // Dec branch whose axis angle for Dec -70 is +20 degrees, so the second
+    // goto runs up, in the approach direction, and owes no final leg of its own.
+    const double before = rig.mount.axis_degrees(2);
+    rig.driver->slew_to_coordinates_async(std::fmod(rig.driver->get_sidereal_time() + 21.0, 24.0), -70.0);
+    pump_until_landed(rig.clock, *rig.driver, rig.mount);
+    const Frames frames = axis_two(rig.mount.motion_log());
+    REQUIRE(rig.mount.axis_degrees(2) > before);
+    CHECK_FALSE(has_final_leg(frames));
+    // Every Dec target after the second dispatch is the second goto's, none
+    // the first goto's origin: its unsent final leg died with its generation.
+    std::vector<uint32_t> targets;
+    for (const std::string& f : frames) {
+        if (f.rfind(":S", 0) == 0) targets.push_back(payload(f));
+    }
+    REQUIRE_FALSE(targets.empty());
+    for (const uint32_t t : targets) CHECK(t != kHomeCounts);
+    const double landed = rig.mount.axis_degrees(2);
+    CHECK(std::abs(landed - (static_cast<double>(targets.back()) - kHomeCounts) * 360.0 /
+                                FakeMountProfile::eqm35_pro().cpr) < 1e-9);
+    CHECK(rig.mount.frames_seen('E') == 0);
+    CHECK(std::abs(rig.register_error_deg()) <= rig.gap_deg + 1e-9);
+}
+
+TEST_CASE("SkyWatcher backlash - a MoveAxis during the first leg sends no final leg",
+          "[skywatcher][telescope][backlash]") {
+    MidFirstLeg rig;
+    rig.driver->move_axis(1, 0.5);  // Dec: the goto's wait loses the axis to the manual motion
+    follow_wall_clock(rig.clock, std::chrono::milliseconds(300));
+    rig.driver->move_axis(1, 0.0);
+    REQUIRE(wait_for([&] {
+        rig.clock.advance(std::chrono::milliseconds(100));
+        return !rig.mount.axis_running(2);
+    }));
+    // The FindHome's landing wait now finds both axes at rest: give it a few
+    // polls to send whatever it would. (Not Slewing: FindHome cut short by a
+    // MoveAxis leaves Slewing set, a separate defect this case does not pin.)
+    follow_wall_clock(rig.clock, std::chrono::milliseconds(1500));
+    CHECK_FALSE(rig.final_leg_sent());
+    CHECK(rig.mount.frames_seen('E') == 0);
+    CHECK(std::abs(rig.register_error_deg()) <= rig.gap_deg + 1e-9);
 }
 
 TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-checked and reach the driver",
@@ -509,18 +640,18 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
     const DeviceKey key{"skywatcher", alpacacore::DeviceType::Telescope};
     constexpr std::int64_t kStepsMax = 100000;
 
-    alpacacore::test::FakeTaskClock clock;
+    FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
     DeviceConfig config;
     config.set("connectionType", std::string{"network"});
     config.set("host", std::string{"127.0.0.1"});
     config.set("udpPort", static_cast<std::int64_t>(mount.port()));
-    config.set("siteLatitude", kLatitude);
-    config.set("siteLongitude", kLongitude);
+    config.set("siteLatitude", kSouth.latitude);
+    config.set("siteLongitude", kSouth.longitude);
 
-    // A config without the keys loads and behaves as today: no ':s' read, no
-    // take-up, no re-base through a Dec reversal.
+    // A config without the keys loads and behaves as today: no ':s' read and
+    // no final leg through a Dec goto either way.
     const auto absent = catalog.normalize(key, config, Source::Api);
     REQUIRE_FALSE(absent.rejection.has_value());
     {
@@ -529,9 +660,10 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
         REQUIRE(t != nullptr);
         t->set_connected(true);
         const double ra0 = t->get_sidereal_time();
-        for (const double dec : kReversal) land(clock, *t, mount, ra0, dec);
+        mount.clear_motion_log();
+        for (const double dec : kBackAndForth) land(clock, *t, mount, ra0, dec);
         CHECK(mount.frames_seen('s') == 0);
-        CHECK(mount.frames_seen('E') == 0);
+        CHECK_FALSE(has_final_leg(mount.motion_log()));
         t->set_connected(false);
     }
     const int worm_before = mount.frames_seen('s');
@@ -567,15 +699,18 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
     CHECK(int_at("backlashStepsDec") == static_cast<std::int64_t>(kBacklash));
     CHECK(bool_at("backlashEnabledDec"));
 
-    // The factory hands them to the driver: a Dec reversal now takes up.
+    // The factory hands them to the driver: a Dec goto against the approach
+    // side now ends with a final leg.
     auto driver = catalog.create(key, saved.config, 0);
     auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(driver.get());
     REQUIRE(telescope != nullptr);
     telescope->set_connected(true);
     const double ra = telescope->get_sidereal_time();
-    for (const double dec : kReversal) land(clock, *telescope, mount, ra, dec);
+    mount.clear_motion_log();
+    for (const double dec : kBackAndForth) land(clock, *telescope, mount, ra, dec);
     CHECK(mount.frames_seen('s') == worm_before + 2);  // both axes asked for a worm count
-    CHECK(mount.frames_seen('E') >= 1);                // the re-base after a take-up
+    CHECK(has_final_leg(axis_two(mount.motion_log())));
+    CHECK(mount.frames_seen('E') == 0);
     telescope->set_connected(false);
 }
 

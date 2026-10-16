@@ -517,13 +517,15 @@
                         </label>
                         <label for="skywatcher-backlash-steps-ra">RA backlash (microsteps):</label>
                         <input type="number" id="skywatcher-backlash-steps-ra" name="skywatcherBacklashStepsRA" min="0" max="100000" step="1" value="0">
+                    </div>
+                    <div class="form-group">
                         <label for="skywatcher-backlash-enabled-dec">
                             <input type="checkbox" id="skywatcher-backlash-enabled-dec" name="skywatcherBacklashEnabledDec">
                             Dec backlash compensation
                         </label>
                         <label for="skywatcher-backlash-steps-dec">Dec backlash (microsteps):</label>
                         <input type="number" id="skywatcher-backlash-steps-dec" name="skywatcherBacklashStepsDec" min="0" max="100000" step="1" value="0">
-                        <small>Off and 0 by default. When on, a goto that turns an axis round first drives this many microsteps in the new direction at a slow speed derived from the mount, then makes the move. Only gotos are compensated: guide pulses, MoveAxis and the rate properties are not, because autoguiders measure and correct backlash themselves. A board that does not report its worm step count is left uncompensated.</small>
+                        <small>Off and 0 by default. When on, every goto finishes from the same side: RA in the tracking direction, Dec upward in counts. A goto that would arrive from the other side goes this many microsteps past the target, then comes back onto it at a slow speed derived from the mount. Only gotos are compensated: guide pulses, MoveAxis and the rate properties are not, because autoguiders measure and correct backlash themselves. A board that does not report its worm step count is left uncompensated.</small>
                     </div>
                 </div>
 

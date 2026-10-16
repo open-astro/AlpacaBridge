@@ -46,6 +46,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -211,6 +212,30 @@ public:
         Axis& a = ax(axis);
         a.advance(now());
         return (static_cast<double>(a.counts + a.frame_shift) - static_cast<double>(kHome)) * 360.0 / a.cpr;
+    }
+
+    /// open-astro#437: give @p axis a gear gap of @p counts between the motor
+    /// and the output shaft (0, the default, couples them rigidly). After a
+    /// reversal the shaft stays put until the motor has travelled the gap:
+    /// the shaft sits at the motor's count when the motor last moved down,
+    /// and @p counts below it when the motor last moved up. The shaft starts
+    /// at the motor's count.
+    void set_gear_gap(int axis, int64_t counts) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        a.gear_gap = counts;
+        a.shaft = a.counts + a.frame_shift;
+    }
+
+    /// open-astro#437: the output shaft's angle in degrees, in the
+    /// controller's count frame: what the register would read if it measured
+    /// the shaft instead of the motor. Equals axis_degrees() with no gear gap.
+    double shaft_degrees(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        return (static_cast<double>(a.shaft - a.frame_shift) - static_cast<double>(kHome)) * 360.0 / a.cpr;
     }
 
     /// Signed axis angle in degrees from COUNT home (the controller's frame).
@@ -457,7 +482,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         Axis& a = ax(axis);
         a.advance(now());
-        a.counts = static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0));
+        const int64_t moved =
+            static_cast<int64_t>(kHome) + static_cast<int64_t>(std::llround(deg * a.cpr / 360.0)) - a.counts;
+        a.counts += moved;
+        a.shaft += moved;  // a set-up jump carries the shaft along, gap unchanged
     }
 
 private:
@@ -477,6 +505,8 @@ private:
         uint32_t t1 = 0;
         int64_t goto_target = kHome;
         int64_t frame_shift = 0;                          // physical = counts + frame_shift
+        int64_t gear_gap = 0;                             // motor-to-shaft play, counts (test knob)
+        int64_t shaft = kHome;                            // output shaft, physical frame
         std::chrono::steady_clock::time_point stop_at{};  // ramped ":K" deadline
         bool stopping = false;
         bool in_goto = false;
@@ -531,6 +561,7 @@ private:
                         counts += static_cast<int64_t>(std::llround(dir_sign * step));
                     }
                     latch_indexer(before_coast);
+                    follow_shaft();
                 }
                 return;
             }
@@ -571,6 +602,15 @@ private:
                 counts += static_cast<int64_t>(whole);
             }
             latch_indexer(before);
+            follow_shaft();
+        }
+
+        // The play rule: the shaft moves only when the motor pushes it, so it
+        // stays within [motor - gear_gap, motor]. Each advance() step is
+        // monotonic, so applying the rule at its end point is exact.
+        void follow_shaft() {
+            const int64_t motor = counts + frame_shift;
+            shaft = std::min(motor, std::max(shaft, motor - gear_gap));
         }
 
         // Latch the home index on a crossing while armed.
