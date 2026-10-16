@@ -657,3 +657,18 @@ TEST_CASE("Gemini PDH Switch Driver - Concurrent DEW value and mode writes never
     CHECK(driver->get_switch_value(11) <= driver->get_max_switch_value(11));
     CHECK(driver->get_switch_value(11) >= 0.0);
 }
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("Gemini PDH Switch Driver - Connect with empty serial port names portPath", "[gemini][switch][unit]") {
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}

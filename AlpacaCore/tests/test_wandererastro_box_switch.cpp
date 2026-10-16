@@ -287,3 +287,19 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
 }
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("WandererAstro Box Switch Driver - Connect with empty serial port names portPath",
+          "[wandererastro][switch][unit]") {
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}

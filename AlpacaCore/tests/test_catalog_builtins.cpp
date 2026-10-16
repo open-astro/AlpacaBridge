@@ -2243,7 +2243,9 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     DeviceConfig no_port;
     no_port.set("wheelType", std::string{"cfw3-usb"});
     no_port.set("connectionType", std::string{"serial"});
-    CHECK_THROWS_AS(catalog.create(kQhyWheelKey, no_port, 9), AlpacaException);
+    // #508 item 1: built anyway so a saved entry stays registered; its connect refuses (the wheel's
+    // own test pins the text).
+    CHECK(catalog.create(kQhyWheelKey, no_port, 9) != nullptr);
     CHECK_THROWS_AS(catalog.create(kQhyCameraKey, DeviceConfig{}, 10), AlpacaException);
 #endif
 }
@@ -2743,11 +2745,14 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the Gemini devices
     hub_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
     REQUIRE(catalog.create(kGeminiSwitchKey, hub_serial, 9) != nullptr);
 
-    // A saved config normalize could only warn about is refused here, never
-    // built into a hub that would auto-detect behind the user's back.
+    // A serial hub with no port is built (#508 item 1) so a saved entry stays registered, but
+    // never into a hub that would auto-detect behind the user's back: its connect refuses.
     DeviceConfig hub_no_port;
     hub_no_port.set("connectionType", std::string{"serial"});
-    CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_no_port, 10), AlpacaException);
+    auto hub_unported = catalog.create(kGeminiSwitchKey, hub_no_port, 10);
+    REQUIRE(hub_unported != nullptr);
+    CHECK_THROWS_AS(hub_unported->set_connected(true), AlpacaException);
+    CHECK_FALSE(hub_unported->get_connected());
     DeviceConfig hub_bad_type;
     hub_bad_type.set("switchType", std::string{"not-a-backend"});
     CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_bad_type, 11), AlpacaException);
@@ -2908,10 +2913,14 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the WandererAstro 
         serial.set("portPath", std::string{"/dev/ttyUSB-no-such-wanderer"});
         REQUIRE(catalog.create(key, serial, 4) != nullptr);
 
-        // Serial mode means an explicit port: no silent auto-detect.
+        // Serial mode means an explicit port: no silent auto-detect. A saved entry with none is
+        // still built (#508 item 1) and its connect refuses naming portPath.
         DeviceConfig no_port;
         no_port.set("connectionType", std::string{"serial"});
-        CHECK_THROWS_AS(catalog.create(key, no_port, 5), AlpacaException);
+        auto unported = catalog.create(key, no_port, 5);
+        REQUIRE(unported != nullptr);
+        CHECK_THROWS_AS(unported->set_connected(true), AlpacaException);
+        CHECK_FALSE(unported->get_connected());
     }
 
     DeviceConfig names;
