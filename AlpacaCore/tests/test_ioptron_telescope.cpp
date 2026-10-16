@@ -955,3 +955,40 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
     CHECK(joined_without_advance);
     CHECK_FALSE(driver->get_connected());
 }
+
+// open-astro#1223: the 750 ms retry delay after a failed site command is a cancellable wait on the driver's
+// clock too. A disconnect that lands inside it joins at once; an uncancellable sleep would park the join
+// forever on a FakeTaskClock nobody advances.
+TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry delay does not wait it out",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+        0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    // The clock-sync thread is parked in its 250 ms start delay.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // Drop the link, so the first set_latitude send fails and the thread lands in its retry delay.
+    mount.reset_link();
+    const auto waits = clock.wait_count();
+    clock.advance(std::chrono::milliseconds(250));
+    // The first set_latitude fails; the thread registers its retry delay as the next wait.
+    REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
+
+    std::promise<void> disconnected;
+    auto done = disconnected.get_future();
+    std::thread disconnecter([&] {
+        driver->set_connected(false);
+        disconnected.set_value();
+    });
+    const bool joined_without_advance = done.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    // Release the parked thread (one retry delay per attempt) so the test can end.
+    while (!joined_without_advance && done.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
+        clock.advance(std::chrono::seconds(10));
+    }
+    disconnecter.join();
+    CHECK(joined_without_advance);
+    CHECK_FALSE(driver->get_connected());
+}
