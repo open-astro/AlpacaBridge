@@ -5480,8 +5480,8 @@ int main() {
             {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
-        // #508 item 1, the arms that DROP a saved entry on an empty portPath
-        // instead of registering it with a WARN: it is rejected by the API and
+        // #508 item 1, the arms that still DROP a saved entry on an empty portPath
+        // instead of registering it with a WARN (only the iOptron filterwheel now): it is rejected by the API and
         // is NOT registered after a restart. It is still listed, as a
         // "<vendor> (failed to load)" row (LoadError true, lower-case
         // DeviceType), which is how the web UI can show and edit it.
@@ -5496,29 +5496,32 @@ int main() {
         drop_pin("ioptron", "filterwheel", "FilterWheel", kPortRequired);
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
-        pin("cfw3-usb serial with empty portPath is DROPPED (#508 item 1)", "qhy", "filterwheel", "FilterWheel",
+        // The catalog turns the refusal into a normalize warning for a saved config and the
+        // factory builds the wheel anyway, so it stays registered and listed; its connect
+        // refuses with the same text (test_qhy_cfw3_filterwheel.cpp). The API still rejects it.
+        pin("cfw3-usb serial with empty portPath registers and warns (#508 item 1)", "qhy", "filterwheel",
+            "FilterWheel", R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":""})",
+            "QHY CFW3 connectionType \"serial\" requires portPath", "{}", true,
             R"({"wheelType":"cfw3-usb","connectionType":"serial","portPath":""})",
-            "QHY CFW3 connectionType \"serial\" requires portPath", "{}", false, "{}",
-            {"config normalized: QHY CFW3 connectionType \"serial\" requires portPath"}, {});
+            {"config normalized: QHY CFW3 connectionType \"serial\" requires portPath"}, {"Skipping persisted device"});
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
-        // The catalog turns the refusal into a normalize warning for a saved config, and the factory
-        // then throws the same text, so the device is dropped as before.
-        pin("serial with empty portPath is DROPPED (#508 item 1)", "gemini", "switch", "Switch",
-            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
-            {"config normalized: " + kPortRequired}, {});
+        // Same shape: a warning, registered and listed, and the connect refuses.
+        pin("serial with empty portPath registers and warns (#508 item 1)", "gemini", "switch", "Switch",
+            R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", true,
+            R"({"connectionType":"serial","portPath":""})", {"config normalized: " + kPortRequired},
+            {"Skipping persisted device"});
 #endif
 #ifdef ALPACACORE_ENABLE_WANDERERASTRO
-        // The catalog turns each refusal into a normalize warning for a saved config, and the factory
-        // then throws the same text, so the device is dropped as before.
         for (const auto& [device_type, alpaca_type] :
              {std::pair<std::string, std::string>{"covercalibrator", "CoverCalibrator"},
               {"rotator", "Rotator"},
               {"filterwheel", "FilterWheel"},
               {"switch", "Switch"}}) {
-            pin("serial with empty portPath is DROPPED (#508 item 1)", "wandererastro", device_type, alpaca_type,
-                R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
-                {"config normalized: " + kPortRequired}, {});
+            pin("serial with empty portPath registers and warns (#508 item 1)", "wandererastro", device_type,
+                alpaca_type, R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", true,
+                R"({"connectionType":"serial","portPath":""})", {"config normalized: " + kPortRequired},
+                {"Skipping persisted device"});
         }
 #endif
 

@@ -68,7 +68,9 @@ void register_gemini_factory(DeviceCatalog& catalog) {
     Factory hub;
     hub.key = DeviceKey{"gemini", DeviceType::Switch};
     hub.create = [](const DeviceConfig& config, int device_number) -> std::unique_ptr<AlpacaDriver> {
-        if (const auto refusal = gemini_switch_refusal(config)) {
+        // A saved serial entry with no port is built anyway (#508 item 1): normalize warned, and
+        // the connect refuses with the same text rather than auto-detecting.
+        if (const auto refusal = gemini_switch_refusal(config); refusal && *refusal != kGeminiSerialPortRequired) {
             throw AlpacaException(*refusal, AlpacaError::InvalidValue);
         }
         if (config.get(kGeminiConnectionType) == "serial") {

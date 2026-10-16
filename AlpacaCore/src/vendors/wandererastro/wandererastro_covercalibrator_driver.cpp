@@ -160,6 +160,13 @@ public:
                 ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
                 effective.serial_port = port.port_path;
             }
+            // A saved serial entry with no port (#508 item 1) is registered so it stays listed;
+            // refuse here, in words an operator can act on, instead of opening "".
+            if (effective.serial_port.empty()) {
+                throw AlpacaException(
+                    "WandererCover: portPath is required when connectionType is 'serial' (or use 'auto').",
+                    AlpacaError::NotConnected);
+            }
             protocol_.connect(effective);
             // Seed the calibrator state from the first streamed frame so the
             // initial CalibratorState/Brightness reflect reality if the panel
