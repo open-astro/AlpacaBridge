@@ -162,12 +162,17 @@ struct MidTakeUp {
         }
     }
     // Wait for the take-up to start, then let it run `partial_s` virtual seconds.
-    void run_partial_takeup() {
-        REQUIRE(wait_for([&] { return mount.axis_in_goto(2) && has_takeup(axis_two(mount.motion_log())); }));
+    // Returns false when the take-up never started or never moved the register
+    // (no Catch2 assertion here: the timeout case calls it from a helper thread).
+    bool partial_takeup_ran() {
+        if (!wait_for([&] { return mount.axis_in_goto(2) && has_takeup(axis_two(mount.motion_log())); })) {
+            return false;
+        }
         clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(partial_s)));
         moved_deg = mount.axis_degrees(2) - before_deg;
-        REQUIRE(std::abs(moved_deg) > 0.0);  // the register is ahead of the shaft
+        return std::abs(moved_deg) > 0.0;  // the register is ahead of the shaft
     }
+    void run_partial_takeup() { REQUIRE(partial_takeup_ran()); }
     ~MidTakeUp() { driver->set_connected(false); }
 };
 
@@ -399,9 +404,11 @@ TEST_CASE("SkyWatcher backlash - a take-up that times out leaves the register wh
     // done and the driver's wait (about five wall-clock seconds) gives up. A
     // synchronous goto hands the failure to this thread, so the register is
     // read at the moment the call returns, with no later dispatch to fix it.
-    std::thread helper([&] { rig.run_partial_takeup(); });
+    bool ran = false;
+    std::thread helper([&] { ran = rig.partial_takeup_ran(); });
     CHECK_THROWS_AS(rig.driver->slew_to_coordinates(rig.ra, -79.5), alpacacore::AlpacaException);
     helper.join();
+    REQUIRE(ran);
     CHECK(rig.mount.axis_degrees(2) == rig.before_deg);
 }
 
