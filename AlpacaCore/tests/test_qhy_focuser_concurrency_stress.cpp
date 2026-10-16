@@ -79,8 +79,7 @@ TEST_CASE("QHY Q-Focuser - destruction races an in-flight connect", "[qhy][focus
     // per iteration.
     alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
         []() { return std::make_unique<FakeQhyQFocuser>(); },
-        [](FakeQhyQFocuser& fake) { return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path()); },
-        25);
+        [](FakeQhyQFocuser& fake) { return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path()); }, 25);
 }
 
 TEST_CASE("QHY Q-Focuser - racing disconnect is never dropped", "[qhy][focuser][stress]") {

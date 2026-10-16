@@ -237,7 +237,9 @@ TEST_CASE("Gemini PDH Advanced 3 switch - destruction races an in-flight connect
     // cannot be read by the next one.
     alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
         []() { return std::make_unique<FakeGeminiPdh>(); },
-        [](FakeGeminiPdh& hub) { return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200); },
+        [](FakeGeminiPdh& hub) {
+            return alpacacore::vendor::gemini::create_gemini_pdh_switch(0, hub.slave_path(), 19200);
+        },
         25);
 }
 
