@@ -200,6 +200,14 @@ it is never reachable through `router.cpp` or the web UI.
   also `false` — custom tracking-rate commands were not confirmed against real OnStep firmware
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op.
+- **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
+  refraction to every RA/Dec it reports unless it was built for observed-place coordinates, and
+  `:GXEE#` says which: it replies `MOUNT_COORDS - 1` as one bare digit with no `#` (`0` observed
+  place, `1` topocentric, `2` topocentric strict). The driver asks at connect, on firmware 10 or
+  later only, because legacy OnStep answers any unknown command with `0` too. It reports `True`
+  for `1`/`2`, and a write of the other value throws `PropertyNotImplemented`, since the mode is
+  fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
+  The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
 - **ConformU-validated on real hardware** (Generic OnStep DIY harmonic-drive mount, firmware
   "On-Step" v10.23a, Linux arm64, ConformU 4.4.0): 0 errors, 0 timing violations in the saved
   run. The only remaining findings are the 2 PulseGuide East/West residual issues documented

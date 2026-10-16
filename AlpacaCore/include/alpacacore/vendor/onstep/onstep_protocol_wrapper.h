@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -134,6 +135,18 @@ public:
      * Sends :GVN#.
      */
     std::string get_version_number();
+
+    /**
+     * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
+     *
+     * Sends :GXEE#, which replies with one bare digit and no '#':
+     * 0 = observed place (no refraction applied to reported RA/Dec),
+     * 1 = topocentric, 2 = topocentric strict (both apply refraction).
+     * Returns std::nullopt for any other reply. Only meaningful on OnStepX:
+     * legacy OnStep answers an unknown command with "0" too, so callers must
+     * check the firmware version first (#1216).
+     */
+    std::optional<int> get_mount_coords_mode();
 
     /**
      * @brief Get current RA/Dec position.
