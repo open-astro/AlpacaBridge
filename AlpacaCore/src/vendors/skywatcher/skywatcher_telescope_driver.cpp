@@ -4603,23 +4603,20 @@ private:
         return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
     }
 
-    // open-astro#437: the final leg a compensated goto owes: the goto's motion
-    // generation, the axes that owe one and the goto's own targets.
+    // open-astro#437: the final leg a goto owes: its generation, axes and targets.
     struct FinalApproach {
         uint64_t generation = 0;
         bool owed[2]{};
         double target_deg[2]{};
     };
 
-    // open-astro#437: called by the landing wait each time the board reports
-    // the goto stopped. A final leg goes out only once each axis that owes one
-    // has settled (wait_axis_stationary_locked(), the rule of every landing),
-    // and only while the goto that owes it is still the current motion: any
-    // newer motion command (AbortSlew, MoveAxis, a pulse, a newer goto) bumps
-    // motion_generation_, and the leg is dropped unsent. The leg goes through
-    // dispatch_goto_locked() and the same wait lands it. True when it went
-    // out. The position register is never written: it always counts the motor,
-    // so an unfinished goto leaves nothing to undo.
+    // open-astro#437: the landing wait calls this whenever the board reports the
+    // goto stopped. The final leg goes out once each axis that owes one has
+    // settled (the rule of every landing), and only while its goto is still the
+    // current motion: a newer motion command (AbortSlew, MoveAxis, a pulse, a
+    // newer goto) bumps motion_generation_ and the leg is dropped unsent. True
+    // when it went out. The position register is never written, so an
+    // unfinished goto leaves nothing to undo.
     bool send_final_approach_locked(std::unique_lock<std::mutex>& lock) {
         const FinalApproach leg = final_approach_;
         final_approach_ = {};
@@ -4637,11 +4634,10 @@ private:
 
     // `compensate_backlash` is false for the AutoHome hunt: its moves read the
     // home index against the count frame, and it waits for its own landings
-    // (autohome_wait_axes_stopped), which never send a final leg. It is false
-    // for a final leg too (open-astro#437): `final_leg` names the goto that
-    // owes it, whose motion generation the leg keeps, and only the axes that
-    // owe one move, in a slow GOTO (':G' mode '2', the controller ramps, ':I'
-    // is the step period) at the derived speed.
+    // (autohome_wait_axes_stopped), which never send a final leg. A final leg
+    // (open-astro#437) keeps its goto's generation and moves only the axes that
+    // owe one, in a slow GOTO (':G' mode '2', ':I' the step period) at the
+    // derived speed.
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg, double target_dec_axis_deg,
                               bool compensate_backlash = true, const FinalApproach* final_leg = nullptr) {
         auto& protocol = *protocol_;
@@ -4657,8 +4653,7 @@ private:
         // circuit skipped the second axis entirely) — while the stale-
         // generation gate inside the wait ensures a superseded dispatch
         // never emits stops that could clobber the superseding command's
-        // fresh motion (round-6 finding). An axis a final leg leaves alone is
-        // neither stopped nor started.
+        // fresh motion (round-6 finding).
         const bool ra_stopped = !moves[0] || stop_axis_and_wait_locked(lock, kAxisRa, gen);
         const bool dec_stopped = !moves[1] || stop_axis_and_wait_locked(lock, kAxisDec, gen);
         if (!ra_stopped || !dec_stopped) {
@@ -4705,20 +4700,14 @@ private:
             }
             protocol.set_goto_target(plan.channel, first_leg);
         }
-        if (!final_leg) {
-            final_approach_ = owes;
-        }
+        final_approach_ = owes;  // after a final leg: nothing (it is not compensated)
         if (owes.owed[0] || owes.owed[1]) {
             // The landing time of a two-leg goto is no sample of the one-leg
             // goto overhead the aim-ahead estimate learns (wait_for_slew_complete).
             last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         }
-        if (moves[0]) {
-            protocol.start_motion(kAxisRa);
-        }
-        if (moves[1]) {
-            protocol.start_motion(kAxisDec);
-        }
+        if (moves[0]) protocol.start_motion(kAxisRa);
+        if (moves[1]) protocol.start_motion(kAxisDec);
         // open-astro#459: every commanded dec-axis angle passes through here
         // (sky goto, the no-indexer FindHome and Park gotos to home, the
         // AutoHome hunt phases), so this is the one place the branch memory
