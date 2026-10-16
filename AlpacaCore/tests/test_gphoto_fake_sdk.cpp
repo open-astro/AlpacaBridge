@@ -19,6 +19,7 @@
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <functional>
@@ -414,7 +415,7 @@ TEST_CASE("GPhoto camera fake - bulb close is sent even when the hold loop throw
     wait_for_exposure_to_finish(*driver);
 
     CHECK(driver->get_image_ready() == false);
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Error);
     REQUIRE(fake.bulb_toggle_history.size() == 2);
     CHECK(fake.bulb_toggle_history.front() == true);
     CHECK(fake.bulb_toggle_history.back() == false);
@@ -451,7 +452,7 @@ TEST_CASE("GPhoto camera fake - bulb frame poll keeps polling until the camera d
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image ready",
+TEST_CASE("GPhoto camera fake - decoder failure latches CameraState Error with no image ready",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
@@ -465,7 +466,7 @@ TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Error);
     CHECK(driver->get_image_ready() == false);
 
     driver->set_connected(false);
@@ -699,156 +700,50 @@ TEST_CASE("GPhoto camera fake - Canon shutter list with only auto does not enabl
     driver->set_connected(false);
 }
 
-namespace {
-
-int count_calls(const FakeGPhotoSDK& fake, const std::string& name) {
-    return static_cast<int>(std::count(fake.call_log.begin(), fake.call_log.end(), name));
-}
-
-}  // namespace
-
-TEST_CASE("GPhoto camera fake - exposure reopens a lost session once and captures", "[gphoto][camera][unit][fakesdk]") {
+TEST_CASE("GPhoto camera fake - camera gone from the USB bus mid-exposure reports Error then disconnects",
+          "[gphoto][camera][unit][fakesdk][canon]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
-    fake.cameras.push_back(make_camera());
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};  // B mode, as on the rig: the press is the first call
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
     FakeRawDecoder decoder;
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
-    const int opens = fake.open_count;
-    const int closes = fake.close_count;
-    const int captures = count_calls(fake, "capture_and_download");
+    REQUIRE(driver->get_connected() == true);
 
-    bool dropped = false;
-    int choice_writes = 0;
+    std::atomic<bool> armed{true};
     fake.before_call = [&](const std::string& name) {
-        if (name == "set_choice_value") ++choice_writes;
-        if (name == "set_choice_value" && !dropped) {
-            dropped = true;
-            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                         alpacacore::AlpacaError::DriverException);
+        if (armed.load() && name == "set_choice_value") {
+            throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Failed to set eosremoterelease = Press Full",
+                                                                       alpacacore::AlpacaError::DriverException);
         }
     };
-
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
 
-    CHECK(dropped);
-    // The failed shutter-speed write, the RAW format and ISO rewritten on the new session, the retried write.
-    CHECK(choice_writes == 4);
-    CHECK(driver->get_image_ready() == true);
-    CHECK(fake.open_count == opens + 1);
-    CHECK(fake.close_count == closes + 1);
-    CHECK(count_calls(fake, "capture_and_download") == captures + 1);
-    CHECK(driver->get_connected() == true);
+    // The body left the bus: the client must see Connected false and reconnect.
+    CHECK(driver->get_connected() == false);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
 
-    driver->set_connected(false);
-}
-
-TEST_CASE("GPhoto camera fake - reopen finds the camera on a new port", "[gphoto][camera][unit][fakesdk]") {
-    reset_gphoto_sensor_cache();
-    FakeGPhotoSDK fake;
-    fake.cameras.push_back(make_camera());
-    FakeRawDecoder decoder;
-
-    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
-    driver->set_connected(true);
-    const int opens = fake.open_count;
-    const int closes = fake.close_count;
-
-    // The body powered off and came back on another USB port.
-    fake.cameras[0].port = "usb:001,006";
-    bool dropped = false;
-    fake.before_call = [&](const std::string& name) {
-        if (name == "set_choice_value" && !dropped) {
-            dropped = true;
-            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                         alpacacore::AlpacaError::DriverException);
-        }
-    };
-
-    driver->start_exposure(0.01, true);
-    wait_for_exposure_to_finish(*driver);
-
-    CHECK(driver->get_image_ready() == true);
-    CHECK(fake.open_count == opens + 1);
-    CHECK(fake.close_count == closes + 1);
-
-    fake.before_call = nullptr;
-    driver->set_connected(false);
-}
-
-TEST_CASE("GPhoto camera fake - failed retried write after reopen keeps the new session closable",
-          "[gphoto][camera][unit][fakesdk]") {
-    reset_gphoto_sensor_cache();
-    FakeGPhotoSDK fake;
-    fake.cameras.push_back(make_camera());
-    FakeRawDecoder decoder;
-
-    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
-    driver->set_connected(true);
-    const int captures = count_calls(fake, "capture_and_download");
-
-    // 1st write: the lost session; 2nd and 3rd: format and ISO on the new session; 4th: the retried write.
-    int writes = 0;
-    fake.before_call = [&](const std::string& name) {
-        if (name != "set_choice_value") return;
-        ++writes;
-        if (writes == 1 || writes == 4) {
-            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                         alpacacore::AlpacaError::DriverException);
-        }
-    };
-
-    driver->start_exposure(0.01, true);
-    wait_for_exposure_to_finish(*driver);
-
-    CHECK(writes == 4);
-    CHECK(count_calls(fake, "capture_and_download") == captures);
-    // Either still connected with the new session open, or disconnected with nothing left open.
-    if (driver->get_connected()) {
-        driver->set_connected(false);
-    }
+    driver->set_connected(false);  // joins the worker
     CHECK(fake.close_count == fake.open_count);
 
-    fake.before_call = nullptr;
-}
-
-TEST_CASE("GPhoto camera fake - failed session reopen ends the exposure without a capture",
-          "[gphoto][camera][unit][fakesdk]") {
-    reset_gphoto_sensor_cache();
-    FakeGPhotoSDK fake;
-    fake.cameras.push_back(make_camera());
-    FakeRawDecoder decoder;
-
-    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    // Reconnect enumerates again and the next exposure works.
+    armed.store(false);
     driver->set_connected(true);
-    const int opens = fake.open_count;
-    const int captures = count_calls(fake, "capture_and_download");
-
-    fake.before_call = [&](const std::string& name) {
-        if (name == "set_choice_value") {
-            throw alpacacore::vendor::gphoto::GPhotoSessionLostException("PTP session is not open",
-                                                                         alpacacore::AlpacaError::DriverException);
-        }
-    };
-    fake.throw_from.insert("open_camera");
-
+    CHECK(driver->get_connected() == true);
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_image_ready() == true);
 
-    // The session is gone and could not be reopened: the camera reports disconnected, no frame exists.
-    CHECK(driver->get_connected() == false);
-    CHECK(fake.open_count == opens);
-    CHECK(count_calls(fake, "capture_and_download") == captures);
-    CHECK(count_calls(fake, "open_camera") == 2);  // connect + the one reopen attempt, never a second
-
-    fake.before_call = nullptr;
-    fake.throw_from.clear();
     driver->set_connected(false);
+    CHECK(fake.close_count == fake.open_count);
 }
 
-TEST_CASE("GPhoto camera fake - a non-session error before the shutter is not retried",
+TEST_CASE("GPhoto camera fake - failed capture latches CameraState Error and keeps the camera connected",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
@@ -857,25 +752,28 @@ TEST_CASE("GPhoto camera fake - a non-session error before the shutter is not re
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
-    const int opens = fake.open_count;
-    const int closes = fake.close_count;
-    const int captures = count_calls(fake, "capture_and_download");
 
-    fake.before_call = [&](const std::string& name) {
-        if (name == "set_choice_value") {
-            throw AlpacaException("Failed to set shutterspeed2 = 1/200: Bad parameters",
-                                  alpacacore::AlpacaError::DriverException);
-        }
-    };
-
+    fake.throw_from.insert("capture_and_download");
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
 
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Error);
     CHECK(driver->get_image_ready() == false);
-    CHECK(fake.open_count == opens);
-    CHECK(fake.close_count == closes);
-    CHECK(count_calls(fake, "capture_and_download") == captures);
+    try {
+        (void)driver->get_image_array();
+        FAIL("ImageArray must throw after a failed exposure");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(std::string(e.what()).find("Exposure failed") != std::string::npos);
+        CHECK(std::string(e.what()).find("injected failure in capture_and_download") != std::string::npos);
+    }
 
-    fake.before_call = nullptr;
+    // The next StartExposure clears the latch.
+    fake.throw_from.clear();
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_image_ready() == true);
+
     driver->set_connected(false);
 }

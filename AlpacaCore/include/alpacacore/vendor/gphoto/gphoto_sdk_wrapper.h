@@ -42,14 +42,13 @@ struct GPhotoCaptureResult {
 };
 
 /**
- * @brief A call failed because the camera session is gone (USB I/O error, PTP session closed by the
- * body's auto power-off or a timeout), not because of the request itself.
+ * @brief A call failed because the camera is no longer on the USB bus (GP_ERROR_IO_USB_FIND), for
+ * example after the body's auto power-off.
  *
  * Still an AlpacaException with the DriverException number, so every caller that does not know about it
- * sees the failure it saw before. The driver catches it to close and reopen the session once before the
- * shutter fires.
+ * sees the failure it saw before. The exposure worker catches it to report the camera as disconnected.
  */
-class GPhotoSessionLostException : public AlpacaException {
+class GPhotoDeviceGoneException : public AlpacaException {
 public:
     using AlpacaException::AlpacaException;
 };

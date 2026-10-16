@@ -648,6 +648,7 @@ public:
 
     CameraState get_camera_state() const override {
         if (!connected_.load()) return CameraState::Idle;
+        if (exposure_failed_.load()) return CameraState::Error;
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
@@ -812,6 +813,9 @@ public:
     ImageArray get_image_array() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        if (exposure_failed_.load()) {
+            throw AlpacaException("Exposure failed: " + exposure_error_, AlpacaError::DriverException);
+        }
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
             throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
         }
@@ -1004,6 +1008,8 @@ public:
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
+            exposure_failed_.store(false);
+            exposure_error_.clear();
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
             // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead. A
@@ -1045,6 +1051,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
+        exposure_failed_.store(false);
+        exposure_error_.clear();
         exposure_deadline_valid_ = false;
     }
 
@@ -1109,6 +1117,10 @@ private:
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
+    // Latched when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
+    // disconnect. exposure_error_ is guarded by mutex_.
+    std::atomic<bool> exposure_failed_{false};
+    std::string exposure_error_;
     std::atomic<bool> abort_requested_{false};
     std::thread exposure_thread_;
     std::mutex exposure_lifecycle_mutex_;
@@ -1163,6 +1175,8 @@ private:
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
+        exposure_failed_.store(false);
+        exposure_error_.clear();
         abort_requested_.store(false);
     }
 
@@ -1371,68 +1385,23 @@ private:
                                                                  decoded.bayer_offset_y, decoded.max_adu});
     }
 
-    // The shutter-speed write is the first SDK call of an exposure and cannot fire the shutter. A body
-    // that powered off or timed the PTP session out while idle fails it as a lost session; close the
-    // session, reopen the same model and port, rewrite the RAW format and ISO and retry the write
-    // once (issue #1064). Nothing after this point retries: once the capture starts the shutter may
-    // have fired. A second failure, or any other error, propagates as before. `handle` is updated
-    // for the caller. Runs on the exposure worker; stop_exposure()/disconnect join it before they
-    // close handle_, so handle_ is only changed here under mutex_.
-    void set_shutter_choice_reopening_lost_session(int& handle, const std::string& widget, const std::string& choice) {
-        auto& sdk = sdk_;
-        try {
-            sdk.set_choice_value(handle, widget, choice);
-            return;
-        } catch (const GPhotoSessionLostException&) {
-            // Not logged here: the outcome line below is the one INFO line per re-init.
-        }
+    // Latch the failure so CameraState reads Error and ImageArray says why. A camera that left the USB bus
+    // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
+    // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
+    // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
+    void record_exposure_failure(int handle, const char* what, bool device_gone) {
+        if (abort_requested_.load()) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || handle_ != handle || !connected_.load()) {
-            throw AlpacaException("Camera session lost and the camera is no longer connected",
-                                  AlpacaError::NotConnected);
-        }
-        int reopened = -1;
+        exposure_error_ = what;
+        exposure_failed_.store(true);
+        if (!device_gone || handle_ != handle) return;
+        handle_ = -1;
+        connected_.store(false);
         try {
-            sdk.close_camera(handle);
-            handle_ = -1;
-            // Resolve the camera as set_connected(true) does: a body that powered off comes back on a
-            // new USB port, so the port stored at connect cannot be reused.
-            auto cameras = sdk.enumerate_cameras();
-            if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
-                throw AlpacaException(
-                    "No DSLR / mirrorless camera found at this camera index (is it plugged in and powered on?)",
-                    AlpacaError::NotConnected);
-            }
-            const auto info = cameras[static_cast<std::size_t>(camera_index_)];
-            reopened = sdk.open_camera(info.model, info.port);
-            try {
-                // Only the camera-side settings the driver wrote: not configure_after_connect_locked(),
-                // which would also reset the learned geometry and the client's ROI.
-                if (format_widget_name_.has_value() && raw_format_choice_.has_value()) {
-                    sdk.set_choice_value(reopened, *format_widget_name_, *raw_format_choice_);
-                }
-                if (current_iso_index_ >= 0 && current_iso_index_ < static_cast<int>(iso_choices_.size())) {
-                    sdk.set_choice_value(reopened, "iso", iso_choices_[static_cast<std::size_t>(current_iso_index_)]);
-                }
-            } catch (...) {
-                sdk.close_camera(reopened);
-                throw;
-            }
-            camera_info_ = info;
-            handle_ = reopened;
-            handle = reopened;
-        } catch (const std::exception& e) {
-            (void)e;  // libgphoto2 text stays out of the log line; the failure still propagates
-            ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopening it failed");
-            // The old handle is closed and no new one exists: report disconnected so the client
-            // reconnects instead of calling a camera that has no handle.
-            connected_.store(false);
-            throw;
+            sdk_.close_camera(handle);
+        } catch (const std::exception&) {
+            // The handle belongs to a device that is gone; the failure is already latched and logged.
         }
-        // The new session is live and published in handle_. A failure here keeps connected_ true so
-        // set_connected(false) still closes it.
-        sdk.set_choice_value(handle, widget, choice);
-        ALPACA_LOG_INFO(kLogTag, "Camera session lost before the exposure; reopened it and continuing");
     }
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
@@ -1440,12 +1409,7 @@ private:
         auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
-                set_shutter_choice_reopening_lost_session(handle, shutter_widget_name, shutter_choice);
-                // A stop that landed during a reopen must not be followed by a shutter release.
-                if (abort_requested_.load()) {
-                    exposure_active_.store(false);
-                    return;
-                }
+                sdk.set_choice_value(handle, shutter_widget_name, shutter_choice);
             }
 
             GPhotoCaptureResult capture;
@@ -1469,6 +1433,7 @@ private:
             image_ready_ = true;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogTag, "Exposure failed: " + std::string(e.what()));
+            record_exposure_failure(handle, e.what(), dynamic_cast<const GPhotoDeviceGoneException*>(&e) != nullptr);
         }
         exposure_active_.store(false);
     }

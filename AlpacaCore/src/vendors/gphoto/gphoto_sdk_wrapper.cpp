@@ -34,28 +34,10 @@ namespace {
 
 constexpr const char* kLogTag = "GPhoto";
 
-// Results treated as "the session itself is gone, not that the request was bad": a USB transfer or
-// claim failed, or the camera reported a generic camera error. This list is a guess that was not
-// reproduced on hardware. Bad parameters, unsupported widgets and busy results are not here.
-// TODO(#1064): confirm on a real body which code a PTP session closed by auto power-off or a timeout
-// returns (GP_ERROR, GP_ERROR_TIMEOUT, GP_ERROR_CAMERA_ERROR) and adjust the list.
-bool gp_result_means_session_lost(int gp_result) {
-    switch (gp_result) {
-        case GP_ERROR_IO:
-        case GP_ERROR_IO_READ:
-        case GP_ERROR_IO_WRITE:
-        case GP_ERROR_IO_USB_FIND:
-        case GP_ERROR_IO_USB_CLAIM:
-        case GP_ERROR_CAMERA_ERROR:
-            return true;
-        default:
-            return false;
-    }
-}
-
 [[noreturn]] void throw_gp_error(const std::string& what, int gp_result) {
-    if (gp_result_means_session_lost(gp_result)) {
-        throw GPhotoSessionLostException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
+    // The only result recorded on a rig when a body powered itself off between exposures (issue #1064).
+    if (gp_result == GP_ERROR_IO_USB_FIND) {
+        throw GPhotoDeviceGoneException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
     }
     throw AlpacaException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
 }
