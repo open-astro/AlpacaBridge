@@ -21,6 +21,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <stdexcept>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -133,5 +134,45 @@ TEST_CASE("WeeWX observing conditions - disconnect races a slow in-flight fetch"
     }
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+    CHECK(fake.in_flight() == 0);
+}
+
+TEST_CASE("WeeWX observing conditions - racing disconnect is never dropped",
+          "[weewx][observingconditions][stress]") {
+    alpacacore::test::FakeWeeWxFetcher fake;
+    // A slow fetch keeps each connect in flight while the disconnect lands.
+    fake.set_delay(std::chrono::milliseconds(20));
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+
+    CHECK(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver) == false);
+    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false) == false);
+    CHECK(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true) == false);
+    // Teardown joined the poll thread: nothing is still inside the fetcher.
+    CHECK(fake.in_flight() == 0);
+}
+
+TEST_CASE("WeeWX observing conditions - poll survives scripted fetch failures",
+          "[weewx][observingconditions][stress]") {
+    alpacacore::test::FakeWeeWxFetcher fake;
+    auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    // refresh() fetches inline, so the scripted failure reaches the caller.
+    fake.fail_next(1);
+    CHECK_THROWS_AS(static_cast<alpacacore::ObservingConditionsDriver&>(*driver).refresh(), std::runtime_error);
+
+    // The next poll tick (1 s) fails and is caught; the tick after answers
+    // again. The thread must still be alive to make that last call.
+    const int before = fake.calls();
+    fake.fail_next(1);
+    for (int i = 0; i < 400 && fake.calls() < before + 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(fake.calls() >= before + 2);
+    CHECK(driver->get_connected() == true);
+    auto& oc = static_cast<alpacacore::ObservingConditionsDriver&>(*driver);
+    CHECK(std::abs(oc.get_temperature() - 10.0) < 1e-6);
+    driver->set_connected(false);
     CHECK(fake.in_flight() == 0);
 }
