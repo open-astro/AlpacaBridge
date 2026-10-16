@@ -11,18 +11,36 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
 
 #include <chrono>
 #include <functional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 
 namespace {
+
+// Every WARN logged while it lives; restores the previous sink on any exit.
+struct WarnCapture {
+    std::vector<std::string> messages;
+    alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+    WarnCapture() {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn) messages.emplace_back(message);
+            });
+    }
+    ~WarnCapture() { alpacacore::logging::set_log_sink(previous); }
+    WarnCapture(const WarnCapture&) = delete;
+    WarnCapture& operator=(const WarnCapture&) = delete;
+};
 
 void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     try {
@@ -391,29 +409,10 @@ TEST_CASE("ZWO EAF Focuser Driver - Without a configured max step the stored val
     CHECK(driver->get_max_step() == 60000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp set_connected() dropping its stored-zero
-// refusal (the connect succeeds and every Move fails with no hint).
-TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured refuses the connect with a hint",
-          "[zwo][focuser][unit][fake-sdk]") {
-    FakeEAFSDK sdk;
-    sdk.max_step = 0;
-    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
-
-    try {
-        driver->set_connected(true);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(std::string(ex.what()).find(
-                  "The EAF reports max step 0. Set Max Step in the focuser's device settings.") != std::string::npos);
-    }
-    CHECK_FALSE(driver->get_connected());
-    CHECK(sdk.set_max_step_calls == 0);
-    CHECK(sdk.close_calls == sdk.open_calls);  // the opened handle is released
-}
-
-// Falsified by: zwo_focuser_driver.cpp removing the stored-zero throw (the async
-// connect succeeds and get_last_connect_error() stays empty).
-TEST_CASE("ZWO EAF Focuser Driver - The stored-zero refusal reaches LastConnectError",
+// Falsified by: zwo_focuser_driver.cpp set_connected() throwing on a stored max step
+// of 0 again (the connect is refused instead of succeeding with MaxStep 0). Also covers the
+// async LastConnectError path of the removed "stored-zero refusal reaches LastConnectError" case.
+TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured still connects",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
     sdk.max_step = 0;
@@ -423,12 +422,16 @@ TEST_CASE("ZWO EAF Focuser Driver - The stored-zero refusal reaches LastConnectE
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     REQUIRE_FALSE(driver->get_connecting());
-    CHECK_FALSE(driver->get_connected());
-    CHECK(driver->get_last_connect_error().find("Set Max Step in the focuser's device settings") != std::string::npos);
+
+    CHECK(driver->get_connected());
+    CHECK(driver->get_last_connect_error().empty());
+    CHECK(driver->get_max_step() == 0);
+    CHECK(sdk.set_max_step_calls == 0);
+    require_alpaca_error([&] { driver->move(0 + 1); }, alpacacore::AlpacaError::InvalidValue);
 }
 
-// Falsified by: zwo_focuser_driver.cpp set_connected() running the stored-zero
-// refusal before the configured write (a stored 0 plus a configured value refuses).
+// Falsified by: zwo_focuser_driver.cpp set_connected() skipping
+// apply_configured_max_step_locked() (MaxStep stays 0, set_max_step_calls 0).
 TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max step of 0",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
@@ -442,28 +445,27 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max s
     CHECK(driver->get_max_step() == 50000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp set_connected() dropping its step-range
-// check (set_max_step_calls 1, and the connect succeeds, not throws).
-TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step range is refused before any write",
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() throwing
+// (or writing the unclamped value) instead of clamping to step_range_.
+TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step range is clamped to it",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;  // step range 1000
+    WarnCapture capture;
     auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk, 1001);
+    driver->set_connected(true);
+    const auto& warnings = capture.messages;
 
-    try {
-        driver->set_connected(true);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        const std::string what = ex.what();
-        CHECK(what.find("1001") != std::string::npos);
-        CHECK(what.find("1000") != std::string::npos);
-    }
-    CHECK_FALSE(driver->get_connected());
-    CHECK(sdk.set_max_step_calls == 0);
-    CHECK(sdk.close_calls == sdk.open_calls);
+    CHECK(driver->get_connected());
+    CHECK(sdk.set_max_step_calls == 1);
+    CHECK(sdk.last_set_max_step == 1000);
+    CHECK(driver->get_max_step() == 1000);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].find("1001") != std::string::npos);
+    CHECK(warnings[0].find("1000") != std::string::npos);
 }
 
-// Falsified by: zwo_focuser_driver.cpp set_connected() comparing against
-// step_range_ without the "> 0" guard (an unavailable range refuses every value).
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() clamping
+// without the "step_range_ > 0" guard (an unavailable range clamps to 0, writing 0).
 TEST_CASE("ZWO EAF Focuser Driver - An unavailable step range does not refuse a configured max step",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;

@@ -89,6 +89,33 @@ struct ReleaseVideoDataOnExit {
 
 }  // namespace
 
+TEST_CASE("SVBONY Camera - ImageArray while the frame is read is asked too early", "[svbony][camera][unit]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera(sdk);
+    sdk.block_video_data();
+    ReleaseVideoDataOnExit release{sdk};
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+
+    // Issue #1167: an exposure was taken but its frame is not in yet. The ICameraV4 InvalidOperation
+    // is logged at DEBUG.
+    bool thrown = false;
+    try {
+        static_cast<void>(camera->get_image_array());
+    } catch (const alpacacore::AlpacaException& ex) {
+        thrown = true;
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(ex.is_asked_too_early());
+    }
+    CHECK(thrown);
+
+    sdk.release_video_data();
+    wait_until_ready(*camera);
+    CHECK(camera->get_image_array().data.size() == 128);
+    camera->set_connected(false);
+}
+
 TEST_CASE("SVBONY Camera - fake SDK publishes a complete frame", "[svbony][camera][unit]") {
     alpacacore::test::FakeSVBSDK sdk;
     auto camera = connected_camera(sdk);

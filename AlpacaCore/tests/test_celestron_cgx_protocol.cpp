@@ -12,6 +12,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <fcntl.h>
@@ -668,6 +669,68 @@ TEST_CASE("Celestron CGX AUX link - requires reconnect after a timed-out reply",
     protocol.disconnect();
     protocol.connect_serial(mount.slave_path());
     CHECK(protocol.exchange(request, std::chrono::milliseconds(100)).payload == std::vector<std::uint8_t>{7, 18});
+}
+
+TEST_CASE("Celestron CGX AUX link - logs the original transaction failure once without changing exceptions",
+          "[celestron][cgx][protocol][integration]") {
+    bool checksum_failure = false;
+    SECTION("timeout") {}
+    SECTION("invalid response checksum") { checksum_failure = true; }
+    for (const bool throwing_sink : {false, true}) {
+        CAPTURE(checksum_failure, throwing_sink);
+        alpacacore::test::FakeCelestronCgxMount mount;
+        REQUIRE(mount.ok());
+        alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+        protocol.connect_serial(mount.slave_path());
+        std::vector<std::string> messages;
+        struct SinkGuard {
+            alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            ~SinkGuard() {
+                alpacacore::logging::set_log_sink(previous);
+                alpacacore::logging::set_log_level(level);
+            }
+        } sink_guard;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Error);
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Error && component == "Celestron CGX") {
+                    messages.emplace_back(message);
+                    if (throwing_sink) throw std::runtime_error("log sink failure");
+                }
+            });
+        if (checksum_failure)
+            mount.corrupt_next_reply_checksum();
+        else
+            mount.set_muted(true);
+        const AuxFrame request{
+            .source = 0x20, .destination = 0x11, .command = 0xfe, .payload = {'p', 'r', 'i', 'v', 'a', 't', 'e'}};
+        const std::string cause = checksum_failure ? "Celestron AUX frame checksum is invalid"
+                                                   : "Celestron CGX USB: AUX transaction timed out";
+        try {
+            static_cast<void>(protocol.exchange(request, std::chrono::milliseconds(50)));
+            FAIL("Expected the original transaction failure");
+        } catch (const alpacacore::AlpacaException& error) {
+            CHECK((error.error_code() == alpacacore::AlpacaError::DriverException));
+            CHECK((std::string(error.what()) ==
+                   (checksum_failure ? "Celestron CGX USB: invalid AUX response: " + cause : cause)));
+        }
+        REQUIRE((messages.size() == 1));
+        CHECK((messages[0].find("source=32 destination=17 command=254 ") != std::string::npos));
+        CHECK((messages[0].find(" timeout_ms=50 error=" + cause) != std::string::npos));
+        CHECK((messages[0].find("private") == std::string::npos));
+        CHECK((messages[0].find(mount.slave_path()) == std::string::npos));
+        const auto elapsed_at = messages[0].find(" elapsed_ms=");
+        REQUIRE((elapsed_at != std::string::npos));
+        const double elapsed_ms = std::stod(messages[0].substr(elapsed_at + 12));
+        CHECK((elapsed_ms >= (checksum_failure ? 0.0 : 50.0)));
+        CHECK_FALSE(protocol.is_healthy());
+        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        CHECK((messages.size() == 1));
+        protocol.disconnect();
+        CHECK_THROWS_AS(protocol.exchange(request, std::chrono::milliseconds(50)), alpacacore::AlpacaException);
+        CHECK((messages.size() == 1));
+    }
 }
 
 TEST_CASE("Celestron CGX AUX link - enforces its deadline while unrelated frames keep arriving",

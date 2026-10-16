@@ -421,10 +421,18 @@ CelestronCgxTelescopeDriver::MotionTransition::MotionTransition(CelestronCgxTele
         if (cancel_motion) driver_.motion_slot_.cancel_all_and_join();
     } catch (...) {
         lock_.lock();
-        driver_.motion_transition_ = false;
+        std::lock_guard<std::mutex> state_lock(driver_.mutex_);
+        driver_.motion_transition_ = driver_.stop_pending_;
         throw;
     }
     lock_.lock();
+    {
+        std::lock_guard<std::mutex> state_lock(driver_.mutex_);
+        // A stop accepted during the join owns cleanup; never dispatch the displaced command.
+        if (driver_.stop_pending_)
+            throw AlpacaException("Celestron CGX motion request interrupted by AbortSlew or Unpark",
+                                  AlpacaError::InvalidOperation);
+    }
     if (!cancel_motion) {
         if (const auto failure = driver_.pulse_slot_.last_failure()) {
             driver_.motion_transition_ = false;
@@ -1534,18 +1542,17 @@ void CelestronCgxTelescopeDriver::start_stop_operation(bool unpark) {
             return;
         }
     }
-    if (motion_transition_)
-        throw AlpacaException("Celestron CGX is changing motion ownership", AlpacaError::InvalidOperation);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stop_pending_ = true;
         unpark_after_stop_ = unpark;
     }
+    const bool was_transitioning = motion_transition_;
     motion_transition_ = true;
     try {
         stop_slot_.start([this](util::OperationContext& context) { run_stop_operation(context); });
     } catch (...) {
-        motion_transition_ = false;
+        motion_transition_ = was_transitioning;
         std::lock_guard<std::mutex> lock(mutex_);
         stop_pending_ = false;
         throw;

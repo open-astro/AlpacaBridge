@@ -30,6 +30,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -156,6 +157,39 @@ TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/movea
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("SkyWatcher telescope - MoveAxis stop racing SetTracking(false)", "[skywatcher][telescope][stress]") {
+    // Issue #535: the MoveAxis(0) restore task must yield to a SetTracking(false)
+    // that is still stopping the RA axis. The old behaviour threw "Tracking
+    // change superseded" from the client's call and left the mount tracking.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    mount.set_stop_ramp_ms(60);
+    auto driver = make_driver(mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    int still_tracking = 0;
+    for (int i = 0; i < 40; ++i) {
+        guard([&] { driver->set_tracking(true); });
+        guard([&] { driver->move_axis(0, 2.0); });
+        guard([&] { driver->move_axis(0, 0.0); });
+        // Land inside the restore task's poll window; vary the offset per pass.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5 + (i % 12) * 5));
+        guard([&] { driver->set_tracking(false); });
+        // Let any restore finish, then the mount must be left with tracking off.
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        if (driver->get_tracking()) {
+            ++still_tracking;
+        }
+    }
+    driver->set_connected(false);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(still_tracking == 0);
 }
 
 TEST_CASE("SkyWatcher telescope - destruction races an in-flight connect", "[skywatcher][telescope][stress]") {

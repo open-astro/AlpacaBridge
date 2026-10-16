@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
@@ -179,7 +180,21 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
         throw_link_error("AUX response timed out previously; reconnect before issuing another command");
     }
 
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + timeout;
+    const auto log_failure = [&](std::string_view reason) noexcept {
+        try {
+            const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started);
+            ALPACA_LOG_ERROR("Celestron CGX", "AUX transaction failed: source=" + std::to_string(request.source) +
+                                                  " destination=" + std::to_string(request.destination) +
+                                                  " command=" + std::to_string(request.command) +
+                                                  " elapsed_ms=" + std::to_string(elapsed.count()) + " timeout_ms=" +
+                                                  std::to_string(timeout.count()) + " error=" + std::string(reason));
+        } catch (...) {
+            // Diagnostics must never replace the original transaction failure.
+            return;
+        }
+    };
     std::vector<std::uint8_t> request_bytes;
     try {
         request_bytes = encode_aux_frame(request);
@@ -203,6 +218,7 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
         }
     } catch (const std::invalid_argument& error) {
         if (request_started) {
+            log_failure(error.what());
             desynchronized_ = true;
             ++session_generation_;
             healthy_.store(false);
@@ -210,6 +226,13 @@ AuxFrame CelestronCgxProtocol::exchange(const AuxFrame& request, std::chrono::mi
         throw_link_error(std::string("invalid AUX response: ") + error.what());
     } catch (...) {
         if (request_started) {
+            try {
+                throw;
+            } catch (const std::exception& error) {
+                log_failure(error.what());
+            } catch (...) {
+                log_failure("non-standard exception");
+            }
             desynchronized_ = true;
             ++session_generation_;
             healthy_.store(false);

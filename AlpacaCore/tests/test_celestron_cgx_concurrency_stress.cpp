@@ -50,6 +50,8 @@ void operate(alpacacore::test::StressCallGuard& guard, alpacacore::AlpacaDriver&
     guard([&] { scope.pulse_guide(0, 100); });
     guard([&] { static_cast<void>(scope.get_is_pulse_guiding()); });
     guard([&] { scope.abort_slew(); });
+    guard([&] { scope.park(); });
+    guard([&] { scope.unpark(); });
     guard([&] { scope.sync_to_coordinates(6.0, 30.0); });
     guard([&] { scope.set_tracking(true); });
     guard([&] { scope.set_tracking(false); });

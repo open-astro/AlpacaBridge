@@ -878,7 +878,8 @@ inline std::vector<ContractEntry> contract_entries() {
 // case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
 // together. Every row hosts every applicable case and no case is registered where it would assert
 // nothing: target flags on telescopes only, InvalidValue only on types with a static out-of-range probe
-// (invalid_probe_reason_for() states why the others have none). A row whose fake cannot hold a connect
+// (invalid_probe_reason_for() states why the others have none), ImageArray before any exposure on cameras
+// only (issue #1167). A row whose fake cannot hold a connect
 // open states why and the source in its connecting_unobservable reason there instead of skipping the
 // Connecting check silently. A row whose fake covers
 // less than its registry entry says so inline.

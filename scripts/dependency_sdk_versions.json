@@ -11,7 +11,8 @@
     {"path": "AlpacaCore/external/ZWO/EFW", "name": "zwo-efw-sdk", "version": "1.8.4", "source": "lib/armv8/libEFWFilter.so.1.8.4", "sha256": "8c9848a1e154dc4b3329f797a2de31db7055bd423bcfa22aca6b55865d5f4443", "updates": {"provider": "json", "url": "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk", "path": "0.acf.software_downloads", "match": {"software_download_title": "EFW SDK"}, "field": "software_version", "changelog_field": "software_update_log_url"}},
     {"path": "AlpacaCore/external/ZWO/CAA", "name": "zwo-caa-sdk", "version": "1.5.9", "source": "lib/armv8/libCAA.so.1.5.9", "sha256": "5f4b12464a5da3d01206789f41931dd702a58133060bfc0c8e64a1797c4fcdfe", "updates": {"provider": "json", "url": "https://www.zwoastro.com/wp-json/wp/v2/zwo_software?slug=product-sdk", "path": "0.acf.software_downloads", "match": {"software_download_title": "CAA SDK"}, "field": "software_version", "changelog_field": "software_update_log_url"}},
     {"path": "AlpacaCore/external/SVBONY", "name": "svbony-camera-sdk", "version": "1.13.4", "source": "readme.txt, newest changelog entry", "sha256": "6152b8186aadb2aad5936ecb021813d1f02c7f99a6d8d4437693b5ffa8dde0cf", "updates": {"provider": "release-page", "url": "https://www.svbony.com/downloads/software-driver", "pattern": "(?i)linux[-_]SVBCameraSDK[-_]v(\\d+\\.\\d+\\.\\d+)"}},
-    {"path": "AlpacaCore/external/libgpiod", "name": "libgpiod", "version": "2.2.4", "source": "libgpiod-2.2.4.tar.xz", "updates": {"provider": "release-page", "url": "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/", "pattern": "libgpiod-(\\d[\\d.]*\\d)\\.tar\\.xz", "changelog": "https://git.kernel.org/pub/scm/libs/libgpiod/libgpiod.git/tree/NEWS"}, "sha256": "68d08b96e79407fb1bad5e28ccea524c61e281c67a2785d5a8d7d4148bc3fd30"}
+    {"path": "AlpacaCore/external/libgpiod", "name": "libgpiod", "version": "2.2.4", "source": "libgpiod-2.2.4.tar.xz", "updates": {"provider": "release-page", "url": "https://mirrors.edge.kernel.org/pub/software/libs/libgpiod/", "pattern": "libgpiod-(\\d[\\d.]*\\d)\\.tar\\.xz", "changelog": "https://git.kernel.org/pub/scm/libs/libgpiod/libgpiod.git/tree/NEWS"}, "sha256": "68d08b96e79407fb1bad5e28ccea524c61e281c67a2785d5a8d7d4148bc3fd30"},
+    {"path": "AlpacaCore/external/libgphoto2", "name": "libgphoto2", "version": "2.5.34", "source": "libgphoto2-2.5.34.tar.xz", "updates": {"provider": "release-page", "url": "https://github.com/gphoto/libgphoto2/tags", "pattern": "releases/tag/v(\\d+\\.\\d+\\.\\d+)\"", "changelog": "https://github.com/gphoto/libgphoto2/blob/master/NEWS"}, "sha256": "14e184af8d0fd0e6b72128f28344fad0ba22c13b27b8a391ca08ea7dade02cf1"}
   ],
   "doc_only": [
     "AlpacaCore/external/Bisque",
@@ -75,7 +76,6 @@
     "zwo": {"tracked": ["zwo-asi-camera-sdk", "zwo-eaf-sdk", "zwo-efw-sdk", "zwo-caa-sdk", "indi-zwo-am5", "libgpiod"]}
   },
   "system_libraries": [
-    {"name": "libgphoto2", "repo": "gphoto/libgphoto2", "debian": "libgphoto2", "baseline": "2.5.31"},
     {"name": "libraw", "repo": "LibRaw/LibRaw", "debian": "libraw", "baseline": "0.21.4"}
   ]
 }

@@ -91,13 +91,15 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 sudo apt install git build-essential cmake g++ \
     libusb-1.0-0-dev libudev-dev libgpiod-dev \
     libhidapi-dev \
-    libgphoto2-dev libraw-dev \
+    libltdl-dev libexif-dev libjpeg-dev libxml2-dev libraw-dev \
     nlohmann-json3-dev libcurl4-openssl-dev \
     zlib1g-dev libsystemd-dev pkgconf \
     catch2
 ```
 
 This matches the `Build-Depends` field of `debian/control`, the authoritative list, plus `git` and `catch2` for the tests.
+
+libgphoto2 is not taken from apt. A build with `ALPACACORE_ENABLE_GPHOTO=ON` needs the bundled copy first: run `sudo scripts/build_bundled_gphoto.sh` once (it builds the vendored tarball into `/usr/lib/alpacabridge/libgphoto2`; `build_and_run.sh` and `install_alpaca_service.sh` do this for you when the installed copy is missing or at another version), or build into a scratch tree with `scripts/build_bundled_gphoto.sh --destdir DIR` and configure with `-DALPACACORE_GPHOTO_STAGE=DIR`. CMake stops with that instruction when the bundle is missing. On a host with the `.deb` installed, the first `build_and_run.sh` or `install_alpaca_service.sh` run rebuilds the bundle over the package's files, because the package ships no `pkgconfig/` file to read the version from; the rebuild writes that file, so later runs skip it. The gphoto link passes `--disable-new-dtags`, so an executable that links the gphoto driver (the server among them) gets its whole rpath as a `DT_RPATH`, which the loader searches before `LD_LIBRARY_PATH`: in a vendors-ON dev build, `LD_LIBRARY_PATH` cannot override a library found on that rpath.
 
 Verify: `cmake --version` (3.20+), `g++ --version` (GCC 10+, C++20 required).
 
@@ -361,14 +363,14 @@ When you add, remove or bump a directory under `AlpacaCore/external/`, edit `scr
 
 `python3 scripts/dependency_snapshot.py --spdx <file.deb>` writes the same inventory as an SPDX 2.3 SBOM rooted at that built package, with its SHA-256: runtime dependencies come from the package's own `Depends` field (so `${shlibs:Depends}` is resolved there), the vendored SDKs and FetchContent libraries are `CONTAINS`, and Build-Depends are `BUILD_DEPENDENCY_OF`. Runtime and build dependencies carry the version installed in the build environment (`dpkg-query`), so the SBOM records which library versions the `.deb` was built against; a package not installed there stays unversioned. `release.yml` (beta) and `nightly-build.yml` attest that SBOM against the `.deb` they publish, next to its build provenance.
 
-Each `sdks` entry also carries a `sha256` pin: a digest of the git-tracked files under its `path`. After you change an SDK's files, check its `version` and run `python3 scripts/dependency_snapshot.py --pin`; `--check` fails until the pins match. `--spdx` unpacks the `.deb` and requires every file under `/usr/lib/alpacabridge/` and `/usr/lib/firmware/` to be byte-identical to a git-tracked vendored file of a listed SDK (the package skips `dh_strip` and `dh_dwz` for `/usr/lib/alpacabridge/` for this reason); it lists each one in the SBOM with its SHA-1 and SHA-256 under its SDK, and stops with an error naming any file that matches none. Build-Depends carry the exact version `dpkg-query` reports in the build environment.
+Each `sdks` entry also carries a `sha256` pin: a digest of the git-tracked files under its `path`. After you change an SDK's files, check its `version` and run `python3 scripts/dependency_snapshot.py --pin`; `--check` fails until the pins match. `--spdx` unpacks the `.deb` and requires every file under `/usr/lib/alpacabridge/` and `/usr/lib/firmware/` to be byte-identical to a git-tracked vendored file of a listed SDK (the package skips `dh_strip` and `dh_dwz` for `/usr/lib/alpacabridge/` for this reason); it lists each one in the SBOM with its SHA-1 and SHA-256 under its SDK, and stops with an error naming any file that matches none, except the libgphoto2 bundle under `/usr/lib/alpacabridge/libgphoto2/`, which `debian/rules` builds from the vendored tarball (`BUILT_FROM_VENDORED_SOURCE` in the script; the tarball's SDK entry is still `CONTAINS`-ed). Build-Depends carry the exact version `dpkg-query` reports in the build environment.
 
 ## Dependency update checks
 
 `.github/workflows/dependency-updates.yml` runs `scripts/dependency_updates.py` every Monday. Nothing it tracks is a manual check. It reads three sources of entries:
 
 - every `pkg:github` pin in the dependency snapshot (cppcheck, zizmor and OSV-Scanner at the `ver=` pins in their workflow steps, nlohmann/json, ConformU), against the repository's latest GitHub release, or its highest version tag when it publishes no releases;
-- every SDK in `scripts/dependency_sdk_versions.json`, through its `updates` block: `release-page` (the highest version a regex matches on a page: libgpiod, QHY, SVBONY, ToupTek, Player One) or `json` (a field of the matching entry in a JSON list: ZWO's SDK endpoint);
+- every SDK in `scripts/dependency_sdk_versions.json`, through its `updates` block: `release-page` (the highest version a regex matches on a page: libgpiod, libgphoto2 (the GitHub tags page), QHY, SVBONY, ToupTek, Player One) or `json` (a field of the matching entry in a JSON list: ZWO's SDK endpoint);
 - the `documents` list in the same file: the protocol documents and reference sources the drivers are built from, each with a reviewed `baseline`. `github-file` compares the newest commit on an INDI driver file a driver was derived from; `hash` compares the sha256 of a PDF, of the ConformU beta tarball (an unpinned URL that can be replaced in place), or of an HTML page's visible text (scripts, comments and whitespace removed, so the hash only moves when the content does); the ASCOM Alpaca Device and Management API schemas and the Alpaca API Reference page are watched this way too, the schemas by the raw bytes ascom-standards.org serves, CRLF line ends included, so their `baseline` is not the LF-normalized snapshot hash the `ascom-alpaca-protocol` skill pins; `page` compares the highest version a regex matches (Wanderer's dated protocol PDFs, the vendor ASCOM installers the Gemini and Oasis protocols were recovered from).
 
 `python3 scripts/dependency_snapshot.py --check` (the `docs-drift` CI job) keeps this coverage complete as the tree grows. It fails when:
@@ -381,7 +383,7 @@ Each `sdks` entry also carries a `sha256` pin: a digest of the git-tracked files
 
 So a new vendor, SDK, protocol folder or pinned tool cannot merge without an update check, or a stated reason why it has none. Each failure names the file and the entry to add.
 
-Debian, Ubuntu and docker entries are not checked for updates: apt and the image tag already resolve to the newest package when CI builds. The libusb copy bundled in `AlpacaCore/external/SVBONY/lib/armv8/` is not tracked either: `debian/rules` packages only `libSVBCameraSDK.so*`, so that copy is neither shipped nor linked, and the system libusb is used at runtime. The exception is `system_libraries`: libraries a driver links that the build takes from Debian (libgphoto2 and LibRaw for the gphoto camera driver), each with its upstream GitHub repository and the version Debian trixie ships as `baseline`. An upstream release newer than the baseline opens an update issue that says there is no pin to bump: review what the release adds for the driver (new camera bodies, fixes), then move the baseline. The gphoto2 command-line tool, whose bulb sequence the gphoto driver follows, is a `documents` entry with the `github-release` provider.
+Debian, Ubuntu and docker entries are not checked for updates: apt and the image tag already resolve to the newest package when CI builds. The libusb copy bundled in `AlpacaCore/external/SVBONY/lib/armv8/` is not tracked either: `debian/rules` packages only `libSVBCameraSDK.so*`, so that copy is neither shipped nor linked, and the system libusb is used at runtime. The exception is `system_libraries`: libraries a driver links that the build takes from Debian (LibRaw for the gphoto camera driver; libgphoto2 is bundled and tracked as an SDK entry), each with its upstream GitHub repository and the version Debian trixie ships as `baseline`. An upstream release newer than the baseline opens an update issue that says there is no pin to bump: review what the release adds for the driver (new camera bodies, fixes), then move the baseline. The gphoto2 command-line tool, whose bulb sequence the gphoto driver follows, is a `documents` entry with the `github-release` provider.
 
 Every update or document issue ends with a `## Changelog` section when the source has one: the GitHub release notes (quoted in a code block, so an `@mention` or `#123` in them pings no one), a compare link for a tag-only release or a changed INDI file, ZWO's per-SDK update log (`changelog_field`), or a static `changelog` URL from the table (QHY, libgpiod). A changelog that cannot be fetched only drops the section; the issue still opens.
 
@@ -394,7 +396,7 @@ Each newer version opens one issue, "Update <name> <current> -> <latest>" (`depe
 The Debian package is built from the `debian/` directory. It installs:
 
 - Binary at `/usr/bin/alpacabridge`
-- Vendor libraries under `/usr/lib/alpacabridge`
+- Vendor libraries under `/usr/lib/alpacabridge`, and libgphoto2 with its camlibs under `/usr/lib/alpacabridge/libgphoto2` (built from the vendored tarball; the executables find it through an rpath, so the host's own libgphoto2 packages are untouched and still used by other programs, and AlpacaBridge no longer depends on them; [decision 0012](decisions/0012-bundled-libgphoto2.md))
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
 - The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit (see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.

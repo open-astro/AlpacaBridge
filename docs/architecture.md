@@ -89,7 +89,7 @@ All interfaces inherit from `AlpacaDriver` which provides device information, co
 - Isolates SDK dependencies from core code
 - Only place where vendor SDK headers are included
 
-Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, Altair, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" (libgphoto2/libraw) is an open-source system package rather than a vendored proprietary library — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
+Drivers that talk to hardware via a vendor C library use an **SDK wrapper** (QHY, Player One, SVBONY, Altair, gphoto; ZWO and ToupTek for their cameras/focusers). Drivers that talk over serial, network, or GPIO use a **protocol wrapper** (iOptron, SynScan, Celestron, Losmandy Gemini; ZWO for the AM mount and ASIAIR power Switch; ToupTek for the StellaVita Switch; QHY for the Q-Focuser and the standalone CFW3 filter wheel). ZWO, ToupTek and QHY therefore use both — hence "SDK + protocol wrapper" in the table above. gphoto is the only SDK-wrapper vendor whose "SDK" is open source: libgphoto2 is built from a vendored tarball (`AlpacaCore/external/libgphoto2/`, `scripts/build_bundled_gphoto.sh`) into a private prefix, and libraw is a system package — see `AlpacaCore/src/vendors/gphoto/CMakeLists.txt`.
 
 #### Layer 3: Vendor implementation
 
@@ -121,7 +121,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | Astroasis | Focuser (Oasis Focuser) | Protocol wrapper | Production |
 | WeeWX | ObservingConditions | HTTP client | Production |
 | Bisque | Telescope | Script/protocol | In development |
-| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (system libgphoto2/libraw, no vendored SDK) | Production |
+| gphoto (DSLR/mirrorless) | Camera (Canon, Nikon, Sony via libgphoto2) | SDK wrapper (bundled libgphoto2 built from source, system libraw) | Production |
 
 ### Management components
 
@@ -242,7 +242,7 @@ AlpacaBridge/
 |   |   |   +- synscan/ celestron/
 |   |   |   +- playerone/ svbony/ touptek/ altair/
 |   |   |   +- gemini/ wandererastro/ weewx/ bisque/
-|   |   |   +- gphoto/                # No external/ SDK dir -- system libgphoto2/libraw
+|   |   |   +- gphoto/                # libgphoto2 tarball is under external/libgphoto2; libraw is a system package
 |   |   +- management/               # Device registry, discovery
 |   +- external/                      # Vendor SDKs and protocol docs
 |   |   +- ZWO/ QHY/ PlayerOne/      # SDK libraries

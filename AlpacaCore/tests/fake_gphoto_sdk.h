@@ -159,7 +159,7 @@ public:
 
     int open_count{0};
     int close_count{0};
-    std::string gphoto_version{"2.5.31"};
+    std::string gphoto_version{"2.5.34"};
 
     // Canned result returned by capture_and_download / poll_bulb_file_and_download.
     vendor::gphoto::GPhotoCaptureResult capture_result;
