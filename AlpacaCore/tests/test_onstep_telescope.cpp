@@ -588,4 +588,56 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew reports a stop it could not send"
     driver->set_connected(false);
 }
 
+TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-type E", "[onstep][telescope][unit]") {
+    auto status_mutex = std::make_shared<std::mutex>();
+    auto reply = std::make_shared<std::string>();
+    alpacacore::test::FakeMountServer server([reply, status_mutex](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            std::lock_guard<std::mutex> lock(*status_mutex);
+            return *reply;
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    // The wrapper is process-wide: disconnect on every exit, so a throw here
+    // cannot leave it connected and fail every later OnStep test.
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+
+    const auto status_for = [&](const std::string& raw) {
+        {
+            std::lock_guard<std::mutex> lock(*status_mutex);
+            *reply = raw + "#";
+        }
+        return wrapper.get_status();
+    };
+
+    // Real TeSeek HM-17 (OnStepX 10.23a) replies.
+    auto west = status_for("nNpEW180");
+    CHECK(west.side_of_pier == 1);
+    CHECK_FALSE(west.is_tracking);
+    CHECK_FALSE(west.is_slewing);
+
+    auto east = status_for("nNpET1:0");
+    CHECK(east.side_of_pier == 0);
+
+    auto parked = status_for("nNPHEo180");
+    CHECK(parked.side_of_pier == -1);
+    CHECK(parked.is_parked);
+    CHECK(parked.is_at_home);
+
+    auto tracking_east = status_for("NpET180");
+    CHECK(tracking_east.side_of_pier == 0);
+    CHECK(tracking_east.is_tracking);
+}
+
 #endif  // _WIN32
