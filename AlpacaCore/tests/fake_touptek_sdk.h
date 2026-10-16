@@ -172,7 +172,7 @@ public:
         hit("trigger");
         require_open(h);
     }
-    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int, int row_pitch, unsigned& actual_width,
+    bool wait_image(HToupcam h, unsigned timeout_ms, void* buffer, int bits, int row_pitch, unsigned& actual_width,
                     unsigned& actual_height) override {
         hit("wait_image");
         require_open(h);
@@ -185,8 +185,29 @@ public:
             actual_height = 0;
             return false;
         }
-        actual_width = delivered_dimensions ? delivered_dimensions->first : roi_.width;
-        actual_height = delivered_dimensions ? delivered_dimensions->second : roi_.height;
+        // Real SDK: ROI coordinates are in sensor resolution and digital
+        // binning rounds the OUTPUT size down to even (toupcam.h,
+        // TOUPCAM_OPTION_BINNING: "640/3 to get 212"), so a 2002-wide span at
+        // bin 2 delivers 1000 columns, not 1001 (#977). Model that here rather
+        // than answer the span the driver asked for; the harsher answer is the
+        // one hardware gives. delivered_dimensions overrides it for malformed-
+        // frame cases.
+        unsigned modelled_width = roi_.width;
+        unsigned modelled_height = roi_.height;
+        if (bin_ >= 2) {
+            modelled_width = (roi_.width / static_cast<unsigned>(bin_)) & ~1U;
+            modelled_height = (roi_.height / static_cast<unsigned>(bin_)) & ~1U;
+        }
+        actual_width = delivered_dimensions ? delivered_dimensions->first : modelled_width;
+        actual_height = delivered_dimensions ? delivered_dimensions->second : modelled_height;
+        // Real SDK: nRowPitch is the destination stride and must hold a whole
+        // delivered row; a shorter pitch is E_INVALIDARG (GPCMOS01200KPF,
+        // 2026-10-14). The driver once relied on a short pitch to crop an
+        // odd-NumX frame and every such sub-frame failed on hardware.
+        if (row_pitch < static_cast<int>(actual_width) * (bits > 8 ? 2 : 1)) {
+            throw alpacacore::AlpacaException("Toupcam_WaitImageV4: E_INVALIDARG",
+                                              alpacacore::AlpacaError::DriverException);
+        }
         const std::size_t required = static_cast<std::size_t>(row_pitch) * actual_height;
         if (buffer != nullptr && !frame_bytes.empty()) {
             std::memcpy(buffer, frame_bytes.data(), std::min(required, frame_bytes.size()));
@@ -234,6 +255,9 @@ public:
         require_open(h);
         return roi_;
     }
+    // The last ROI the driver programmed (sensor coordinates), for a test to
+    // check the span it asked for without a handle.
+    ToupROIFormat last_roi() const { return roi_; }
     void put_roi(HToupcam h, unsigned x, unsigned y, unsigned w, unsigned hh) override {
         hit("put_roi");
         require_open(h);

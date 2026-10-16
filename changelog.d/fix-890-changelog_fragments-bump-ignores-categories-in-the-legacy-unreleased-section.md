@@ -1,0 +1,2 @@
+### Fixed
+- **`--bump` and `--release` count the legacy UNRELEASED section's categories** (tooling, issue #890). `scripts/changelog_fragments.py` took the bump category from the fragments only, so a `Breaking changes` or `Added` entry that lived only in a legacy `## [X.Y.Z] - UNRELEASED` section under a low label did not raise the proposed version, and `--release` accepted that version. The section body now counts like a fragment (its heading label stays a floor); the self-test covers legacy-only Breaking (major), Added (minor), Fixed (patch) and the `--release` refusal.
