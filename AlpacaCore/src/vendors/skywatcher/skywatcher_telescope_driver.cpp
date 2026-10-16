@@ -2410,6 +2410,22 @@ public:
         return axis == 0 || axis == 1;
     }
 
+    // MoveAxis is sky-referenced (INDI indi-eqmod parity, open-astro#297):
+    // positive primary = east (RightAscension rises), positive secondary =
+    // north (Declination rises), in both hemispheres and on both pier sides,
+    // so a client needs no reverse toggle. Maps the ASCOM rate onto the
+    // signed AXIS rate the mechanical layer expects. RA: tracking turns the
+    // axis in ra_axis_sign_locked() to raise the hour angle, and east lowers
+    // it. Dec: same XOR as pulse_guide() North and apply_dec_rate_offset_locked().
+    double sky_move_axis_rate_locked(int axis, double rate) const {
+        if (axis == 0) {
+            return -ra_axis_sign_locked() * rate;
+        }
+        // No board read: MoveAxis is an asynchronous initiator. The branch flips only across the pole,
+        // and the connect and the status poll keep cached_dec_axis_deg_ current.
+        return (branch_from_axis_locked(cached_dec_axis_deg_) > 0) != hemisphere_south_locked() ? -rate : rate;
+    }
+
     void move_axis(int axis, double rate) override {
         // axis is not validated until the lock below: nothing indexes the
         // per-axis stop slots before it has been.
@@ -2466,7 +2482,7 @@ public:
                 if (from_rest) {
                     seed_limit_guard_baseline_locked();
                 }
-                start_speed_motion_locked(lock, channel, rate, /*anchor_model=*/true);
+                start_speed_motion_locked(lock, channel, sky_move_axis_rate_locked(axis, rate), /*anchor_model=*/true);
                 manual_axis_slewing_[axis] = true;
                 started = true;
             } else if (manual_axis_slewing_[axis]) {
@@ -2994,8 +3010,9 @@ private:
     // (tracking, RightAscensionRate, East/West guide pulses): increasing
     // counts north of the equator, decreasing south of it, because the mount
     // faces the opposite pole and ha = -ha_mech there (pointing-model
-    // comment). Mechanical motion -- MoveAxis, goto deltas, AutoHome -- never
-    // applies this: a signed axis rate means the same thing everywhere.
+    // comment). Mechanical motion -- goto deltas, AutoHome -- never applies
+    // this: a signed axis rate means the same thing everywhere. MoveAxis is
+    // sky-referenced and maps its rate through sky_move_axis_rate_locked().
     double ra_axis_sign_locked() const { return hemisphere_south_locked() ? -1.0 : 1.0; }
 
     int override_dec_axis_sense() const { return dec_axis_sense_setting_ == DecAxisSenseSetting::Reversed ? -1 : +1; }
@@ -4126,8 +4143,9 @@ private:
         const bool fast = std::abs(signed_rate_deg_per_sec) > kFastModeThresholdDegPerSec;
         // Motion mode: '1' = speed slow, '3' = speed fast.
         // No hemisphere handling HERE: this is the mechanical layer, and a
-        // signed axis rate means the same thing everywhere (MoveAxis and
-        // AutoHome depend on that). The hemisphere's RA sense for tracking,
+        // signed axis rate means the same thing everywhere (AutoHome and
+        // the goto deltas depend on that; MoveAxis maps its sky-referenced
+        // rate onto it first, sky_move_axis_rate_locked()). The hemisphere's RA sense for tracking,
         // RightAscensionRate and East/West pulses is applied by the callers
         // through ra_axis_sign_locked() -- see effective_ra_rate_locked() and
         // the pointing-model comment. (#250 had removed a flip from this

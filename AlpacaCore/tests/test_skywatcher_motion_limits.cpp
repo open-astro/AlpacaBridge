@@ -514,6 +514,10 @@ namespace {
 constexpr double kGuardDecAxisDeg = 30.0;
 constexpr double kGuardAltitudeDeg = 33.6;                   // at kGuardDecAxisDeg, see above
 const double kMaxMoveAxisRate = 800.0 * 360.0 / 86164.0905;  // the advertised AxisRates maximum
+// MoveAxis is sky-referenced (open-astro#297). These cases sit north of the
+// equator on the a2 > 0 Dec branch, where a positive secondary rate raises
+// Dec and so turns the axis DOWN: the cases that drive the axis outward
+// (lowering the tube) therefore pass a negative rate.
 
 MotionLimits meridian_minutes(double minutes) {
     MotionLimits limits;
@@ -533,7 +537,7 @@ TEST_CASE("SkyWatcher limits - MoveAxis carrying the tube below the floor is sto
     auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
 
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     // About 1.4 deg of altitude per second: the floor is reached in about a
     // second, and nothing but the guard stops the axis before the timeout.
@@ -561,7 +565,7 @@ TEST_CASE("SkyWatcher limits - a stale frame is not served to the guard and it r
 
     // A slow MoveAxis: the dead-reckoned model alone never reaches the floor
     // in this test, so only a direct read of the board can see the jump.
-    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     sw::set_status_poll_paused_for_testing(*driver, true);
     std::this_thread::sleep_for(std::chrono::milliseconds(400));  // past the freshness bound
@@ -597,7 +601,7 @@ TEST_CASE("SkyWatcher limits - a MoveAxis that supersedes a synchronous slew is 
     });
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 5000));
 
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     sync_slew.join();
     CHECK(result.load() == alpacacore::AlpacaError::InvalidOperation);
     CHECK(wait_until([&] { return !mount.axis_running(2); }, 10000));
@@ -650,7 +654,7 @@ TEST_CASE("SkyWatcher limits - a floor crossed before the guard's first sample i
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
 
     mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // about 4 deg below the floor
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     CHECK(wait_until([&] { return !mount.axis_running(2); }, 6000));
     CHECK(wait_until([&] { return !driver->get_slewing(); }, 6000));
@@ -817,7 +821,7 @@ TEST_CASE("SkyWatcher limits - motion that starts outside a limit is not stopped
 
     // Further below the floor: recovery moves out of a limit must stay
     // possible, and so must any move that never crossed one.
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));
     CHECK(mount.axis_running(2));
@@ -887,7 +891,7 @@ TEST_CASE("SkyWatcher limits - a MoveAxis started from rest takes no baseline fr
     driver->set_tracking(false);
     mount.jump_axis_degrees(1, 95.0);
     settle_status_poll(mount);
-    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // four 250 ms polls
     CHECK(mount.axis_running(2));
@@ -906,7 +910,7 @@ std::pair<int, int> start_guarded_move_with_slow_stops(FakeSkyWatcherMount& moun
     driver.set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
     mount.set_stop_ramp_ms(7000);
-    driver.move_axis(1, kMaxMoveAxisRate);
+    driver.move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     return {mount.stop_count(2), mount.stop_count(1)};
 }
@@ -957,7 +961,7 @@ TEST_CASE("SkyWatcher limits - a MoveAxis Dec stop does not restore the Dec rate
     driver->set_tracking(true);
     driver->set_declination_rate(30.0);
     REQUIRE(wait_until([&] { return mount.axis_running(1) && mount.axis_running(2); }, 2000));
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     REQUIRE(driver->get_slewing());
 
     mount.set_stop_ramp_ms(300);  // the Dec stop lands first ...
@@ -987,7 +991,7 @@ TEST_CASE("SkyWatcher limits - a reverse MoveAxis after a stop does not seed fro
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
 
     mount.set_stop_ramp_ms(800);
-    driver->move_axis(1, kMaxMoveAxisRate / 10.0);
+    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     driver->move_axis(1, 0.0);
     REQUIRE(driver->get_slewing());
@@ -997,7 +1001,7 @@ TEST_CASE("SkyWatcher limits - a reverse MoveAxis after a stop does not seed fro
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 3000));
     mount.jump_axis_degrees(2, kGuardDecAxisDeg + 10.0);  // coasted about 4 deg past the floor
 
-    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);  // back inside
+    driver->move_axis(1, kMaxMoveAxisRate / 10.0);  // back inside
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));  // four 250 ms polls
     CHECK(mount.axis_running(2));
@@ -1013,7 +1017,7 @@ TEST_CASE("SkyWatcher limits - with no limit set the guard never starts", "[skyw
     auto driver = connected_driver(mount);
     const auto started = sw::detail::limit_guard_bodies_started();
 
-    driver->move_axis(1, kMaxMoveAxisRate);
+    driver->move_axis(1, -kMaxMoveAxisRate);
     driver->set_tracking(true);
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     CHECK(sw::detail::limit_guard_bodies_started() == started);

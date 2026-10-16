@@ -361,6 +361,10 @@ target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` ove
 (Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
 is refused before the GOTO is ever sent.
 
+### Sky-Watcher MoveAxis is sky-referenced (issue #297)
+
+On the Sky-Watcher direct driver a positive `MoveAxis` rate on axis 0 moves the tube east (the reported RightAscension rises) and a positive rate on axis 1 moves it north (the reported Declination rises), in both hemispheres and on both pier sides, as `indi-eqmod` does. The hemisphere and Dec branch come from `sky_move_axis_rate_locked()`, which reuses `ra_axis_sign_locked()` and the pulse-guide Dec rule. A client needs no reverse toggle: NINA's "Primary Reversed" stays off. Goto, tracking and guiding are unchanged. Tests: `test_skywatcher_pointing.cpp`, `[moveaxis]`.
+
 ### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
 
 ASCOM treats the two target properties as separate: each getter must refuse a read

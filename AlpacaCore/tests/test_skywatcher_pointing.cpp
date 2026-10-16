@@ -1176,6 +1176,109 @@ TEST_CASE("SkyWatcher pointing - DeclinationRate raises the physical Dec of an E
     driver->set_connected(false);
 }
 
+// open-astro#297: MoveAxis is sky-referenced. The judge is the REPORTED RA and
+// Dec, never the raw counts: positive primary = east (RA rises), positive
+// secondary = north (Dec rises), both hemispheres, both Dec branches.
+namespace {
+
+struct MoveAxisSite {
+    const char* name;
+    double latitude;
+    double longitude;
+    double dec;  // target Dec well inside the hemisphere's sky
+};
+
+void jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
+                       alpacacore::TelescopeDriver& driver, int axis, double rate) {
+    driver.move_axis(axis, rate);
+    REQUIRE(
+        run_until_on_fake_clock(clock, mount, [&] { return mount.axis_running(axis + 1); }, std::chrono::seconds(3)));
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    run_until_on_fake_clock(
+        clock, mount, [&] { return std::chrono::steady_clock::now() >= end; }, std::chrono::seconds(3));
+}
+
+void stop_jog_on_fake_clock(alpacacore::test::FakeTaskClock& clock, FakeSkyWatcherMount& mount,
+                            alpacacore::TelescopeDriver& driver, int axis) {
+    driver.move_axis(axis, 0.0);
+    REQUIRE(run_until_on_fake_clock(clock, mount, [&] { return !driver.get_slewing(); }, std::chrono::seconds(10)));
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - MoveAxis is sky-referenced on the primary axis, both hemispheres (#297)",
+          "[skywatcher][telescope][pointing][hemisphere][taskclock][moveaxis]") {
+    const MoveAxisSite sites[] = {{"south", -33.856784, 151.215297, -20.0}, {"north", 51.477833, -0.001500, 20.0}};
+    for (const auto& site : sites) {
+        for (const double rate : {0.5, -0.5}) {
+            INFO(site.name << " site, primary rate " << rate);
+            alpacacore::test::FakeTaskClock clock;
+            FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+            REQUIRE(mount.ok());
+            auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
+            driver->set_connected(true);
+            driver->set_tracking(false);
+
+            const double lst = driver->get_sidereal_time();
+            land_on_fake_clock(clock, *driver, mount, std::fmod(lst + 1.0, 24.0), site.dec);  // HA -1 h
+
+            const double ra0 = driver->get_right_ascension();
+            jog_on_fake_clock(clock, mount, *driver, 0, rate);
+            const double ra_moved = wrap_ha(driver->get_right_ascension() - ra0);
+            INFO("reported RA moved " << ra_moved << " h");
+            if (rate > 0.0) {
+                CHECK(ra_moved > 0.02);  // east: RA rises
+            } else {
+                CHECK(ra_moved < -0.02);  // west: RA falls
+            }
+            stop_jog_on_fake_clock(clock, mount, *driver, 0);
+            driver->set_connected(false);
+        }
+    }
+}
+
+TEST_CASE(
+    "SkyWatcher pointing - MoveAxis is sky-referenced on the secondary axis, both hemispheres and pier sides (#297)",
+    "[skywatcher][telescope][pointing][hemisphere][taskclock][moveaxis]") {
+    const MoveAxisSite sites[] = {{"south", -33.856784, 151.215297, -20.0}, {"north", 51.477833, -0.001500, 20.0}};
+    for (const auto& site : sites) {
+        bool seen_positive_branch = false;
+        bool seen_negative_branch = false;
+        for (const double ha : {-3.0, 3.0}) {  // one hour angle per Dec branch
+            for (const double rate : {0.5, -0.5}) {
+                INFO(site.name << " site, HA " << ha << " h, secondary rate " << rate);
+                alpacacore::test::FakeTaskClock clock;
+                FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+                REQUIRE(mount.ok());
+                auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
+                driver->set_connected(true);
+                driver->set_tracking(false);
+
+                const double lst = driver->get_sidereal_time();
+                const LandedFrame f =
+                    land_on_fake_clock(clock, *driver, mount, std::fmod(lst - ha + 24.0, 24.0), site.dec);
+                INFO("landed on a2 " << f.a2);
+                (f.a2 >= 0.0 ? seen_positive_branch : seen_negative_branch) = true;
+
+                const double dec0 = driver->get_declination();
+                jog_on_fake_clock(clock, mount, *driver, 1, rate);
+                const double dec_moved = driver->get_declination() - dec0;
+                INFO("reported Dec moved " << dec_moved << " deg");
+                if (rate > 0.0) {
+                    CHECK(dec_moved > 0.2);  // north: Dec rises
+                } else {
+                    CHECK(dec_moved < -0.2);
+                }
+                stop_jog_on_fake_clock(clock, mount, *driver, 1);
+                driver->set_connected(false);
+            }
+        }
+        INFO(site.name << " site");
+        CHECK(seen_positive_branch);
+        CHECK(seen_negative_branch);
+    }
+}
+
 TEST_CASE("SkyWatcher pointing - a Wave 150i goto lands on the sky, south (#458, geometry only)",
           "[skywatcher][telescope][pointing][hemisphere][taskclock]") {
     // NOT MEASURED. The Wave 150i's sense (+1) is measured in the north only
