@@ -113,6 +113,9 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                     if (st->reject_level_start.load()) return "";
                     return "#";
                 }
+                if (op == 0xFE) {  // complete the binary firmware reply for each AUX bus probe
+                    return std::string("\x00\x00#", 3);
+                }
                 if (op == 0x12) {
                     st->home_status_polls.fetch_add(1);
                     if (st->invalid_next_home_status.exchange(false)) return std::string("\x01#", 2);

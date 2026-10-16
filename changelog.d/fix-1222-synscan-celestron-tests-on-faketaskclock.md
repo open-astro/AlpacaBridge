@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **SynScan and Celestron slew tests run on the fake task clock**: the SynScan landing handset fake and the SynScan and Celestron async slew-failure cases now share the driver's `FakeTaskClock` and step virtual time instead of sleeping, and the Celestron park responder answers the AUX firmware probe with a well-formed reply so connect no longer waits out 14 one-second probes (issue #1222). Test-only; the asserted values and thresholds are unchanged (the AbortSlew case also now checks that the abort call returned and did not throw), and the summed time of the four files fell from 864 s to 396 s locally.

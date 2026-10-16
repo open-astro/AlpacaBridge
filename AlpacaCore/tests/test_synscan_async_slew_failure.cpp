@@ -27,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -181,6 +182,41 @@ bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<b
         clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
     return pred();
+}
+
+// The driver on a caller-owned task clock, so a case steps its waits with advance_until() instead of sleeping.
+std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock) {
+    return alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(port), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+}
+
+// Runs a blocking driver call on its own thread, stepping the clock until it returns, then rethrows what it threw.
+// `started` (optional) must hold, on real time, before the first step: a task parked on the clock from before the
+// call (a pulse timer the call reaps) would otherwise satisfy the rendezvous while the call is still on the socket,
+// and virtual time would run ahead of it.
+template <typename Fn>
+void run_virtual(alpacacore::test::FakeTaskClock& clock, Fn&& fn, const std::function<bool()>& started = nullptr) {
+    std::exception_ptr error;
+    std::atomic<bool> done{false};
+    std::thread caller([&] {
+        try {
+            fn();
+        } catch (...) {
+            error = std::current_exception();
+        }
+        done.store(true);
+    });
+    const bool began = !started || wait_until([&] { return started() || done.load(); }, 5000);
+    const bool finished = began && advance_until(clock, [&] { return done.load(); });
+    while (!done.load()) {
+        clock.advance(std::chrono::hours(1));  // release a hung caller (it may park again) so the thread can join
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    caller.join();
+    REQUIRE(began);
+    REQUIRE(finished);
+    if (error) std::rethrow_exception(error);
 }
 
 bool is_variable_rate_command(const std::string& command, int device) {
@@ -494,18 +530,21 @@ TEST_CASE("SynScan PulseGuide - cross-axis pulses keep the RA tracking restore",
 
 TEST_CASE("SynScan PulseGuide - short Dec pulse keeps the position override of a long RA pulse (#990)",
           "[synscan][telescope][pulseguiding]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     // The fake mount never moves, so any difference from this reading is the private estimate.
     const double live_ra = driver->get_right_ascension();
     driver->pulse_guide(2, 1500);  // East, RA: the estimate is held until about 5.5 s
     driver->pulse_guide(0, 100);   // North, Dec: its own hold would end at about 4.1 s
-    std::this_thread::sleep_for(std::chrono::milliseconds(4500));
+    clock.wait_for_waiters(2, std::chrono::seconds(5));  // both pulse timers are parked
+    clock.advance(std::chrono::milliseconds(4500));
+    clock.wait_for_woken_settled(std::chrono::seconds(2));
     // Past the Dec pulse's hold, inside the RA pulse's: the RA estimate must still be served.
     CHECK(std::abs(driver->get_right_ascension() - live_ra) > 1e-6);
     driver->set_connected(false);
@@ -531,12 +570,13 @@ TEST_CASE("SynScan PulseGuide - guide position does not publish as target", "[sy
 }
 
 TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     st->land_on_goto.store(false);
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     const double position_before_pulse_ra = driver->get_right_ascension();
@@ -552,7 +592,7 @@ TEST_CASE("SynScan async slew - position reports mount feedback after PulseGuide
     driver->slew_to_coordinates_async(target_ra, target_dec);
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
     // The mount never moves, so the slew ends with the far-miss failure after one repeat GOTO (#1105).
-    REQUIRE(wait_until([&] { return read_slewing(*driver) != SlewingRead::True; }, 30000));
+    REQUIRE(advance_until(clock, [&] { return read_slewing(*driver) != SlewingRead::True; }));
 
     // The fake mount acknowledges the GOTO but stays at its fixed position.
     // Completion must not make the requested target masquerade as readback.
@@ -786,18 +826,21 @@ TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsP
           "[synscan][telescope][pulseguiding][reap]") {
     enum class Op { SlewToCoordinates, SlewToCoordinatesAsync, Park };
     for (const Op op : {Op::SlewToCoordinates, Op::SlewToCoordinatesAsync, Op::Park}) {
+        alpacacore::test::FakeTaskClock clock;
         auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
-        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        auto driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
         driver->pulse_guide(0, 60000);  // outlasts the sync slew, so only the reap can clear it
         REQUIRE(driver->get_is_pulse_guiding());
         switch (op) {
             case Op::SlewToCoordinates:
-                driver->slew_to_coordinates(5.5, 20.0);
+                run_virtual(
+                    clock, [&] { driver->slew_to_coordinates(5.5, 20.0); },
+                    [&] { return st->goto_count.load() >= 1; });  // the pulse is reaped, the GOTO is out
                 break;
             case Op::SlewToCoordinatesAsync:
                 driver->slew_to_coordinates_async(5.5, 20.0);
@@ -808,6 +851,8 @@ TEST_CASE("SynScan PulseGuide - SlewToCoordinates reaps the pulse and clears IsP
         }
         INFO("op " << static_cast<int>(op));
         CHECK_FALSE(driver->get_is_pulse_guiding());
+        // The async slew and the park run on the task clock: step them out before the disconnect joins them.
+        REQUIRE(advance_until(clock, [&] { return !driver->get_slewing(); }));
         driver->set_connected(false);
     }
 }
