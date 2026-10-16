@@ -2931,6 +2931,7 @@ private:
         parked_ = false;
         at_home_ = false;
         tracking_ = false;
+        tracking_stop_unconfirmed_ = false;
         restore_tracking_after_slew_ = false;
         pulse_axis_active_[0] = false;
         pulse_axis_active_[1] = false;
