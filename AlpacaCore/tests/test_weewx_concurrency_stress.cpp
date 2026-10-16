@@ -130,7 +130,12 @@ TEST_CASE("WeeWX observing conditions - disconnect races a slow in-flight fetch"
         CHECK(fake.in_flight() == 0);
         driver->set_connected(true);  // starts a poll thread that fetches slowly at once
         REQUIRE(driver->get_connected() == true);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));  // let it enter the fetch
+        // Wait until the poll thread is inside the fetch, so the next
+        // disconnect really races an in-flight one.
+        for (int w = 0; w < 200 && fake.in_flight() == 0; ++w) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        CHECK(fake.in_flight() > 0);
     }
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
@@ -156,6 +161,14 @@ TEST_CASE("WeeWX observing conditions - poll survives scripted fetch failures",
     auto driver = alpacacore::vendor::weewx::create_weewx_observingconditions(0, fake_config(), fake.fetcher());
     driver->set_connected(true);
     REQUIRE(driver->get_connected() == true);
+
+    // The poll thread's immediate first fetch is the second call; wait for it
+    // so the next poll fetch is about 1 s away and cannot take the scripted
+    // failure meant for refresh().
+    for (int i = 0; i < 200 && fake.calls() < 2; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(fake.calls() >= 2);
 
     // refresh() fetches inline, so the scripted failure reaches the caller.
     fake.fail_next(1);
