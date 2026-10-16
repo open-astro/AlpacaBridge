@@ -163,6 +163,10 @@ if(TARGET alpacacore_wandererastro)
     # cover/wheel/box over the pty streamer fake + fail-fast rotator [stress], #271
     list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
 endif()
+if(TARGET alpacacore_gemini AND TARGET alpacacore_wandererastro)
+    # Serial port retune across drivers, open-astro#1202 (reproduction).
+    list(APPEND TEST_SOURCES test_serial_port_retune_repro.cpp)
+endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
