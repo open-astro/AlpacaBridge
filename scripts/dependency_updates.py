@@ -77,6 +77,7 @@ PAGE_TIMEOUT = 30  # seconds per page or API request; about 45 run in sequence e
 DOCUMENT_TIMEOUT = 300  # a hashed document can be large (the ~50 MB ConformU beta tarball)
 LIST_LIMIT = 5000  # issues read back for their markers; the OSV dedupe needs closed ones too
 OSV_THRESHOLD = 7.0  # CVSS: High is 7.0-8.9, Critical 9.0-10.0
+OSV_CRITICAL = 9.0  # an unfixed finding still reaches code scanning from here: it may call for dropping the dependency
 OSV_MARKER = "osv2"  # "osv" was the first format (#1135), which listed unfixable findings
 OSV_MAX_ROWS = 100  # rows per summary issue; keeps the body far below GitHub's 65536 characters
 
@@ -639,12 +640,35 @@ def osv_unimportant(report: dict, vid: str, name: str) -> bool:
     return False
 
 
+def osv_actionable(report: dict, vid: str, name: str) -> bool:
+    """True when ``vid`` in source package ``name`` has a fix in trixie, or no fix but a CVSS of
+    OSV_CRITICAL or more. Anything else has nothing to act on until Debian ships a fix, and the
+    daily scan shows it on the day one lands. An advisory the report does not carry is not kept."""
+    for res in report.get("results") or []:
+        for p in res.get("packages") or []:
+            pkg = p.get("package") or {}
+            if pkg.get("name") != name:
+                continue
+            vulns = {v.get("id"): v for v in p.get("vulnerabilities") or []}
+            for g in p.get("groups") or []:
+                ids = g.get("ids") or []
+                if vid not in ids:
+                    continue
+                if osv_fix(vulns, ids, pkg.get("ecosystem", ""), name) is not None:
+                    return True
+                try:
+                    return float(g.get("max_severity") or "") >= OSV_CRITICAL
+                except ValueError:
+                    return False
+    return False
+
+
 SARIF_PACKAGE_RE = re.compile(r"Package '([^@']+)@[^']*' is vulnerable to '([^']+)'")
 
 
 def filter_sarif(sarif: dict, report: dict, direct: set[str]) -> dict:
     """The SARIF with only findings in ``direct`` source packages that Debian does not rate
-    unimportant: what code scanning shows. Rules stay as they are (results refer to them by index).
+    unimportant and that are actionable (osv_actionable): what code scanning shows. Rules stay as they are (results refer to them by index).
 
     Each kept result's fingerprint becomes a hash of its source package and advisory alone.
     osv-scanner's own includes the package version, so every Debian security update to a package
@@ -654,7 +678,8 @@ def filter_sarif(sarif: dict, report: dict, direct: set[str]) -> dict:
         kept = []
         for r in run.get("results") or []:
             m = SARIF_PACKAGE_RE.search((r.get("message") or {}).get("text", ""))
-            if m and m.group(1) in direct and not osv_unimportant(report, m.group(2), m.group(1)):
+            if (m and m.group(1) in direct and not osv_unimportant(report, m.group(2), m.group(1))
+                    and osv_actionable(report, m.group(2), m.group(1))):
                 key = f"{m.group(1)}|{m.group(2)}".encode()
                 r["partialFingerprints"] = {"primaryLocationLineHash": hashlib.sha256(key).hexdigest()}
                 kept.append(r)
@@ -980,24 +1005,33 @@ def self_test() -> int:
         return {"ruleId": vid, "message": {"text": f"Package '{pkg_name}@1.0' is vulnerable to '{vid}'."}}
     sarif = {"runs": [{"tool": {"driver": {"name": "osv-scanner", "rules": [
         {"id": v} for v in ("DEBIAN-CVE-2026-9", "DEBIAN-CVE-2026-10", "DEBIAN-CVE-2019-1010022", "DEBIAN-CVE-2026-11",
-                            "DEBIAN-CVE-2026-12")]}},
+                            "DEBIAN-CVE-2026-12", "DEBIAN-CVE-2026-13", "DEBIAN-CVE-2026-14", "DEBIAN-CVE-2026-15")]}},
         "results": [result("util-linux", "DEBIAN-CVE-2026-9"), result("curl", "DEBIAN-CVE-2026-10"),
                     result("glibc", "DEBIAN-CVE-2019-1010022"), result("libgphoto2", "DEBIAN-CVE-2026-11"),
-                    result("curl", "DEBIAN-CVE-2026-12")]}]}
+                    result("curl", "DEBIAN-CVE-2026-12"), result("curl", "DEBIAN-CVE-2026-13"),
+                    result("curl", "DEBIAN-CVE-2026-14"), result("curl", "DEBIAN-CVE-2026-15")]}]}
     sarif_report = {"results": [{"packages": [
         pkg("glibc", [{"ids": ["DEBIAN-CVE-2019-1010022"], "max_severity": "9.8"}],
             [vuln("DEBIAN-CVE-2019-1010022", None, "unimportant")]),
+        # High but with no trixie fix: nothing to act on yet, so it waits for Debian's fix.
         pkg("libgphoto2", [{"ids": ["DEBIAN-CVE-2026-11"], "max_severity": "8.8"}],
             [vuln("DEBIAN-CVE-2026-11", None, "not yet assigned", name="libgphoto2")]),
-        # Unimportant in one of the .deb's own dependencies: still dropped from code scanning.
-        pkg("curl", [{"ids": ["DEBIAN-CVE-2026-12"], "max_severity": "5.3"}],
-            [vuln("DEBIAN-CVE-2026-12", None, "unimportant", name="curl")])]}]}
+        pkg("curl", [{"ids": ["DEBIAN-CVE-2026-10"], "max_severity": "5.3"},   # fixed in trixie, any severity
+                     {"ids": ["DEBIAN-CVE-2026-12"], "max_severity": "5.3"},   # unimportant: dropped
+                     {"ids": ["DEBIAN-CVE-2026-13"], "max_severity": "9.8"},   # Critical, no fix: kept
+                     {"ids": ["DEBIAN-CVE-2026-14"], "max_severity": ""},      # unscored, no fix: dropped
+                     {"ids": ["DEBIAN-CVE-2026-15"], "max_severity": "9.8"}],  # Critical but unimportant: dropped
+            [vuln("DEBIAN-CVE-2026-10", {"Debian:13": "8.14.1-2+deb13u2"}, name="curl"),
+             vuln("DEBIAN-CVE-2026-12", None, "unimportant", name="curl"),
+             vuln("DEBIAN-CVE-2026-13", None, "not yet assigned", name="curl"),
+             vuln("DEBIAN-CVE-2026-14", None, "not yet assigned", name="curl"),
+             vuln("DEBIAN-CVE-2026-15", None, "unimportant", name="curl")])]}]}
     kept = filter_sarif(sarif, sarif_report, direct)
     texts = [r["message"]["text"] for r in kept["runs"][0]["results"]]
     assert texts == ["Package 'curl@1.0' is vulnerable to 'DEBIAN-CVE-2026-10'.",
-                     "Package 'libgphoto2@1.0' is vulnerable to 'DEBIAN-CVE-2026-11'."], texts
-    assert len(kept["runs"][0]["tool"]["driver"]["rules"]) == 5, "rules stay: results refer to them by index"
-    assert len(sarif["runs"][0]["results"]) == 5, "the input SARIF is not modified"
+                     "Package 'curl@1.0' is vulnerable to 'DEBIAN-CVE-2026-13'."], texts
+    assert len(kept["runs"][0]["tool"]["driver"]["rules"]) == 8, "rules stay: results refer to them by index"
+    assert len(sarif["runs"][0]["results"]) == 8, "the input SARIF is not modified"
     # Code scanning matches an alert across scans by its fingerprint. osv-scanner's hashes the package
     # version, so a Debian security update (curl 8.14.1-2+deb13u5 -> +deb13u7) reopened every dismissed
     # alert as a new one; the fingerprint is the source package and advisory only.
@@ -1005,7 +1039,9 @@ def self_test() -> int:
         r = {"ruleId": vid, "partialFingerprints": {"primaryLocationLineHash": version},
              "message": {"text": f"Package '{pkg_name}@{version}' is vulnerable to '{vid}'."}}
         one = {"runs": [{"tool": {"driver": {"rules": [{"id": vid}]}}, "results": [r]}]}
-        return filter_sarif(one, {"results": []}, {"curl", "libgphoto2"})["runs"][0]["results"][0]["partialFingerprints"]
+        fixed = {"results": [{"packages": [pkg(pkg_name, [{"ids": [vid], "max_severity": "7.5"}],
+                                                [vuln(vid, {"Debian:13": "9-9"}, name=pkg_name)])]}]}
+        return filter_sarif(one, fixed, {"curl", "libgphoto2"})["runs"][0]["results"][0]["partialFingerprints"]
     assert fingerprint("8.14.1-2+deb13u5") == fingerprint("8.14.1-2+deb13u7"), "one alert across Debian revisions"
     assert fingerprint("1.0") != fingerprint("1.0", vid="DEBIAN-CVE-2026-11"), "each advisory is its own alert"
     assert fingerprint("1.0") != fingerprint("1.0", pkg_name="libgphoto2"), "each source package is its own alert"
@@ -1327,7 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
         before = sum(len(r.get("results") or []) for r in sarif.get("runs") or [])
         after = sum(len(r.get("results") or []) for r in out.get("runs") or [])
         print(f"code scanning: {after} of {before} findings are in the .deb's direct dependencies "
-              f"({', '.join(sorted(direct))}) and not rated unimportant")
+              f"({', '.join(sorted(direct))}), not rated unimportant, and fixed in trixie or Critical")
         return 0
     issues = GhIssues(a.dry_run)
     if a.osv_summary:

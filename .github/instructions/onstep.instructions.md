@@ -36,18 +36,16 @@ it is never reachable through `router.cpp` or the web UI.
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
   duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread.
-- **SideOfPier must be computed from hour angle, not read from `:GU#`'s `E`/`W` flag** — the same
+- **SideOfPier must be computed from hour angle, not read from `:GU#`'s pier-side letter** — the same
   lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
   a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
-  the meridian. `:GU#` does encode pier side directly (confirmed on real hardware, firmware
-  "On-Step" v10.23a, characters `E`/`W`), and an earlier version of this driver preferred that
-  flag over the hour-angle computation, falling back to hour angle only when neither character
-  was present. This parsed correctly (verified against the exact character table below) but
-  failed ConformU's SideofPier check on real hardware: `Reported SideofPier at HA -9, +9: EE`
-  (constant, reflecting the physical side, which only changes on an actual mechanical meridian
-  flip) instead of the required `WE` (flips with HA sign — ASCOM's pointing-state contract).
-  `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`); `:GU#`'s `E`/`W`
-  is parsed and available in `MountStatus` but intentionally unused for this property. Do not
+  the meridian. An earlier version of this driver preferred the `:GU#` flag over the hour-angle
+  computation and failed ConformU's SideofPier check on real hardware: `Reported SideofPier at
+  HA -9, +9: EE` instead of the required `WE` (flips with HA sign — ASCOM's pointing-state
+  contract). That `EE` was not the physical pier side: the driver read `E`, which OnStepX writes
+  for the mount type (GEM) on every reply, as "pier east" (#1217). The pier side is `T`/`W`/`o`
+  (table below). `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`);
+  `:GU#`'s pier side is parsed into `MountStatus` but intentionally unused for this property. Do not
   reintroduce a firmware-flag-preferred branch here without re-validating against ConformU's
   SideofPier/DestinationSideofPier checks. Also avoid forcing a live position refresh inside
   `get_side_of_pier()` (a `:GRa#`/`:GDe#` round trip, ~0.13s each on this serial link, can push
@@ -57,8 +55,17 @@ it is never reachable through `router.cpp` or the web UI.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what
   the INDI driver's comments implied, and was the single biggest early bug in this driver).
-  `H` = at home, `P`/`p` = parked/not parked, `E`/`W` = pier side east/west. Any other character
-  is ignored (forward-compatible with firmware revisions); only a total non-response is a fault.
+  `H` = at home, `P`/`p` = parked/not parked, `I` = parking in progress, `F` = park failed,
+  `h` = homing. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
+  pier side: `T` east, `W` west, `o` none (OnStepX `Status.command.cpp`; HM-17 traces `nNpEW180`
+  = pier west, `nNpET1:0` = pier east, `nNPHEo180` = parked at home). `e` means "sync to
+  encoders only": unpark, home and sync set it and the next GOTO clears it, and it matters only
+  with external encoders. The last three characters are `'0' + n` for the pulse-guide rate, the
+  guide rate and the general error code (`:` is 10). Error `7` is `ERR_MERIDIAN`: after it,
+  OnStepX acknowledges GOTO, park and home commands but does not move, and a manual move back
+  inside the limit clears it (the HM-17's limits are ±60 min, `:GXE9#`/`:GXEA#`). Any other
+  character is ignored (forward-compatible with firmware revisions); only a total non-response
+  is a fault.
 - **RA/Dec position reads use the high-precision variants**: `:GRa#`/`:GDe#` (fractional
   seconds/arcseconds: `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSSS#`), not `:GR#`/`:GD#` (whole-second/
   whole-arcsecond resolution). The whole-second RA resolution (~15″ at the equator) is far too
@@ -157,19 +164,29 @@ it is never reachable through `router.cpp` or the web UI.
   permanent per-call cost. Which members land inside that window depends on ConformU's exact call
   order/pacing for a given version, so don't be surprised if it isn't `DeviceState` specifically.
   Same conclusion applies: treat as accepted, not a bug to chase-fix via caching.
-- **`PulseGuide` East/West shows 1-2 residual ConformU issues per run, right at the 0.07″
-  tolerance boundary, and this is inherent hardware noise, not a driver bug**: root-caused via
-  four independent tests, all on real hardware — (1) A/B test with OnStep's refraction
-  rate-compensation feature (`:Tr#`/`:Tn#`) on vs. off: no correlation, disabling it made the
-  residual *worse*; (2) mount unloaded vs. with the real telescope mounted and balanced: no
-  measurable difference; (3) attempted testing far from the celestial pole: blocked by ConformU's
-  own `Park()`/`FindHome()` always returning the mount near the pole regardless of test
-  settings; (4) the same residual reappears at a different member (sometimes `-9.0`, sometimes
-  `+9.0`, North or South) across repeated runs, and all 4 rate labels (`-9.0`/`-3.0`/`+3.0`/
-  `+9.0`) drive the *same* physical pulse (`GuideRateDeclination`/`RightAscension` are fixed,
-  `CanSetGuideRates=false`) — i.e. these are 4 repetitions of one experiment, and a noise floor
-  straddling a tight tolerance will intermittently cross it. Do not attempt to "fix" this by
-  loosening tolerances or by re-adding rate-compensation toggling.
+- **`PulseGuide` residual ConformU issues: North/South at HA ±9 is refraction, the rest is
+  noise.** The `-9.0`/`-3.0`/`+3.0`/`+9.0` in ConformU's PulseGuide member names are the **hour
+  angles** of the test position (`TestPulseGuide(ha)` in `TelescopeTester.cs`), not guide rates.
+  - *North/South at HA ±9* (`East-West movement was outside test tolerance` on a North or South
+    pulse, RA change 0.07–0.12 s): ConformU picks the test Dec with the highest elevation under
+    65° on a 10° grid, which from latitude +40.5° (the HM-17 site) is Dec +85 at HA ±9 and Dec +55
+    at HA ±3; other latitudes give other positions. OnStepX removes refraction from the RA/Dec it
+    reports (topocentric coordinates, `:GXEE#` = `1`), and at that position a 37.6″
+    Dec pulse shifts the reported RA by ~0.08 s, while ConformU's RA tolerance is 0.07 s (0.09″ on
+    the sky at Dec +85) and does not allow for refraction. Proven on the TeSeek HM-17 (2026-10-16)
+    by repeating the pulses outside ConformU at three firmware pressures (`:SX9B,n#`, a diagnostic
+    only): the RA change matched OnStepX's own refraction formula (measured = 1.00 × predicted),
+    fell to the noise level at 100 hPa, and the raw RA axis angle (`:GX42#`) moved only at the
+    sidereal rate. The sign flips between North and South and between HA −9 and +9; HA ±3 is
+    clean. Upstream: ASCOMInitiative/ConformU#35 (allow for refraction when `DoesRefraction` is
+    true, #1216). Until that lands, a run on such a mount shows these 4 issues; note them in the
+    saved report instead of changing the tolerance.
+  - *Other residuals* (East/West at the 0.07″ boundary): treated as hardware noise after (1) an
+    A/B test with refraction rate compensation (`:Tr#`/`:Tn#`) on vs. off, no correlation; (2) mount
+    unloaded vs. loaded, no difference; (3) testing far from the pole was blocked by ConformU's own
+    `Park()`/`FindHome()` returning near the pole. The earlier reading that all four labels drive
+    one repeated experiment was wrong (the labels are hour angles, see above).
+  - Do not "fix" either case by loosening tolerances or by re-adding rate-compensation toggling.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
   telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
@@ -183,6 +200,14 @@ it is never reachable through `router.cpp` or the web UI.
   also `false` — custom tracking-rate commands were not confirmed against real OnStep firmware
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op.
+- **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
+  refraction to every RA/Dec it reports unless it was built for observed-place coordinates, and
+  `:GXEE#` says which: it replies `MOUNT_COORDS - 1` as one bare digit with no `#` (`0` observed
+  place, `1` topocentric, `2` topocentric strict). The driver asks at connect, on firmware 10 or
+  later only, because legacy OnStep answers any unknown command with `0` too. It reports `True`
+  for `1`/`2`, and a write of the other value throws `PropertyNotImplemented`, since the mode is
+  fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
+  The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
 - **ConformU-validated on real hardware** (Generic OnStep DIY harmonic-drive mount, firmware
   "On-Step" v10.23a, Linux arm64, ConformU 4.4.0): 0 errors, 0 timing violations in the saved
   run. The only remaining findings are the 2 PulseGuide East/West residual issues documented

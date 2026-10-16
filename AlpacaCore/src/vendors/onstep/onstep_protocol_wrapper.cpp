@@ -219,7 +219,11 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
-    if (raw.find('E') != std::string::npos) {
+    // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
+    // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
+    // therefore always present on a GEM and says nothing about the pier
+    // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east).
+    if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {
         status.side_of_pier = 1;  // pier west
@@ -684,6 +688,15 @@ public:
     std::string get_product_name() { return send_command(":GVP#", true, 0); }
 
     std::string get_version_number() { return send_command(":GVN#", true, 0); }
+
+    std::optional<int> get_mount_coords_mode() {
+        // Bare digit, no '#' (OnStepX sets suppressFrame for :GXEE#).
+        const std::string reply = send_command(":GXEE#", false, kSetAckTimeoutMs);
+        if (reply.size() == 1 && reply[0] >= '0' && reply[0] <= '2') {
+            return reply[0] - '0';
+        }
+        return std::nullopt;
+    }
 
     Position get_position() {
         Position pos;
@@ -1210,6 +1223,8 @@ bool OnStepProtocolWrapper::is_connected() const { return pimpl_->is_connected()
 std::string OnStepProtocolWrapper::get_product_name() { return pimpl_->get_product_name(); }
 
 std::string OnStepProtocolWrapper::get_version_number() { return pimpl_->get_version_number(); }
+
+std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl_->get_mount_coords_mode(); }
 
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 

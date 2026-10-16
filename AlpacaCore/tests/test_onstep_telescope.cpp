@@ -588,4 +588,300 @@ TEST_CASE("OnStep Telescope Driver - AbortSlew reports a stop it could not send"
     driver->set_connected(false);
 }
 
+TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-type E", "[onstep][telescope][unit]") {
+    auto status_mutex = std::make_shared<std::mutex>();
+    auto reply = std::make_shared<std::string>();
+    alpacacore::test::FakeMountServer server([reply, status_mutex](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            std::lock_guard<std::mutex> lock(*status_mutex);
+            return *reply;
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    // The wrapper is process-wide: disconnect on every exit, so a throw here
+    // cannot leave it connected and fail every later OnStep test.
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+
+    const auto status_for = [&](const std::string& raw) {
+        {
+            std::lock_guard<std::mutex> lock(*status_mutex);
+            *reply = raw + "#";
+        }
+        return wrapper.get_status();
+    };
+
+    // Real TeSeek HM-17 (OnStepX 10.23a) replies.
+    auto west = status_for("nNpEW180");
+    CHECK(west.side_of_pier == 1);
+    CHECK_FALSE(west.is_tracking);
+    CHECK_FALSE(west.is_slewing);
+
+    auto east = status_for("nNpET1:0");
+    CHECK(east.side_of_pier == 0);
+
+    auto parked = status_for("nNPHEo180");
+    CHECK(parked.side_of_pier == -1);
+    CHECK(parked.is_parked);
+    CHECK(parked.is_at_home);
+
+    auto tracking_east = status_for("NpET180");
+    CHECK(tracking_east.side_of_pier == 0);
+    CHECK(tracking_east.is_tracking);
+}
+
+namespace {
+
+// A fake OnStepX whose :GU# reply the test scripts, recording every command.
+struct ScriptedOnStep {
+    std::mutex mutex;
+    std::string status = "nNpEW180#";
+    std::vector<std::string> log;
+
+    void set_status(const std::string& s) {
+        std::lock_guard<std::mutex> lock(mutex);
+        status = s;
+    }
+    std::size_t count(const char* needle) {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<std::size_t>(std::count_if(
+            log.begin(), log.end(), [&](const std::string& c) { return c.find(needle) != std::string::npos; }));
+    }
+    void clear_log() {
+        std::lock_guard<std::mutex> lock(mutex);
+        log.clear();
+    }
+    std::string reply(const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(mutex);
+        log.push_back(chunk);
+        if (chunk.rfind(":GU", 0) == 0) return status;
+        if (chunk.rfind(":S", 0) == 0) return "1";   // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG/:ST)
+        if (chunk.rfind(":MS", 0) == 0) return "0";  // slew accepted
+        if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
+        if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
+        return "0#";
+    }
+};
+
+// Polls Slewing until the driver has fetched the scripted in-progress status
+// with a :GU# (past its 2 s status cache and slew grace), so it has seen the
+// slew running and will notice the slew end. Call right after set_status().
+void observe_slewing(alpacacore::TelescopeDriver& driver, ScriptedOnStep& mount) {
+    const std::size_t polls_before = mount.count(":GU#");
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    bool slewing = false;
+    while (mount.count(":GU#") == polls_before) {
+        REQUIRE(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        slewing = driver.get_slewing();  // cached answers before the poll may be stale
+    }
+    REQUIRE(slewing);  // the answer from the call that polled
+}
+
+// Polls Slewing (each poll may refresh :GU#) until it reads false.
+bool wait_slew_done(alpacacore::TelescopeDriver& driver, std::chrono::seconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (!driver.get_slewing()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("OnStep Telescope Driver - FindHome and Park never restart tracking", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not at home or parked
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto finish_home = [&]() {
+        mount->set_status("npHhEo180#");  // homing
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpHEo180#");  // at home, not tracking (HM-17 trace, #1218)
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(driver->get_at_home());
+        CHECK(mount->count(":ST6") == 0);
+        CHECK(mount->count(":Te#") == 0);
+    };
+    // A GOTO whose end the driver never saw, so its tracking flag is still set.
+    const auto abort_a_goto = [&]() {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        REQUIRE_NOTHROW(driver->abort_slew());
+        mount->set_status("NpEW180#");
+    };
+
+    SECTION("FindHome after an aborted GOTO") {
+        abort_a_goto();
+        REQUIRE_NOTHROW(driver->find_home());
+        finish_home();
+    }
+
+    SECTION("Park after an aborted GOTO") {
+        abort_a_goto();
+        REQUIRE_NOTHROW(driver->park());
+        mount->set_status("nIEW180#");  // parking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNPHEo180#");  // parked
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(driver->get_at_park());
+        CHECK(mount->count(":ST6") == 0);
+        CHECK(mount->count(":Te#") == 0);
+    }
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if the mount lost it",
+          "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking before the slew
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    REQUIRE(driver->get_tracking());
+
+    SECTION("tracking kept through the GOTO: nothing is sent") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("NpEW180#");  // done, still tracking (OnStepX)
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("a slew already running at connect is left alone") {
+        mount->set_status("npEW180#");  // slewing, not tracking: started elsewhere
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpEW180#");
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("tracking lost during the GOTO: restored once") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount);
+        mount->clear_log();
+        mount->set_status("nNpEW180#");  // done, tracking off
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 1);
+    }
+
+    driver->set_connected(false);
+}
+
+namespace {
+
+// A fake mount that reports a firmware version and a :GXEE# reply (#1216).
+struct RefractionFake {
+    std::string version;  // :GVN# reply, without '#'
+    std::string gxee;     // :GXEE# reply (bare digit; empty = no reply)
+    std::atomic<int> gxee_queries{0};
+
+    std::string reply(const std::string& chunk) {
+        if (chunk.rfind(":GVP", 0) == 0) return "On-Step#";
+        if (chunk.rfind(":GVN", 0) == 0) return version + "#";
+        if (chunk.rfind(":GXEE", 0) == 0) {
+            ++gxee_queries;
+            return gxee;
+        }
+        if (chunk.rfind(":GU", 0) == 0) return "nNpEo180#";
+        if (chunk.rfind(":S", 0) == 0) return "1";
+        return "0#";
+    }
+};
+
+}  // namespace
+
+TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {
+    auto fake = std::make_shared<RefractionFake>();
+    std::string version = "10.23a";
+    std::string gxee = "1";
+    bool expect_query = true;
+    bool from_firmware = true;
+    bool expected = true;
+
+    SECTION("topocentric firmware (:GXEE# 1) applies refraction") {}
+    SECTION("topocentric strict firmware (:GXEE# 2) applies refraction") { gxee = "2"; }
+    SECTION("observed-place firmware (:GXEE# 0) does not") {
+        gxee = "0";
+        expected = false;
+    }
+    SECTION("OnStepX that does not answer :GXEE# keeps the local flag") {
+        gxee = "";
+        from_firmware = false;
+        expected = false;
+    }
+    SECTION("legacy OnStep is not asked, since it answers unknown commands with 0") {
+        version = "4.24s";
+        gxee = "0";
+        expect_query = false;
+        from_firmware = false;
+        expected = false;
+    }
+    fake->version = version;
+    fake->gxee = gxee;
+
+    alpacacore::test::FakeMountServer server([fake](const std::string& chunk) { return fake->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    CHECK((fake->gxee_queries.load() > 0) == expect_query);
+    CHECK(driver->get_does_refraction() == expected);
+
+    if (from_firmware) {
+        REQUIRE_NOTHROW(driver->set_does_refraction(expected));  // the firmware's own value
+        require_alpaca_error([&] { driver->set_does_refraction(!expected); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        CHECK(driver->get_does_refraction() == expected);
+    } else {
+        REQUIRE_NOTHROW(driver->set_does_refraction(true));
+        CHECK(driver->get_does_refraction());
+        REQUIRE_NOTHROW(driver->set_does_refraction(false));
+        CHECK_FALSE(driver->get_does_refraction());
+    }
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 #endif  // _WIN32

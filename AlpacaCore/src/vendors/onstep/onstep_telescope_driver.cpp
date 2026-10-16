@@ -22,6 +22,7 @@
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -29,6 +30,7 @@
 #include <mutex>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::onstep {
@@ -47,6 +49,14 @@ constexpr auto kSlewForceGrace = std::chrono::seconds(2);
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
+// OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with
+// "10.23a"); legacy OnStep is 4.x and older. Only OnStepX knows :GXEE#.
+bool is_onstepx_version(const std::string& version) {
+    std::size_t digits = 0;
+    while (digits < version.size() && std::isdigit(static_cast<unsigned char>(version[digits]))) ++digits;
+    return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
+}
+
 constexpr double kInformationalGuideRateDegPerSec = (15.0411 / 3600.0) * 0.5;
 
 double wrap_hours(double hours) {
@@ -239,17 +249,31 @@ public:
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             pulse_guiding_active_ = false;
-            tracking_before_slew_ = true;
+            tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
+            std::string firmware_version;
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 try {
                     std::string product = protocol.get_product_name();
-                    std::string version = protocol.get_version_number();
-                    firmware_cache_ = product + (version.empty() ? "" : (" " + version));
+                    firmware_version = protocol.get_version_number();
+                    firmware_cache_ = product + (firmware_version.empty() ? "" : (" " + firmware_version));
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     firmware_cache_.clear();
+                }
+            }
+
+            // OnStepX applies refraction to the RA/Dec it reports unless it was
+            // built for observed-place coordinates; :GXEE# says which (#1216).
+            refraction_from_firmware_.reset();
+            if (is_onstepx_version(firmware_version)) {
+                try {
+                    if (const auto mode = protocol.get_mount_coords_mode()) {
+                        refraction_from_firmware_ = (*mode != 0);
+                    }
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unknown: DoesRefraction keeps the settable local flag.
                 }
             }
 
@@ -345,6 +369,7 @@ public:
         } else {
             protocol.disconnect();
             connected_ = false;
+            refraction_from_firmware_.reset();
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 firmware_cache_.clear();
@@ -596,9 +621,29 @@ public:
 
     EquatorialSystem get_equatorial_system() const override { return EquatorialSystem::Topocentric; }
 
-    bool get_does_refraction() const override { return does_refraction_; }
+    // OnStepX reports its refraction mode at connect (#1216). It is fixed when
+    // the firmware is built, so only the value the firmware already uses can
+    // be written. Older firmware keeps the local flag.
+    bool get_does_refraction() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        return refraction_from_firmware_.value_or(does_refraction_);
+    }
 
-    void set_does_refraction(bool does_refraction) override { does_refraction_ = does_refraction; }
+    void set_does_refraction(bool does_refraction) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (refraction_from_firmware_.has_value()) {
+            if (does_refraction != *refraction_from_firmware_) {
+                throw AlpacaException(std::string("This OnStepX firmware ") +
+                                          (*refraction_from_firmware_ ? "always applies" : "never applies") +
+                                          " refraction to its coordinates; it is set when the firmware is built",
+                                      AlpacaError::PropertyNotImplemented);
+            }
+            return;
+        }
+        does_refraction_ = does_refraction;
+    }
 
     int get_slew_settle_time() const override { return slew_settle_time_seconds_; }
 
@@ -768,6 +813,8 @@ public:
             return;
         }
         OnStepProtocolWrapper::instance().find_home();
+        // OnStepX ends a home with tracking off; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_at_home = false;
         cached_status_.is_slewing = true;
         status_cache_valid_ = true;
@@ -782,6 +829,8 @@ public:
             return;  // ASCOM: Park() on an already-parked mount is a no-op.
         }
         OnStepProtocolWrapper::instance().park();
+        // A parked mount must not track; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
@@ -1120,15 +1169,20 @@ private:
         // simple dataflow model doesn't see that the call mutates
         // cached_status_, so it (wrongly) assumes both sides always match.
         if (was_slewing && !cached_status_.is_slewing) {
-            // Slew just completed: caches are stale and, per the SynScan
+            // Slew just completed: caches are stale. Per the SynScan
             // tracking-restoration lesson in
             // .github/instructions/synscan.instructions.md, some LX200-family
-            // mounts stop tracking during a GOTO — best-effort restore it.
-            // TODO: confirm against
-            // real OnStep firmware whether this restoration is needed.
+            // mounts stop tracking during a GOTO, so restore it once, and only
+            // after a coordinate slew that started with tracking on and ended
+            // without it. OnStepX keeps tracking through a GOTO (seen on the
+            // TeSeek HM-17), so there this normally sends nothing. Park and
+            // FindHome clear the flag: they end with tracking off on purpose,
+            // and restarting it moved the mount off home (#1218).
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            if (tracking_before_slew_) {
+            const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
+            tracking_before_slew_ = false;
+            if (restore_tracking) {
                 try {
                     OnStepProtocolWrapper::instance().start_tracking();
                     cached_status_.is_tracking = true;
@@ -1359,9 +1413,12 @@ private:
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
-    mutable bool tracking_before_slew_ = true;
+    // Set only by a coordinate slew; consumed when that slew completes (#1218).
+    mutable bool tracking_before_slew_ = false;
 
     bool does_refraction_ = false;
+    // From :GXEE# at connect on OnStepX; empty when unknown or disconnected.
+    std::optional<bool> refraction_from_firmware_;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;

@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -70,7 +71,8 @@ struct AltAz {
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
- * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
+ * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
+ * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -133,6 +135,18 @@ public:
      * Sends :GVN#.
      */
     std::string get_version_number();
+
+    /**
+     * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
+     *
+     * Sends :GXEE#, which replies with one bare digit and no '#':
+     * 0 = observed place (no refraction applied to reported RA/Dec),
+     * 1 = topocentric, 2 = topocentric strict (both apply refraction).
+     * Returns std::nullopt for any other reply. Only meaningful on OnStepX:
+     * legacy OnStep answers an unknown command with "0" too, so callers must
+     * check the firmware version first (#1216).
+     */
+    std::optional<int> get_mount_coords_mode();
 
     /**
      * @brief Get current RA/Dec position.

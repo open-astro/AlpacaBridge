@@ -5,7 +5,8 @@
 # SBOM cannot be scanned as is, because its runtime versions are those of the
 # build environment, not the versions a user installs. Only findings in the
 # .deb's own runtime dependencies (not the base system, not the C/C++ runtime)
-# that Debian does not rate unimportant go to Security > Code scanning; the new High/Critical ones among them that Debian
+# that Debian does not rate unimportant, and that Debian has fixed in trixie or that are Critical
+# (CVSS 9.0+) without a fix, go to Security > Code scanning; the new High/Critical ones that Debian
 # has fixed in trixie also open one summary issue
 # (scripts/dependency_updates.py --filter-sarif / --osv-summary).
 # Vendored SDKs have no advisory source and are not covered.
@@ -111,8 +112,9 @@ jobs:
 
       - name: Keep the findings in the .deb's own dependencies
         # Base-system packages and the C/C++ runtime (glibc, gcc) are dropped,
-        # and so is anything Debian rates unimportant: none of it is actionable
-        # here. The full result is kept as the run's osv-full-results artifact.
+        # and so is anything Debian rates unimportant, and anything with no
+        # trixie fix unless it is Critical: none of it is actionable here. The
+        # full result is kept as the run's osv-full-results artifact.
         run: |
           set -o pipefail
           python3 scripts/dependency_updates.py --filter-sarif osv-all.sarif --report osv-all.json \
