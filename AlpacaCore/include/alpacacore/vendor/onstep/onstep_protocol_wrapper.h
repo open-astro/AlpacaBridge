@@ -70,7 +70,8 @@ struct AltAz {
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
- * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
+ * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
+ * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
