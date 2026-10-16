@@ -142,6 +142,14 @@ public:
             util::connect_resolved(
                 config_, connection_resolved_, connection_resolver_,
                 [this, &info](const Cfw3ConnectionConfig& cfg) {
+                    // A saved serial entry with no port (#508 item 1) is registered so it
+                    // stays listed; refuse here rather than opening "".
+                    if (cfg.serial_port.empty()) {
+                        throw AlpacaException(
+                            "QHY CFW3 connectionType \"serial\" requires portPath: set the serial port in the "
+                            "device settings (or use 'auto').",
+                            AlpacaError::NotConnected);
+                    }
                     try {
                         info = protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {

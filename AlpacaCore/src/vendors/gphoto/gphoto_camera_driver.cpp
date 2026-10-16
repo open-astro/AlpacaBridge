@@ -812,6 +812,7 @@ public:
     ImageArray get_image_array() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_exposure_failed_locked();
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
             throw AlpacaException::asked_too_early("Image not ready");
         }
@@ -823,6 +824,7 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_exposure_failed_locked();
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
@@ -1004,6 +1006,8 @@ public:
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
+            exposure_failed_ = false;
+            exposure_error_.clear();
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
             // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead. A
@@ -1045,6 +1049,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
+        exposure_failed_ = false;
+        exposure_error_.clear();
         exposure_deadline_valid_ = false;
     }
 
@@ -1109,6 +1115,10 @@ private:
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
+    // Set when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
+    // disconnect. Both guarded by mutex_.
+    bool exposure_failed_{false};
+    std::string exposure_error_;
     std::atomic<bool> abort_requested_{false};
     std::thread exposure_thread_;
     std::mutex exposure_lifecycle_mutex_;
@@ -1163,6 +1173,8 @@ private:
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
+        exposure_failed_ = false;
+        exposure_error_.clear();
         abort_requested_.store(false);
     }
 
@@ -1380,6 +1392,34 @@ private:
                                                                  decoded.bayer_offset_y, decoded.max_adu});
     }
 
+    // Requires mutex_ held. A failed exposure is reported by ImageReady and ImageArray while CameraState stays
+    // Idle, so the next StartExposure can run: a sticky Error poisoned every later operation on the ZWO driver,
+    // which reports a failure the same way (issue #1204).
+    void throw_if_exposure_failed_locked() const {
+        if (exposure_failed_) {
+            throw AlpacaException("Exposure failed: " + exposure_error_, AlpacaError::DriverException);
+        }
+    }
+
+    // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
+    // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
+    // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
+    // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
+    void record_exposure_failure(int handle, const char* what, bool device_gone) {
+        if (abort_requested_.load()) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        exposure_error_ = what;
+        exposure_failed_ = true;
+        if (!device_gone || handle_ != handle) return;
+        handle_ = -1;
+        connected_.store(false);
+        try {
+            sdk_.close_camera(handle);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // The handle belongs to a device that is gone; the failure is already latched and logged.
+        }
+    }
+
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
                       bool use_bulb, double duration) {
         auto& sdk = sdk_;
@@ -1409,6 +1449,7 @@ private:
             image_ready_ = true;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogTag, "Exposure failed: " + std::string(e.what()));
+            record_exposure_failure(handle, e.what(), dynamic_cast<const GPhotoDeviceGoneException*>(&e) != nullptr);
         }
         exposure_active_.store(false);
     }

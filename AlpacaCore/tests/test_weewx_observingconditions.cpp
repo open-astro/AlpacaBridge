@@ -658,3 +658,13 @@ TEST_CASE("WeeWX ObservingConditions Driver - async connect to a stalled feed re
     CHECK(driver->get_connected() == false);
     CHECK_FALSE(driver->get_last_connect_error().empty());
 }
+
+TEST_CASE("WeeWX ObservingConditions Driver - empty fetcher is refused at construction", "[weewx]") {
+    alpacacore::vendor::weewx::WeeWxHttpConfig config;
+    config.url = "http://localhost:9999/dummy";
+
+    CHECK(alpaca_error_of([&] {
+              (void)alpacacore::vendor::weewx::create_weewx_observingconditions(
+                  0, config, alpacacore::vendor::weewx::WeeWxFetcher{});
+          }) == alpacacore::AlpacaError::InvalidValue);
+}

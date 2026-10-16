@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -37,6 +39,18 @@ struct GPhotoCaptureResult {
     std::vector<std::uint8_t> data;
     std::string filename;
     std::string mime_type;
+};
+
+/**
+ * @brief A call failed because the camera is no longer on the USB bus (GP_ERROR_IO_USB_FIND), for
+ * example after the body's auto power-off.
+ *
+ * Still an AlpacaException with the DriverException number, so every caller that does not know about it
+ * sees the failure it saw before. The exposure worker catches it to report the camera as disconnected.
+ */
+class GPhotoDeviceGoneException : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
 };
 
 /**

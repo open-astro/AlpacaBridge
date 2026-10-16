@@ -6968,10 +6968,11 @@ std::vector<std::string> drop_unreadable_selectors(nlohmann::json& config,
 // and a WARN naming it. Clearing it is what makes the two paths agree: an
 // out-of-range coordinate is exactly as unusable as an absent one, so the
 // driver's own unset handling -- refusing the connect, for Sky-Watcher --
-// applies to both.
+// applies to both. The cleared coordinate is also forgotten in the stored entry
+// (`learned_config`), so a later save does not write it back (#508 item 5).
 bool read_site_coordinates(const nlohmann::json& config, bool from_api, const std::string& vendor, int device_number,
                            std::optional<double>& site_latitude, std::optional<double>& site_longitude,
-                           std::string& error_message) {
+                           std::string& error_message, nlohmann::json* learned_config = nullptr) {
     struct Field {
         const char* key;
         double limit;
@@ -7008,6 +7009,9 @@ bool read_site_coordinates(const nlohmann::json& config, bool from_api, const st
             warning += detail;
             warning += ". The coordinate is ignored; set a valid one in the web UI.";
             util::log_warning(warning);
+            // #508 item 5: forget the value in the stored entry (the registration's
+            // learned config), so the entry holds what the driver uses.
+            if (learned_config != nullptr) (*learned_config)[field.key] = nullptr;
             continue;
         }
         *field.out = value;
@@ -8367,6 +8371,24 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                                       "stays unset if it has none. Registered so it stays listed and editable in "
                                       "the web UI.");
                 }
+                if (learned_config != nullptr) {
+                    // #508 item 5: a saved site coordinate that the descriptor declares and
+                    // normalize() dropped as out of range is forgotten in the stored entry
+                    // too, so the entry holds what the driver uses and the next save does not
+                    // write it back. A coordinate the descriptor does not declare is never in
+                    // `normalized`, so it is left alone.
+                    const auto normalized = catalog_json::json_from_config(result.config);
+                    for (const char* key : {"siteLatitude", "siteLongitude"}) {
+                        const auto original = config.find(key);
+                        const bool declared =
+                            std::any_of(view->fields.begin(), view->fields.end(),
+                                        [key](const auto& field) { return std::string_view{field.key} == key; });
+                        if (declared && original != config.end() && original->is_number() &&
+                            normalized.find(key) == normalized.end()) {
+                            (*learned_config)[key] = nullptr;
+                        }
+                    }
+                }
                 if (view->forget_dropped_selectors && learned_config != nullptr) {
                     const auto normalized = catalog_json::json_from_config(result.config);
                     for (const auto& field : view->fields) {
@@ -8472,7 +8494,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
         std::optional<bool> sync_time_on_connect;
 
         if (!read_site_coordinates(config, source == ConfigSource::Api, vendor, device_number, site_latitude,
-                                   site_longitude, error_message)) {
+                                   site_longitude, error_message, learned_config)) {
             return false;
         }
         if (config_has(config, "siteElevation")) {

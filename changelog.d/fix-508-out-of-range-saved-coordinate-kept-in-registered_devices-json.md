@@ -1,0 +1,3 @@
+### Fixed
+
+- **An out-of-range saved `siteLatitude` or `siteLongitude` is now removed from the saved entry** (AlpacaHTTP, issue #508 item 5): the load still warns and the driver still ignores the value, but the entry in `registered_devices.json` (and so `configureddevices`) no longer keeps it, so the next save does not write it back; an in-range coordinate in the same entry stays. It covers the catalog telescope arms and the iOptron arm (tests `siteLatitude 200 (#508 item 5)` for Sky-Watcher and `siteLatitude 200 (read_site_coordinates)` for iOptron in `test_routing.cpp`). Remaining under #508: item 4 (iOptron network with an empty host).

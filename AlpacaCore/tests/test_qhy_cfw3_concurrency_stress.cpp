@@ -79,6 +79,11 @@ TEST_CASE("QHY CFW3 - concurrent connect/disconnect/operate stress", "[qhy][filt
         {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { wheel_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -88,11 +93,13 @@ TEST_CASE("QHY CFW3 - concurrent connect/disconnect/operate stress", "[qhy][filt
 }
 
 TEST_CASE("QHY CFW3 - destruction races an in-flight connect", "[qhy][filterwheel][stress]") {
-    FakeQhyCfw3 fake(7);
-    const std::string port = fake.slave_path();
     const auto settings = stress_settings();
-    alpacacore::test::run_destruction_during_connect_stress(
-        [&port, &settings]() { return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, port, settings); }, 25);
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeQhyCfw3>(7); },
+        [&settings](FakeQhyCfw3& fake) {
+            return alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, fake.slave_path(), settings);
+        },
+        25);
 }
 
 TEST_CASE("QHY CFW3 - racing disconnect is never dropped", "[qhy][filterwheel][stress]") {

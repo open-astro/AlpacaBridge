@@ -19,6 +19,7 @@
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <functional>
@@ -79,6 +80,23 @@ FakeGPhotoSDK::FakeCamera make_canon_camera() {
     cam.choices["eosremoterelease"] = {"None", "Press Half", "Press Full", "Release Half", "Release Full"};
     cam.choice_value["eosremoterelease"] = "None";
     return cam;
+}
+
+// A failed exposure is reported by ImageReady and ImageArray, not by a sticky CameraState Error (issue #1204,
+// the ZWO shape): both throw DriverException naming the SDK failure.
+void require_exposure_failure_reported(const alpacacore::CameraDriver& driver, const std::string& sdk_text) {
+    const std::function<void()> calls[] = {[&] { (void)driver.get_image_ready(); },
+                                           [&] { (void)driver.get_image_array(); }};
+    for (const auto& call : calls) {
+        try {
+            call();
+            FAIL("ImageReady and ImageArray must throw after a failed exposure");
+        } catch (const AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(e.what()).find("Exposure failed: ") != std::string::npos);
+            CHECK(std::string(e.what()).find(sdk_text) != std::string::npos);
+        }
+    }
 }
 
 }  // namespace
@@ -400,7 +418,7 @@ TEST_CASE("GPhoto camera fake - bulb close is sent even when the hold loop throw
     // rather than sleeping, so it can throw. A throw that skips the close
     // leaves the shutter open, the exact wedge issue #569 is about, so the
     // close is guarded: it must still be sent, and the exposure then fails
-    // normally (no image, state back to Idle).
+    // normally (state back to Idle, ImageReady and ImageArray name the failure).
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_bulb_camera());
@@ -413,8 +431,8 @@ TEST_CASE("GPhoto camera fake - bulb close is sent even when the hold loop throw
     driver->start_exposure(0.25, true);  // > 1/50 s native ceiling => bulb path
     wait_for_exposure_to_finish(*driver);
 
-    CHECK(driver->get_image_ready() == false);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_exposure_failure_reported(*driver, "injected failure in drain_events");
     REQUIRE(fake.bulb_toggle_history.size() == 2);
     CHECK(fake.bulb_toggle_history.front() == true);
     CHECK(fake.bulb_toggle_history.back() == false);
@@ -451,7 +469,7 @@ TEST_CASE("GPhoto camera fake - bulb frame poll keeps polling until the camera d
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image ready",
+TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle and ImageReady reports the failure",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
@@ -466,7 +484,7 @@ TEST_CASE("GPhoto camera fake - decoder failure leaves camera idle with no image
     wait_for_exposure_to_finish(*driver);
 
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    CHECK(driver->get_image_ready() == false);
+    require_exposure_failure_reported(*driver, "injected decode failure");
 
     driver->set_connected(false);
 }
@@ -561,7 +579,8 @@ TEST_CASE("GPhoto camera fake - Canon release is sent even when the hold loop th
     driver->start_exposure(0.25, true);
     wait_for_exposure_to_finish(*driver);
 
-    CHECK(driver->get_image_ready() == false);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_exposure_failure_reported(*driver, "injected failure in drain_events");
     REQUIRE(fake.remote_release_history.size() == 2);
     CHECK(fake.remote_release_history.front() == "Press Full");
     CHECK(fake.remote_release_history.back() == "Release Full");
@@ -742,4 +761,186 @@ TEST_CASE("GPhoto camera fake - Canon shutter list with only auto does not enabl
     CHECK(fake.remote_release_history.empty());
 
     driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - camera gone from the USB bus mid-exposure reports a disconnect",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};  // B mode, as on the rig: the press is the first call
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    std::atomic<bool> armed{true};
+    fake.before_call = [&](const std::string& name) {
+        if (armed.load() && name == "set_choice_value") {
+            throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Failed to set eosremoterelease = Press Full",
+                                                                        alpacacore::AlpacaError::DriverException);
+        }
+    };
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    // The body left the bus: the client must see Connected false and reconnect.
+    CHECK(driver->get_connected() == false);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+
+    driver->set_connected(false);  // joins the worker
+    CHECK(fake.close_count == fake.open_count);
+
+    // Reconnect enumerates again and the next exposure works.
+    armed.store(false);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+    CHECK(fake.close_count == fake.open_count);
+}
+
+TEST_CASE("GPhoto camera fake - failed capture reports the SDK error through ImageReady and stays idle",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    fake.throw_from.insert("capture_and_download");
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+
+    // The next StartExposure starts and clears the failure.
+    fake.throw_from.clear();
+    REQUIRE_NOTHROW(driver->start_exposure(0.01, true));
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - failed bulb press reports the SDK error through ImageReady and stays idle",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    // Issue #1204: a Canon in B mode whose eosremoterelease press fails. The failure was in the log only and
+    // ImageReady stayed false; it must reach the client without leaving the camera in a sticky Error state.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};  // B mode: the press is the first call of the exposure
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    std::atomic<bool> armed{true};
+    fake.before_call = [&](const std::string& name) {
+        if (armed.load() && name == "set_choice_value") {
+            throw AlpacaException("Failed to set eosremoterelease = Press Full: Unspecified error",
+                                  alpacacore::AlpacaError::DriverException);
+        }
+    };
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_exposure_failure_reported(*driver, "Failed to set eosremoterelease = Press Full: Unspecified error");
+
+    armed.store(false);
+    REQUIRE_NOTHROW(driver->start_exposure(0.01, true));
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - abort after a failed exposure clears the reported failure",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    fake.throw_from.insert("capture_and_download");
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+    require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+
+    driver->abort_exposure();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_image_ready() == false);
+    try {
+        (void)driver->get_image_array();
+        FAIL("ImageArray must throw with no image");
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(e.what()).find("Exposure failed") == std::string::npos);
+    }
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - camera gone while an abort closes the shutter keeps the camera connected",
+          "[gphoto][camera][unit][fakesdk][canon]") {
+    // A stop in progress is not a failure: a device-gone error raised after AbortExposure (here by the
+    // release that closes the shutter) must not close the handle or report a disconnect.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_canon_camera();
+    cam.choices["shutterspeed2"] = {"bulb"};  // B mode: press, hold, release
+    cam.choice_value["shutterspeed2"] = "bulb";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    std::atomic<bool> holding{false};
+    std::atomic<int> choice_writes{0};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "drain_events") holding.store(true);
+        if (name == "set_choice_value" && ++choice_writes == 2) {  // 1: press, 2: release
+            throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Failed to set eosremoterelease = Release Full",
+                                                                        alpacacore::AlpacaError::DriverException);
+        }
+    };
+    driver->start_exposure(10.0, true);  // only the abort ends the hold
+    for (int i = 0; i < 500 && !holding.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(holding.load());
+    const int closes = fake.close_count;
+
+    driver->abort_exposure();  // joins the worker
+
+    CHECK(choice_writes.load() == 2);
+    CHECK(driver->get_connected() == true);
+    CHECK(fake.close_count == closes);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_image_ready() == false);
+
+    driver->set_connected(false);
+    CHECK(fake.close_count == fake.open_count);
 }

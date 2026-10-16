@@ -146,7 +146,7 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over an unreachable URL, #271.
+    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
@@ -162,6 +162,10 @@ if(TARGET alpacacore_wandererastro)
          test_wandererastro_filterwheel.cpp test_wandererastro_box_switch.cpp)
     # cover/wheel/box over the pty streamer fake + fail-fast rotator [stress], #271
     list(APPEND TEST_SOURCES test_wandererastro_concurrency_stress.cpp)
+endif()
+if(TARGET alpacacore_gemini AND TARGET alpacacore_wandererastro)
+    # Serial port retune across drivers, open-astro#1202 (reproduction).
+    list(APPEND TEST_SOURCES test_serial_port_retune_repro.cpp)
 endif()
 if(TARGET alpacacore_astroasis)
     list(APPEND TEST_SOURCES test_astroasis_focuser.cpp test_astroasis_concurrency_stress.cpp)

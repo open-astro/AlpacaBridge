@@ -506,3 +506,18 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect mid-move waits out the arr
     REQUIRE_NOTHROW(driver->set_position(6));
     CHECK(settle_position(*driver) == 6);
 }
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("QHY CFW3 Filter Wheel Driver - Connect with empty serial port names portPath", "[qhy][cfw3][unit]") {
+    auto driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}
