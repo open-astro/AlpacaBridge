@@ -361,6 +361,13 @@ def newest_nightly_deb(paths: list[str]) -> tuple[str | None, list[str]]:
     return (max(stamped)[1] if stamped else None), warnings
 
 
+def newest_deb_in_dir(directory: Path) -> tuple[int, str | None, list[str]]:
+    """(exit code, newest stamped .deb, warnings): 1 when .deb files exist and none has a stamp."""
+    debs = sorted(str(p) for p in directory.glob("*.deb"))
+    newest, warnings = newest_nightly_deb(debs)
+    return (1 if debs and newest is None else 0), newest, warnings
+
+
 def parse_runtime_system(root: Path) -> tuple[list[str], list[str]]:
     """Return (package names, errors) for RUNTIME_SYSTEM: a package whose evidence is gone is an error."""
     names, errors = [], list(scan_udev_rules(root)[1])
@@ -1093,6 +1100,13 @@ def self_test() -> int:
         pick, warns = newest_nightly_deb(["zzz_arm64.deb", old])
         assert pick == old and len(warns) == 1 and "zzz_arm64.deb" in warns[0], (pick, warns)
         assert newest_nightly_deb(["zzz_arm64.deb"])[0] is None
+        with tempfile.TemporaryDirectory() as nd:
+            dd = Path(nd)
+            assert newest_deb_in_dir(dd) == (0, None, []), newest_deb_in_dir(dd)
+            (dd / "foo_arm64.deb").write_text("")
+            assert newest_deb_in_dir(dd)[0] == 1, newest_deb_in_dir(dd)
+            (dd / old).write_text("")
+            assert newest_deb_in_dir(dd)[:2] == (0, str(dd / old)), newest_deb_in_dir(dd)
         # Every workflow manifest the snapshot submits also carries that workflow's action pins:
         # GitHub drops its own scan of a workflow file a submitted snapshot names.
         pin = "c" * 40
@@ -1323,16 +1337,14 @@ def main() -> int:
         print("\n".join(apt_packages(ROOT, a.apt_packages, deb)))
         return 0
     if a.newest_deb:
-        debs = sorted(str(p) for p in Path(a.newest_deb).glob("*.deb"))
-        newest, warnings = newest_nightly_deb(debs)
+        code, newest, warnings = newest_deb_in_dir(Path(a.newest_deb))
         for w in warnings:
             print(f"::warning::{w}", file=sys.stderr)
-        if debs and newest is None:
+        if code:
             print("ERROR: no .deb carries a nightlyYYYYMMDDHHMM stamp", file=sys.stderr)
-            return 1
-        if newest:
+        elif newest:
             print(newest)
-        return 0
+        return code
     if a.pin:
         pin_sdk_hashes(ROOT)
         print(f"{TABLE}: sha256 pins rewritten")
