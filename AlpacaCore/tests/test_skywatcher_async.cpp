@@ -5217,6 +5217,34 @@ TEST_CASE("SkyWatcher async - SiteLatitude crossing on an idle tracking mount re
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - SiteLatitude crossing inside the pulse-end restart stop-wait reverses RA",
+          "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);  // northern site
+    driver->set_guide_rate(
+        {FakeSkyWatcherMount::kSiderealDegPerSec, FakeSkyWatcherMount::kSiderealDegPerSec});  // 1.0x: the restart branch
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
+    const char north_dir = mount.axis_dir(1);
+    const int stops_before = mount.stop_count(1);
+
+    driver->pulse_guide(2, 1000);  // East
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before; }, 5000));  // the dispatch stop
+    mount.hold_running(1, true);  // the pulse-end stop-wait cannot finish
+    REQUIRE(wait_until([&] { return mount.stop_count(1) > stops_before + 1; }, 5000));
+    // The pulse holds RA, so the setter skips it: the restart must notice.
+    driver->set_site_latitude(-33.856784);
+    mount.hold_running(1, false);
+    REQUIRE(wait_until([&] { return !driver->get_is_pulse_guiding(); }, 8000));
+    REQUIRE(driver->get_site_latitude() < 0.0);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    CHECK(mount.axis_dir(1) != north_dir);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - a pulse dispatch failure after the live :I restores the drive in the new hemisphere",
           "[skywatcher][async]") {
     FakeSkyWatcherMount mount;

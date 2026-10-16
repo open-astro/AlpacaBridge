@@ -1735,7 +1735,7 @@ public:
                             // A SiteLatitude write crossed the equator since the
                             // ":I" went out: an in-place ":I" cannot turn the axis
                             // round, so stop and restart it in the new direction.
-                            start_speed_motion_locked(lock, kAxisRa, restore_rate);
+                            restart_ra_in_current_direction_locked(lock);
                             return;
                         }
                         proto.set_step_period(kAxisRa, tracking_step_period_for(restore_rate),
@@ -1969,8 +1969,7 @@ public:
                     // under this lock and turn it round if the sense moved.
                     const double fresh_rate = effective_ra_rate_locked();
                     if ((fresh_rate > 0.0) != (ra_restore_rate_deg_per_sec > 0.0)) {
-                        applied_ra_restore_rate = fresh_rate;
-                        start_speed_motion_locked(lock, kAxisRa, fresh_rate);
+                        applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                     }
                     // The ":J" above can land inside a Tracking=false
                     // stop-wait (after its ":K"): stop RA again now, not
@@ -1980,7 +1979,7 @@ public:
                     // Reversed pulse, or a hemisphere change mid-pulse: full
                     // stop-and-restart back to the drive rate.
                     std::unique_lock<std::mutex> lock(mutex_);
-                    start_speed_motion_locked(lock, kAxisRa, ra_restore_rate_deg_per_sec);
+                    applied_ra_restore_rate = restart_ra_in_current_direction_locked(lock);
                 } else {
                     proto.stop_motion(axis);
                     // Zero the dead-reckoning rate: this direct stop bypasses
@@ -4112,6 +4111,25 @@ private:
             advance_model_anchor_locked();
         }
         cmd_axis_rate_deg_s_[channel - 1] = rate;
+    }
+
+    // Stop-and-restart RA at the drive rate, re-deriving the rate after every
+    // unlock. start_speed_motion_locked() releases `mutex_` while it waits for
+    // the stop, and a pulse holding the RA axis makes set_site_latitude() skip
+    // it, so an equator crossing inside that wait would otherwise leave RA
+    // latched in the old hemisphere's direction. Bounded: each pass needs a
+    // further crossing to repeat. Returns the rate actually applied.
+    double restart_ra_in_current_direction_locked(std::unique_lock<std::mutex>& lock) {
+        constexpr int kMaxPasses = 4;
+        double applied = effective_ra_rate_locked();
+        for (int pass = 0; pass < kMaxPasses; ++pass) {
+            applied = effective_ra_rate_locked();
+            start_speed_motion_locked(lock, kAxisRa, applied);
+            if ((effective_ra_rate_locked() > 0.0) == (cmd_axis_rate_deg_s_[0] > 0.0)) {
+                break;
+            }
+        }
+        return applied;
     }
 
     // Base drive rate for the selected ASCOM DriveRate.

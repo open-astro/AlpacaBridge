@@ -1718,7 +1718,7 @@ TEST_CASE("SkyWatcher pointing - a target inside the goto aim-ahead of HA=0 is n
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
     driver->set_connected(true);
     driver->set_tracking(true);
-    // HA just west of the meridian by less than the goto's own aim-ahead
+    // HA just east of the meridian by less than the goto's own aim-ahead
     // (~3 s = 0.0009 h): the dispatch aims at HA > 0, the landing check used
     // to evaluate the target at the current LST, HA < 0.
     const double lst = driver->get_sidereal_time();
