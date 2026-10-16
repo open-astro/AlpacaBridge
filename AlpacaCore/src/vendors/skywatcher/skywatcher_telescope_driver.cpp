@@ -4628,6 +4628,7 @@ private:
         if ((!leg.owed[0] && !leg.owed[1]) || leg.generation != motion_generation_ || body_stopped()) {
             return false;
         }
+        slewing_cached_ = true;  // as before every goto: a failed first poll of the leg must not land it
         dispatch_goto_locked(lock, leg.target_deg[0], leg.target_deg[1], /*compensate_backlash=*/false, &leg);
         return true;
     }

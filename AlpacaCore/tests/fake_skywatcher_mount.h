@@ -467,16 +467,17 @@ public:
     }
 
     /// open-astro#437: answer the next @p n ":f" inquiries on an axis with
-    /// "!0", so the wrapper throws: a status read that fails.
-    void fail_status_replies(int axis, int n) {
+    /// "!0", so the wrapper throws: a status read that fails. With
+    /// @p after_next_start the count starts at the axis' next ":J".
+    void fail_status_replies(int axis, int n, bool after_next_start = false) {
         std::lock_guard<std::mutex> lock(mutex_);
-        ax(axis).failed_status_replies = n;
+        (after_next_start ? ax(axis).failed_status_replies_on_start : ax(axis).failed_status_replies) = n;
     }
 
     /// How many of those failed replies are still to be served.
     int status_failures_pending(int axis) {
         std::lock_guard<std::mutex> lock(mutex_);
-        return ax(axis).failed_status_replies;
+        return ax(axis).failed_status_replies + ax(axis).failed_status_replies_on_start;
     }
 
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
@@ -548,6 +549,8 @@ private:
         double coast_cps = 0.0;
         int commands_while_coasting = 0;  // motion frames received while coasting
         int failed_status_replies = 0;    // ":f" inquiries to answer "!0" (test knob)
+        int failed_status_replies_on_start = 0;  // moved into failed_status_replies at the next ":J"
+        double goto_cps = 0.0;                   // a slow GOTO's ":I" rate; 0 = kGotoDegPerSec
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int wrong_restart_latches = 0;    // ":J" restarts to latch at the wrong rate (test knob)
 
@@ -593,7 +596,7 @@ private:
             int64_t before = counts;
             if (in_goto) {
                 double dir_sign = goto_target >= counts ? 1.0 : -1.0;
-                double step = kGotoDegPerSec * cpr / 360.0 * dt;
+                double step = (goto_cps > 0.0 ? goto_cps : kGotoDegPerSec * cpr / 360.0) * dt;
                 double remaining = std::abs(static_cast<double>(goto_target - counts));
                 if (step >= remaining) {
                     running = false;
@@ -791,6 +794,8 @@ private:
                     return "!2";  // refused: nothing applied
                 }
                 ++a.start_count;
+                a.failed_status_replies += a.failed_status_replies_on_start;
+                a.failed_status_replies_on_start = 0;
                 was_running_on_start = a.running;
                 if (!was_running_on_start) {
                     // Only a genuinely fresh start (from stopped) has no
@@ -807,6 +812,8 @@ private:
                 a.stopping = false;
                 if (a.in_goto) {
                     a.goto_target &= 0xFFFFFF;
+                    // A slow GOTO (mode '2') runs at the ":I" rate, a fast one at kGotoDegPerSec.
+                    a.goto_cps = !a.fast && a.t1 > 0 ? static_cast<double>(kTimerFreq) / a.t1 : 0.0;
                 } else if (a.ignore_start_relatches > 0) {
                     --a.ignore_start_relatches;  // acked, preset still not applied
                 } else {

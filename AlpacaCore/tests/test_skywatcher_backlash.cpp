@@ -305,7 +305,8 @@ struct SteppedHome : Rig {
     static constexpr std::chrono::milliseconds kStep{250};
     std::string failure;  // a failed FindHome reports its error through Slewing (open-astro#631)
 
-    SteppedHome() : Rig(dec_backlash(kBacklash), FakeMountProfile::eqm35_pro(), kSouth, /*shared_clock=*/true) {
+    explicit SteppedHome(uint32_t steps = kBacklash)
+        : Rig(dec_backlash(steps), FakeMountProfile::eqm35_pro(), kSouth, /*shared_clock=*/true) {
         mount.jump_axis_degrees(2, 4.0);
         mount.clear_motion_log();
         driver->find_home();
@@ -320,12 +321,15 @@ struct SteppedHome : Rig {
             return false;
         }
     }
-    // Steps the clock until Slewing clears, for at most `limit` of clock time.
+    // Steps the clock until Slewing clears, for at most `limit` of clock time;
+    // `home_while_moving` notes an AtHome read while the Dec axis still runs.
+    bool home_while_moving = false;
     void run(std::chrono::seconds limit = std::chrono::seconds(30)) {
         for (std::chrono::milliseconds t{0}; t < limit && slewing(); t += kStep) {
             if (!clock.wait_for_waiters(kParked, std::chrono::milliseconds(2000))) return;
             clock.advance(kStep);
             if (!clock.wait_for_woken_settled(std::chrono::milliseconds(2000))) return;
+            home_while_moving = home_while_moving || (driver->get_at_home() && mount.axis_running(2));
         }
     }
 };
@@ -653,21 +657,27 @@ TEST_CASE("SkyWatcher backlash - the final leg waits until the first leg has sto
     CHECK(rig.mount.axis_degrees(2) == 0.0);  // the target: the count origin
 }
 
-TEST_CASE("SkyWatcher backlash - a failed status read during the first leg does not fail the goto",
+TEST_CASE("SkyWatcher backlash - a failed status read during either leg does not fail the goto",
           "[skywatcher][telescope][backlash]") {
     // The landing wait keeps its last answer across a status read that fails
-    // (get_hardware_slewing_locked(), for up to 10 s), so one failed ':f' on
-    // the Dec axis while the first leg runs is no error. The status poll is
-    // paused, so the read that fails is the landing wait's.
-    SteppedHome rig;
-    sw::set_status_poll_paused_for_testing(*rig.driver, true);
-    rig.mount.fail_status_replies(2, 1);
-    rig.run();
-    CHECK(rig.mount.status_failures_pending(2) == 0);  // the failed reply was served
-    CHECK(rig.failure.empty());
-    CHECK(rig.driver->get_at_home());
-    CHECK(has_final_leg(axis_two(rig.mount.motion_log())));
-    CHECK(rig.mount.axis_degrees(2) == 0.0);
+    // (get_hardware_slewing_locked(), for up to 10 s): one failed ':f' on the
+    // Dec axis during the first leg is no error, and three from the final
+    // leg's start (a 20000-count leg, about 4.7 s at the derived speed) do not
+    // land it early. The status poll is paused, so the reads that fail are the
+    // landing wait's.
+    for (const bool final_leg : {false, true}) {
+        INFO((final_leg ? "from the final leg's start" : "during the first leg"));
+        SteppedHome rig(final_leg ? 20000 : kBacklash);
+        sw::set_status_poll_paused_for_testing(*rig.driver, true);
+        rig.mount.fail_status_replies(2, final_leg ? 3 : 1, /*after_next_start=*/final_leg);
+        rig.run();
+        CHECK(rig.mount.status_failures_pending(2) == 0);  // the failed replies were served
+        CHECK(rig.failure.empty());
+        CHECK_FALSE(rig.home_while_moving);
+        CHECK(rig.driver->get_at_home());
+        CHECK(has_final_leg(axis_two(rig.mount.motion_log())));
+        CHECK(rig.mount.axis_degrees(2) == 0.0);
+    }
 }
 
 TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-checked and reach the driver",
