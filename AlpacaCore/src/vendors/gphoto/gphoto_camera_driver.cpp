@@ -1389,12 +1389,14 @@ private:
     // close handle_, so handle_ is only changed here under mutex_.
     void set_shutter_choice_reopening_lost_session(int& handle, const std::string& widget, const std::string& choice) {
         auto& sdk = sdk_;
+        bool session_lost = false;
         try {
             sdk.set_choice_value(handle, widget, choice);
-            return;
         } catch (const GPhotoSessionLostException&) {
             // Not logged here: the outcome line below is the one INFO line per re-init.
+            session_lost = true;
         }
+        if (!session_lost) return;
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || handle_ != handle || !connected_.load()) {
             throw AlpacaException("Camera session lost and the camera is no longer connected",
