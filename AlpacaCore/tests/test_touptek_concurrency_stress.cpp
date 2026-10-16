@@ -106,6 +106,9 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
 
     // The driver must still be usable after the storm, and the ref-counted
     // open ledger must balance once we settle it disconnected.
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);
@@ -182,6 +185,9 @@ TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[toupte
         },
         opt);
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-afw-0") == 0);
@@ -230,6 +236,9 @@ TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", 
         guard([&] { focuser.halt(); });
     });
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-aaf-0") == 0);
@@ -284,6 +293,9 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
         guard([&] { static_cast<void>(sw.get_device_state()); });
     });
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);

@@ -466,17 +466,38 @@ inline bool settle_connected(AlpacaDriver& driver, bool want,
 /// task is (or may still be) in flight. A driver missing the shutting_down_
 /// teardown contract leaves an unjoined thread -> std::terminate; a driver
 /// whose task touches members after they're destroyed is a TSan/ASan report.
+inline void destroy_driver_during_connect(std::unique_ptr<AlpacaDriver>& driver, int iteration) {
+    driver->connect();  // spawns the async connection task
+    if ((iteration % 2) != 0) {
+        // Half the time, also race a disconnect against the connect so the
+        // pending-disconnect machinery is live at destruction time.
+        driver->disconnect();
+    }
+    driver.reset();  // ~Driver must join the in-flight task, every time
+}
+
 inline void run_destruction_during_connect_stress(const std::function<std::unique_ptr<AlpacaDriver>()>& make,
                                                   int iterations = 100) {
     for (int i = 0; i < iterations; ++i) {
         auto driver = make();
-        driver->connect();  // spawns the async connection task
-        if ((i % 2) != 0) {
-            // Half the time, also race a disconnect against the connect so the
-            // pending-disconnect machinery is live at destruction time.
-            driver->disconnect();
-        }
-        driver.reset();  // ~Driver must join the in-flight task, every time
+        destroy_driver_during_connect(driver, i);
+    }
+}
+
+/// Same race, but one FRESH fake per iteration. A pty-backed fake shared across
+/// iterations keeps the replies it wrote to a driver destroyed mid-connect
+/// queued on the pty, so the next iteration's driver can read the previous
+/// one's answers and the case stops testing a cold connect. `make_fake` returns
+/// a std::unique_ptr<Fake>; `make_driver` takes `Fake&`. The driver is destroyed
+/// first, then the fake, every iteration.
+template <typename MakeFake, typename MakeDriver>
+void run_destruction_during_connect_stress_fresh_fake(MakeFake&& make_fake, MakeDriver&& make_driver,
+                                                      int iterations = 100) {
+    for (int i = 0; i < iterations; ++i) {
+        auto fake = make_fake();
+        std::unique_ptr<AlpacaDriver> driver = make_driver(*fake);
+        destroy_driver_during_connect(driver, i);
+        fake.reset();
     }
 }
 

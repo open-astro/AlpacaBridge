@@ -151,6 +151,11 @@ TEST_CASE("SkyWatcher telescope - concurrent connect/disconnect/slew/pulse/movea
         alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { skywatcher_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -193,11 +198,12 @@ TEST_CASE("SkyWatcher telescope - MoveAxis stop racing SetTracking(false)", "[sk
 }
 
 TEST_CASE("SkyWatcher telescope - destruction races an in-flight connect", "[skywatcher][telescope][stress]") {
-    FakeSkyWatcherMount mount;
-    REQUIRE(mount.ok());
-    const int port = mount.port();
-    alpacacore::test::run_destruction_during_connect_stress(
-        [port]() { return sw::create_skywatcher_telescope(0, endpoint_for_port(port), 39.7392, -104.9903, 1609.0); },
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeSkyWatcherMount>(); },
+        [](FakeSkyWatcherMount& mount) {
+            REQUIRE(mount.ok());
+            return sw::create_skywatcher_telescope(0, endpoint_for_port(mount.port()), 39.7392, -104.9903, 1609.0);
+        },
         // 25 iterations, not the default 100: each destroyed connect can ride
         // a 250 ms UDP response timeout (up to 3 retransmits per query), same
         // reasoning as the SynScan stress test.
@@ -206,11 +212,12 @@ TEST_CASE("SkyWatcher telescope - destruction races an in-flight connect", "[sky
 
 TEST_CASE("SkyWatcher telescope - destruction mid-operation (slew/pulse/stop/rate-verify threads live)",
           "[skywatcher][telescope][stress]") {
-    FakeSkyWatcherMount mount;
-    REQUIRE(mount.ok());
-    mount.set_stop_ramp_ms(200);  // keep both stop tasks alive across the reset
-
     for (int i = 0; i < 10; ++i) {
+        // Fresh mount per iteration: the previous driver's queued datagrams
+        // must not reach the next one.
+        FakeSkyWatcherMount mount;
+        REQUIRE(mount.ok());
+        mount.set_stop_ramp_ms(200);  // keep both stop tasks alive across the reset
         auto driver = make_driver(mount);
         // A hard assertion, not a discarded result: the worker threads this
         // scenario destroys mid-flight only exist on a connected driver, so a

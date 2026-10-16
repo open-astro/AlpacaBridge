@@ -37,6 +37,7 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 
 #include <chrono>
+#include <memory>
 #include <string>
 
 #include "catch2_compat.h"
@@ -136,6 +137,11 @@ TEST_CASE("WandererAstro cover calibrator - concurrent connect/disconnect/operat
                                             alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { cover_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -154,10 +160,13 @@ TEST_CASE("WandererAstro cover calibrator - destruction races an in-flight conne
     // is no step-level bound under it). The frame CONTENT is what the driver
     // keys on, not the cadence, so a faster interval deepens the storm for
     // free and makes the harness default affordable.
-    FakeSerialStreamer cover(kCoverFrame, std::chrono::milliseconds(50));
-    const std::string port = cover.slave_path();
-    alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, port); });
+    // Fresh streamer per iteration: frames queued for a destroyed driver must
+    // not reach the next one.
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeSerialStreamer>(kCoverFrame, std::chrono::milliseconds(50)); },
+        [](FakeSerialStreamer& cover) {
+            return alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(0, cover.slave_path());
+        });
 }
 
 TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate stress",
@@ -181,6 +190,11 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
                                             alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { filterwheel_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -192,10 +206,13 @@ TEST_CASE("WandererAstro filter wheel - concurrent connect/disconnect/operate st
 TEST_CASE("WandererAstro filter wheel - destruction races an in-flight connect",
           "[wandererastro][filterwheel][stress]") {
     // 50 ms frame interval, same reason as the cover calibrator above.
-    FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(50));
-    const std::string port = wheel.slave_path();
-    alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, port); });
+    // Fresh streamer per iteration: frames queued for a destroyed driver must
+    // not reach the next one.
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeSerialStreamer>(kSfwFrame, std::chrono::milliseconds(50)); },
+        [](FakeSerialStreamer& wheel) {
+            return alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+        });
 }
 
 TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stress",
@@ -214,6 +231,11 @@ TEST_CASE("WandererAstro box switch - concurrent connect/disconnect/operate stre
                                             alpacacore::AlpacaError::DriverException};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { box_switch_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -226,10 +248,13 @@ TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "
     // 50 ms frame interval, same reason as the cover calibrator above --
     // sharper here, since the unit tests' 500 ms would have added ~50 s at
     // the harness default.
-    FakeSerialStreamer box(kBoxFrame, std::chrono::milliseconds(50));
-    const std::string port = box.slave_path();
-    alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, port); });
+    // Fresh streamer per iteration: frames queued for a destroyed driver must
+    // not reach the next one.
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeSerialStreamer>(kBoxFrame, std::chrono::milliseconds(50)); },
+        [](FakeSerialStreamer& box) {
+            return alpacacore::vendor::wandererastro::create_wandererastro_box_switch(0, box.slave_path());
+        });
 }
 
 TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress", "[wandererastro][rotator][stress]") {
