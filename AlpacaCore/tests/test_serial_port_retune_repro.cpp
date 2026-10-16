@@ -153,7 +153,7 @@ TEST_CASE("Serial port retune - second driver cannot retune a connected rotator'
 }
 
 // Falsified by: wandererastro_rotator_protocol_wrapper.cpp read_section's
-// ::read (about line 85) bounded with poll(), so a VMIN=1 retune cannot park
+// ::read (line 112) bounded with poll(), so a VMIN=1 retune cannot park
 // the monitor, makes disconnect() return inside 3 s, so the case passes and
 // [!shouldfail] turns it red.
 // Reproduces open-astro#1202 (slice 1); slice 8 removes [!shouldfail].
