@@ -718,7 +718,7 @@ TEST_CASE("GPhoto camera fake - camera gone from the USB bus mid-exposure report
     fake.before_call = [&](const std::string& name) {
         if (armed.load() && name == "set_choice_value") {
             throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Failed to set eosremoterelease = Press Full",
-                                                                       alpacacore::AlpacaError::DriverException);
+                                                                        alpacacore::AlpacaError::DriverException);
         }
     };
     driver->start_exposure(0.01, true);
