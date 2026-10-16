@@ -331,9 +331,11 @@ def scan_udev_rules(root: Path) -> tuple[list[Path], list[str]]:
                           "which installed_udev_rules() cannot expand: assign it with := or =")
             continue
         if "$(" in expanded or "${" in expanded:
-            prefix = Path(re.split(r"\$[({]", expanded, maxsplit=1)[0])
-            if prefix.is_absolute() and not prefix.is_relative_to(root / EXTERNAL):
-                continue  # resolved far enough to be outside the vendored tree: not vendor evidence
+            text_prefix = re.split(r"\$[({]", expanded, maxsplit=1)[0]
+            prefix, vendored = Path(text_prefix), str(root / EXTERNAL)
+            if (prefix.is_absolute() and not prefix.is_relative_to(root / EXTERNAL)
+                    and not vendored.startswith(text_prefix)):
+                continue  # the text so far cannot lead into the vendored tree: not vendor evidence
             errors.append(f"debian/rules: {word} still holds an unresolved variable after expansion "
                           f"({expanded}): define it with := or = in debian/rules")
             continue
@@ -1068,10 +1070,19 @@ def self_test() -> int:
             (r / "debian/rules").write_text(rule_text)
             errs = scan_udev_rules(r)[1]
             assert len(errs) == 1 and "debian/rules" in errs[0] and "x.rules" in errs[0], (form, errs)
+            if form != "unresolved":
+                assert f"({form})" in errs[0], (form, errs)
             assert any("x.rules" in e for e in drift()), (form, drift())
         # An unresolved variable in a path already outside the vendored tree is not vendor evidence: no error.
         (r / "debian/rules").write_text(good + "\tinstall -m 644 $(CURDIR)/debian/$(UNDEFINED)/y.rules x/\n")
         assert scan_udev_rules(r)[1] == [], scan_udev_rules(r)
+        # A prefix that is an ancestor of the vendored tree could still lead into it: error.
+        for anc in ("$(CURDIR)/$(UNDEFINED)/x.rules", "$(CURDIR)/AlpacaCore/$(UNDEFINED)/x.rules"):
+            (r / "debian/rules").write_text(good + f"\tinstall -m 644 {anc} x/\n")
+            assert len(scan_udev_rules(r)[1]) == 1, (anc, scan_udev_rules(r))
+        # Only the $(shell) rule catches a variable whose value is a shell call inside an otherwise known path.
+        (r / "debian/rules").write_text(good + "SH := /opt/$(shell echo a)\n\tinstall -m 644 $(SH)/z.rules x/\n")
+        assert any("($(shell ...))" in e for e in scan_udev_rules(r)[1]), scan_udev_rules(r)
         (r / "debian/rules").write_text(good)
         assert drift() == [], drift()
         # The pick of the newest nightly .deb orders by its stamp, never by the full name.
