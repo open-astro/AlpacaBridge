@@ -219,7 +219,11 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
-    if (raw.find('E') != std::string::npos) {
+    // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
+    // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
+    // therefore always present on a GEM and says nothing about the pier
+    // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east).
+    if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {
         status.side_of_pier = 1;  // pier west
