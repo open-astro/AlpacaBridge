@@ -47,6 +47,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -713,6 +714,58 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     CHECK_FALSE(driver->get_slewing());
     CHECK(st->nudge_count.load() == 1);  // the move was stopped at once, not after its 4 s
     CHECK(st->goto_count.load() == 1);
+    driver->set_connected(false);
+}
+
+// A synchronous slew's landing nudge waits on the task clock, so a test drives it in virtual time. The caller
+// runs on its own thread; the test parks it inside the nudge, aborts, and reads the clock, not the wall.
+TEST_CASE(
+    "SynScan GOTO landing - AbortSlew during a synchronous slew's landing nudge returns the caller at once (#1108)",
+    "[synscan][telescope][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->ra_offset_counts.store(150);  // 11.6", a 4 s move at 2"/s
+    driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
+
+    std::atomic<bool> returned{false};
+    std::thread caller([&] {
+        try {
+            driver->slew_to_coordinates(kTargetRa, kTargetDec);
+        } catch (const std::exception&) {
+        }
+        returned.store(true);
+    });
+    // Advance virtual time until the landing move is under way.
+    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    while (st->nudge_starts.load() < 1 && Clock::now() < deadline) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        if (st->nudge_starts.load() >= 1) break;
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    REQUIRE(st->nudge_starts.load() == 1);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the caller is parked in the nudge wait
+    const auto parked_at = clock.now();
+
+    REQUIRE_NOTHROW(driver->abort_slew());
+    const auto join_deadline = Clock::now() + std::chrono::seconds(5);
+    while (!returned.load() && Clock::now() < join_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    CHECK(returned.load());  // without the fix the caller sleeps out the 4 s of virtual time, which never comes
+    CHECK(clock.now() - parked_at < std::chrono::milliseconds(500));
+    if (!returned.load()) {
+        clock.advance(std::chrono::seconds(10));  // release the caller so the thread can join
+    }
+    caller.join();
+    CHECK(st->nudge_count.load() == 1);  // AbortSlew stopped the move; the woken nudge did not stop it again
     driver->set_connected(false);
 }
 
