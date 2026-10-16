@@ -11,9 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
-#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
@@ -261,9 +261,7 @@ public:
         return true;
     }
 
-    bool get_is_moving() const override {
-        return served_frame().moving;
-    }
+    bool get_is_moving() const override { return served_frame().moving; }
 
     int get_max_step() const override {
         ensure_connected();
@@ -275,9 +273,7 @@ public:
         return get_max_step();
     }
 
-    int get_position() const override {
-        return served_frame().position;
-    }
+    int get_position() const override { return served_frame().position; }
 
     double get_step_size() const override {
         ensure_connected();
@@ -364,9 +360,10 @@ private:
             throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
         }
         if (clock_.now() - reading->measured_at >= util::kLinkStalenessBound) {
-            throw AlpacaException("Gemini focuser communications compromised: no state from the device for "
-                                      "30 s",
-                                  AlpacaError::DriverException);
+            throw AlpacaException(
+                "Gemini focuser communications compromised: no state from the device for "
+                "30 s",
+                AlpacaError::DriverException);
         }
         return reading->value;
     }
@@ -466,10 +463,8 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
     return std::make_unique<GeminiFocuserDriver>(device_number, std::move(config));
 }
 
-std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
-                                                      const std::string& serial_port,
-                                                      int baud_rate,
-                                                      util::TaskClock& clock) {
+std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number, const std::string& serial_port, int baud_rate,
+                                                     util::TaskClock& clock) {
     ConnectionConfig config;
     config.type = ConnectionType::Serial;
     config.serial_port = serial_port;

@@ -38,10 +38,8 @@ std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
 
 /// As above, with the clock the state poll waits on injected (tests pass a
 /// FakeTaskClock so a poll tick is an advance(), not a sleep).
-std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number,
-                                                      const std::string& serial_port,
-                                                      int baud_rate,
-                                                      util::TaskClock& clock);
+std::unique_ptr<FocuserDriver> create_gemini_focuser(int device_number, const std::string& serial_port, int baud_rate,
+                                                     util::TaskClock& clock);
 
 /// Port resolved at connect time by `resolver` (#659); the by-index factory
 /// below wraps it, tests inject a fake's pty path.
