@@ -1709,3 +1709,95 @@ TEST_CASE("SkyWatcher pointing - a catalog-built driver maps decAxisSense to the
 }
 
 #endif  // !_WIN32
+
+TEST_CASE("SkyWatcher pointing - a target inside the goto aim-ahead of HA=0 is not re-goto'd for the other branch",
+          "[skywatcher][telescope][pointing]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    // HA just east of the meridian by less than the goto's own aim-ahead
+    // (~3 s = 0.0009 h): the dispatch aims at HA > 0, the landing check used
+    // to evaluate the target at the current LST, HA < 0.
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.0004 + 24.0, 24.0);  // HA = -0.0004 h
+    const double target_dec = 30.0;
+    const int starts_before = mount.start_count(2);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, target_dec);
+    const int dec_gotos = mount.start_count(2) - starts_before;
+    INFO("dec-axis starts " << dec_gotos << " a2=" << f.a2 << " reported dec " << f.reported_dec);
+    CHECK(dec_gotos <= 2);
+    CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher pointing - a target well away from HA=0 still lands with two dec-axis starts",
+          "[skywatcher][telescope][pointing]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    const double lst = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst + 0.1 + 24.0, 24.0);  // HA = -0.1 h
+    const double target_dec = 30.0;
+    const int starts_before = mount.start_count(2);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, target_dec);
+    const int dec_gotos = mount.start_count(2) - starts_before;
+    INFO("dec-axis starts " << dec_gotos << " a2=" << f.a2 << " reported dec " << f.reported_dec);
+    CHECK(dec_gotos == 2);
+    CHECK(std::abs(f.reported_dec - target_dec) < kDecToleranceDegrees);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+}
+
+namespace {
+
+// The RA landing residual (arcsec) of the second slew of the pair P, Q on a
+// fresh mount, after `trained_slews` earlier slews and, when `reconnect`, a
+// disconnect + connect. The aim-ahead of a slew is built from the driver's
+// measured goto overhead and resume latency, which every landing updates, so
+// the residual of Q reads those two estimates back through the pointing.
+double second_slew_ra_residual_arcsec(int trained_slews, bool reconnect) {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 45.0, 11.0, 100.0);
+    driver->set_connected(true);
+    driver->set_tracking(true);
+    for (int i = 0; i < trained_slews; ++i) {
+        const double lst = driver->get_sidereal_time();
+        land_on_fake_clock(clock, *driver, mount, std::fmod(lst - 0.3 + 24.0, 24.0), 10.0 + 15.0 * i);
+    }
+    if (reconnect) {
+        driver->set_connected(false);
+        driver->set_connected(true);
+        driver->set_tracking(true);
+    }
+    const double lst_p = driver->get_sidereal_time();
+    land_on_fake_clock(clock, *driver, mount, std::fmod(lst_p - 0.2 + 24.0, 24.0), 60.0);
+    const double lst_q = driver->get_sidereal_time();
+    const double target_ra = std::fmod(lst_q - 0.15 + 24.0, 24.0);
+    const LandedFrame f = land_on_fake_clock(clock, *driver, mount, target_ra, 20.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
+    return (f.reported_ra - target_ra) * 15.0 * 3600.0;
+}
+
+}  // namespace
+
+TEST_CASE("SkyWatcher pointing - a reconnect resets the measured goto overhead and resume latency",
+          "[skywatcher][telescope][pointing]") {
+    const double fresh = second_slew_ra_residual_arcsec(0, false);
+    const double trained = second_slew_ra_residual_arcsec(4, false);
+    const double reconnected = second_slew_ra_residual_arcsec(4, true);
+    INFO("fresh " << fresh << " trained " << trained << " reconnected " << reconnected);
+    // The training moves the estimates enough to move the landing...
+    CHECK(std::abs(trained - fresh) > 2.0);
+    // ...and a reconnect puts them back to the seeded constants.
+    CHECK(std::abs(reconnected - fresh) < 1.0);
+}
