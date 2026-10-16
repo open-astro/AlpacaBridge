@@ -2154,14 +2154,15 @@ private:
         }
     }
 
-    // Moves one axis by `delta_arcsec` (RA: east positive; Dec: north positive) at the guide rate and stops,
-    // restoring tracking after an RA move as a pulse does. Returns false when superseded or cancelled.
+    // Supersedes every in-flight motion and wakes a synchronous landing nudge waiting on `motion_cv_`.
     uint64_t bump_motion_generation() {
         const uint64_t generation = ++motion_generation_;
         motion_cv_.notify_all();
         return generation;
     }
 
+    // Moves one axis by `delta_arcsec` (RA: east positive; Dec: north positive) at the guide rate and stops,
+    // restoring tracking after an RA move as a pulse does. Returns false when superseded or cancelled.
     bool nudge_axis_locked(std::unique_lock<std::mutex>& lock, int axis, double delta_arcsec, uint64_t owner_generation,
                            util::OperationContext* ctx) {
         auto& protocol = SynScanProtocolWrapper::instance();
