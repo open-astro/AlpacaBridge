@@ -801,8 +801,8 @@ TEST_CASE("SynScan GOTO landing - AbortSlew during a refinement pass stops it (#
     const bool returned = aborted.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     CHECK(returned);
     CHECK(clock.now() - abort_started < std::chrono::milliseconds(1500));  // not the move's remaining 4 s
-    if (!returned) {
-        clock.advance(std::chrono::seconds(10));  // release the abort so the thread can join
+    while (aborted.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+        clock.advance(std::chrono::seconds(10));  // release the abort (it may park again) so the thread can join
     }
     aborter.join();
     CHECK_NOTHROW(aborted.get());
