@@ -1,0 +1,2 @@
+### Changed (tooling)
+- **Beta `.deb`s carry build provenance** (CI, `.github/workflows/release.yml`): each beta `.deb` attached to a pre-release now gets a Sigstore-signed SLSA build provenance attestation, so `gh attestation verify <file> --repo open-astro/AlpacaBridge` proves which workflow and commit built it. A release dry run attests nothing. Stable `.deb`s ship through apt.openastro.net and are not covered.

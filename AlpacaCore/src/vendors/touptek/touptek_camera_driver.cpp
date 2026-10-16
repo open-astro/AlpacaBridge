@@ -1094,6 +1094,10 @@ public:
         int active_start_y = 0;
         int active_num_x = 0;
         int active_num_y = 0;
+        // Frame size the SDK will report for that ROI (see below): the worker
+        // treats anything smaller as a malformed frame.
+        int expected_w = 0;
+        int expected_h = 0;
         // Sensor-coordinate ROI actually programmed into the SDK (see below).
         unsigned roi_x = 0;
         unsigned roi_y = 0;
@@ -1148,35 +1152,61 @@ public:
             // and height, and the ROI must fit the sensor. The binned span is
             // (num * bin); for odd bin factors that product can be odd (e.g.
             // 3x3 → 4167), which the SDK rejects — no frame is delivered and
-            // ImageReady never sets. Round the span UP to even so the SDK
-            // floor-bins it back to exactly num output pixels (the +1 pad is
-            // < bin for any bin >= 2), and round the offset DOWN to even. If
-            // padding the span pushes the right/bottom edge past the sensor
-            // (an edge-touching sub-frame where num*bin already reached the
-            // limit), shift the even offset left/up by the overflow instead of
-            // shrinking the span — that keeps the output count at num, so the
-            // pixel buffer sized from active_num_x/y stays correct.
+            // ImageReady never sets. Round the span UP to even and the offset
+            // DOWN to even. If the +1 pad pushes the right/bottom edge past the
+            // sensor, shift the even offset left/up by the overflow (at most
+            // one sensor pixel) instead of shrinking the span. What the SDK
+            // then delivers for the span is worked out below (expected_w/h);
+            // the pixel buffer is sized from that, not from num.
             int span_w = active_num_x * active_bin;
             int span_h = active_num_y * active_bin;
             span_w += (span_w & 1);
             span_h += (span_h & 1);
-            // NB: at bin 1 an odd NumX/NumY makes the SDK ROI one pixel wider/taller
-            // than requested, so got_w/got_h from WaitImageV4 can exceed
-            // active_num_x/active_num_y — this is NOT an off-by-one. We pass
-            // rowPitch = active_num_x * bytes, which is SMALLER than the ROI's
-            // (active_num_x+1)-pixel row, so each row's extra trailing pixel is
-            // written at the start of the next row's stride slot and is then
-            // overwritten by that row's first pixel; columns 0..active_num_x-1 of
-            // every row stay intact. build_image_array reads exactly
-            // active_num_x columns per row at the same stride, and the +2-row
-            // buffer margin absorbs the final row's unreclaimed extra pixel.
-            // Reported NumX/NumY stay = active_num_x/y.
             // Defensive only: with max_w/max_h derived from the even sensor size
             // above, ceil_even(num*bin) <= even_max, so these clamps never fire.
             if (span_w > even_max_w) span_w = even_max_w;
             if (span_h > even_max_h) span_h = even_max_h;
             int roi_x_i = (active_start_x * active_bin) & ~1;
             int roi_y_i = (active_start_y * active_bin) & ~1;
+            // Digital binning ALSO rounds the OUTPUT size down to even
+            // (toupcam.h, TOUPCAM_OPTION_BINNING: "640/3 to get 212"), so an odd
+            // NumX/NumY at bin >= 2 comes back one pixel short of num even though
+            // the sensor span above was even (#977, measured on the SC571CC and
+            // SC715C: span 2002 at bin 2 delivers 1000, not 1001). Where the
+            // sensor has the room, grow the span to the next even OUTPUT size
+            // ((num+1)*bin) at the requested origin: the SDK then delivers
+            // num+1 real pixels and the buffer stride crops the last one (see
+            // the NB below). Where it does not fit (num is the odd maximum of
+            // the axis, e.g. 4168/3 = 1389, or an edge-touching sub-frame), keep
+            // the ungrown span: the SDK delivers num-1 and build_image_array
+            // fills the one missing edge row/column from its neighbour, since
+            // that pixel does not exist on the sensor. The origin is never
+            // moved by a whole binned pixel to make the grown span fit.
+            if (active_bin >= 2 && (active_num_x & 1)) {
+                const int grown = (active_num_x + 1) * active_bin;
+                if (roi_x_i + grown <= even_max_w) span_w = grown;
+            }
+            if (active_bin >= 2 && (active_num_y & 1)) {
+                const int grown = (active_num_y + 1) * active_bin;
+                if (roi_y_i + grown <= even_max_h) span_h = grown;
+            }
+            // NB: at bin 1 an odd NumX/NumY (the +1 even pad), and at bin >= 2 the
+            // grown span, make the SDK frame one pixel wider/taller than
+            // requested, so got_w/got_h from WaitImageV4 can exceed
+            // active_num_x/active_num_y — this is NOT an off-by-one. The worker
+            // lays the frame out at that wider stride and build_image_array reads
+            // the first active_num_x columns of each row (WaitImageV4 rejects a
+            // rowPitch shorter than the delivered row with E_INVALIDARG, measured
+            // on the GPCMOS01200KPF, so the stride can never be the requested
+            // width). Reported NumX/NumY stay = active_num_x/y.
+            // What the SDK will report for this ROI: the even-padded span at bin
+            // 1, floor(span/bin) rounded down to even otherwise. The worker
+            // rejects anything smaller as a malformed frame (#913); a value one
+            // below num is the documented edge fill, never a short frame.
+            expected_w = active_bin >= 2 ? (span_w / active_bin) & ~1 : span_w;
+            expected_h = active_bin >= 2 ? (span_h / active_bin) & ~1 : span_h;
+            // Only the +1 even pad of the ungrown span can push the edge past the
+            // sensor here (the grown span is applied only when it fits).
             if (roi_x_i + span_w > even_max_w) roi_x_i = (even_max_w - span_w) & ~1;
             if (roi_y_i + span_h > even_max_h) roi_y_i = (even_max_h - span_h) & ~1;
             if (roi_x_i < 0) roi_x_i = 0;
@@ -1221,8 +1251,8 @@ public:
 
         const uint64_t abort_generation = abort_generation_.load();
         exposure_thread_ = std::thread([this, handle, abort_generation, exposure_us, active_bin, active_num_x,
-                                        active_num_y, roi_x, roi_y, roi_w, roi_h, dirty_format, dirty_roi,
-                                        active_16bit]() {
+                                        active_num_y, expected_w, expected_h, roi_x, roi_y, roi_w, roi_h, dirty_format,
+                                        dirty_roi, active_16bit]() {
             auto& sdk_local = sdk_;
             // Track which reconfigure stages actually completed, so the catch
             // re-marks ONLY the stage that failed — re-marking an
@@ -1274,32 +1304,29 @@ public:
                 }
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
-                // Buffer is num_x * num_y pixels at the sensor's byte depth
-                // (RAW8 = 1 byte/pixel, >8-bit = 16-bit little-endian; M14);
-                // the even-up ROI floor-bins to exactly that. Add a two-row
-                // margin as crash-insurance in case a model ever delivers one
-                // extra padded row from the rounded ROI span.
+                // Buffer rows are stride_px wide at the sensor's byte depth (RAW8
+                // = 1 byte/pixel, >8-bit = 16-bit little-endian; M14): the frame
+                // the SDK will deliver (expected_w, one wider than num for an odd
+                // NumX) or num_x when the SDK delivers one column fewer (the edge
+                // fill). The row count is the larger of the two the same way,
+                // plus two rows of crash-insurance: the SDK writes got_h rows
+                // before any check here can run.
                 const std::size_t bytes_per_pixel = active_16bit ? 2 : 1;
-                std::vector<std::uint8_t> pixel_buffer(static_cast<std::size_t>(active_num_x) * bytes_per_pixel *
-                                                       static_cast<std::size_t>(active_num_y + 2));
+                const int stride_px = std::max(expected_w, active_num_x);
+                const int buffer_rows = std::max(expected_h, active_num_y) + 2;
+                std::vector<std::uint8_t> pixel_buffer(static_cast<std::size_t>(stride_px) * bytes_per_pixel *
+                                                       static_cast<std::size_t>(buffer_rows));
 
                 unsigned got_w = 0;
                 unsigned got_h = 0;
-                // rowPitch = active_num_x * bytes_per_pixel: this is the SDK
-                // contract for Toupcam_WaitImageV4's nRowPitch arg — the
-                // destination row stride in OUR buffer (not the ROI width). We
-                // deliberately set it to the requested (unpadded) width so the
-                // image is laid out at active_num_x stride regardless of the
-                // even-padded ROI (see the odd-NumX/bin-1 note at the ROI
-                // computation above). got_w/got_h are the SDK's delivered
-                // dimensions and MAY exceed active_num_x/y by one at bin 1;
-                // build_image_array reads exactly active_num_x columns per row
-                // at this same stride. If a future SDK ignores nRowPitch and
-                // packs at got_w, this assumption breaks — revalidate against
-                // the SDK docs.
+                // rowPitch = stride_px * bytes_per_pixel: Toupcam_WaitImageV4's
+                // nRowPitch is the destination row stride in OUR buffer and must
+                // hold a whole delivered row — a pitch shorter than the frame's
+                // row (the requested width against a one-wider frame) is
+                // E_INVALIDARG on hardware. build_image_array reads the first
+                // active_num_x columns of each stride_px-wide row.
                 bool got = sdk_local.wait_image(handle, timeout_ms, pixel_buffer.data(), active_16bit ? 16 : 8,
-                                                static_cast<int>(active_num_x * static_cast<int>(bytes_per_pixel)),
-                                                got_w, got_h);
+                                                stride_px * static_cast<int>(bytes_per_pixel), got_w, got_h);
 
                 if (!got || !exposure_active_.load()) {
                     const char* failure_message = got ? "A frame arrived after the exposure was no longer active"
@@ -1327,11 +1354,29 @@ public:
                     got_h > static_cast<unsigned>(std::numeric_limits<int>::max())) {
                     alpacacore::util::throw_invalid_camera_image("ToupTek frame dimensions exceed supported limits");
                 }
+                // The ROI math in start_exposure predicts the SDK's frame size
+                // exactly (even-padded span, even-rounded binned output). A
+                // frame below that is malformed (#913) and must not be padded
+                // into a plausible image; a frame at it that is still one row or
+                // column short of num is the sensor-edge fill (#977).
+                if (::alpacacore::logging::get_log_level() <= ::alpacacore::logging::LogLevel::Debug) {
+                    ALPACA_LOG_DEBUG("ToupTek", "Frame " + std::to_string(got_w) + "x" + std::to_string(got_h) +
+                                                    " for ROI " + std::to_string(roi_w) + "x" + std::to_string(roi_h) +
+                                                    " at bin " + std::to_string(active_bin) + " (expected " +
+                                                    std::to_string(expected_w) + "x" + std::to_string(expected_h) +
+                                                    ", requested " + std::to_string(active_num_x) + "x" +
+                                                    std::to_string(active_num_y) + ")");
+                }
+                if (got_w < static_cast<unsigned>(expected_w) || got_h < static_cast<unsigned>(expected_h)) {
+                    alpacacore::util::throw_invalid_camera_image(
+                        "ToupTek frame is smaller than the frame the ROI predicts");
+                }
 
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    ImageArray image = build_image_array(pixel_buffer, active_16bit, active_num_x, active_num_y,
-                                                         static_cast<int>(got_w), static_cast<int>(got_h));
+                    ImageArray image =
+                        build_image_array(pixel_buffer, active_16bit, stride_px, active_num_x, active_num_y,
+                                          static_cast<int>(got_w), static_cast<int>(got_h));
                     alpacacore::util::validate_image_array(image);
                     last_image_ = std::move(image);
                     image_cached_ = true;
@@ -1796,39 +1841,55 @@ private:
         roi_dirty_ = true;
     }
 
-    // Buffer holds out_width-stride rows at 1 (RAW8) or 2 (16-bit, little-
-    // endian native) bytes per pixel — the same stride passed as WaitImageV4's
-    // nRowPitch (M14).
-    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int out_width, int out_height,
-                                 int actual_width, int actual_height) const {
+    // Buffer holds stride_px-wide rows at 1 (RAW8) or 2 (16-bit, little-endian
+    // native) bytes per pixel — the same stride passed as WaitImageV4's
+    // nRowPitch (M14); stride_px >= out_width, and the first out_width columns
+    // of each row are the image.
+    ImageArray build_image_array(const std::vector<std::uint8_t>& buffer, bool is_16bit, int stride_px, int out_width,
+                                 int out_height, int actual_width, int actual_height) const {
         ImageArray image;
         image.width = out_width;
         image.height = out_height;
         image.rank = 2;
-        if (out_width <= 0 || out_height <= 0 || actual_width <= 0 || actual_height <= 0) {
+        if (out_width <= 0 || out_height <= 0 || actual_width <= 0 || actual_height <= 0 || stride_px < out_width) {
             alpacacore::util::throw_invalid_camera_image("invalid ToupTek frame dimensions");
         }
-        // start_exposure() even-pads the sensor-space ROI before binning so the
-        // SDK must deliver the requested output dimensions. Unlike QHY's SDK,
-        // ToupTek's smaller positive dimensions violate that ROI contract; do
-        // not synthesize pixels from a frame the SDK reports as truncated.
-        if (actual_width < out_width || actual_height < out_height) {
-            alpacacore::util::throw_invalid_camera_image("ToupTek frame is smaller than the requested ROI");
+        // start_exposure() sizes the sensor-space ROI so the SDK delivers at
+        // least num pixels per axis wherever the sensor has them. The one case
+        // it cannot is an odd num at the sensor edge with bin >= 2: digital
+        // binning rounds its output down to even, and the extra row or column
+        // that would fix it is off the sensor (#977). That frame is exactly one
+        // short; fill the missing edge from its neighbour rather than fail
+        // every full-frame exposure at that bin. Anything shorter than that is
+        // a malformed frame (#913), and the exposure worker has already checked
+        // the frame against the size the ROI math predicted.
+        if (actual_width + 1 < out_width || actual_height + 1 < out_height) {
+            alpacacore::util::throw_invalid_camera_image(
+                "ToupTek frame is more than one pixel smaller than the requested ROI");
         }
+        const int last_col = std::min(actual_width, out_width) - 1;
+        const int last_row = std::min(actual_height, out_height) - 1;
         const std::size_t bpp = is_16bit ? 2 : 1;
         const std::size_t output_pixels = static_cast<std::size_t>(out_width) * static_cast<std::size_t>(out_height);
-        if (output_pixels > buffer.size() / bpp) {
+        const std::size_t stored_pixels = static_cast<std::size_t>(stride_px) * static_cast<std::size_t>(out_height);
+        if (stored_pixels > buffer.size() / bpp) {
             alpacacore::util::throw_invalid_camera_image("ToupTek frame buffer is shorter than its dimensions");
         }
         image.data.resize(output_pixels);
         for (int row = 0; row < out_height; ++row) {
             for (int col = 0; col < out_width; ++col) {
-                std::size_t src_idx = static_cast<std::size_t>(row) *
-                                      static_cast<std::size_t>(out_width) +
-                                      static_cast<std::size_t>(col);
-                std::size_t byte_idx = src_idx * bpp;
+                // Rows are laid out at stride_px (WaitImageV4's nRowPitch); a
+                // delivered width above out_width is cropped by reading only the
+                // first out_width columns, and one below it has only the last
+                // column missing, which reads its neighbour.
+                const std::size_t src_idx =
+                    static_cast<std::size_t>(std::min(row, last_row)) * static_cast<std::size_t>(stride_px) +
+                    static_cast<std::size_t>(std::min(col, last_col));
+                const std::size_t dst_idx =
+                    static_cast<std::size_t>(row) * static_cast<std::size_t>(out_width) + static_cast<std::size_t>(col);
+                const std::size_t byte_idx = src_idx * bpp;
                 if (byte_idx + bpp <= buffer.size()) {
-                    image.data[src_idx] =
+                    image.data[dst_idx] =
                         is_16bit ? static_cast<std::int32_t>(static_cast<std::uint16_t>(buffer[byte_idx]) |
                                                              (static_cast<std::uint16_t>(buffer[byte_idx + 1]) << 8))
                                  : static_cast<std::int32_t>(buffer[byte_idx]);

@@ -8,7 +8,9 @@ Only the release step writes CHANGELOG.md. The format is in
 
   --check                    validate every fragment (CI and pre-flight)
   --preview [--version V]    print the section --release would write (no date)
-  --bump                     print the proposed next version
+  --bump                     print the proposed next version (categories of the
+                             fragments and of a legacy UNRELEASED section; its
+                             heading label is a floor)
   --release V --date D       write the dated section, collapse the previous
                              release, merge a legacy UNRELEASED section, and
                              delete the fragments
@@ -329,15 +331,19 @@ def default_version_floor(changelog: Path) -> str | None:
 
 def propose_bump(lines: list[str], directory: Path, current: str | None = None) -> str:
     base = latest_released(lines)
-    fragment_entries = merge_entries([e for _, e in load_fragments(directory)])
+    legacy = legacy_unreleased(lines)
+    groups = [e for _, e in load_fragments(directory)]
+    if legacy:
+        # Categories of the legacy section body count like a fragment's; its label is a floor below.
+        groups.append(parse_body(lines[legacy[0] + 1 : legacy[1]])[0])
+    entries = merge_entries(groups)
     major, minor, patch = version_tuple(base)
-    if any(c == "Breaking changes" or c.startswith("Breaking changes (") for c in fragment_entries):
+    if any(c == "Breaking changes" or c.startswith("Breaking changes (") for c in entries):
         proposed = (major + 1, 0, 0)
-    elif "Added" in fragment_entries:
+    elif "Added" in entries:
         proposed = (major, minor + 1, 0)
     else:
         proposed = (major, minor, patch + 1)
-    legacy = legacy_unreleased(lines)
     if legacy and BARE_RE.match(legacy[2]):
         proposed = max(proposed, version_tuple(legacy[2]))
     if current:
@@ -502,6 +508,16 @@ def self_test() -> int:
         floor = FIXTURE.replace("[1.2.1] - UNRELEASED", "[1.4.0] - UNRELEASED").split("\n")
         expect(propose_bump(floor, d) == "1.4.0", "legacy label must be a floor")
         (d / "t.md").unlink()
+        low = FIXTURE.replace("### Fixed\n- **Legacy fix**", "### Breaking changes\n- **Legacy break**").split("\n")
+        expect(propose_bump(low, d) == "2.0.0", "legacy-only Breaking changes under a low label must propose major")
+        expect(propose_bump(FIXTURE.replace("### Fixed\n- **Legacy fix**", "### Added\n- **Legacy add**").split("\n"), d)
+               == "1.3.0", "legacy-only Added must propose minor")
+        expect(propose_bump(lines, d) == "1.2.1", "legacy with only Fixed must stay a patch")
+        try:
+            assemble("\n".join(low), d, "1.2.1", "2026-02-03")
+            expect(False, "--release accepted a version below the legacy-only Breaking proposal")
+        except SystemExit as e:
+            expect("below the proposed bump 2.0.0" in str(e), "wrong refusal for legacy-only Breaking: %s" % e)
 
         # release on a fixture: legacy UNRELEASED + two fragments
         _write(d, "b-second.md", "### Fixed\n- **Second fix** (issue #3)\n\n### Security\n- **Sec** (issue #3)\n")

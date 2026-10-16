@@ -118,6 +118,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
 - **Dew Heater / Fan**: Cooled models expose the lens heater and radiator fan two ways — camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`, percent) and the **Player One Thermal Switch** device (see Switch Drivers below) for slider control in clients like NINA. Both are runtime-only by design; no setting persists across connects. Note the fan does not auto-vary with temperature — `CoolerOn` turns cooler + fan on and the fan runs at its set power.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
+- **StopExposure**: not supported (`CanStopExposure = false`); use `AbortExposure`. `POAStopExposure` discards the frame on the camera (checked on the Ceres 462M, issue #1023), so there is no partial image to return. Ceres 462M re-validated with ConformU 4.5.1 on 2026-10-15 with this change: 0 errors, 0 issues, all members within timing targets.
 
 </details>
 
@@ -191,7 +192,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.
 - **Offset**: exposed as ASCOM `Offset` (black level, `TOUPCAM_OPTION_BLACKLEVEL`) on cameras reporting `TOUPCAM_FLAG_BLACKLEVEL`; `OffsetMax` scales with the output bit depth. Cameras without it report `PropertyNotImplemented`.
 - **Dew heater / fan / tail LED**: cooled cameras expose an anti-fog dew heater, radiator fan, and the tail indicator LED through the **ToupTek Thermal Switch** device (see Switch Drivers) — `switchType: thermal`, bound by `cameraIndex`, sharing the camera's SDK handle so it runs alongside the camera. Elements are capability-probed per model.
-- **Binning**: 1×/2×/3×/4×. Odd bin factors need an even sensor-ROI span, which the driver handles by padding the ROI to even (the SDK floor-bins it back to the requested pixel count).
+- **Binning**: 1×/2×/3×/4×. The SDK needs an even sensor-ROI span and rounds the binned output down to an even size, so for an odd NumX/NumY the driver asks for the next even output size and crops; an odd full frame or an odd sub-frame touching the right/bottom edge gets its last row or column filled from its neighbour (issue #977).
 - **FullWellCapacity**: reported as the ADU saturation value; the true electron full well is a sensor-datasheet figure the SDK does not expose (see readout modes above for the ~51 ke⁻ / ~100 ke⁻ IMX571 modes).
 
 </details>
