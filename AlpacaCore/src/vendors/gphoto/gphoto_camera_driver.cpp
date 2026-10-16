@@ -648,7 +648,6 @@ public:
 
     CameraState get_camera_state() const override {
         if (!connected_.load()) return CameraState::Idle;
-        if (exposure_failed_.load()) return CameraState::Error;
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
@@ -813,9 +812,7 @@ public:
     ImageArray get_image_array() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (exposure_failed_.load()) {
-            throw AlpacaException("Exposure failed: " + exposure_error_, AlpacaError::DriverException);
-        }
+        throw_if_exposure_failed_locked();
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
             throw AlpacaException::asked_too_early("Image not ready");
         }
@@ -827,6 +824,7 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_exposure_failed_locked();
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
@@ -1008,7 +1006,7 @@ public:
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
-            exposure_failed_.store(false);
+            exposure_failed_ = false;
             exposure_error_.clear();
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
@@ -1051,7 +1049,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
-        exposure_failed_.store(false);
+        exposure_failed_ = false;
         exposure_error_.clear();
         exposure_deadline_valid_ = false;
     }
@@ -1117,9 +1115,9 @@ private:
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
-    // Latched when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
-    // disconnect. exposure_error_ is guarded by mutex_.
-    std::atomic<bool> exposure_failed_{false};
+    // Set when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
+    // disconnect. Both guarded by mutex_.
+    bool exposure_failed_{false};
     std::string exposure_error_;
     std::atomic<bool> abort_requested_{false};
     std::thread exposure_thread_;
@@ -1175,7 +1173,7 @@ private:
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
-        exposure_failed_.store(false);
+        exposure_failed_ = false;
         exposure_error_.clear();
         abort_requested_.store(false);
     }
@@ -1394,7 +1392,16 @@ private:
                                                                  decoded.bayer_offset_y, decoded.max_adu});
     }
 
-    // Latch the failure so CameraState reads Error and ImageArray says why. A camera that left the USB bus
+    // Requires mutex_ held. A failed exposure is reported by ImageReady and ImageArray while CameraState stays
+    // Idle, so the next StartExposure can run: a sticky Error poisoned every later operation on the ZWO driver,
+    // which reports a failure the same way (issue #1204).
+    void throw_if_exposure_failed_locked() const {
+        if (exposure_failed_) {
+            throw AlpacaException("Exposure failed: " + exposure_error_, AlpacaError::DriverException);
+        }
+    }
+
+    // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
     // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
     // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
     // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
@@ -1402,7 +1409,7 @@ private:
         if (abort_requested_.load()) return;
         std::lock_guard<std::mutex> lock(mutex_);
         exposure_error_ = what;
-        exposure_failed_.store(true);
+        exposure_failed_ = true;
         if (!device_gone || handle_ != handle) return;
         handle_ = -1;
         connected_.store(false);
