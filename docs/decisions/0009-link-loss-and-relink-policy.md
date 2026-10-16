@@ -49,7 +49,8 @@ Revert the PR. The bound is one constant, so "never lost by silence" is a one-li
 | iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | planned follow-up |
 | QHY Q-Focuser | `link_lost_` latch on the next transaction (#527) | planned follow-up |
 | SynScan, Celestron, OnStep, Bisque | No latch; transport errors only | planned follow-up |
-| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One, Astroasis, GPhoto) | SDK error on the next call | planned follow-up |
+| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One, Astroasis) | SDK error on the next call | planned follow-up |
+| GPhoto camera | A failed exposure is reported by `ImageReady`/`ImageArray` (`CameraState` stays Idle); a camera gone from the USB bus mid-exposure reports `Connected` false; no automatic reopen (#1064, #1204) | planned follow-up |
 | WeeWX | HTTP fetch staleness | planned follow-up |
 
 Drivers adopt this record in their own later changes; the telescope state-snapshot slices apply point 3 when they land.
