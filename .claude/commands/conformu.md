@@ -178,12 +178,12 @@ ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MI
 gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 ```
 
-(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0, which step 2g replaces regardless of whether the upstream lookup succeeded.)
+(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0 or 4.5.1, which step 2g replaces regardless of whether the upstream lookup succeeded.)
 
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
 **Read this before running any install command.** On arm64 -- which is every rig this project
-supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 counts as outdated no matter what
+supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
 `releases/latest` says**, and `releases/latest` itself is *not* the place to install from today.
 
 The official `conformu.linux-arm64.tar.xz` 4.5.0 asset was published without `PublishReadyToRun`, so
@@ -192,22 +192,40 @@ returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESP
 matter whose driver answers (Camera: `CameraState`, `CameraXSize`, `SensorType`; Telescope:
 `AlignmentMode`, `EquatorialSystem`, `SideOfPier`). That is a ConformU bug, not a driver regression
 ([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)), and a warm re-run only hides
-it. 4.5.1 fixes it but is not a GitHub release yet, so `releases/latest` still resolves to the broken
-4.5.0.
+it. 4.5.1 fixed it, and the current standard is **4.5.2-rc.1**, which also keeps the Telescope
+PulseGuide test declinations within ±65° so a mount that reports refracted coordinates no longer
+fails it near the pole ([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)).
+Neither is a GitHub release yet, so `releases/latest` still resolves to the broken 4.5.0.
 
-So, while that remains true, if the installed version is MISSING, outdated, **or 4.5.0**, install the
-maintainer's fixed 4.5.1 beta (no confirmation needed -- this is part of the standard rig setup):
+So, while that remains true, if the installed version is MISSING, outdated, **4.5.0 or 4.5.1**,
+install the standard build from the project's mirror (no confirmation needed -- this is part of the
+standard rig setup). The install stops before unpacking if the checksum does not match:
 
 ```bash
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.xz 'https://github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-4.5.2-rc.1/conformu.linux-arm64.tar.xz' && echo '01446893eaf054c956e29591e681674c2c126af76fa1fed0abe13b6323825014  cu.tar.xz' | sha256sum -c - && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-That URL is unpinned and unsigned: the same name can serve a different build later. Check the version
-line it prints against the build the current reports were produced with, `4.5.1.54507, Build time:
-Thu 27 August 2026 11:40:17` -- a different build is not automatically wrong, but note it in the log
-and say so in the PR rather than labelling the run "4.5.1" and moving on.
+The printed version line must start `4.5.2.56111, Build time:` (4.5.2-rc.1). Reports made with
+`4.5.1.54507` stay valid: 4.5.2-rc.1 changes only the Telescope PulseGuide target selection.
 
-**Once 4.5.1 or later is a real GitHub release, delete everything above from "Read this before" and
+**Why a mirror.** The maintainer's beta download,
+`https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz`, carries no version in its
+name, and each new beta replaces the file: 4.5.1.54507 is no longer downloadable there. The
+`tools/conformu-<version>` pre-releases on open-astro/AlpacaBridge keep each build the project
+adopted, with its sha256 and the upstream commit it was built from (ConformU is GPL-3.0, so the
+release notes name the corresponding source). Never install from the ASCOM beta URL for a run;
+a `conformu-beta-build` dependency-update issue says a newer beta is there.
+
+**Adopting a newer beta** (a maintainer decision, as in open-astro/AlpacaBridge#1244): download it
+from the beta URL while it is current, read its version, and check it on one camera and one
+telescope run. Then publish it as a new pre-release, `tools/conformu-<version>`, with the tarball,
+its `.sha256`, the upstream commit and a GPL source note, created with `--prerelease --latest=false`
+so the repository's Latest release does not change. Then update the URL, the sha256 and the build
+line above, the `conformu-beta-build` baseline in `scripts/dependency_sdk_versions.json`, and the
+version AGENTS.md names. Old `tools/` releases stay, so an older report can be re-run with its
+build.
+
+**Once 4.5.2 or later is a real GitHub release, delete everything above from "Read this before" and
 go back to the ordinary release asset**, which is the only correct path at that point:
 
 ```bash

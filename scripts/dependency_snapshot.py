@@ -69,11 +69,13 @@ WORKFLOW_TOOL_STEPS = {".github/workflows/osv-scan.yml": (("Install OSV-Scanner"
 # Unpinned tools ci.yml installs from the runner's apt (Ubuntu 24.04, not trixie).
 CI_APT_TOOLS = ("catch2", "clang-format", "clang-tidy", "gcovr", "nodejs", "shellcheck")
 CI_APT_QUALIFIERS = "arch=arm64&distro=ubuntu-24.04"
-# ConformU validates every driver on the rig; no workflow installs it. /conformu installs the
-# maintainer's 4.5.1 beta (no GitHub release yet) and names the build it must match.
+# ConformU validates every driver on the rig; no workflow installs it. /conformu installs a
+# maintainer beta (no GitHub release yet) from the project's tools/ mirror and names the build
+# it must match.
 CONFORMU_DOC = ".claude/commands/conformu.md"
 CONFORMU_BUILD_RE = re.compile(r"`(\d+\.\d+\.\d+)\.\d+, Build time:")
 CONFORMU_BETA_URL = "download.ascom-standards.org/beta/"
+CONFORMU_MIRROR_URL = "github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-"
 DETECTOR = {"name": "alpacabridge-dependency-snapshot", "version": "1",
             "url": "https://github.com/open-astro/AlpacaBridge/blob/main/scripts/dependency_snapshot.py"}
 # Packages the installed daemon needs that debian/control's Depends does not name, each with the
@@ -211,13 +213,14 @@ def parse_conformu(text: str) -> tuple[list[str], list[str]]:
     """Return (purls, errors) for the ConformU build /conformu pins.
 
     The version carries ``-beta`` only while the doc installs from the ASCOM beta download
-    (``CONFORMU_BETA_URL``); a pin on a GitHub release reports the bare version.
+    (``CONFORMU_BETA_URL``) or the project's mirror of one (``CONFORMU_MIRROR_URL``); a pin on
+    a GitHub release reports the bare version.
     """
     m = CONFORMU_BUILD_RE.search(text)
     if not m:
         return [], [f"{CONFORMU_DOC}: no pinned ConformU build ('`X.Y.Z.N, Build time:`') found: "
                     "if ConformU is now a GitHub release, update parse_conformu in scripts/dependency_snapshot.py"]
-    suffix = "-beta" if CONFORMU_BETA_URL in text else ""
+    suffix = "-beta" if CONFORMU_BETA_URL in text or CONFORMU_MIRROR_URL in text else ""
     return [f"pkg:github/ASCOMInitiative/ConformU@{m.group(1)}{suffix}"], []
 
 
@@ -779,6 +782,11 @@ def self_test() -> int:
     # Pinned to a GitHub release (no beta download URL): the bare version, no -beta.
     released = cu_doc.replace("download.ascom-standards.org/beta/", "github.com/ASCOMInitiative/ConformU/")
     assert parse_conformu(released) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1"], [])
+    # Installed from the project's tools/ mirror of a beta, with the ASCOM beta URL named
+    # nowhere in the doc: still a beta, not a GitHub release.
+    mirrored = cu_doc.replace("download.ascom-standards.org/beta/",
+                              "github.com/open-astro/AlpacaBridge/releases/download/tools/conformu-4.5.2-rc.1/")
+    assert parse_conformu(mirrored) == (["pkg:github/ASCOMInitiative/ConformU@4.5.1-beta"], [])
     cu, errs = parse_conformu("go back to the ordinary release asset\n")
     assert cu == [] and len(errs) == 1 and CONFORMU_DOC in errs[0], errs
     wf = ("jobs:\n  a:\n    container: debian:trixie\n  b:\n    container: debian:trixie  # dup\n"

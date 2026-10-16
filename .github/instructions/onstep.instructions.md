@@ -180,8 +180,9 @@ it is never reachable through `router.cpp` or the web UI.
     fell to the noise level at 100 hPa, and the raw RA axis angle (`:GX42#`) moved only at the
     sidereal rate. The sign flips between North and South and between HA −9 and +9; HA ±3 is
     clean. Upstream: ASCOMInitiative/ConformU#35 (allow for refraction when `DoesRefraction` is
-    true, #1216). Until that lands, a run on such a mount shows these 4 issues; note them in the
-    saved report instead of changing the tolerance.
+    true, #1216). The maintainer fixed it in ConformU 4.5.2-rc.1 (build 56111) by keeping the test
+    declinations within ±65°. A run with an older build still shows these 4 issues; note them in
+    the saved report instead of changing the tolerance.
   - *Other residuals* (East/West at the 0.07″ boundary): treated as hardware noise after (1) an
     A/B test with refraction rate compensation (`:Tr#`/`:Tn#`) on vs. off, no correlation; (2) mount
     unloaded vs. loaded, no difference; (3) testing far from the pole was blocked by ConformU's own
