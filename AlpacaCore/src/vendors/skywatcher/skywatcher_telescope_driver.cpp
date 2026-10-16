@@ -4482,9 +4482,15 @@ private:
     // A Tracking=false whose stop-wait threw left tracking_ true. Once a poll
     // measured after that throw shows the RA axis stopped, the stop did land:
     // Tracking must not read true for a stopped axis. Served from the polled
-    // frame, never the board (decision 0010).
+    // frame, never the board (decision 0010). Only while that stop still owns
+    // RA: a newer motion command (generation bump) or a pulse, slew or
+    // tracking restore holding RA stopped took the axis over, and settling
+    // then would end the limit guard while a slew is set to restore tracking.
     void settle_unconfirmed_tracking_stop_locked() const {
         if (!tracking_stop_unconfirmed_ || !tracking_) {
+            return;
+        }
+        if (motion_generation_ != tracking_stop_unconfirmed_gen_ || axis_busy_locked(kAxisRa) || restoring_tracking_) {
             return;
         }
         const auto reading = snapshot_.read();
@@ -4492,6 +4498,7 @@ private:
             !reading->value.ra_running) {
             tracking_ = false;
             tracking_stop_unconfirmed_ = false;
+            restore_tracking_after_slew_ = false;  // no restore without tracking_ (restore_tracking_after_slew_locked)
         }
     }
 
@@ -4525,6 +4532,7 @@ private:
                 // poll taken after this point sees RA stopped.
                 tracking_stop_unconfirmed_ = true;
                 tracking_stop_unconfirmed_since_ = clock_.now();
+                tracking_stop_unconfirmed_gen_ = gen;
                 throw;
             }
             if (!stopped) {
@@ -6029,6 +6037,7 @@ private:
     mutable bool tracking_ = false;
     mutable bool tracking_stop_unconfirmed_ = false;
     mutable std::chrono::steady_clock::time_point tracking_stop_unconfirmed_since_{};
+    uint64_t tracking_stop_unconfirmed_gen_ = 0;  // motion_generation_ of that stop
     // Number of Tracking=false stop-waits in flight (under mutex_), while
     // tracking_ still reads true. A counter, not a flag: a second setter can
     // enter the wait while the first is in its unlocked poll, and the first
@@ -6040,7 +6049,7 @@ private:
     int tracking_off_pending_ = 0;
     // Caller holds mutex_.
     bool tracking_effectively_on_locked() const { return tracking_ && tracking_off_pending_ == 0; }
-    bool restore_tracking_after_slew_ = false;
+    mutable bool restore_tracking_after_slew_ = false;  // mutable: get_tracking() settle clears it
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool slewing_cached_ = false;
