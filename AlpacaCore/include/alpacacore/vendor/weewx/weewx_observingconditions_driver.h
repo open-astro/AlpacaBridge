@@ -13,7 +13,9 @@
 #pragma once
 
 #include <alpacacore/observingconditions_driver.h>
+
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,6 +40,14 @@ struct WeeWxCurrentValues {
 };
 
 /**
+ * @brief Fetches the WeeWX JSON feed body for `url`, throwing on failure.
+ *
+ * Production uses the libcurl implementation; tests inject a scripted one.
+ * It runs on the connect thread and the poll thread, so it must be thread-safe.
+ */
+using WeeWxFetcher = std::function<std::string(const std::string& url, std::chrono::milliseconds timeout)>;
+
+/**
  * @brief Parse the WeeWX current JSON payload into Alpaca ObservingConditions units.
  *
  * This parser is intentionally tolerant of invalid JSON outside the current block.
@@ -55,5 +65,14 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload);
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
     int device_number,
     const WeeWxHttpConfig& config);
+
+/**
+ * @brief As above, but fetching the feed through `fetcher` instead of libcurl.
+ *
+ * A test seam: the production overload delegates here with the libcurl fetch.
+ */
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            WeeWxFetcher fetcher);
 
 } // namespace alpacacore::vendor::weewx

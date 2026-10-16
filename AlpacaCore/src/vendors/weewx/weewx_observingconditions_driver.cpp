@@ -299,14 +299,18 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config)
+    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, WeeWxFetcher fetcher)
         : AsyncConnectable(kDriverComponent),
           device_number_(device_number),
           config_(std::move(config)),
+          fetcher_(std::move(fetcher)),
           connected_(false),
           poll_running_(false) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
+        }
+        if (!fetcher_) {
+            throw AlpacaException("WeeWX fetcher is required", AlpacaError::InvalidValue);
         }
     }
 
@@ -594,7 +598,7 @@ private:
     }
 
     SensorSnapshot fetch_snapshot() const {
-        std::string payload = http_get(config_.url, config_.timeout);
+        std::string payload = fetcher_(config_.url, config_.timeout);
         return parse_snapshot(payload);
     }
 
@@ -646,6 +650,7 @@ private:
 
     int device_number_;
     WeeWxHttpConfig config_;
+    WeeWxFetcher fetcher_;
 
     std::atomic<bool> connected_;
 
@@ -684,7 +689,13 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload) 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
     int device_number,
     const WeeWxHttpConfig& config) {
-    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config);
+    return create_weewx_observingconditions(device_number, config, http_get);
+}
+
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            WeeWxFetcher fetcher) {
+    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(fetcher));
 }
 
 } // namespace alpacacore::vendor::weewx
