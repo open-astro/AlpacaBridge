@@ -83,6 +83,18 @@ inline const Field<double> kSkyWatcherMeridianLimitMinutes{
 // the API and drops it from a saved config, where it reads as "auto".
 inline const Field<std::string> kSkyWatcherDecAxisSense{.key = "decAxisSense", .default_value = "auto"};
 
+// #437: goto backlash compensation, per axis, in the board's microsteps. Off and
+// 0 by default, so a saved config without these keys behaves as before. The
+// ceiling is far above any real backlash (a full worm turn is ~70k on an EQM-35
+// Pro) and keeps a typo from commanding a multi-revolution move.
+inline constexpr std::int64_t kSkyWatcherBacklashStepsMax = 100000;
+inline const Field<std::int64_t> kSkyWatcherBacklashStepsRa{
+    .key = "backlashStepsRA", .default_value = 0, .min = 0, .max = kSkyWatcherBacklashStepsMax};
+inline const Field<std::int64_t> kSkyWatcherBacklashStepsDec{
+    .key = "backlashStepsDec", .default_value = 0, .min = 0, .max = kSkyWatcherBacklashStepsMax};
+inline const Field<bool> kSkyWatcherBacklashEnabledRa{.key = "backlashEnabledRA", .default_value = false};
+inline const Field<bool> kSkyWatcherBacklashEnabledDec{.key = "backlashEnabledDec", .default_value = false};
+
 inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
     static const std::vector<FieldRef> fields{kSkyWatcherConnectionType.ref(),
                                               kSkyWatcherMountIndex.ref(),
@@ -98,7 +110,11 @@ inline const std::vector<FieldRef>& skywatcher_telescope_fields() {
                                               kSkyWatcherFocalLength.ref(),
                                               kSkyWatcherMinAltitudeDeg.ref(),
                                               kSkyWatcherMeridianLimitMinutes.ref(),
-                                              kSkyWatcherDecAxisSense.ref()};
+                                              kSkyWatcherDecAxisSense.ref(),
+                                              kSkyWatcherBacklashStepsRa.ref(),
+                                              kSkyWatcherBacklashEnabledRa.ref(),
+                                              kSkyWatcherBacklashStepsDec.ref(),
+                                              kSkyWatcherBacklashEnabledDec.ref()};
     return fields;
 }
 

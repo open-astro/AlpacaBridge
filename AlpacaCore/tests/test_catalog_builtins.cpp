@@ -856,7 +856,11 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
                                                       "focalLength",
                                                       "minAltitudeDeg",
                                                       "meridianLimitMinutes",
-                                                      "decAxisSense"};
+                                                      "decAxisSense",
+                                                      "backlashStepsRA",
+                                                      "backlashEnabledRA",
+                                                      "backlashStepsDec",
+                                                      "backlashEnabledDec"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -887,6 +891,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
         {"minAltitudeDeg", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -90.0, 90.0},
         {"meridianLimitMinutes", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, 0.0, 360.0},
         {"decAxisSense", FieldRef::Kind::String, Role::Plain, std::nullopt, std::string{"auto"}, {}, {}},
+        {"backlashStepsRA", FieldRef::Kind::Int, Role::Plain, std::nullopt, std::int64_t{0}, 0.0, 100000.0},
+        {"backlashEnabledRA", FieldRef::Kind::Bool, Role::Plain, std::nullopt, false, {}, {}},
+        {"backlashStepsDec", FieldRef::Kind::Int, Role::Plain, std::nullopt, std::int64_t{0}, 0.0, 100000.0},
+        {"backlashEnabledDec", FieldRef::Kind::Bool, Role::Plain, std::nullopt, false, {}, {}},
     };
     for (const Expect& e : expectations) {
         INFO(e.key);

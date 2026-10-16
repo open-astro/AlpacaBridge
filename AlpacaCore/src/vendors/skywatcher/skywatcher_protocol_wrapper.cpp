@@ -1986,6 +1986,8 @@ AxisParameters SkyWatcherProtocolWrapper::get_axis_parameters(int axis) {
     return params;
 }
 
+uint32_t SkyWatcherProtocolWrapper::get_steps_per_worm(int axis) { return decode_u24(send_command('s', axis)); }
+
 uint32_t SkyWatcherProtocolWrapper::inquire_position(int axis) { return decode_u24(send_command('j', axis)); }
 
 AxisStatus SkyWatcherProtocolWrapper::inquire_status(int axis) {

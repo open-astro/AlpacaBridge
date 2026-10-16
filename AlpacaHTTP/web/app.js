@@ -928,6 +928,11 @@ function startEditDevice(device) {
         setFormValue('skywatcher-meridian-limit', config.meridianLimitMinutes ?? '');
         // open-astro#582: absent = auto.
         setFormValue('skywatcher-dec-axis-sense', config.decAxisSense || 'auto');
+        // open-astro#437: absent = 0 steps, off.
+        setFormValue('skywatcher-backlash-steps-ra', config.backlashStepsRA ?? 0);
+        setFormValue('skywatcher-backlash-steps-dec', config.backlashStepsDec ?? 0);
+        document.getElementById('skywatcher-backlash-enabled-ra').checked = config.backlashEnabledRA === true;
+        document.getElementById('skywatcher-backlash-enabled-dec').checked = config.backlashEnabledDec === true;
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             skywatcherLearnSite.checked = config.learnSiteFromClient !== false;
@@ -4032,6 +4037,11 @@ document.getElementById('device-form').addEventListener('submit', async function
         deviceData.minAltitudeDeg = readOptionalNumber(formData, 'skywatcherMinAltitudeDeg');
         deviceData.meridianLimitMinutes = readOptionalNumber(formData, 'skywatcherMeridianLimitMinutes');
         deviceData.decAxisSense = formData.get('skywatcherDecAxisSense') || 'auto';  // open-astro#582
+        // open-astro#437: whole microsteps, 0 when blank; a checkbox is absent from FormData when unticked.
+        deviceData.backlashStepsRA = Math.max(0, parseInt(formData.get('skywatcherBacklashStepsRA'), 10) || 0);
+        deviceData.backlashStepsDec = Math.max(0, parseInt(formData.get('skywatcherBacklashStepsDec'), 10) || 0);
+        deviceData.backlashEnabledRA = formData.has('skywatcherBacklashEnabledRA');
+        deviceData.backlashEnabledDec = formData.has('skywatcherBacklashEnabledDec');
         const skywatcherLearnSite = document.getElementById('skywatcher-learn-site-from-client');
         if (skywatcherLearnSite) {
             deviceData.learnSiteFromClient = skywatcherLearnSite.checked;  // open-astro#444

@@ -110,6 +110,8 @@ if(TARGET alpacacore_skywatcher)
     # Altitude floor / meridian limit: goto target check over the fake mount
     # (open-astro#436).
     list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
+    # Goto backlash compensation over the fake mount (open-astro#437).
+    list(APPEND TEST_SOURCES test_skywatcher_backlash.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).

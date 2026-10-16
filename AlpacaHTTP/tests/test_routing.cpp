@@ -3905,6 +3905,50 @@ int main() {
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
     }
     {
+        // case: skywatcher backlash config round trip
+        // open-astro#437: the four backlash keys survive the sanitize round-trip
+        // (Required Test Case 9), default to 0/off when absent, and the API
+        // refuses a step count outside 0..100000.
+        const nlohmann::json base{
+            {"vendor", "skywatcher"},     {"deviceType", "telescope"}, {"connectionType", "network"},
+            {"host", "192.0.2.10"},       {"udpPort", 11880},          {"siteLatitude", -33.856784},
+            {"siteLongitude", 151.215297}};
+        auto with = [&](int number, const nlohmann::json& extra) {
+            nlohmann::json body = base;
+            body["deviceNumber"] = number;
+            body.update(extra);
+            return body;
+        };
+        const auto cfg = roundtrip_config(router,
+                                          with(9670, {{"backlashStepsRA", 120},
+                                                      {"backlashEnabledRA", true},
+                                                      {"backlashStepsDec", 100000},
+                                                      {"backlashEnabledDec", false}}),
+                                          "Telescope", 9670);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("backlashStepsRA", -1) == 120);
+        EXPECT(cfg.value("backlashEnabledRA", false) == true);
+        EXPECT(cfg.value("backlashStepsDec", -1) == 100000);
+        EXPECT(cfg.value("backlashEnabledDec", true) == false);
+        remove_device(router, "skywatcher", "telescope", 9670);
+
+        const auto absent = roundtrip_config(router, with(9671, nlohmann::json::object()), "Telescope", 9671);
+        EXPECT(absent.is_object() && !absent.empty());
+        // Absent stays absent (or reads as the default): nothing is invented for a saved config.
+        EXPECT(absent.value("backlashStepsRA", 0) == 0);
+        EXPECT(absent.value("backlashEnabledRA", false) == false);
+        EXPECT(absent.value("backlashStepsDec", 0) == 0);
+        EXPECT(absent.value("backlashEnabledDec", false) == false);
+        remove_device(router, "skywatcher", "telescope", 9671);
+
+        for (const int bad : {-1, 100001}) {
+            const auto response = route_request(router, "POST", "/management/v1/configuredevice",
+                                                with(9672, {{"backlashStepsDec", bad}}).dump());
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+        }
+    }
+    {
         // issue #274: configuredevice is a first-class REST API independent of
         // the web UI, and used to accept a skywatcher config with no
         // coordinates at all. Both would then collapse to 0.0 in the driver,

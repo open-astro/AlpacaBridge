@@ -189,6 +189,9 @@ public:
     std::string get_motor_board_version();         // ":e" axis 1 (firmware only)
     MotorBoardInfo get_motor_board_info();         // ":e" axis 1, decoded
     AxisParameters get_axis_parameters(int axis);  // ":a"/":b"/":g"
+    // ":s" (microsteps per worm revolution). Throws on a board that rejects the
+    // inquiry; a board may also answer 0 (EQ-AL55i), which callers read as unknown.
+    uint32_t get_steps_per_worm(int axis);
     uint32_t inquire_position(int axis);           // ":j" (24-bit counts)
     AxisStatus inquire_status(int axis);           // ":f"
 

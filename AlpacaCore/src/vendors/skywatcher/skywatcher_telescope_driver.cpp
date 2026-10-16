@@ -317,7 +317,8 @@ public:
                               util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
                               util::MotionLimits motion_limits = {},
                               util::TaskClock& clock = util::default_task_clock(),
-                              DecAxisSenseSetting dec_axis_sense_setting = DecAxisSenseSetting::Auto)
+                              DecAxisSenseSetting dec_axis_sense_setting = DecAxisSenseSetting::Auto,
+                              BacklashSettings backlash = {})
         : AsyncConnectable("SkyWatcher"),
           device_number_(device_number),
           connection_info_(connection_info),
@@ -333,7 +334,8 @@ public:
           // only the optionals know, and only here.
           site_latitude_set_(site_latitude_deg.has_value()),
           site_longitude_set_(site_longitude_deg.has_value()),
-          dec_axis_sense_setting_(dec_axis_sense_setting) {
+          dec_axis_sense_setting_(dec_axis_sense_setting),
+          backlash_(backlash) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
         // Decision 0009: the staleness bound and link-lost stamp run on the
@@ -607,6 +609,7 @@ public:
             try {
                 axis_params_[0] = protocol.get_axis_parameters(kAxisRa);
                 axis_params_[1] = protocol.get_axis_parameters(kAxisDec);
+                read_backlash_rates_locked(protocol);
 
                 // Feature inquiry (":q" data 0x000001): bit 0x04 = home index
                 // sensor. Wave 100i reports it on both axes (0x100C); older
@@ -4132,6 +4135,9 @@ private:
         // the southern reversal back where the sky frame is built.)
         const double rate = signed_rate_deg_per_sec;
         protocol.set_motion_mode(channel, fast ? '3' : '1', direction_char(rate));
+        if (rate != 0.0) {
+            last_direction_[channel - 1] = rate > 0.0 ? 1 : -1;  // #437: state only, no take-up here
+        }
         protocol.set_step_period(channel, step_period_for_locked(channel, rate, fast));
         protocol.start_motion(channel);
         if (anchor_model) {
@@ -4555,8 +4561,117 @@ private:
         invalidate_position_cache_locked();
     }
 
-    void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg,
-                              double target_dec_axis_deg) {
+    // open-astro#437: ":s" is read once at connect, and only for an axis that
+    // asked for compensation, so a config without backlash sends the same
+    // connect stream as before. A board that rejects ":s" (Wave 100i) or
+    // answers 0 (EQ-AL55i) gives no worm count to derive a speed from: that axis
+    // stays uncompensated, loudly.
+    void read_backlash_rates_locked(SkyWatcherProtocolWrapper& protocol) {
+        backlash_rate_deg_s_[0] = backlash_rate_deg_s_[1] = 0.0;
+        last_direction_[0] = last_direction_[1] = 0;
+        const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
+        for (int channel = kAxisRa; channel <= kAxisDec; ++channel) {
+            if (!cfg[channel - 1]->active()) {
+                continue;
+            }
+            uint32_t worm = 0;
+            try {
+                worm = protocol.get_steps_per_worm(channel);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+                // Rejected: handled with the zero case below.
+            }
+            if (worm == 0) {
+                ALPACA_LOG_WARN("SkyWatcher", std::string("Backlash compensation on the ") +
+                                                  (channel == kAxisRa ? "RA" : "Dec") +
+                                                  " axis is off: the board reports no worm step count (':s'), so "
+                                                  "there is no speed to derive (open-astro#437)");
+                continue;
+            }
+            // INDI's way: the speed follows the worm. A sixteenth of a worm turn
+            // per second, held under the slow-mode ceiling so the take-up is a
+            // plain slow GOTO.
+            const double deg_per_s = 360.0 * kBacklashWormTurnsPerSecond * worm /
+                                     static_cast<double>(axis_params_[channel - 1].counts_per_revolution);
+            backlash_rate_deg_s_[channel - 1] = std::min(deg_per_s, kFastModeThresholdDegPerSec);
+        }
+    }
+
+    static constexpr double kBacklashWormTurnsPerSecond = 1.0 / 16.0;
+
+    // Take the slack out of every axis whose goto reverses its last direction
+    // (open-astro#437), BEFORE the real move. The take-up is `steps` counts in
+    // the new direction at the derived speed; the board's position register
+    // is then put back on the count it held before (":E"), because the output
+    // shaft did not move during the take-up. The real absolute ":S" goto that
+    // follows is therefore the same command it would have been without
+    // compensation, and the register lands on the target.
+    // Returns false when the wait was superseded (the caller aborts).
+    [[nodiscard]] bool take_up_backlash_locked(std::unique_lock<std::mutex>& lock, uint64_t gen,
+                                               const double (&delta_deg)[2]) {
+        auto& protocol = *protocol_;
+        const BacklashSettings::Axis* cfg[2] = {&backlash_.ra, &backlash_.dec};
+        bool active[2] = {false, false};
+        uint32_t origin[2] = {0, 0};
+        double longest_s = 0.0;
+        for (int i = 0; i < 2; ++i) {
+            const int channel = i + 1;
+            const double counts = std::abs(delta_deg[i]) * axis_params_[i].counts_per_revolution / 360.0;
+            if (!cfg[i]->active() || backlash_rate_deg_s_[i] <= 0.0 || counts < 0.5) {
+                continue;  // off, no speed, or no move (rounds to 0 counts: not a reversal)
+            }
+            const int dir = delta_deg[i] > 0.0 ? 1 : -1;
+            if (last_direction_[i] == 0 || last_direction_[i] == dir) {
+                continue;
+            }
+            origin[i] = protocol.inquire_position(channel);
+            const uint32_t target = dir > 0 ? origin[i] + cfg[i]->steps : origin[i] - cfg[i]->steps;
+            // '2' = slow GOTO: the controller ramps, and ":I" is the step period.
+            protocol.set_motion_mode(channel, '2', direction_char(delta_deg[i]));
+            protocol.set_step_period(channel, step_period_for_locked(channel, backlash_rate_deg_s_[i], false));
+            protocol.set_goto_target(channel, target & kCountsMask);
+            protocol.start_motion(channel);
+            active[i] = true;
+            const double rate_cps = backlash_rate_deg_s_[i] * axis_params_[i].counts_per_revolution / 360.0;
+            longest_s = std::max(longest_s, cfg[i]->steps / rate_cps);
+        }
+        if (!active[0] && !active[1]) {
+            return true;
+        }
+        const auto deadline = clock_.now() + std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::duration<double>(longest_s) + kAxisStopTimeout);
+        for (int i = 0; i < 2; ++i) {
+            while (active[i]) {
+                if (motion_generation_ != gen) {
+                    return false;
+                }
+                if (!protocol.inquire_status(i + 1).running) {
+                    break;
+                }
+                if (clock_.now() >= deadline) {
+                    throw AlpacaException("Timed out waiting for the backlash take-up on axis " +
+                                          std::to_string(i + 1));
+                }
+                lock.unlock();
+                clock_.sleep_for(std::chrono::milliseconds(50));
+                lock.lock();
+                check_connected();
+            }
+        }
+        if (motion_generation_ != gen) {
+            return false;
+        }
+        for (int i = 0; i < 2; ++i) {
+            if (active[i]) {
+                protocol.set_position(i + 1, origin[i]);
+            }
+        }
+        return true;
+    }
+
+    // `compensate_backlash` is false for the AutoHome hunt, whose moves read
+    // the home index against the count frame and must not re-base it.
+    void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg, double target_dec_axis_deg,
+                              bool compensate_backlash = true) {
         auto& protocol = *protocol_;
         const uint64_t gen = ++motion_generation_;
         cmd_axis_rate_deg_s_[0] = 0.0;
@@ -4586,8 +4701,20 @@ private:
             {kAxisRa, cached_ra_axis_deg_, target_ra_axis_deg},
             {kAxisDec, cached_dec_axis_deg_, target_dec_axis_deg},
         };
+        if (compensate_backlash && backlash_.any_active()) {
+            const double deltas[2] = {plans[0].target_deg - plans[0].current_deg,
+                                      plans[1].target_deg - plans[1].current_deg};
+            if (!take_up_backlash_locked(lock, gen, deltas)) {
+                throw AlpacaException("Slew superseded before dispatch");
+            }
+        }
         for (const auto& plan : plans) {
             double delta = plan.target_deg - plan.current_deg;
+            if (std::abs(delta) * axis_params_[static_cast<std::size_t>(plan.channel - 1)].counts_per_revolution /
+                    360.0 >=
+                0.5) {
+                last_direction_[plan.channel - 1] = delta > 0.0 ? 1 : -1;
+            }
             // Motion mode '0' = fast GOTO (the controller manages ramp and the
             // brake point); direction from the signed move.
             protocol.set_motion_mode(plan.channel, '0', direction_char(delta));
@@ -5170,7 +5297,8 @@ private:
             up[i] = read_idx(i) == 0;
         }
         refresh_position_cache_locked(true);
-        dispatch_goto_locked(lock, axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0));
+        dispatch_goto_locked(lock, axis_deg(0) + (up[0] ? -5.0 : 5.0), axis_deg(1) + (up[1] ? -5.0 : 5.0),
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
 
         // Phase 2: if the 5-degree step swept PAST the index (latched), move a
@@ -5185,7 +5313,7 @@ private:
             ALPACA_LOG_INFO("SkyWatcher", "AutoHome phase 2: stepping past a latched index");
             refresh_position_cache_locked(true);
             dispatch_goto_locked(lock, axis_deg(0) + (swept[0] ? (up[0] ? -5.0 : 5.0) : 0.0),
-                                 axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0));
+                                 axis_deg(1) + (swept[1] ? (up[1] ? -5.0 : 5.0) : 0.0), /*compensate_backlash=*/false);
             autohome_wait_axes_stopped(lock);
             for (int i = 0; i < 2; ++i) {
                 if (swept[i]) {
@@ -5270,9 +5398,11 @@ private:
 
         // Phase 5+6: back 10 degrees below the latched mark, then approach it
         // from below and stamp the position registers to the home offset.
-        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0);
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]) - 10.0, idx_to_deg(1, home_idx[1]) - 10.0,
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
-        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]));
+        dispatch_goto_locked(lock, idx_to_deg(0, home_idx[0]), idx_to_deg(1, home_idx[1]),
+                             /*compensate_backlash=*/false);
         autohome_wait_axes_stopped(lock);
         proto.set_position(kAxisRa, kHomeCounts);
         proto.set_position(kAxisDec, kHomeCounts);
@@ -6011,6 +6141,15 @@ private:
     int dec_axis_sense_ = 0;
     // open-astro#582: the configured decAxisSense; fixed at construction.
     const DecAxisSenseSetting dec_axis_sense_setting_;
+    // open-astro#437: the configured goto backlash take-up; fixed at construction.
+    const BacklashSettings backlash_;
+    // Take-up speed per axis in deg/s, derived at connect from ":s" and ":a";
+    // 0 = this axis is not compensated (off, or the board gave no worm count).
+    double backlash_rate_deg_s_[2]{};
+    // Direction (+1 increasing counts, -1 decreasing, 0 unknown) the axis last
+    // moved in under any command; unknown after a connect, so the first goto
+    // of a session is never compensated.
+    int last_direction_[2]{};
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.
@@ -6310,16 +6449,14 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 }
 }  // namespace detail
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(int device_number, const ConnectionInfo& connection_info,
-                                                             std::optional<double> site_latitude_deg,
-                                                             std::optional<double> site_longitude_deg,
-                                                             std::optional<double> site_elevation_m,
-                                                             std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-                                                             util::MotionLimits motion_limits, util::TaskClock& clock,
-                                                             DecAxisSenseSetting dec_axis_sense) {
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::unique_ptr<SkyWatcherProtocolWrapper> protocol, util::MotionLimits motion_limits, util::TaskClock& clock,
+    DecAxisSenseSetting dec_axis_sense, BacklashSettings backlash) {
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
-        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense);
+        util::ConnectionResolver<ConnectionInfo>{}, motion_limits, clock, dec_axis_sense, backlash);
 }
 
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
@@ -6344,13 +6481,14 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::unique_ptr<SkyWatcherProtocolWrapper> protocol,
-    util::MotionLimits motion_limits, util::TaskClock& clock, DecAxisSenseSetting dec_axis_sense) {
+    util::MotionLimits motion_limits, util::TaskClock& clock, DecAxisSenseSetting dec_axis_sense,
+    BacklashSettings backlash) {
     if (!connection_resolver) {
         throw AlpacaException("Sky-Watcher telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<SkyWatcherTelescopeDriver>(
         device_number, ConnectionInfo{}, site_latitude_deg, site_longitude_deg, site_elevation_m, std::move(protocol),
-        std::move(connection_resolver), motion_limits, clock, dec_axis_sense);
+        std::move(connection_resolver), motion_limits, clock, dec_axis_sense, backlash);
 }
 
 ConnectionInfo resolve_skywatcher_auto(int mount_index) {
@@ -6391,16 +6529,14 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index) {
     return conn;
 }
 
-std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(int device_number, int mount_index,
-                                                                  std::optional<double> site_latitude_deg,
-                                                                  std::optional<double> site_longitude_deg,
-                                                                  std::optional<double> site_elevation_m,
-                                                                  util::MotionLimits motion_limits,
-                                                                  DecAxisSenseSetting dec_axis_sense) {
+std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
+    int device_number, int mount_index, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m, util::MotionLimits motion_limits,
+    DecAxisSenseSetting dec_axis_sense, BacklashSettings backlash) {
     // The serial scan and UDP discovery run at connect time (#659), not here.
     return create_skywatcher_telescope_deferred(
         device_number, [mount_index] { return resolve_skywatcher_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, {}, motion_limits, util::default_task_clock(), dec_axis_sense);
+        site_longitude_deg, site_elevation_m, {}, motion_limits, util::default_task_clock(), dec_axis_sense, backlash);
 }
 
 }  // namespace alpacacore::vendor::skywatcher

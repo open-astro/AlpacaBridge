@@ -59,6 +59,7 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 namespace alpacacore::test {
 
@@ -269,6 +270,20 @@ public:
     int frames_seen(char cmd = 0) {
         std::lock_guard<std::mutex> lock(mutex_);
         return frame_count(cmd);
+    }
+
+    /// Every motion-shaping frame (":G" ":S" ":I" ":J" ":K" ":L" ":E"), in the
+    /// order the board received it and exactly as framed, status polls left
+    /// out: the command stream a byte-identical case compares.
+    std::vector<std::string> motion_log() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return motion_log_;
+    }
+
+    /// Forget the motion log so far (a case that wants only the stream of one move).
+    void clear_motion_log() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        motion_log_.clear();
     }
 
     /// Blocks until frames_seen(cmd) >= @p n or @p real_timeout of real time
@@ -624,6 +639,9 @@ private:
         a.advance(now());
         ++total_frames_;
         ++frames_by_cmd_[static_cast<unsigned char>(cmd)];
+        if (std::strchr("GSIJKLE", cmd) != nullptr) {
+            motion_log_.push_back(frame);
+        }
         frames_cv_.notify_all();
         bool was_running_on_start = false;  // ":J" only; declared here to not cross case labels
         switch (cmd) {
@@ -812,6 +830,7 @@ private:
 
     int fd_ = -1;
     int port_ = 0;
+    std::vector<std::string> motion_log_;
     FakeMountProfile profile_;
     alpacacore::util::TaskClock& clock_;
     std::atomic<bool> stop_{false};
