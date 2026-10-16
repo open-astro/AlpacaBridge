@@ -1408,7 +1408,7 @@ private:
         connected_.store(false);
         try {
             sdk_.close_camera(handle);
-        } catch (const std::exception&) {
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
             // The handle belongs to a device that is gone; the failure is already latched and logged.
         }
     }
