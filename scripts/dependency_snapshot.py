@@ -1069,6 +1069,9 @@ def self_test() -> int:
             errs = scan_udev_rules(r)[1]
             assert len(errs) == 1 and "debian/rules" in errs[0] and "x.rules" in errs[0], (form, errs)
             assert any("x.rules" in e for e in drift()), (form, drift())
+        # An unresolved variable in a path already outside the vendored tree is not vendor evidence: no error.
+        (r / "debian/rules").write_text(good + "\tinstall -m 644 $(CURDIR)/debian/$(UNDEFINED)/y.rules x/\n")
+        assert scan_udev_rules(r)[1] == [], scan_udev_rules(r)
         (r / "debian/rules").write_text(good)
         assert drift() == [], drift()
         # The pick of the newest nightly .deb orders by its stamp, never by the full name.
