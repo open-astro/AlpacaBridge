@@ -150,6 +150,13 @@ Checks:
      (issue #702): it listed 11 of 18 jobs and called `format` `clang-format`.
      The roster is every backticked token in the bullet outside parentheses,
      so each id's description goes in parentheses after it.
+ 19. No vendored shared library under AlpacaCore/external/ is committed as two
+     regular files with the same content in one directory (`libfoo.so` next to
+     `libfoo.so.1.2`): the unversioned name has to be a symlink. `cp -a` in
+     debian/rules copies a regular file as a second full copy, so the ZWO
+     camera SDK shipped twice in every .deb (3.4 MB) from March 2026 until this
+     check. Read from the git index, so a staged fix is seen. The empty blob is
+     skipped: a 0-byte placeholder is not a library copy.
 """
 
 import glob
@@ -2086,6 +2093,46 @@ def check_ci_roster_matches_workflow(root=ROOT):
     return _ci_roster_findings(read(".github/workflows/ci.yml", root), read("AGENTS.md", root))
 
 
+# Check 19: a vendored `.so` committed twice as regular files. Matches
+# `libfoo.so` and `libfoo.so.1.2.3`, not `libfoo.a` or `libfoo.so.txt`.
+_VENDORED_SO_RE = re.compile(r"^lib[^/]*\.so(\.\d+)*$")
+_GIT_EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+VENDORED_SO_ROOT = "AlpacaCore/external/"
+
+
+def _duplicate_so_findings(entries):
+    """Check 19 over `git ls-files -s` entries as (mode, blob, path). Pure, so
+    --self-test can drive it."""
+    libs = [(mode, blob, path) for mode, blob, path in entries
+            if path.startswith(VENDORED_SO_ROOT) and _VENDORED_SO_RE.match(path.rsplit("/", 1)[-1])]
+    if not libs:
+        return ["found no vendored lib*.so under %s in the git index: the reader is stale" % VENDORED_SO_ROOT]
+    groups = {}
+    for mode, blob, path in libs:
+        if mode in ("100644", "100755") and blob != _GIT_EMPTY_BLOB:
+            groups.setdefault((path.rsplit("/", 1)[0], blob), []).append(path)
+    failures = []
+    for (_, _), paths in sorted(groups.items()):
+        if len(paths) > 1:
+            paths = sorted(paths, key=len)
+            target = paths[-1].rsplit("/", 1)[-1]
+            failures.append("%s are identical regular files; keep %s and make %s symlink(s) to it, "
+                            "or debian/rules' `cp -a` ships every copy"
+                            % (", ".join(paths), target,
+                               ", ".join(q.rsplit("/", 1)[-1] for q in paths[:-1])))
+    return failures
+
+
+def check_vendored_so_not_duplicated(root=ROOT):
+    out = _run_git(["ls-files", "-s", "--", VENDORED_SO_ROOT], root=root).stdout
+    entries = []
+    for line in out.splitlines():
+        meta, _, path = line.partition("\t")
+        mode, blob, _stage = meta.split()
+        entries.append((mode, blob, path))
+    return _duplicate_so_findings(entries)
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2106,6 +2153,7 @@ CHECKS = [
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
     ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
+    ("Vendored shared libraries are not committed twice", check_vendored_so_not_duplicated),
 ]
 
 
@@ -2840,6 +2888,32 @@ def self_test():
     f = roster(ci_text=roster_ci.replace("jobs:\n", "workflows:\n"))
     check("ci roster: a ci.yml with no jobs: block is a finding, not a pass",
           f is not None and len(f) == 1 and "no job ids" in f[0])
+
+    zwo = "AlpacaCore/external/ZWO/lib/armv8/"
+    blob_a, blob_b = "a" * 40, "b" * 40
+    so_clean = [
+        ("100755", blob_a, zwo + "libASICamera2.so.1.41"),
+        ("120000", blob_b, zwo + "libASICamera2.so"),
+        ("100644", blob_a, zwo + "libASICamera2.a"),
+    ]
+
+    def dup_so(entries):
+        return attempt("vendored so", lambda: _duplicate_so_findings(entries))
+
+    f = dup_so(so_clean)
+    check("vendored so: a versioned file plus a symlink is clean", f == [])
+    f = dup_so(so_clean[:1] + [("100755", blob_a, zwo + "libASICamera2.so")])
+    check("vendored so: the unversioned name committed as a copy is reported, naming both and the fix",
+          f is not None and len(f) == 1 and "libASICamera2.so," in f[0] and "libASICamera2.so.1.41" in f[0]
+          and "keep libASICamera2.so.1.41" in f[0])
+    f = dup_so(so_clean + [("100755", blob_a, "AlpacaCore/external/ZWO/lib/x64/libASICamera2.so.1.41")])
+    check("vendored so: the same blob in two directories is not a duplicate", f == [])
+    f = dup_so(so_clean + [("100644", _GIT_EMPTY_BLOB, zwo + "libusb.so"),
+                           ("100644", _GIT_EMPTY_BLOB, zwo + "libusb.so.0")])
+    check("vendored so: two empty placeholders are not reported", f == [])
+    f = dup_so([("100755", blob_a, "AlpacaCore/src/libx.so"), ("100755", blob_a, "AlpacaCore/src/libx.so.1")])
+    check("vendored so: an index with no vendored .so is a finding, not a pass",
+          f is not None and len(f) == 1 and "stale" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
