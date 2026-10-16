@@ -4224,9 +4224,8 @@ private:
     // Dec rises under +DeclinationRate / a North pulse; not yet measured on
     // hardware below the equator (a guiding session or plate-solved drift
     // run would do it). XOR-ing the branch test with the hemisphere is the
-    // full fix: MoveAxis, which applies no sign transform at all, is the
-    // hardware-observed reference for which way a raw axis rate moves
-    // reported Dec (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -37.2).
+    // full fix: MoveAxis, which then applied no sign transform at all (since #297 it does), is the
+    // hardware-observed reference for which way a raw axis rate moves reported Dec (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -37.2).
     // The sign is evaluated once at (re)apply time and held: it is NOT
     // re-evaluated as this offset's own motion carries the axis across the
     // branch boundary (a2 through 0). This was tracked as a bug for a while

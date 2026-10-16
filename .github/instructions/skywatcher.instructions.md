@@ -840,8 +840,9 @@ and each time the assertion itself was the review finding.
     read under the pre-#432 model, where `d(HA)/d(a1)` did not flip below the equator.
     The same mechanical button now moves reported RA the other way at this site. What
     the rows still establish is the mechanical fact, which way each button turns which
-    axis; only the RA/Dec labels on them changed. `move_axis()` applies NO branch or hemisphere sign
-    transform (the rate goes straight to `start_speed_motion_locked`), so this is
+    axis; only the RA/Dec labels on them changed. At that time `move_axis()` applied NO branch or hemisphere sign
+    transform (the rate went straight to `start_speed_motion_locked`; since #297 it
+    maps the sky-referenced rate through `sky_move_axis_rate_locked()`), so this is
     also the hardware reference for which way a raw Dec-axis rate moves reported
     Dec below the equator -- the fact the DeclinationRate/PulseGuide fix below
     rests on. Reported coordinates come from the driver's own pointing model; the
@@ -910,7 +911,8 @@ and each time the assertion itself was the review finding.
     gap above. Key realization (2026-09-07): `a2` is the raw Dec-axis angle relative to
     home (see `compute_ra_dec_locked()`) and is NOT coupled to the RA axis at all, so the
     `a2 < 0` branch does not require an actual GOTO across the meridian -- the same
-    `MoveAxis` bench technique already used for `a2 > 0` reaches it directly, mirrored:
+    `MoveAxis` bench technique already used for `a2 > 0` reaches it directly, mirrored
+    (`MoveAxis` is sky-referenced since #297: judge by `a2`, not by the sign of the rate):
     1. `Connected=true`, tracking on at sidereal, OTA mounted, daylight is fine (same
        setup as the `a2 > 0` session, 2026-09-06).
     2. `MoveAxis` the Dec axis to roughly **-0.5 deg from home** (the OPPOSITE direction
@@ -962,8 +964,8 @@ equator the rule was backwards on BOTH dec-axis branches. The full sign table:
 **Why it survived.** The Wave 100i was ConformU-validated in the northern hemisphere,
 where the rule is right, and the ConformU measured-rate tests that "confirmed" the sign
 ran there. The southern-hemisphere hardware session (2026-09-06) exercised tracking and
-`MoveAxis` -- and `move_axis()` applies no sign transform at all, so it was never
-exposed to this rule.
+`MoveAxis` -- and at that time `move_axis()` applied no sign transform at all, so it was never
+exposed to this rule (since #297 it applies the same branch/hemisphere XOR).
 
 **Fix (done).** Both call sites now negate when
 `(branch_from_axis_locked(a2) > 0) != hemisphere_south_locked()` (XOR), which reproduces the
