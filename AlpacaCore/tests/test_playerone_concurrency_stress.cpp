@@ -68,8 +68,11 @@ TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[
     driver->start_exposure(0.000001, true);
 
     // open-astro#326: one guard per call, and it COUNTS what it swallows.
-    alpacacore::test::StressCallGuard guard(
-        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
+    // StopExposure is MethodNotImplemented since issue #1023 (CanStopExposure
+    // is false); the storm keeps calling it to cover its connection check.
+    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected,
+                                             alpacacore::AlpacaError::InvalidOperation,
+                                             alpacacore::AlpacaError::MethodNotImplemented});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { static_cast<void>(camera.get_camera_state()); });

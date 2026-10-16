@@ -59,7 +59,7 @@ jobs:
         # through the environment, never through a `${{ }}` expansion in `run:`.
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          FALSIFIED_BASE: ${{ github.event.pull_request.base.sha }}
+          FALSIFIED_BASE: merge-parent
         run: |
           python3 scripts/check_falsified_by.py --self-test
           python3 scripts/check_falsified_by.py
