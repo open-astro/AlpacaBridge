@@ -340,13 +340,11 @@ private:
     // path rather than auto-probing and attaching to whatever mount answers.
     //
     // `valid` is per-vendor and each caller passes its OWN branch's list,
-    // empty string included where that branch reads empty as auto-detect.
-    // There is no blanket "empty is always fine" rule here, because it is not
-    // true: five branches test `conn_type == "auto" || conn_type.empty()`, but
-    // the ZWO branch tests a bare `conn_type == "auto"`, so an entry with no
-    // connectionType key falls to its else. Treating empty as universally
-    // valid would have left that one branch dropping persisted devices, which
-    // is the failure this whole change exists to remove.
+    // empty string included where that branch reads empty as auto-detect
+    // (the mount arms do; ZWO reads empty as auto the same way, #508 item 3,
+    // through its catalog normalize). The list stays per caller so a vendor
+    // with no auto-detect cannot inherit an "empty is fine" rule it does not
+    // implement.
     static std::string normalize_persisted_connection_type(ConfigSource source, const std::string& conn_type,
                                                            std::initializer_list<const char*> valid,
                                                            const std::string& vendor, const std::string& device_type,

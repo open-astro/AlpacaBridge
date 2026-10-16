@@ -4634,12 +4634,10 @@ int main() {
                            {"siteLatitude", 39.7392},
                            {"siteLongitude", -104.9903}});
 #ifdef ALPACACORE_ENABLE_ZWO
-        // Review finding: the ZWO branch tests a bare `conn_type == "auto"`,
-        // not `|| conn_type.empty()`, so an entry with no connectionType key
-        // falls to its else and used to be dropped regardless of source -- the
-        // one branch a blanket "empty is always valid" rule in the helper
-        // would have left unfixed. The off-UI path: hand-edited, or written by
-        // a non-web-UI client, since the form always sets the field.
+        // An entry with no connectionType key: the off-UI path (hand-edited,
+        // or written by a non-web-UI client, since the form always sets the
+        // field). ZWO reads it as auto like the other mount arms (#508 item 3),
+        // so it registers and logs no connectionType WARN.
         entries.push_back({{"vendor", "zwo"}, {"deviceType", "telescope"}, {"deviceNumber", 9644}});
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -4758,7 +4756,7 @@ int main() {
         bool warned_bisque_host = false;
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        bool warned_zwo_empty = false;
+        bool warned_zwo_empty = false;  // must stay false: empty is auto (#508 item 3)
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         bool warned_onstep_network = false;
@@ -4772,9 +4770,7 @@ int main() {
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
             // Match the normalisation line's own distinctive wording, not a
-            // bare "serial": the sibling port-path WARN only fails to match
-            // that because it capitalises "Serial", which is a coincidence of
-            // wording rather than something this case should rest on.
+            // bare "serial". ZWO must NOT emit it for an empty type.
             if (w.find("telescope 9644") != std::string::npos && w.find("has connectionType") != std::string::npos) {
                 warned_zwo_empty = true;
             }
@@ -4790,7 +4786,7 @@ int main() {
         EXPECT(warned_bisque_host);
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        EXPECT(warned_zwo_empty);
+        EXPECT(!warned_zwo_empty);
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
         EXPECT(warned_onstep_network);
