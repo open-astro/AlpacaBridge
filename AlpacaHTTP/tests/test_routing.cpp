@@ -5453,8 +5453,9 @@ int main() {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
         // #508 item 5: an out-of-range coordinate. The API rejects it; a saved
         // one is WARNED about and ignored by the driver (the #398 test above
-        // reads the driver back), but the file entry keeps it: configureddevices
-        // still shows 200.0, and the next save writes it back.
+        // reads the driver back) and removed from the stored entry, so
+        // configureddevices no longer shows 200.0 and the next save does not
+        // write it back. The in-range field stays.
         // open-astro#744 rule 7: the range is the catalog's per-field rule, so
         // the API text is the catalog's ("siteLatitude is out of range (min
         // -90) (max 90)"; it was read_site_coordinates()' "siteLatitude
@@ -5463,9 +5464,9 @@ int main() {
         // wrapped warning, so the factory then logs the #274 missing-site
         // WARNING as well: two WARNs, the persisted outcome unchanged.
         pin("siteLatitude 200 (#508 item 5)", "skywatcher", "telescope", "Telescope",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":151.215297})",
             "siteLatitude is out of range (min -90) (max 90)", "{}", true,
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLongitude":151.215297})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
              "has no site latitude and will refuse to connect"},
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
@@ -5474,9 +5475,9 @@ int main() {
         // The router-owned arm still words both the API refusal and the saved
         // config's WARN through read_site_coordinates(): short numbers in both.
         pin("siteLatitude 200 (read_site_coordinates)", "ioptron", "telescope", "Telescope",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":151.215297})",
             "siteLatitude 200 is out of range: must be between -90 and 90 degrees", "{}", true,
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":172.6})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLongitude":151.215297})",
             {"siteLatitude 200 is out of range: must be between -90 and 90 degrees"}, {"200.000000"});
 #endif
 
