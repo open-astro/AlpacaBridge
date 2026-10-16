@@ -137,8 +137,7 @@ TEST_CASE("WeeWX observing conditions - disconnect races a slow in-flight fetch"
     CHECK(fake.in_flight() == 0);
 }
 
-TEST_CASE("WeeWX observing conditions - racing disconnect is never dropped",
-          "[weewx][observingconditions][stress]") {
+TEST_CASE("WeeWX observing conditions - racing disconnect is never dropped", "[weewx][observingconditions][stress]") {
     alpacacore::test::FakeWeeWxFetcher fake;
     // A slow fetch keeps each connect in flight while the disconnect lands.
     fake.set_delay(std::chrono::milliseconds(20));
