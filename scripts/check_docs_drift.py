@@ -1516,6 +1516,7 @@ HELPER_FAKES = {
     "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",
+    "fake_weewx_fetcher.h": "scripted WeeWxFetcher injected through the WeeWX factory overload; no transport of its own to roster",
     "fake_task_clock.h": "virtual-time TaskClock for driver wait tests",
 }
 

@@ -146,7 +146,7 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
 endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over an unreachable URL, #271.
+    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
