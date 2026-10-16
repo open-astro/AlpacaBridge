@@ -5276,7 +5276,8 @@ int main() {
         // web UI. And the current, inconsistent behaviour behind
         // open-astro/AlpacaBridge#508, pinned AS IT IS TODAY. Each #508 case
         // below is commented with the item it pins and is expected to flip,
-        // deliberately, when that item's fix lands.
+        // deliberately, when that item's fix lands. (Item 3, an empty
+        // connectionType, is resolved: it is "auto" for every mount.)
         // -----------------------------------------------------------------
         struct Pin {
             std::string label;
@@ -5417,13 +5418,16 @@ int main() {
             // the API accepts it and a saved one registers with no WARN.
             // zwo only here: the other five arms are pinned by the probe cases.
             if (vendor == "zwo") {  // the other five: probe cases below
-                const std::string auto_cfg = obj({R"("connectionType":"auto")", site});
+                // Both sources list the entry as posted or saved: the router stores the
+                // sanitized request (only learned selectors merge back), never the
+                // normalized config, so "auto" applies at registration and the listed
+                // value stays "" (or absent).
                 pin("empty connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope",
-                    obj({R"("connectionType":"")", site}), "", auto_cfg, true, obj({R"("connectionType":"")", site}),
-                    {}, {"not one this driver knows", warned_serial, "Skipping persisted device"});
-                pin("absent connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope", obj({site}), "",
-                    auto_cfg, true, "{}", {},
+                    obj({R"("connectionType":"")", site}), "", obj({R"("connectionType":"")", site}), true,
+                    obj({R"("connectionType":"")", site}), {},
                     {"not one this driver knows", warned_serial, "Skipping persisted device"});
+                pin("absent connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope", obj({site}), "",
+                    "{}", true, "{}", {}, {"not one this driver knows", warned_serial, "Skipping persisted device"});
             }
         }
 
