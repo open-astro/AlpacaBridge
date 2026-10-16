@@ -532,6 +532,9 @@ public:
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
         last_status_update_ = std::chrono::steady_clock::now();
+        // The client has said what it wants; a pending GOTO restore must not
+        // override it when the slew ends (#1230).
+        tracking_before_slew_ = false;
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -1077,6 +1080,17 @@ public:
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
         status_cache_valid_ = false;
+        // ASCOM: after AbortSlew, tracking returns to its state before the
+        // slew. Decide now instead of at a later slew end the driver may never
+        // see (#1230). Only an aborted GOTO costs the extra :GU#.
+        if (tracking_before_slew_) {
+            try {
+                refresh_status_cache_locked(true);
+                finish_slew_tracking_locked();
+            } catch (...) {
+                tracking_before_slew_ = false;  // status unknown: never restart blind
+            }
+        }
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -1180,17 +1194,26 @@ private:
             // and restarting it moved the mount off home (#1218).
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
-            tracking_before_slew_ = false;
-            if (restore_tracking) {
-                try {
-                    OnStepProtocolWrapper::instance().start_tracking();
-                    cached_status_.is_tracking = true;
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                }
-            }
+            finish_slew_tracking_locked();
         }
         return cached_status_.is_slewing;
+    }
+
+    // Uses and clears the restore flag that start_slew_locked() set: restore
+    // tracking once if that slew started with tracking on and the mount now
+    // reports it off. Every path that ends a coordinate slew calls this (the
+    // async edge above, wait_for_slew_complete_locked(), abort_slew()), so the
+    // flag cannot outlive its slew and fire at an unrelated one (#1230).
+    void finish_slew_tracking_locked() const {
+        const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
+        tracking_before_slew_ = false;
+        if (restore_tracking) {
+            try {
+                OnStepProtocolWrapper::instance().start_tracking();
+                cached_status_.is_tracking = true;
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+        }
     }
 
     // Poll for a status condition, RELEASING the driver mutex around every
@@ -1216,6 +1239,9 @@ private:
 
     void wait_for_slew_complete_locked(std::unique_lock<std::mutex>& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
+        // The loop's forced refresh hides the slewing -> idle edge from
+        // get_slewing_locked(), so decide here; the status was just read (#1230).
+        finish_slew_tracking_locked();
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));

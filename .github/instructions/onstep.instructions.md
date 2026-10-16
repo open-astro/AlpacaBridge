@@ -130,7 +130,8 @@ it is never reachable through `router.cpp` or the web UI.
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
   stale-input drain window is `50ms` (one VTIME cycle) for the same reason — `120ms` (2+ cycles)
-  pushed `AbortSlew` to 1.04s, just over budget.
+  pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
+  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first

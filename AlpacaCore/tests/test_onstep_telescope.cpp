@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -882,6 +883,89 @@ TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordina
 
     driver->set_connected(false);
     require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its slew", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not slewing
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_tracking());
+
+    // A slew the driver did not start (handset, another program) that ends
+    // with tracking off: a left-over flag would restart tracking here.
+    const auto foreign_slew_ends_untracked = [&]() {
+        mount->set_status("npEW180#");  // slewing, not tracking
+        observe_slewing(*driver, *mount);
+        mount->set_status("nNpEW180#");
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+    };
+
+    SECTION("synchronous GOTO, then a foreign slew: no restore") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates(12.0, 45.0));  // ends after the 2 s grace
+        mount->clear_log();
+        foreign_slew_ends_untracked();
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("synchronous GOTO that loses tracking: restored once at its end") {
+        // A throw must fail the case, not escape the thread and std::terminate the binary.
+        std::exception_ptr slew_error;
+        std::thread slew([&] {
+            try {
+                driver->slew_to_coordinates(12.0, 45.0);
+            } catch (...) {
+                slew_error = std::current_exception();
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        mount->clear_log();
+        mount->set_status("nNpEW180#");  // done, tracking off
+        slew.join();
+        REQUIRE_NOTHROW(slew_error ? std::rethrow_exception(slew_error) : void());
+        CHECK(mount->count(":ST6") == 1);
+    }
+
+    SECTION("Tracking=false during a GOTO wins over the restore") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount);
+        REQUIRE_NOTHROW(driver->set_tracking(false));
+        mount->clear_log();
+        mount->set_status("nNpEW180#");  // done, tracking off as asked
+        REQUIRE(wait_slew_done(*driver, std::chrono::seconds(10)));
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("AbortSlew with tracking kept, then a foreign slew: no restore") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("NpEW180#");  // stopped, still tracking
+        REQUIRE_NOTHROW(driver->abort_slew());
+        CHECK(mount->count(":ST6") == 0);
+        mount->clear_log();
+        foreign_slew_ends_untracked();
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    SECTION("AbortSlew of a GOTO that lost tracking: restored at once, not later") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("nNpEW180#");  // stopped, tracking off
+        mount->clear_log();
+        REQUIRE_NOTHROW(driver->abort_slew());
+        CHECK(mount->count(":ST6") == 1);
+        mount->clear_log();
+        foreign_slew_ends_untracked();
+        CHECK(mount->count(":ST6") == 0);
+    }
+
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32
