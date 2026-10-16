@@ -271,3 +271,19 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     CHECK(restarted->get_mechanical_position() == 0.0);
     restarted->set_connected(false);
 }
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("WandererAstro Rotator Driver - Connect with empty serial port names portPath",
+          "[wandererastro][rotator][unit]") {
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}

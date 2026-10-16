@@ -125,6 +125,8 @@ inline std::optional<std::string> qhy_camera_refusal(const DeviceConfig& config)
     return qhy_camera_handle_refusal(config, "QHY camera");
 }
 
+inline constexpr const char* kQhyCfw3SerialPortRequired = "QHY CFW3 connectionType \"serial\" requires portPath";
+
 inline std::optional<std::string> qhy_filterwheel_refusal(const DeviceConfig& config) {
     const std::string wheel_type = config.get(kQhyWheelType);
     if (wheel_type != "integrated" && wheel_type != "cfw3-usb") {
@@ -134,7 +136,7 @@ inline std::optional<std::string> qhy_filterwheel_refusal(const DeviceConfig& co
     const std::string type = config.get(kQhyWheelConnectionType);
     if (type != "auto" && type != "serial") return "QHY CFW3 connectionType must be \"auto\" or \"serial\"";
     if (type == "serial") {
-        if (config.get(kQhyWheelPortPath).empty()) return "QHY CFW3 connectionType \"serial\" requires portPath";
+        if (config.get(kQhyWheelPortPath).empty()) return kQhyCfw3SerialPortRequired;
     } else if (config.get(kQhyWheelIndex) < 0) {
         return "QHY CFW3 filterwheelIndex must be 0 or greater";
     }
