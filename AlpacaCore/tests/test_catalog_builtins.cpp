@@ -3252,17 +3252,22 @@ TEST_CASE("Builtin catalog - ZWO telescope connection type and endpoint rules", 
     DeviceCatalog catalog;
     register_builtin_schemas(catalog);
 
-    // An absent connectionType is not "auto" for this mount: refused from the API, read as serial when saved.
-    const auto absent_api = catalog.normalize(kZwoTelescopeKey, DeviceConfig{}, Source::Api);
-    REQUIRE(absent_api.rejection.has_value());
-    CHECK(*absent_api.rejection == "Invalid connection type. Use 'serial', 'network', or 'auto'");
-    const auto absent_saved = catalog.normalize(kZwoTelescopeKey, DeviceConfig{}, Source::Persisted);
-    CHECK_FALSE(absent_saved.rejection.has_value());
-    REQUIRE_FALSE(absent_saved.warnings.empty());
-    CHECK(absent_saved.warnings.front().find("has connectionType") != std::string::npos);
-    const ConfigValue* read_as = absent_saved.config.find_value("connectionType");
-    REQUIRE(read_as != nullptr);
-    CHECK(std::get<std::string>(*read_as) == "serial");
+    // An empty or absent connectionType is "auto" for every mount, this one included (#508 item 3): accepted from
+    // the API and read as auto when saved, with no "not one this driver knows" warning.
+    const auto type_of = [](const NormalizeResult& r) {
+        const ConfigValue* v = r.config.find_value("connectionType");
+        return v ? std::get<std::string>(*v) : std::string{"<unset>"};
+    };
+    DeviceConfig empty_type;
+    empty_type.set("connectionType", std::string{});
+    for (const DeviceConfig& config : {DeviceConfig{}, empty_type}) {
+        for (const Source source : {Source::Api, Source::Persisted}) {
+            const auto result = catalog.normalize(kZwoTelescopeKey, config, source);
+            CHECK_FALSE(result.rejection.has_value());
+            CHECK(result.warnings.empty());
+            CHECK(type_of(result) == "auto");
+        }
+    }
 
     DeviceConfig autod;
     autod.set("connectionType", std::string{"auto"});
@@ -3283,7 +3288,15 @@ TEST_CASE("Builtin catalog - ZWO telescope connection type and endpoint rules", 
 
     DeviceConfig bogus;
     bogus.set("connectionType", std::string{"usb"});
-    CHECK(catalog.normalize(kZwoTelescopeKey, bogus, Source::Api).rejection.has_value());
+    const auto bogus_api = catalog.normalize(kZwoTelescopeKey, bogus, Source::Api);
+    REQUIRE(bogus_api.rejection.has_value());
+    CHECK(*bogus_api.rejection == "Invalid connection type. Use 'serial', 'network', or 'auto'");
+    // A non-empty unknown saved value is unchanged: warned about and read as serial.
+    const auto bogus_saved = catalog.normalize(kZwoTelescopeKey, bogus, Source::Persisted);
+    CHECK_FALSE(bogus_saved.rejection.has_value());
+    REQUIRE_FALSE(bogus_saved.warnings.empty());
+    CHECK(bogus_saved.warnings.front().find("has connectionType \"usb\"") != std::string::npos);
+    CHECK(type_of(bogus_saved) == "serial");
 }
 
 TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device type", "[catalog][zwo][unit]") {

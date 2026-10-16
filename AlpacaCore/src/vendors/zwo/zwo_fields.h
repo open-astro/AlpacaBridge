@@ -43,8 +43,8 @@ namespace alpacacore::catalog {
 // Telescope. "serial", "network" and "auto" (scan at connect). No allowed_values:
 // the per-field rule would substitute the default for an unknown saved value,
 // which must be read as "serial" instead (#380), so the schema's normalize owns
-// this rule. Unlike the other mounts an ABSENT connectionType is not "auto" here
-// (the arm's valid list had no empty entry), so normalize reads it with find().
+// this rule. An empty or ABSENT connectionType is "auto" as for the other mounts
+// (#508 item 3); normalize reads it with find() and writes "auto" back.
 inline const Field<std::string> kZwoConnectionType{
     .key = "connectionType", .default_value = "auto", .role = Role::Discriminator};
 inline const Field<std::string> kZwoPortPath{.key = "portPath",

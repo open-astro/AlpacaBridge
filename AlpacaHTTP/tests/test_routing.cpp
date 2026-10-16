@@ -5330,7 +5330,7 @@ int main() {
             const char* vendor;
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
-            bool empty_type_is_auto;       // zwo is the odd one out (#508 item 3)
+            bool empty_type_is_auto;       // every mount reads "" as auto (#508 item 3)
             // open-astro#744: registered through the device catalog rather than
             // a router arm. Two observable differences, pinned per case below:
             // sanitize keeps every declared field (ADR 0004: portPath / host
@@ -5359,7 +5359,7 @@ int main() {
         mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true, true});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", false, true});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", true, true});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -5417,15 +5417,18 @@ int main() {
                 m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
                           : std::vector<std::string>{"Skipping persisted device"});
 
-            // #508 item 3: an empty connectionType. zwo treats "" as
-            // unrecognised: the API rejects it, a saved one is normalised to
-            // "serial" (WARN) and stays listed. The five arms that treat ""
-            // as "auto" are pinned by the probe cases below.
-            if (!m.empty_type_is_auto) {
-                pin("empty connectionType is NOT auto (#508 item 3)", vendor, "telescope", "Telescope",
-                    obj({R"("connectionType":"")", site}), m.bad_type_message, "{}", true,
-                    obj({R"("connectionType":"")", site}), {"has connectionType \"\"", warned_serial},
-                    {"Skipping persisted device"});
+            // #508 item 3: an empty connectionType is "auto" for every mount,
+            // zwo included. Its normalize reads "" as auto for both sources, so
+            // the API accepts it and a saved one registers with no WARN.
+            // zwo only here: the other five arms are pinned by the probe cases.
+            if (vendor == "zwo") {
+                const std::string auto_cfg = obj({R"("connectionType":"auto")", site});
+                pin("empty connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope",
+                    obj({R"("connectionType":"")", site}), "", auto_cfg, true, obj({R"("connectionType":"")", site}),
+                    {}, {"not one this driver knows", warned_serial, "Skipping persisted device"});
+                pin("absent connectionType is auto (#508 item 3)", vendor, "telescope", "Telescope", obj({site}), "",
+                    auto_cfg, true, "{}", {},
+                    {"not one this driver knows", warned_serial, "Skipping persisted device"});
             }
         }
 

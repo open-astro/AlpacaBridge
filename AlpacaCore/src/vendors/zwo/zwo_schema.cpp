@@ -18,9 +18,10 @@
 //
 // Telescope rules, in the arm's order: connection type, then the endpoint. The
 // API is refused; a saved config is registered so it stays listed and editable
-// in the web UI (#380): an unknown or missing connection type is read as
+// in the web UI (#380): a non-empty unknown connection type is read as
 // "serial", never "auto", so it cannot auto-probe, and an empty endpoint is
-// warned about and kept.
+// warned about and kept. An empty or missing connection type is "auto", as for
+// every other mount (#508 item 3).
 
 #include <functional>
 #include <string>
@@ -60,8 +61,13 @@ NormalizeResult normalize_telescope(const DeviceConfig& in, Source source) {
     result.config = in;
     const bool from_api = source == Source::Api;
 
-    // find(), not get(): an absent connectionType is not "auto" for this mount.
+    // find(), not get(): an empty or absent connectionType is "auto" (#508 item 3), written
+    // into the config so create_telescope sees "auto" rather than reading "" as serial.
     std::string type = in.find(kZwoConnectionType).value_or("");
+    if (type.empty()) {
+        type = "auto";
+        result.config.set(kZwoConnectionType.key, type);
+    }
     if (type != "auto" && type != "serial" && type != "network") {
         if (from_api) {
             result.rejection = "Invalid connection type. Use 'serial', 'network', or 'auto'";

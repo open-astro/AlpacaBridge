@@ -981,7 +981,7 @@ function startEditDevice(device) {
         setFormValue('bisque-aperture-diameter', opticsMetersToMm(config.apertureDiameter));
         setFormValue('bisque-focal-length', opticsMetersToMm(config.focalLength));
     } else if (vendor === 'zwo' && deviceType === 'telescope') {
-        const zwoMountConnectionType = config.connectionType || 'serial';
+        const zwoMountConnectionType = config.connectionType || 'auto';
         setFormValue('zwo-mount-connection-type', zwoMountConnectionType);
         if (zwoMountConnectionType === 'serial') {
             setFormValue('zwo-mount-port-path', config.portPath);
