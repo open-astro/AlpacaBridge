@@ -547,8 +547,8 @@ private:
         bool coasting = false;     // counts still creeping with ":f" reading stopped
         int64_t coast_target = 0;
         double coast_cps = 0.0;
-        int commands_while_coasting = 0;  // motion frames received while coasting
-        int failed_status_replies = 0;    // ":f" inquiries to answer "!0" (test knob)
+        int commands_while_coasting = 0;         // motion frames received while coasting
+        int failed_status_replies = 0;           // ":f" inquiries to answer "!0" (test knob)
         int failed_status_replies_on_start = 0;  // moved into failed_status_replies at the next ":J"
         double goto_cps = 0.0;                   // a slow GOTO's ":I" rate; 0 = kGotoDegPerSec
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
