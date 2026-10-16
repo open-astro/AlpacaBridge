@@ -690,7 +690,7 @@ public:
                 throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
             }
             if (!last_exposure_valid_ || !image_ready_ || !last_image_) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
             image = last_image_;
         }

@@ -30,6 +30,7 @@
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 
 #include <chrono>
 #include <optional>
@@ -67,6 +68,10 @@ public:
     ROUTE_TABLE_STUB_COMMON(Camera, "camera")
 
     void set_image_array(ImageArray image) { image_array_ = std::move(image); }
+    // ImageArray throws this instead of returning the image while set.
+    void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
+        image_array_error_ = std::move(error);
+    }
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -102,7 +107,10 @@ public:
     std::vector<std::string> get_gains() const override { return std::vector<std::string>{}; }
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
-    ImageArray get_image_array() const override { return image_array_; }
+    ImageArray get_image_array() const override {
+        if (image_array_error_) throw *image_array_error_;
+        return image_array_;
+    }
     std::string get_image_array_variant() const override { return std::string{}; }
     bool get_image_ready() const override { return bool{}; }
     bool get_is_pulse_guiding() const override { return bool{}; }
@@ -147,6 +155,7 @@ private:
     int number_;
     bool connected_ = false;
     ImageArray image_array_;
+    std::optional<alpacacore::AlpacaException> image_array_error_;
 };
 
 class TelescopeStub final : public alpacacore::TelescopeDriver {

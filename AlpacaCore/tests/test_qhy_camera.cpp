@@ -1031,10 +1031,19 @@ TEST_CASE("QHY Camera Driver - ImageArray during an exposure is InvalidOperation
     driver->start_exposure(1.0, true);
     REQUIRE(eventually([&] { return in_frame.load(); }));
     const auto t0 = std::chrono::steady_clock::now();
-    const int code = error_code_of([&] { (void)driver->get_image_array(); });
+    int code = 0;
+    bool asked_too_early = false;
+    try {
+        (void)driver->get_image_array();
+    } catch (const alpacacore::AlpacaException& e) {
+        code = e.error_code();
+        asked_too_early = e.is_asked_too_early();
+    }
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
     release = true;
     CHECK(code == alpacacore::AlpacaError::InvalidOperation);
+    // Issue #1167: the "poll ImageReady" answer is logged at DEBUG, not ERROR.
+    CHECK(asked_too_early);
     CHECK(ms.count() < 1000);
     driver->set_connected(false);
 }

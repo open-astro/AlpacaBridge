@@ -53,6 +53,7 @@ Thumbs.db
 !external/Altair/**
 !external/PlayerOne/**
 !external/libgpiod/**
+!external/libgphoto2/**
 
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories

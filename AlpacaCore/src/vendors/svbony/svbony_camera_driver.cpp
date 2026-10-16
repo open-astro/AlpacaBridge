@@ -632,10 +632,10 @@ public:
             ensure_capture_stop_confirmed_locked();
             throw_exposure_failure_locked();
             if (!last_exposure_valid_) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
             if (!image_ready_ || !image_cached_ || !last_image_) {
-                throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+                throw AlpacaException::asked_too_early("Image not ready");
             }
             image = last_image_;
         }

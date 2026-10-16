@@ -731,8 +731,12 @@ private:
                 ++a.stop_count;
                 a.coasting = false;  // an explicit stop ends the landing coast
                 if (a.running && stop_ramp_ms_ > 0) {
-                    a.stopping = true;
-                    a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                    // A second ":K" on an axis already braking leaves the brake
+                    // running: the ramp ends where the first stop put it.
+                    if (!a.stopping) {
+                        a.stopping = true;
+                        a.stop_at = now() + std::chrono::milliseconds(stop_ramp_ms_);
+                    }
                 } else {
                     a.running = false;
                     a.in_goto = false;

@@ -48,6 +48,10 @@ VENDORS = "AlpacaCore/src/vendors"
 DEB_QUALIFIERS = "arch=arm64&distro=trixie"
 # Package directories holding vendor binaries and firmware copied from AlpacaCore/external/.
 SHIPPED_VENDOR_DIRS = ("usr/lib/alpacabridge", "usr/lib/firmware")
+# Subtrees of those directories built at package time from a vendored source tarball (libgphoto2,
+# scripts/build_bundled_gphoto.sh): no file in them is byte-identical to a tracked file, so the
+# file-level match below cannot apply. The SDK entry (the tarball) is still CONTAINS-ed by the package.
+BUILT_FROM_VENDORED_SOURCE = ("usr/lib/alpacabridge/libgphoto2/",)
 SKIP = {"debhelper-compat"}
 CI = ".github/workflows/ci.yml"
 # (ci.yml step name, purl template): tools CI downloads at a pinned version.
@@ -454,6 +458,8 @@ def build_spdx(root: Path, deb: dict[str, str], file_name: str, sha256: str,
     files = []
     unmatched = []
     for path in sorted(payload):
+        if path.startswith(BUILT_FROM_VENDORED_SOURCE):
+            continue
         d = payload[path]
         sdk_id = vendored.get(d["sha256"])
         if sdk_id is None:
@@ -947,6 +953,17 @@ def self_test() -> int:
             assert "usr/lib/alpacabridge/libevil.so" in str(e), e
         else:
             raise AssertionError("an unmatched shipped file must fail")
+        # A file built from a vendored tarball is skipped, but only inside its own subtree.
+        built = {"usr/lib/alpacabridge/libgphoto2/lib/libgphoto2.so.6": file_digests(b"built")}
+        doc = build_spdx(r, deb, "x.deb", "f" * 64, "t", "n", payload=built, installed={})
+        assert doc.get("files", []) == [], doc.get("files")
+        try:
+            build_spdx(r, deb, "x.deb", "f" * 64, "t", "n",
+                       payload={"usr/lib/alpacabridge/libgphoto2.so.6": file_digests(b"built")}, installed={})
+        except ValueError as e:
+            assert "usr/lib/alpacabridge/libgphoto2.so.6" in str(e), e
+        else:
+            raise AssertionError("a file next to the built subtree must still fail")
         (r / EXTERNAL / "New").mkdir()
         errs = check_drift(r)
         assert len(errs) == 1 and f"{EXTERNAL}/New is not in {TABLE}" in errs[0], errs

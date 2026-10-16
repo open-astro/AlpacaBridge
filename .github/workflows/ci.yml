@@ -21,6 +21,8 @@
 #                  (no threshold, not a required check; bound 30 min)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
+#   package-deb    build the .deb in debian:trixie, install it, run
+#                  scripts/check_bundled_gphoto.sh (bundled libgphoto2 loader path)
 #   unicode        scan sources for Trojan-Source / invisible Unicode
 #   shellcheck     lint the project's shell scripts
 #   javascript     node --check AND node --test the hand-written web UI JavaScript
@@ -135,7 +137,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -165,6 +170,16 @@ jobs:
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
@@ -267,7 +282,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -288,6 +306,16 @@ jobs:
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Stage vendor SDK shared libraries
         # Mirrors the build-vendors job: the vendor-ON build links the in-tree
@@ -400,7 +428,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -421,6 +452,16 @@ jobs:
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Stage vendor SDK shared libraries
         # Copied from build-vendors; keep the two lists in step.
@@ -575,7 +616,10 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
+            libxml2-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -604,6 +648,16 @@ jobs:
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
       - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
@@ -653,6 +707,50 @@ jobs:
             exit 1
           fi
           echo "clang-tidy OK"
+
+  package-deb:
+    # Builds the .deb in the target distribution (no libgphoto2-dev installed),
+    # installs it and runs the bundled-libgphoto2 acceptance checks, so a change
+    # that breaks the packaged loader path fails before release.
+    name: package-deb
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev binutils
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Build the .deb
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          ls -l ../alpacabridge_*_arm64.deb
+          dpkg-deb --info ../alpacabridge_*_arm64.deb
+
+      - name: Install the .deb
+        # Recommends (NetworkManager, polkit) are not needed to run the checks.
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ../alpacabridge_*_arm64.deb
+
+      - name: Check the bundled libgphoto2
+        run: scripts/check_bundled_gphoto.sh
 
   unicode:
     name: Unicode scan

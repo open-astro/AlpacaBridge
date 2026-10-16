@@ -237,6 +237,17 @@ public:
         no_readback_ = no_readback;
     }
 
+    /// Answer ":i" the way an EQM-35 Pro (fw 3.47) does: the stored period
+    /// divided by 16 (truncated), as a signed 24-bit value negative when
+    /// `negative` (the direction). `wrong_value` >= 0 answers that raw value
+    /// instead, to model a readback that fits neither encoding.
+    void set_readback_div16(bool negative, int64_t wrong_value = -1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        div16_readback_ = true;
+        div16_negative_ = negative;
+        div16_wrong_ = wrong_value;
+    }
+
     /// Refuse the next ":i" with "!<code>" once (e.g. "2", Motor not stopped).
     void reject_next_readback(std::string code) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -379,6 +390,11 @@ private:
                     return "!" + code;
                 }
                 if (no_readback_) return "!0";
+                if (div16_readback_) {
+                    if (div16_wrong_ >= 0) return "=" + u24(static_cast<uint32_t>(div16_wrong_));
+                    const uint32_t q = t1_[axis - 1] / 16;
+                    return "=" + u24(div16_negative_ ? (0x1000000u - q) & 0xFFFFFFu : q);
+                }
                 return "=" + u24(t1_[axis - 1]);
             case 'K':
             case 'L':
@@ -505,6 +521,9 @@ private:
     int straggler_ms_ = 0;
     bool straggler_pending_ = false;
     bool no_readback_ = false;
+    bool div16_readback_ = false;
+    bool div16_negative_ = false;
+    int64_t div16_wrong_ = -1;
     std::string reject_readback_code_;
     // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
     // speed mode, not running, initialized.

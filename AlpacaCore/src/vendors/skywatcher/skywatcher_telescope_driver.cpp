@@ -2513,17 +2513,15 @@ public:
                 // during EQM-35 Pro bring-up, 2026-09-06). `tracking_`/
                 // `dec_rate_arcsec_per_sec_` below guard a COMPLETED
                 // SetTracking(false) -- that path publishes tracking_ = false
-                // under the SAME mutex_ this task also holds here. They do NOT
-                // guard one still IN FLIGHT: set_tracking_locked(false) bumps
-                // motion_generation_ first, then releases mutex_ inside
-                // stop_axis_and_wait_locked()'s poll loop, and assigns tracking_
-                // only after that wait returns -- so a restore tail waking inside
-                // that window reads tracking_ == true, restores the drive, and the
-                // caller throws "Tracking change superseded by a concurrent motion
-                // command" with the mount left tracking. That is issue #535
-                // (open); its regression case is quarantined [!mayfail] in
-                // test_skywatcher_async.cpp, so nothing gates this path until #535
-                // lands. What the generation check still needs to catch
+                // under the SAME mutex_ this task also holds here. One still IN
+                // FLIGHT is invisible to them: set_tracking_locked(false) bumps
+                // motion_generation_, then releases mutex_ inside
+                // stop_axis_and_wait_locked() and assigns tracking_ only after
+                // the wait returns. tracking_off_pending_ covers that window
+                // (tracking_effectively_on_locked()), so the restore yields to
+                // it instead of making the caller throw "Tracking change
+                // superseded" with the mount left tracking (issue #535).
+                // What the generation check still needs to catch
                 // is a goto/park/home/pulse-guide that took over THIS axis, none
                 // of which necessarily touch tracking_/dec_rate_arcsec_per_sec_ --
                 // hence the same same_axis_owner idiom already used by the duty-
@@ -2536,7 +2534,7 @@ public:
                 const bool same_axis_owner =
                     goto_in_progress_ || parking_ || homing_ || slewing_cached_ || pulse_axis_active_[channel - 1];
                 const bool generation_ok = motion_generation_ == stop_task_generation || !same_axis_owner;
-                if (channel == kAxisRa && tracking_ && generation_ok) {
+                if (channel == kAxisRa && tracking_effectively_on_locked() && generation_ok) {
                     try {
                         set_tracking_locked(lock, true);
                     } catch (const std::exception& e) {

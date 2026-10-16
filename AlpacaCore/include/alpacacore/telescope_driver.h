@@ -69,8 +69,7 @@ public:
     // property getters (omit-on-throw keeps DeviceState consistent with the GET
     // endpoints) plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
     // Inline so the vtable stays weak and the per-vendor static libraries link
-    // without a base-library ordering dependency. UTCDate is intentionally omitted to avoid format drift versus
-    // the /utcdate endpoint; it is optional ("if known").
+    // without a base-library ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};
@@ -91,12 +90,14 @@ public:
         add("AtPark", [this] { return get_at_park(); });
         add("Azimuth", [this] { return get_azimuth(); });
         add("Declination", [this] { return get_declination(); });
-        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
         add("RightAscension", [this] { return get_right_ascension(); });
         add("SideOfPier", [this] { return static_cast<std::int32_t>(get_side_of_pier()); });
+        // Keep coordinate reads together before potentially slow live guide-status queries.
+        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
         add("SiderealTime", [this] { return get_sidereal_time(); });
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
+        add("UTCDate", [this] { return device_state_timestamp(get_utc_date()); });
         state.push_back({"TimeStamp", age ? device_state_timestamp(
                                                 std::chrono::system_clock::now() -
                                                 std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))

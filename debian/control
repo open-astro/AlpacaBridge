@@ -9,7 +9,10 @@ Build-Depends: debhelper-compat (= 13),
                libudev-dev,
                libgpiod-dev (>= 2.0),
                libhidapi-dev,
-               libgphoto2-dev,
+               libltdl-dev,
+               libexif-dev,
+               libjpeg-dev,
+               libxml2-dev,
                libraw-dev,
                nlohmann-json3-dev,
                zlib1g-dev,
@@ -36,7 +39,8 @@ Description: ASCOM Alpaca HTTP server for astronomical devices
  cameras (ZWO ASI, QHY), mounts (iOptron, SynScan/Celestron), focusers,
  filter wheels, rotators, and weather stations via the Alpaca protocol.
  .
- Includes bundled vendor SDKs, udev rules, and QHY firmware for
+ Includes bundled vendor SDKs (libgphoto2 among them, in a private prefix),
+ udev rules, and QHY firmware for
  plug-and-play USB device access. Runs as the alpacabridge system user
  and starts automatically via systemd on each boot.
  .

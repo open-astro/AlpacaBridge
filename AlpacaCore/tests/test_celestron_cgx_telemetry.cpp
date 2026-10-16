@@ -13,6 +13,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -73,7 +74,7 @@ TEST_CASE("CGX stationary telemetry shares only a bounded raw pair", "[celestron
         const int guide_ra = rig.mount.count_command(0x10, 0x27);
         const int guide_dec = rig.mount.count_command(0x11, 0x27);
         const auto state = rig.driver->get_device_state();
-        CHECK(state.size() == 12);
+        CHECK(state.size() == 13);
         CHECK(rig.reads(0x10) == ra + 1);
         CHECK(rig.reads(0x11) == dec + 1);
         CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra + 1);
@@ -90,6 +91,34 @@ TEST_CASE("CGX stationary telemetry shares only a bounded raw pair", "[celestron
         rig.coordinates();
         CHECK(rig.reads(0x10) == ra + 2);
         CHECK(rig.reads(0x11) == dec + 2);
+    }
+}
+
+TEST_CASE("CGX DeviceState keeps coordinate reads together across slow live guide status",
+          "[celestron][cgx][telemetry]") {
+    TelemetryRig rig;
+    for (const bool parked : {false, true}) {
+        if (parked) rig.home(true);
+        const int ra = rig.reads(0x10), dec = rig.reads(0x11);
+        const int guide_ra = rig.mount.count_command(0x10, 0x27);
+        const int guide_dec = rig.mount.count_command(0x11, 0x27);
+        rig.mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x27});
+        auto pending = std::async(std::launch::async, [&] { return rig.driver->get_device_state(); });
+        const bool waiting = rig.mount.wait_for_reply_fragment(2s);
+        // Real guide-status reads straddle the unchanged 30 ms raw-pair TTL.
+        rig.clock.advance(32ms);
+        rig.mount.release_reply_tail();
+        REQUIRE(waiting);
+        const auto state = pending.get();
+        for (const char* name : {"Altitude", "AtHome", "AtPark", "Azimuth", "Declination", "IsPulseGuiding",
+                                 "RightAscension", "SideOfPier", "SiderealTime", "Slewing", "Tracking", "TimeStamp"}) {
+            CHECK(std::count_if(state.begin(), state.end(), [name](const auto& entry) { return entry.name == name; }) ==
+                  1);
+        }
+        CHECK(rig.reads(0x10) == ra + 1);
+        CHECK(rig.reads(0x11) == dec + 1);
+        CHECK(rig.mount.count_command(0x10, 0x27) == guide_ra + 1);
+        CHECK(rig.mount.count_command(0x11, 0x27) == guide_dec + 1);
     }
 }
 
