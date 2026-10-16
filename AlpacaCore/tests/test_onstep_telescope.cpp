@@ -800,4 +800,88 @@ TEST_CASE("OnStep Telescope Driver - a coordinate slew restores tracking only if
     driver->set_connected(false);
 }
 
+namespace {
+
+// A fake mount that reports a firmware version and a :GXEE# reply (#1216).
+struct RefractionFake {
+    std::string version;  // :GVN# reply, without '#'
+    std::string gxee;     // :GXEE# reply (bare digit; empty = no reply)
+    std::atomic<int> gxee_queries{0};
+
+    std::string reply(const std::string& chunk) {
+        if (chunk.rfind(":GVP", 0) == 0) return "On-Step#";
+        if (chunk.rfind(":GVN", 0) == 0) return version + "#";
+        if (chunk.rfind(":GXEE", 0) == 0) {
+            ++gxee_queries;
+            return gxee;
+        }
+        if (chunk.rfind(":GU", 0) == 0) return "nNpEo180#";
+        if (chunk.rfind(":S", 0) == 0) return "1";
+        return "0#";
+    }
+};
+
+}  // namespace
+
+TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {
+    auto fake = std::make_shared<RefractionFake>();
+    std::string version = "10.23a";
+    std::string gxee = "1";
+    bool expect_query = true;
+    bool from_firmware = true;
+    bool expected = true;
+
+    SECTION("topocentric firmware (:GXEE# 1) applies refraction") {}
+    SECTION("topocentric strict firmware (:GXEE# 2) applies refraction") { gxee = "2"; }
+    SECTION("observed-place firmware (:GXEE# 0) does not") {
+        gxee = "0";
+        expected = false;
+    }
+    SECTION("OnStepX that does not answer :GXEE# keeps the local flag") {
+        gxee = "";
+        from_firmware = false;
+        expected = false;
+    }
+    SECTION("legacy OnStep is not asked, since it answers unknown commands with 0") {
+        version = "4.24s";
+        gxee = "0";
+        expect_query = false;
+        from_firmware = false;
+        expected = false;
+    }
+    fake->version = version;
+    fake->gxee = gxee;
+
+    alpacacore::test::FakeMountServer server([fake](const std::string& chunk) { return fake->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::NotConnected);
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    CHECK((fake->gxee_queries.load() > 0) == expect_query);
+    CHECK(driver->get_does_refraction() == expected);
+
+    if (from_firmware) {
+        REQUIRE_NOTHROW(driver->set_does_refraction(expected));  // the firmware's own value
+        require_alpaca_error([&] { driver->set_does_refraction(!expected); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        CHECK(driver->get_does_refraction() == expected);
+    } else {
+        REQUIRE_NOTHROW(driver->set_does_refraction(true));
+        CHECK(driver->get_does_refraction());
+        REQUIRE_NOTHROW(driver->set_does_refraction(false));
+        CHECK_FALSE(driver->get_does_refraction());
+    }
+
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::NotConnected);
+}
+
 #endif  // _WIN32

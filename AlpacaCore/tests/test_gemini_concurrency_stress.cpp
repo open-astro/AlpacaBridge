@@ -316,9 +316,9 @@ TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gem
 
     // Expected set stated explicitly (AGENTS.md, CI section). A connected
     // focuser's only legitimate throw is NotConnected from a racing disconnect
-    // (ensure_connected(), gemini_focuser_driver.cpp:313, and the wrapper's own
-    // check under its lock, gemini_protocol_wrapper.cpp:597). move() clamps
-    // instead of throwing InvalidValue (gemini_focuser_driver.cpp:302), and the
+    // (GeminiFocuserDriver::ensure_connected(), and the wrapper's own
+    // check under its lock, gemini_protocol_wrapper.cpp). move() clamps
+    // instead of throwing InvalidValue in GeminiFocuserDriver::move(), and the
     // fake answers every query. A DriverException (wrapper read/write failure)
     // is deliberately not expected: the fake never fails a transaction, so one
     // would be a real regression.
