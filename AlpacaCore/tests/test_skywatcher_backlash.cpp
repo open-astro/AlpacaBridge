@@ -279,6 +279,46 @@ struct MidFirstLeg {
     ~MidFirstLeg() { driver->set_connected(false); }
 };
 
+// The same FindHome with the driver on the fake's own clock: run() steps it
+// 250 ms at a time, each step once the driver's two waits (the slew body and
+// the status poll) are parked, so the landing wait polls once per step. On
+// construction the first leg is on its way and has been polled once.
+struct SteppedHome {
+    static constexpr std::size_t kParked = 2;
+    static constexpr std::chrono::milliseconds kStep{250};
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount{FakeMountProfile::eqm35_pro(), clock};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::string failure;  // a failed FindHome reports its error through Slewing (open-astro#631)
+
+    SteppedHome() {
+        REQUIRE(mount.ok());
+        driver = make_driver(mount, dec_backlash(kBacklash), kSouth, clock);
+        mount.jump_axis_degrees(2, 4.0);
+        mount.clear_motion_log();
+        driver->find_home();
+        REQUIRE(wait_for([&] { return mount.start_count(2) >= 1; }));
+        REQUIRE(clock.wait_for_waiters(kParked, std::chrono::milliseconds(2000)));
+    }
+    bool slewing() {
+        try {
+            return driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& e) {
+            failure = e.what();
+            return false;
+        }
+    }
+    // Steps the clock until Slewing clears, for at most `limit` of clock time.
+    void run(std::chrono::seconds limit = std::chrono::seconds(30)) {
+        for (std::chrono::milliseconds t{0}; t < limit && slewing(); t += kStep) {
+            if (!clock.wait_for_waiters(kParked, std::chrono::milliseconds(2000))) return;
+            clock.advance(kStep);
+            if (!clock.wait_for_woken_settled(std::chrono::milliseconds(2000))) return;
+        }
+    }
+    ~SteppedHome() { driver->set_connected(false); }
+};
+
 }  // namespace
 
 TEST_CASE("SkyWatcher backlash - a goto against the approach side ends with a slow final leg onto the target",
@@ -312,22 +352,24 @@ TEST_CASE("SkyWatcher backlash - a goto against the approach side ends with a sl
                 ++final_legs;
                 const std::size_t s = first_target(off);
                 REQUIRE(s + 1 < off.size());
-                REQUIRE(on.size() == off.size() + 4);
+                REQUIRE(on.size() == off.size() + 5);
                 CHECK(Frames(on.begin(), on.begin() + static_cast<std::ptrdiff_t>(s)) ==
                       Frames(off.begin(), off.begin() + static_cast<std::ptrdiff_t>(s)));
                 // First leg: the same fast goto, past the target by the slack.
                 const uint32_t target = payload(off[s]);
                 CHECK(payload(on[s]) == ((target - static_cast<uint32_t>(approach[i]) * kBacklash) & kCountsMask));
                 CHECK(on[s + 1] == off[s + 1]);  // ":J"
-                // Final leg: slow GOTO in the approach direction, at the
-                // derived speed, onto the unchanged target.
+                // Final leg, through the goto dispatch: its stop, then a slow
+                // GOTO in the approach direction, at the derived speed, onto
+                // the unchanged target.
                 const char ch = static_cast<char>('0' + i + 1);
-                CHECK(on[s + 2] == std::string(":G") + ch + '2' + (approach[i] > 0 ? '0' : '1'));
-                REQUIRE(on[s + 3].rfind(std::string(":I") + ch, 0) == 0);
-                CHECK(payload(on[s + 3]) == period);
-                CHECK(on[s + 4] == off[s]);  // ":S" target, byte for byte
-                CHECK(on[s + 5] == off[s + 1]);
-                CHECK(Frames(on.begin() + static_cast<std::ptrdiff_t>(s) + 6, on.end()) ==
+                CHECK(on[s + 2] == std::string(":K") + ch);
+                CHECK(on[s + 3] == std::string(":G") + ch + '2' + (approach[i] > 0 ? '0' : '1'));
+                REQUIRE(on[s + 4].rfind(std::string(":I") + ch, 0) == 0);
+                CHECK(payload(on[s + 4]) == period);
+                CHECK(on[s + 5] == off[s]);  // ":S" target, byte for byte
+                CHECK(on[s + 6] == off[s + 1]);
+                CHECK(Frames(on.begin() + static_cast<std::ptrdiff_t>(s) + 7, on.end()) ==
                       Frames(off.begin() + static_cast<std::ptrdiff_t>(s) + 2, off.end()));
                 CHECK_FALSE(std::any_of(on.begin(), on.end(), [](const std::string& f) { return f[1] == 'E'; }));
             }
@@ -546,42 +588,16 @@ TEST_CASE("SkyWatcher backlash - an AbortSlew during the first leg stops it and 
 
 TEST_CASE("SkyWatcher backlash - a slew wait that times out with a final leg owed sends no final leg",
           "[skywatcher][telescope][backlash]") {
-    // The driver shares the fake's clock here: the slew-complete wait gives up
-    // at 180 s of clock time while the board never reports the first leg done.
-    FakeTaskClock clock;
-    FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
-    REQUIRE(mount.ok());
-    auto driver = make_driver(mount, dec_backlash(kBacklash), kSouth, clock);
-    mount.jump_axis_degrees(2, 4.0);
-    mount.clear_motion_log();
-    driver->find_home();
-    // Rendezvous: one step of clock at a time, each once a driver wait is parked.
-    const auto step = [&](std::chrono::milliseconds d) {
-        if (!clock.wait_for_waiters(2, std::chrono::milliseconds(2000))) return false;
-        clock.advance(d);
-        return clock.wait_for_woken_settled(std::chrono::milliseconds(2000));
-    };
-    REQUIRE(wait_for([&] { return mount.start_count(2) >= 1; }));
-    mount.hold_running(2, true);  // the first leg never reports done
-    // A failed FindHome reports its error through Slewing (open-astro#631).
-    std::string failure;
-    const auto slewing = [&] {
-        try {
-            return driver->get_slewing();
-        } catch (const alpacacore::AlpacaException& e) {
-            failure = e.what();
-            return false;
-        }
-    };
-    for (int i = 0; i < 200 * 4 && slewing(); ++i) {
-        if (!step(std::chrono::milliseconds(250))) break;
-    }
-    CHECK(failure.find("Slew timed out") != std::string::npos);  // the wait gave up
-    CHECK_FALSE(driver->get_at_home());
-    mount.hold_running(2, false);
-    CHECK_FALSE(has_final_leg(axis_two(mount.motion_log())));
-    CHECK(mount.frames_seen('E') == 0);
-    driver->set_connected(false);
+    // The slew-complete wait gives up at 180 s of clock time while the board
+    // never reports the first leg done.
+    SteppedHome rig;
+    rig.mount.hold_running(2, true);
+    rig.run(std::chrono::seconds(200));
+    CHECK(rig.failure.find("Slew timed out") != std::string::npos);  // the wait gave up
+    CHECK_FALSE(rig.driver->get_at_home());
+    rig.mount.hold_running(2, false);
+    CHECK_FALSE(has_final_leg(axis_two(rig.mount.motion_log())));
+    CHECK(rig.mount.frames_seen('E') == 0);
 }
 
 TEST_CASE("SkyWatcher backlash - a second goto during the first leg lands on its own target",
@@ -629,6 +645,39 @@ TEST_CASE("SkyWatcher backlash - a MoveAxis during the first leg sends no final 
     CHECK_FALSE(rig.final_leg_sent());
     CHECK(rig.mount.frames_seen('E') == 0);
     CHECK(std::abs(rig.register_error_deg()) <= rig.gap_deg + 1e-9);
+}
+
+TEST_CASE("SkyWatcher backlash - the final leg waits until the first leg has stopped moving",
+          "[skywatcher][telescope][backlash]") {
+    // An EQM-35 Pro reported a goto stopped while its last counts were still
+    // arriving (kLandingSettle in the driver). The first leg lands 0.05 degrees
+    // short with ':f' already reading stopped and creeps in the rest over
+    // 600 ms, inside the landing settle's 2 s: no command reaches the axis
+    // until it is still.
+    SteppedHome rig;
+    rig.mount.land_short_by(2, 1, 0.05, 600);
+    rig.run();
+    CHECK(rig.failure.empty());
+    CHECK(rig.mount.commands_while_coasting(2) == 0);
+    CHECK(has_final_leg(axis_two(rig.mount.motion_log())));
+    CHECK(rig.mount.axis_degrees(2) == 0.0);  // the target: the count origin
+}
+
+TEST_CASE("SkyWatcher backlash - a failed status read during the first leg does not fail the goto",
+          "[skywatcher][telescope][backlash]") {
+    // The landing wait keeps its last answer across a status read that fails
+    // (get_hardware_slewing_locked(), for up to 10 s), so one failed ':f' on
+    // the Dec axis while the first leg runs is no error. The status poll is
+    // paused, so the read that fails is the landing wait's.
+    SteppedHome rig;
+    sw::set_status_poll_paused_for_testing(*rig.driver, true);
+    rig.mount.fail_status_replies(2, 1);
+    rig.run();
+    CHECK(rig.mount.status_failures_pending(2) == 0);  // the failed reply was served
+    CHECK(rig.failure.empty());
+    CHECK(rig.driver->get_at_home());
+    CHECK(has_final_leg(axis_two(rig.mount.motion_log())));
+    CHECK(rig.mount.axis_degrees(2) == 0.0);
 }
 
 TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-checked and reach the driver",

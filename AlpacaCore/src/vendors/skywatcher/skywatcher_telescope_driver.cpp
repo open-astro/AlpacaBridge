@@ -4603,50 +4603,50 @@ private:
         return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
     }
 
-    // open-astro#437: send the final leg a compensated goto still owes each
-    // axis, once that axis has stopped at the end of its first leg: a slow
-    // GOTO (':G' mode '2', the controller ramps, ':I' is the step period) of
-    // the backlash steps in the approach direction, at the derived speed, onto
-    // the goto's own target. Only while the goto that owes it is still the
-    // current motion: any newer motion command (AbortSlew, MoveAxis, a pulse,
-    // a newer goto) bumps motion_generation_, and the record is then dropped
-    // unsent. Returns true while a leg is owed or was just started, so the
-    // caller keeps waiting. The position register is never written: it always
-    // counts the motor, so an unfinished goto leaves nothing to undo.
-    bool advance_final_approach_locked() const {
-        bool owed = false;
+    // open-astro#437: the final leg a compensated goto owes: the goto's motion
+    // generation, the axes that owe one and the goto's own targets.
+    struct FinalApproach {
+        uint64_t generation = 0;
+        bool owed[2]{};
+        double target_deg[2]{};
+    };
+
+    // open-astro#437: called by the landing wait each time the board reports
+    // the goto stopped. A final leg goes out only once each axis that owes one
+    // has settled (wait_axis_stationary_locked(), the rule of every landing),
+    // and only while the goto that owes it is still the current motion: any
+    // newer motion command (AbortSlew, MoveAxis, a pulse, a newer goto) bumps
+    // motion_generation_, and the leg is dropped unsent. The leg goes through
+    // dispatch_goto_locked() and the same wait lands it. True when it went
+    // out. The position register is never written: it always counts the motor,
+    // so an unfinished goto leaves nothing to undo.
+    bool send_final_approach_locked(std::unique_lock<std::mutex>& lock) {
+        const FinalApproach leg = final_approach_;
+        final_approach_ = {};
         for (int i = 0; i < 2; ++i) {
-            FinalApproach& leg = final_approach_[i];
-            if (!leg.pending) {
-                continue;
+            if (leg.owed[i] && leg.generation == motion_generation_) {
+                wait_axis_stationary_locked(lock, i + 1);
             }
-            if (leg.generation != motion_generation_) {
-                leg.pending = false;
-                continue;
-            }
-            const int channel = i + 1;
-            auto& protocol = *protocol_;
-            owed = true;
-            if (protocol.inquire_status(channel).running) {
-                continue;  // still on its first leg
-            }
-            leg.pending = false;
-            const int approach = backlash_approach_sign_locked(channel);
-            protocol.set_motion_mode(channel, '2', direction_char(approach));
-            protocol.set_step_period(channel, step_period_for_locked(channel, backlash_rate_deg_s_[i], false));
-            protocol.set_goto_target(channel, leg.target_counts);
-            protocol.start_motion(channel);
         }
-        return owed;
+        if ((!leg.owed[0] && !leg.owed[1]) || leg.generation != motion_generation_ || body_stopped()) {
+            return false;
+        }
+        dispatch_goto_locked(lock, leg.target_deg[0], leg.target_deg[1], /*compensate_backlash=*/false, &leg);
+        return true;
     }
 
     // `compensate_backlash` is false for the AutoHome hunt: its moves read the
     // home index against the count frame, and it waits for its own landings
-    // (autohome_wait_axes_stopped), which never send a final leg.
+    // (autohome_wait_axes_stopped), which never send a final leg. It is false
+    // for a final leg too (open-astro#437): `final_leg` names the goto that
+    // owes it, whose motion generation the leg keeps, and only the axes that
+    // owe one move, in a slow GOTO (':G' mode '2', the controller ramps, ':I'
+    // is the step period) at the derived speed.
     void dispatch_goto_locked(std::unique_lock<std::mutex>& lock, double target_ra_axis_deg, double target_dec_axis_deg,
-                              bool compensate_backlash = true) {
+                              bool compensate_backlash = true, const FinalApproach* final_leg = nullptr) {
         auto& protocol = *protocol_;
-        const uint64_t gen = ++motion_generation_;
+        const uint64_t gen = final_leg ? final_leg->generation : ++motion_generation_;
+        const bool moves[2] = {!final_leg || final_leg->owed[0], !final_leg || final_leg->owed[1]};
         cmd_axis_rate_deg_s_[0] = 0.0;
         cmd_axis_rate_deg_s_[1] = 0.0;
         // A single generation spans BOTH stop-waits and the goto commands
@@ -4657,9 +4657,10 @@ private:
         // circuit skipped the second axis entirely) — while the stale-
         // generation gate inside the wait ensures a superseded dispatch
         // never emits stops that could clobber the superseding command's
-        // fresh motion (round-6 finding).
-        const bool ra_stopped = stop_axis_and_wait_locked(lock, kAxisRa, gen);
-        const bool dec_stopped = stop_axis_and_wait_locked(lock, kAxisDec, gen);
+        // fresh motion (round-6 finding). An axis a final leg leaves alone is
+        // neither stopped nor started.
+        const bool ra_stopped = !moves[0] || stop_axis_and_wait_locked(lock, kAxisRa, gen);
+        const bool dec_stopped = !moves[1] || stop_axis_and_wait_locked(lock, kAxisDec, gen);
         if (!ra_stopped || !dec_stopped) {
             throw AlpacaException("Slew superseded before dispatch");
         }
@@ -4674,39 +4675,50 @@ private:
             {kAxisRa, cached_ra_axis_deg_, target_ra_axis_deg},
             {kAxisDec, cached_dec_axis_deg_, target_dec_axis_deg},
         };
-        bool two_legs = false;
+        FinalApproach owes{gen, {false, false}, {target_ra_axis_deg, target_dec_axis_deg}};
         for (const auto& plan : plans) {
             const auto i = static_cast<std::size_t>(plan.channel - 1);
+            if (!moves[i]) {
+                continue;
+            }
             const uint32_t cpr = axis_params_[i].counts_per_revolution;
             const double delta = plan.target_deg - plan.current_deg;
             const uint32_t target = degrees_to_counts(plan.target_deg, cpr);
             uint32_t first_leg = target;
             // open-astro#437: a move against the approach side overshoots the
             // target by the backlash steps; the final leg comes back onto it
-            // from the approach side (advance_final_approach_locked(), from the
-            // landing wait). A move of under one count has no direction. A
-            // record an earlier goto left unsent is not cleared here: its
-            // generation is no longer current, so it is never sent.
+            // from the approach side (send_final_approach_locked(), from the
+            // landing wait). A move of under one count has no direction.
             const int approach = backlash_approach_sign_locked(plan.channel);
             if (compensate_backlash && backlash_rate_deg_s_[i] > 0.0 && std::abs(delta) * cpr / 360.0 >= 0.5 &&
                 (delta > 0.0 ? 1 : -1) != approach) {
                 const uint32_t steps = i == 0 ? backlash_.ra.steps : backlash_.dec.steps;
                 first_leg = (approach > 0 ? target - steps : target + steps) & kCountsMask;
-                final_approach_[i] = {true, gen, target};
-                two_legs = true;
+                owes.owed[i] = true;
             }
             // Motion mode '0' = fast GOTO (the controller manages ramp and the
-            // brake point); direction from the signed move.
-            protocol.set_motion_mode(plan.channel, '0', direction_char(delta));
+            // brake point), '2' for a final leg; direction from the signed move.
+            protocol.set_motion_mode(plan.channel, final_leg ? '2' : '0', direction_char(delta));
+            if (final_leg) {
+                protocol.set_step_period(plan.channel,
+                                         step_period_for_locked(plan.channel, backlash_rate_deg_s_[i], false));
+            }
             protocol.set_goto_target(plan.channel, first_leg);
         }
-        if (two_legs) {
+        if (!final_leg) {
+            final_approach_ = owes;
+        }
+        if (owes.owed[0] || owes.owed[1]) {
             // The landing time of a two-leg goto is no sample of the one-leg
             // goto overhead the aim-ahead estimate learns (wait_for_slew_complete).
             last_goto_dispatch_time_ = std::chrono::steady_clock::time_point{};
         }
-        protocol.start_motion(kAxisRa);
-        protocol.start_motion(kAxisDec);
+        if (moves[0]) {
+            protocol.start_motion(kAxisRa);
+        }
+        if (moves[1]) {
+            protocol.start_motion(kAxisDec);
+        }
         // open-astro#459: every commanded dec-axis angle passes through here
         // (sky goto, the no-indexer FindHome and Park gotos to home, the
         // AutoHome hunt phases), so this is the one place the branch memory
@@ -5431,7 +5443,7 @@ private:
     }
 
     bool wait_for_slew_complete(std::unique_lock<std::mutex>& lock,
-                                std::optional<uint64_t> expected_generation = std::nullopt) const {
+                                std::optional<uint64_t> expected_generation = std::nullopt) {
         const auto timeout = std::chrono::seconds(180);
         auto start = clock_.now();
         const auto start_grace = std::chrono::seconds(2);
@@ -5451,9 +5463,7 @@ private:
                 // replaced it; abandon the wait promptly so the join is bounded.
                 throw AlpacaException("Slew wait cancelled");
             }
-            // open-astro#437: a final leg still owed keeps the goto going.
-            const bool leg_owed = advance_final_approach_locked();
-            bool slewing = get_hardware_slewing_locked(false) || leg_owed;
+            bool slewing = get_hardware_slewing_locked(false);
             if (slewing) {
                 saw_slewing = true;
             }
@@ -5461,6 +5471,9 @@ private:
                 if (!saw_slewing && (clock_.now() - start) < start_grace) {
                     sleep_unlocked(std::chrono::milliseconds(200));
                     continue;
+                }
+                if (send_final_approach_locked(lock)) {
+                    continue;  // open-astro#437: land the final leg the same way
                 }
                 break;
             }
@@ -6130,15 +6143,8 @@ private:
     // Final-leg speed per axis in deg/s, derived at connect from ":s" and ":a";
     // 0 = this axis is not compensated (off, or the board gave no worm count).
     double backlash_rate_deg_s_[2]{};
-    // The final leg a compensated goto still owes each axis, tagged with the
-    // goto's motion generation (see advance_final_approach_locked). Mutable:
-    // the landing wait that sends it is const.
-    struct FinalApproach {
-        bool pending = false;
-        uint64_t generation = 0;
-        uint32_t target_counts = 0;
-    };
-    mutable FinalApproach final_approach_[2]{};
+    // The final leg the last goto owes, if any (see send_final_approach_locked).
+    FinalApproach final_approach_;
     // open-astro#666: live_rate_change_needs_relatch() of the connected board,
     // true when unknown. Atomic because the pulse task's restore reads it
     // without mutex_.

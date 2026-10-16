@@ -456,6 +456,29 @@ public:
         a.coast_ms = coast_ms;
     }
 
+    /// open-astro#437: motion frames (":G" ":S" ":I" ":J" ":K" ":L" ":E") the
+    /// axis received while still coasting in after a land_short_by() landing,
+    /// the window the driver's landing settle exists for. A ":K" counts too: it
+    /// ends the coast here, so a motion start that stops the axis first would
+    /// otherwise reach its ":J" with nothing left to see.
+    int commands_while_coasting(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).commands_while_coasting;
+    }
+
+    /// open-astro#437: answer the next @p n ":f" inquiries on an axis with
+    /// "!0", so the wrapper throws: a status read that fails.
+    void fail_status_replies(int axis, int n) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ax(axis).failed_status_replies = n;
+    }
+
+    /// How many of those failed replies are still to be served.
+    int status_failures_pending(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).failed_status_replies;
+    }
+
     /// Refuse the next @p n ":J" on an axis with "!2" (Motor not stopped):
     /// the start/re-latch throws in the wrapper. Models a transport-level
     /// failure of the ":J" kick that follows a live ":I" (#249 review).
@@ -523,6 +546,8 @@ private:
         bool coasting = false;     // counts still creeping with ":f" reading stopped
         int64_t coast_target = 0;
         double coast_cps = 0.0;
+        int commands_while_coasting = 0;  // motion frames received while coasting
+        int failed_status_replies = 0;    // ":f" inquiries to answer "!0" (test knob)
         int drop_step_period_writes = 0;  // ":I" writes to ack-but-ignore (test knob)
         int wrong_restart_latches = 0;    // ":J" restarts to latch at the wrong rate (test knob)
 
@@ -681,6 +706,7 @@ private:
         ++frames_by_cmd_[static_cast<unsigned char>(cmd)];
         if (std::strchr("GSIJKLE", cmd) != nullptr) {
             motion_log_.push_back(frame);
+            a.commands_while_coasting += a.coasting ? 1 : 0;
         }
         frames_cv_.notify_all();
         bool was_running_on_start = false;  // ":J" only; declared here to not cross case labels
@@ -702,6 +728,10 @@ private:
             case 'j':
                 return "=" + u24(static_cast<uint32_t>(a.counts & 0xFFFFFF));
             case 'f': {
+                if (a.failed_status_replies > 0) {
+                    --a.failed_status_replies;
+                    return "!0";
+                }
                 static const char* hex = "0123456789ABCDEF";
                 uint32_t n0 = (a.speed_mode ? 1u : 0u) | (a.dir == '1' ? 2u : 0u) | (a.fast ? 4u : 0u);
                 uint32_t n1 = !a.hide_running && (a.running || a.hold_running) ? 1u : 0u;
