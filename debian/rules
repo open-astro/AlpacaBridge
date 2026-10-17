@@ -16,7 +16,7 @@ QHY_SDK_DIR        := $(CURDIR)/AlpacaCore/external/QHY/sdk_linux_arm64_26.07.28
 ZWO_EAF_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ZWO/EAF/lib/armv8
 ZWO_CAMERA_LIB_DIR := $(CURDIR)/AlpacaCore/external/ZWO/ASI_Camera_SDK/lib/linux/armv8
 SVBONY_LIB_DIR     := $(CURDIR)/AlpacaCore/external/SVBONY/lib/armv8
-TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc
+TOUPTEK_LIB_DIR    := $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260519/linux/arm64/glibc
 ALTAIR_LIB_DIR     := $(CURDIR)/AlpacaCore/external/Altair/altaircamsdk.20260531/linux/arm64/glibc
 PLAYERONE_LIB_DIR  := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64
 PLAYERONE_PW_LIB_DIR := $(CURDIR)/AlpacaCore/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64
@@ -131,7 +131,7 @@ override_dh_auto_install:
 	  $(CURDIR)/AlpacaCore/external/SVBONY/90-ckusb.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	install -m 644 \
-	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260128/linux/udev/99-toupcam.rules \
+	  $(CURDIR)/AlpacaCore/external/ToupTek/toupcamsdk.20260519/linux/udev/99-toupcam.rules \
 	  $(STAGING)/usr/lib/udev/rules.d/
 	# 99-altaircam.rules also grants ToupTek's 0547/04b4 ids, duplicating
 	# 99-toupcam.rules. Keep both: each vendor's rule is installed on its own

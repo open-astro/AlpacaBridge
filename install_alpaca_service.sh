@@ -121,7 +121,7 @@ install_udev_rules() {
   fi
 
   # Install ToupTek Camera shared library (used by companion guiding software)
-  local touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
+  local touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260519/linux/arm64/glibc"
   if [[ -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
     echo "Installing ToupTek Camera shared library to /usr/local/lib"
     sudo cp -a "${touptek_lib_dir}/libtoupcam.so"* /usr/local/lib/

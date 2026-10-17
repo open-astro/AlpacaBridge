@@ -179,7 +179,7 @@ run_system_setup() {
     sudo ldconfig
   fi
 
-  touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260128/linux/arm64/glibc"
+  touptek_lib_dir="${CORE_DIR}/external/ToupTek/toupcamsdk.20260519/linux/arm64/glibc"
   if [[ -f "${touptek_lib_dir}/libtoupcam.so" ]]; then
     echo "Installing ToupTek Camera shared library to /usr/local/lib"
     sudo cp -a "${touptek_lib_dir}/libtoupcam.so"* /usr/local/lib/
