@@ -34,9 +34,10 @@ namespace alpacacore::test {
  * through the decorator type behaves like one through the interface.
  *
  * Do not use it over a FakePlayerOneSDK configured to block: get_image_data()
- * holds in hold_image_data mode (ignoring its timeout) until stop_exposure()
- * releases it, and behind this mutex the abort's stop_exposure() would queue
- * behind the very read it is meant to wake.
+ * waits in hold_image_data mode (up to its timeout, or until stop_exposure()
+ * releases it when set_hold_image_data was given ignore_timeout), and behind
+ * this mutex the abort's stop_exposure() would queue behind the very read it
+ * is meant to wake.
  */
 class LockedPlayerOneSDK final : public vendor::playerone::PlayerOneSDK {
 public:

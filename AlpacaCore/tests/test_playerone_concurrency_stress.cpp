@@ -75,12 +75,12 @@ TEST_CASE("Player One Phoenix - connected concurrent connect/disconnect/operate 
     REQUIRE(driver->get_connected());
 
     // open-astro#326: one guard per call, and it COUNTS what it swallows. This
-    // registration runs connected, so the expected set is widened: a move
-    // racing another move is InvalidOperation, and a position racing the
-    // disconnect's name reset can be InvalidValue.
-    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected,
-                                             alpacacore::AlpacaError::InvalidValue,
-                                             alpacacore::AlpacaError::InvalidOperation});
+    // registration runs connected, so the expected set is widened beyond
+    // NotConnected: a move racing another move is InvalidOperation (the fake
+    // refuses a goto while the wheel is moving, as the real wrapper maps
+    // PW_ERROR_IS_MOVING).
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
         guard([&] { static_cast<void>(wheel.get_position()); });
