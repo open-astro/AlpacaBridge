@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/vendor/playerone/playerone_pw_sdk.h>
 
 #include <memory>
 
@@ -27,5 +28,13 @@ namespace alpacacore::vendor::playerone {
  * @return Unique pointer to filter wheel driver
  */
 std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_number, int wheel_index);
+
+/**
+ * @brief As above, over an injected PW SDK (issue #1256). The two-argument
+ *        factory passes the real PlayerOnePWSDKWrapper singleton; tests pass a
+ *        fake. The SDK is not owned and must outlive the driver.
+ */
+std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_number, int wheel_index,
+                                                                PlayerOnePWSDK& sdk);
 
 }  // namespace alpacacore::vendor::playerone

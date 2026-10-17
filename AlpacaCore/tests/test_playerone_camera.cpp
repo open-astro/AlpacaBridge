@@ -15,15 +15,19 @@
 #include <alpacacore/version.h>
 
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <functional>
 #include <limits>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
 #include "fake_playerone_sdk.h"
+#include "locked_playerone_sdk.h"
 
 namespace {
 
@@ -45,6 +49,143 @@ bool eventually(Predicate&& predicate, std::chrono::seconds timeout = std::chron
     }
     return predicate();
 }
+
+// Records which interface method it received and the camera id, so the forward
+// sweep below proves every LockedPlayerOneSDK override lands on its own
+// counterpart (not merely that the decorator compiles).
+class RecordingPlayerOneSDK final : public alpacacore::vendor::playerone::PlayerOneSDK {
+public:
+    using PlayerOneCameraInfo = alpacacore::vendor::playerone::PlayerOneCameraInfo;
+    using PlayerOneConfigCaps = alpacacore::vendor::playerone::PlayerOneConfigCaps;
+    using PlayerOneImageFormat = alpacacore::vendor::playerone::PlayerOneImageFormat;
+    using PlayerOneCameraState = alpacacore::vendor::playerone::PlayerOneCameraState;
+    using PlayerOneGuideDirection = alpacacore::vendor::playerone::PlayerOneGuideDirection;
+
+    std::string get_sdk_version() override {
+        record("get_sdk_version", -1);
+        return "recorded-sdk";
+    }
+    std::vector<PlayerOneCameraInfo> enumerate_cameras() override {
+        record("enumerate_cameras", -1);
+        return {};
+    }
+    void open_camera(int camera_id) override { record("open_camera", camera_id); }
+    void init_camera(int camera_id) override { record("init_camera", camera_id); }
+    void close_camera(int camera_id) override { record("close_camera", camera_id); }
+    PlayerOneCameraInfo get_camera_properties_by_id(int camera_id) override {
+        record("get_camera_properties_by_id", camera_id);
+        return {};
+    }
+    PlayerOneConfigCaps probe_config_caps(int camera_id) override {
+        record("probe_config_caps", camera_id);
+        return {};
+    }
+    long get_config_int(int camera_id, int /*config_id*/, bool* is_auto) override {
+        record("get_config_int", camera_id);
+        saw_is_auto_ptr = is_auto != nullptr;
+        return 0;
+    }
+    void set_config_int(int camera_id, int /*config_id*/, long /*value*/, bool /*is_auto*/) override {
+        record("set_config_int", camera_id);
+    }
+    double get_config_float(int camera_id, int /*config_id*/, bool* is_auto) override {
+        record("get_config_float", camera_id);
+        return 0.0;
+    }
+    bool get_config_bool(int camera_id, int /*config_id*/, bool* is_auto) override {
+        record("get_config_bool", camera_id);
+        return false;
+    }
+    void set_config_float(int camera_id, int /*config_id*/, double /*value*/, bool /*is_auto*/) override {
+        record("set_config_float", camera_id);
+    }
+    void set_config_bool(int camera_id, int /*config_id*/, bool /*value*/, bool /*is_auto*/) override {
+        record("set_config_bool", camera_id);
+    }
+    PlayerOneImageFormat get_image_format(int camera_id) override {
+        record("get_image_format", camera_id);
+        return {};
+    }
+    void set_image_format(int camera_id, PlayerOneImageFormat /*format*/) override {
+        record("set_image_format", camera_id);
+    }
+    void get_image_size(int camera_id, int& /*width*/, int& /*height*/) override {
+        record("get_image_size", camera_id);
+    }
+    void set_image_size(int camera_id, int /*width*/, int /*height*/) override { record("set_image_size", camera_id); }
+    void get_image_start_pos(int camera_id, int& /*start_x*/, int& /*start_y*/) override {
+        record("get_image_start_pos", camera_id);
+    }
+    void set_image_start_pos(int camera_id, int /*start_x*/, int /*start_y*/) override {
+        record("set_image_start_pos", camera_id);
+    }
+    int get_image_bin(int camera_id) override {
+        record("get_image_bin", camera_id);
+        return 0;
+    }
+    void set_image_bin(int camera_id, int /*bin*/) override { record("set_image_bin", camera_id); }
+    void start_exposure(int camera_id, bool /*single_frame*/) override { record("start_exposure", camera_id); }
+    void stop_exposure(int camera_id) override { record("stop_exposure", camera_id); }
+    PlayerOneCameraState get_camera_state(int camera_id) override {
+        record("get_camera_state", camera_id);
+        return {};
+    }
+    bool image_ready(int camera_id) override {
+        record("image_ready", camera_id);
+        return false;
+    }
+    bool get_image_data(int camera_id, std::uint8_t* /*buffer*/, std::size_t /*buffer_size*/,
+                        int /*timeout_ms*/) override {
+        record("get_image_data", camera_id);
+        return false;
+    }
+    void pulse_guide_on(int camera_id, PlayerOneGuideDirection /*direction*/) override {
+        record("pulse_guide_on", camera_id);
+    }
+    void pulse_guide_off(int camera_id, PlayerOneGuideDirection /*direction*/) override {
+        record("pulse_guide_off", camera_id);
+    }
+    double get_temperature_c(int camera_id) override {
+        record("get_temperature_c", camera_id);
+        return 0.0;
+    }
+    bool get_cooler_on(int camera_id) override {
+        record("get_cooler_on", camera_id);
+        return false;
+    }
+    void set_cooler_on(int camera_id, bool /*on*/) override { record("set_cooler_on", camera_id); }
+    int get_target_temp_c(int camera_id) override {
+        record("get_target_temp_c", camera_id);
+        return 0;
+    }
+    void set_target_temp_c(int camera_id, int /*target_c*/) override { record("set_target_temp_c", camera_id); }
+    int get_cooler_power_percent(int camera_id) override {
+        record("get_cooler_power_percent", camera_id);
+        return 0;
+    }
+    double get_egain(int camera_id) override {
+        record("get_egain", camera_id);
+        return 0.0;
+    }
+    int get_heater_power_percent(int camera_id) override {
+        record("get_heater_power_percent", camera_id);
+        return 0;
+    }
+    void set_heater_power_percent(int camera_id, int /*percent*/) override {
+        record("set_heater_power_percent", camera_id);
+    }
+    int get_fan_power_percent(int camera_id) override {
+        record("get_fan_power_percent", camera_id);
+        return 0;
+    }
+    void set_fan_power_percent(int camera_id, int /*percent*/) override { record("set_fan_power_percent", camera_id); }
+
+    std::vector<std::pair<std::string, int>> seen;
+    bool saw_is_auto_ptr{true};
+
+private:
+    void record(const char* name, int camera_id) { seen.emplace_back(name, camera_id); }
+};
 
 }  // namespace
 
@@ -901,4 +1042,155 @@ TEST_CASE("Player One Camera Driver - Pulse-off failure remains observable", "[p
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
     CHECK(sdk.open_count() == sdk.close_count());
+}
+
+// --- SDK seam: LockedPlayerOneSDK (issue #1256) -------------------------------
+
+TEST_CASE("FakePlayerOneSDK-style recording SDK behind LockedPlayerOneSDK - forwards every entry point",
+          "[playerone][camera][unit][fake-sdk]") {
+    using namespace alpacacore::vendor::playerone;
+    RecordingPlayerOneSDK recorder;
+    alpacacore::test::LockedPlayerOneSDK sdk(recorder);
+    std::vector<std::uint8_t> buf(16, 0);
+    bool flag = false;
+    int ia = 0;
+    static_cast<void>(ia);
+    static_cast<void>(flag);
+
+    sdk.get_sdk_version();
+    sdk.enumerate_cameras();
+    sdk.open_camera(23);
+    sdk.init_camera(23);
+    sdk.close_camera(23);
+    sdk.get_camera_properties_by_id(23);
+    sdk.probe_config_caps(23);
+    sdk.get_config_int(23, 1);
+    sdk.set_config_int(23, 23, 5L, true);
+    sdk.get_config_float(23, 23, &flag);
+    sdk.get_config_bool(23, 23, &flag);
+    sdk.set_config_float(23, 23, 1.5, true);
+    sdk.set_config_bool(23, 23, true, true);
+    sdk.get_image_format(23);
+    sdk.set_image_format(23, PlayerOneImageFormat::Raw8);
+    sdk.get_image_size(23, ia, ia);
+    sdk.set_image_size(23, 23, 23);
+    sdk.get_image_start_pos(23, ia, ia);
+    sdk.set_image_start_pos(23, 23, 23);
+    sdk.get_image_bin(23);
+    sdk.set_image_bin(23, 23);
+    sdk.start_exposure(23, true);
+    sdk.stop_exposure(23);
+    sdk.get_camera_state(23);
+    sdk.image_ready(23);
+    sdk.get_image_data(23, buf.data(), buf.size(), 23);
+    sdk.pulse_guide_on(23, PlayerOneGuideDirection::North);
+    sdk.pulse_guide_off(23, PlayerOneGuideDirection::North);
+    sdk.get_temperature_c(23);
+    sdk.get_cooler_on(23);
+    sdk.set_cooler_on(23, true);
+    sdk.get_target_temp_c(23);
+    sdk.set_target_temp_c(23, 23);
+    sdk.get_cooler_power_percent(23);
+    sdk.get_egain(23);
+    sdk.get_heater_power_percent(23);
+    sdk.set_heater_power_percent(23, 23);
+    sdk.get_fan_power_percent(23);
+    sdk.set_fan_power_percent(23, 23);
+
+    const std::vector<std::string> expected = {"get_sdk_version",
+                                               "enumerate_cameras",
+                                               "open_camera",
+                                               "init_camera",
+                                               "close_camera",
+                                               "get_camera_properties_by_id",
+                                               "probe_config_caps",
+                                               "get_config_int",
+                                               "set_config_int",
+                                               "get_config_float",
+                                               "get_config_bool",
+                                               "set_config_float",
+                                               "set_config_bool",
+                                               "get_image_format",
+                                               "set_image_format",
+                                               "get_image_size",
+                                               "set_image_size",
+                                               "get_image_start_pos",
+                                               "set_image_start_pos",
+                                               "get_image_bin",
+                                               "set_image_bin",
+                                               "start_exposure",
+                                               "stop_exposure",
+                                               "get_camera_state",
+                                               "image_ready",
+                                               "get_image_data",
+                                               "pulse_guide_on",
+                                               "pulse_guide_off",
+                                               "get_temperature_c",
+                                               "get_cooler_on",
+                                               "set_cooler_on",
+                                               "get_target_temp_c",
+                                               "set_target_temp_c",
+                                               "get_cooler_power_percent",
+                                               "get_egain",
+                                               "get_heater_power_percent",
+                                               "set_heater_power_percent",
+                                               "get_fan_power_percent",
+                                               "set_fan_power_percent"};
+    REQUIRE(recorder.seen.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        INFO(expected[i]);
+        CHECK(recorder.seen[i].first == expected[i]);
+        // Calls that carry a camera id forward it unchanged (get_sdk_version and
+        // enumerate_cameras have none and record -1).
+        CHECK((recorder.seen[i].second == 23 || recorder.seen[i].second == -1));
+    }
+    // The decorator repeats the interface's defaulted is_auto argument.
+    CHECK_FALSE(recorder.saw_is_auto_ptr);
+}
+
+TEST_CASE("FakePlayerOneSDK behind LockedPlayerOneSDK - forwards values and out-parameters",
+          "[playerone][camera][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOneSDK fake;
+    alpacacore::test::LockedPlayerOneSDK sdk(fake);
+
+    REQUIRE(sdk.get_sdk_version() == "fake-playerone-sdk");
+    REQUIRE(sdk.enumerate_cameras().size() == 1);
+    sdk.open_camera(17);
+    CHECK(fake.open_count() == 1);
+    sdk.set_config_int(17, 1, 42);
+    bool is_auto = true;
+    CHECK(sdk.get_config_int(17, 1, &is_auto) == 42);
+    CHECK_FALSE(is_auto);
+    sdk.set_image_size(17, 8, 4);
+    int width = 0;
+    int height = 0;
+    sdk.get_image_size(17, width, height);
+    CHECK(width == 8);
+    CHECK(height == 4);
+    sdk.close_camera(17);
+    CHECK(fake.close_count() == 1);
+}
+
+TEST_CASE("Player One Camera Driver - FakePlayerOneSDK exposure behind LockedPlayerOneSDK",
+          "[playerone][camera][unit][fake-sdk]") {
+    alpacacore::test::FakePlayerOneSDK fake;
+    alpacacore::test::LockedPlayerOneSDK sdk(fake);
+    fake.set_supported_formats({alpacacore::vendor::playerone::PlayerOneImageFormat::Raw8});
+    fake.set_frame_data(std::vector<std::uint8_t>(16 * 8, 0));
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (...) {
+            return false;
+        }
+    }));
+    CHECK(driver->get_image_array().data.size() == 16 * 8);
+    CHECK(fake.exposure_start_count() == 1);
+    driver->set_connected(false);
+    CHECK(fake.close_count() == 1);
 }

@@ -1065,6 +1065,7 @@ Every new driver **must** ship with at least the following 8 unit test cases, pl
 ### Hardware-free driver tests via the SDK seam (ToupTek, QHY, gphoto and SVBONY camera — extend to other vendors)
 
 The SVBONY camera has the same seam (`SVBSDK` in `svbony_sdk.h`, `FakeSVBSDK`, `LockedSVBSDK`, issue #1010).
+The Player One camera and Phoenix Wheel have it too: `PlayerOneSDK` / `FakePlayerOneSDK` / `LockedPlayerOneSDK` for the camera, and `PlayerOnePWSDK` (`playerone_pw_sdk.h`) / `FakePlayerOnePWSDK` / `LockedPlayerOnePWSDK` for the wheel, whose `create_playerone_filterwheel(device, index, sdk)` overload leaves the two-argument factory on the real singleton (issue #1256).
 
 The ToupTek drivers take the SDK through the abstract `ToupTekSDK` interface
 (`touptek_sdk_wrapper.h`): production factories pass the `ToupTekSDKWrapper`

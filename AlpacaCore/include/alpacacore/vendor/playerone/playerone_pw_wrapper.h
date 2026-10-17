@@ -12,18 +12,13 @@
 
 #pragma once
 
+#include <alpacacore/vendor/playerone/playerone_pw_sdk.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::playerone {
-
-struct PlayerOnePWInfo {
-    int handle{-1};             // SDK handle (PWProperties::Handle)
-    std::string name;           // PWProperties::Name (e.g. "PhoenixWheel")
-    int position_count{};       // filter capacity (e.g. 5-position)
-    std::string serial_number;  // PWProperties::SN
-};
 
 /**
  * Thin wrapper around the Player One Phoenix Filter Wheel SDK (libPlayerOnePW)
@@ -37,35 +32,35 @@ struct PlayerOnePWInfo {
  *
  * PWErrors != PW_OK is translated to AlpacaException.
  */
-class PlayerOnePWSDKWrapper {
+class PlayerOnePWSDKWrapper final : public PlayerOnePWSDK {
 public:
     static PlayerOnePWSDKWrapper& instance();
 
-    std::vector<PlayerOnePWInfo> enumerate_wheels();
-    bool get_wheel_info_by_index(int wheel_index, PlayerOnePWInfo& info);
-    bool get_wheel_info_by_handle(int handle, PlayerOnePWInfo& info);
+    std::vector<PlayerOnePWInfo> enumerate_wheels() override;
+    bool get_wheel_info_by_index(int wheel_index, PlayerOnePWInfo& info) override;
+    bool get_wheel_info_by_handle(int handle, PlayerOnePWInfo& info) override;
 
-    void open_wheel(int handle);
-    void close_wheel(int handle);
+    void open_wheel(int handle) override;
+    void close_wheel(int handle) override;
 
     // Returns -1 while the wheel is moving (matches the ASCOM Position
     // contract; the SDK reports PW_ERROR_IS_MOVING in that window).
-    int get_position(int handle);
-    void goto_position(int handle, int position);
-    bool is_moving(int handle);
+    int get_position(int handle) override;
+    void goto_position(int handle, int position) override;
+    bool is_moving(int handle) override;
 
-    bool get_one_way(int handle);
-    void set_one_way(int handle, bool one_way);
+    bool get_one_way(int handle) override;
+    void set_one_way(int handle, bool one_way) override;
 
     // Filter alias / focus offset are stored on the wheel itself.
-    std::string get_filter_alias(int handle, int position);
-    int get_focus_offset(int handle, int position);
+    std::string get_filter_alias(int handle, int position) override;
+    int get_focus_offset(int handle, int position) override;
 
     // Recovery for PW_ERROR_FIRMWARE_ERROR (filter/hole misalignment).
-    void reset_wheel(int handle);
+    void reset_wheel(int handle) override;
 
-    std::string get_sdk_version();
-    int get_api_version();
+    std::string get_sdk_version() override;
+    int get_api_version();  // not part of the PlayerOnePWSDK seam
 
 private:
     class Impl;

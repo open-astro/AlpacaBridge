@@ -909,6 +909,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
+    {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
     {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},

@@ -126,7 +126,9 @@
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
+#include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 
+#include "fake_playerone_pw_sdk.h"
 #include "fake_playerone_sdk.h"
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
@@ -1341,6 +1343,34 @@ Tier2Host tier2_host_playerone_camera() {
     };
     return h;
 }
+
+Tier2Host tier2_host_playerone_filterwheel() {
+    Tier2Host h{"playerone_filterwheel",
+                "playerone",
+                "filterwheel",
+                "fake_playerone_pw_sdk.h",
+                DeviceType::FilterWheel,
+                "playerone_filterwheel",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOnePWSDK>();
+        if (hold) sdk->set_open_delay(kHold);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOnePWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0, fake);
+        });
+    };
+    h.failing = []() {
+        auto sdk = std::make_shared<alpacacore::test::FakePlayerOnePWSDK>();
+        sdk->set_no_wheels(true);
+        return host_over(sdk, [](alpacacore::test::FakePlayerOnePWSDK& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0, fake);
+        });
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SVBONY
@@ -1574,7 +1604,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SVBONY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
-#define CS2_PLAYERONE(X) X(playerone_camera, CAM)
+#define CS2_PLAYERONE(X) X(playerone_camera, CAM) X(playerone_filterwheel, PRB)
 #else
 #define CS2_PLAYERONE(X)
 #endif

@@ -29,8 +29,9 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    PlayerOnePWFilterWheelDriver(int device_number, int wheel_index)
+    PlayerOnePWFilterWheelDriver(int device_number, int wheel_index, PlayerOnePWSDK& sdk)
         : AsyncConnectable("PlayerOne"),
+          sdk_(sdk),
           device_number_(device_number),
           wheel_index_(wheel_index),
           handle_(-1),
@@ -107,7 +108,7 @@ public:
             return;
         }
 
-        auto& sdk = PlayerOnePWSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             int handle = resolve_handle_locked();
             sdk.open_wheel(handle);
@@ -165,7 +166,7 @@ public:
         if (handle_ < 0) {
             throw AlpacaException("Filter wheel handle not set", AlpacaError::NotConnected);
         }
-        return PlayerOnePWSDKWrapper::instance().get_position(handle_);
+        return sdk_.get_position(handle_);
     }
 
     void set_position(int position) override {
@@ -191,7 +192,7 @@ public:
         if (position >= wheel_info_.position_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        PlayerOnePWSDKWrapper::instance().goto_position(handle_, position);
+        sdk_.goto_position(handle_, position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -229,7 +230,7 @@ private:
     }
 
     int resolve_handle_locked() {
-        auto wheels = PlayerOnePWSDKWrapper::instance().enumerate_wheels();
+        auto wheels = sdk_.enumerate_wheels();
         if (wheels.empty()) {
             ALPACA_LOG_WARN("PlayerOne", "No Player One filter wheels detected by SDK");
             throw AlpacaException("No Player One filter wheels detected", AlpacaError::NotConnected);
@@ -253,7 +254,7 @@ private:
             throw AlpacaException("Filter wheel reported no filter positions", AlpacaError::DriverException);
         }
         const std::size_t slots = static_cast<std::size_t>(wheel_info_.position_count);
-        auto& sdk = PlayerOnePWSDKWrapper::instance();
+        auto& sdk = sdk_;
 
         if (filter_names_.empty()) {
             filter_names_.assign(slots, std::string());
@@ -307,6 +308,7 @@ private:
         }
     }
 
+    PlayerOnePWSDK& sdk_;
     int device_number_;
     int wheel_index_;
     int handle_;
@@ -319,7 +321,12 @@ private:
 };
 
 std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_number, int wheel_index) {
-    return std::make_unique<PlayerOnePWFilterWheelDriver>(device_number, wheel_index);
+    return create_playerone_filterwheel(device_number, wheel_index, PlayerOnePWSDKWrapper::instance());
+}
+
+std::unique_ptr<FilterWheelDriver> create_playerone_filterwheel(int device_number, int wheel_index,
+                                                                PlayerOnePWSDK& sdk) {
+    return std::make_unique<PlayerOnePWFilterWheelDriver>(device_number, wheel_index, sdk);
 }
 
 }  // namespace alpacacore::vendor::playerone
