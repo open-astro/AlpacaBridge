@@ -704,7 +704,7 @@ public:
         // (HH:MM:SS.SSSS# / sDD*MM:SS.SSSS#, 0.0001s / 0.001" resolution)
         // instead of the whole-second/whole-arcsecond :GR#/:GD# forms.
         // :GR#'s 1-second RA resolution (~15" at the equator) is too coarse
-        // for ConformU's PulseGuide tolerance (0.07") on short (2-5s) guide
+        // for ConformU's PulseGuide tolerance (0.07 s) on short (2-5s) guide
         // pulses — confirmed against real hardware (firmware "On-Step"
         // v10.23a responds to :GRa# with fractional seconds).
         std::string ra_resp = send_command(":GRa#", true, 0);
@@ -1193,7 +1193,14 @@ private:
                     break;
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // For a '#'-terminated reply, back off only when nothing arrived:
+            // a pause after every character cost ~10 ms each (a 14-char :GRa#
+            // reply took ~0.16 s at 9600 baud, where the bytes take ~15 ms).
+            // An unterminated ack keeps it: its idle break needs this pause
+            // plus one VTIME wait to pass 100 ms, or it waits a second cycle.
+            if (!got_char || !require_hash_terminator) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
         return response;
     }

@@ -331,13 +331,12 @@ public:
             }
 
             // Warm caches so the first property reads stay within ConformU's
-            // fast-response targets. NOTE: this does not help the very first
-            // DeviceState call — ConformU's Connect()/Connected preamble
-            // issues a fast connect/disconnect/reconnect dance and calls
-            // DeviceState immediately after, faster than this warm-up can
-            // complete (measured: DeviceState's ~0.65s live-read cost is
-            // identical whether or not this block runs). Kept anyway because
-            // every OTHER first-property-read benefits from it.
+            // fast-response targets. This covers the first DeviceState too:
+            // after ConformU's Connected=false / Connect() preamble from a
+            // single client it answers in 3-5 ms with no serial reads. It
+            // only misses when another client keeps the device open, so the
+            // preamble does not reconnect and this block does not run
+            // (#1242).
             try {
                 refresh_status_cache_locked(true);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -587,11 +586,12 @@ public:
         //
         // Deliberately does NOT call refresh_equatorial_cache_locked() (which
         // enforces kPositionCacheTtl's normal 2s freshness window): a live
-        // :GRa#/:GDe# round trip (~0.13s each, ~0.26s+ together on this
-        // serial link) landing inside this call is enough to blow ConformU's
-        // 0.1s FAST target — confirmed against real hardware, where this
-        // showed up as an occasional "SideOfPier Read ... OUTSIDE FAST
-        // RESPONSE TIME TARGET" once the TTL happened to have just lapsed.
+        // :GRa#/:GDe# round trip (~25 ms each on the HM-17 at 9600 baud;
+        // ~0.16s each while read_response() slept per character, #1242)
+        // landing inside this call (~50 ms together) uses about half of
+        // ConformU's 0.1s FAST target, and about three times it before #1242 — confirmed against real
+        // hardware, where this showed up as an occasional "SideOfPier Read
+        // ... OUTSIDE FAST RESPONSE TIME TARGET" once the TTL had just lapsed.
         // Hour-angle SIGN (the only thing this needs) is insensitive to a
         // couple of seconds of RA staleness — sidereal drift over that
         // window is a few arcseconds, utterly negligible next to the ±6h

@@ -641,6 +641,34 @@ TEST_CASE("OnStep protocol wrapper - :GU# pier side is T/W/o and not the mount-t
     CHECK(tracking_east.is_tracking);
 }
 
+TEST_CASE("OnStep protocol wrapper - a long reply costs no time per character", "[onstep][telescope][unit]") {
+    // The fake answers at once, so the wire adds nothing: what is measured is
+    // the read loop. A pause after every character costs 10 ms each (#1242).
+    const std::string long_reply(60, 'x');
+    alpacacore::test::FakeMountServer server([long_reply](const std::string&) { return long_reply + "#"; });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 2000;
+    auto& wrapper = alpacacore::vendor::onstep::OnStepProtocolWrapper::instance();
+    REQUIRE(wrapper.connect(conn));
+    struct DisconnectOnExit {
+        alpacacore::vendor::onstep::OnStepProtocolWrapper& w;
+        ~DisconnectOnExit() { w.disconnect(); }
+    } disconnect_on_exit{wrapper};
+
+    const auto started = std::chrono::steady_clock::now();
+    const std::string reply = wrapper.send_command(":GVP#");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(reply == long_reply);
+    // 60 characters at 10 ms each would take 600 ms; the bound leaves room
+    // for a slow sanitizer build.
+    CHECK(elapsed < std::chrono::milliseconds(200));
+}
+
 namespace {
 
 // A fake OnStepX whose :GU# reply the test scripts, recording every command.

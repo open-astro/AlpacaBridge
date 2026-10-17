@@ -48,8 +48,9 @@ it is never reachable through `router.cpp` or the web UI.
   `:GU#`'s pier side is parsed into `MountStatus` but intentionally unused for this property. Do not
   reintroduce a firmware-flag-preferred branch here without re-validating against ConformU's
   SideofPier/DestinationSideofPier checks. Also avoid forcing a live position refresh inside
-  `get_side_of_pier()` (a `:GRa#`/`:GDe#` round trip, ~0.13s each on this serial link, can push
-  the read over ConformU's 0.1s FAST target) — hour-angle *sign* tolerates a couple of seconds of
+  `get_side_of_pier()` (a `:GRa#`/`:GDe#` pair, ~25 ms each on the HM-17 at 9600 baud, so ~50 ms,
+  uses about half of a FAST read's 0.1s budget; it was ~0.16s each while `read_response()` slept
+  10 ms after every reply character, #1242) — hour-angle *sign* tolerates a couple of seconds of
   RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated.
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
@@ -69,7 +70,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **RA/Dec position reads use the high-precision variants**: `:GRa#`/`:GDe#` (fractional
   seconds/arcseconds: `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSSS#`), not `:GR#`/`:GD#` (whole-second/
   whole-arcsecond resolution). The whole-second RA resolution (~15″ at the equator) is far too
-  coarse for ConformU's 0.07″ PulseGuide tolerance on short (2-5s) guide pulses — confirmed via
+  coarse for ConformU's 0.07 s PulseGuide tolerance on short (2-5s) guide pulses — confirmed via
   ConformU issue count dropping from 8 to 0-2 after switching. `parse_sexagesimal()` handles the
   fractional last field transparently (`std::stod` on a run of digits+`.`), no parser change
   needed.
@@ -143,28 +144,29 @@ it is never reachable through `router.cpp` or the web UI.
   ConformU log, where `Park`/`FindHome` also take ~30s in wall-clock terms but show `0.001s ✓
   (EXTENDED)` in the timing table). Real GEM mounts physically cannot park/home in 1 second;
   fire-and-forget is the only way to pass this target with genuine hardware.
-- **`DeviceState`'s first post-Connect call routinely exceeds the 0.1s FAST target (~0.65s),
-  and this is NOT fixable by warming caches during `connect()`**: two different warm-up
-  strategies (locked, then a mutex-released ToupTek-AFW-style version) were tried against real
-  hardware and neither moved the measured time at all — ConformU's Connect()/Connected preamble
-  (`Connected=True` → `Connected=False` → `Connect()`) calls `DeviceState` fast enough after the
-  final reconnect that the live `:GA#/:GZ#/:GU#/:GRa#/:GDe#` round trips always land inside its
-  measurement window regardless of what connect-time work has or hasn't finished. Treat this as
-  an accepted, inherent one-time cold-start cost, not a bug to keep chasing.
-- **The same connect-adjacent cold-start window can land on other FAST members too, not just
-  `DeviceState`** (re-confirmed on real hardware, ConformU 4.5.0, after the driver-branch update
-  that ported this driver's auto-detect to the shared `serial_by_id_scan.h` helper): two
-  consecutive runs both showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
-  `EquatorialSystem` (~0.136s), and `SideOfPier Read` (~0.140s) OUTSIDE the 0.1s FAST target,
-  every time, at nearly identical values (±0.003s) — including `AlignmentMode`/`EquatorialSystem`,
-  which are compile-time constants with no wire I/O at all. This is the same phenomenon as the
-  `DeviceState` note above, not a regression from that auto-detect change (which only touches
-  `enumerate_onstep_ports()`, never called on this code path): manually repeating the same calls
-  a few seconds after `Connect()` (well outside ConformU's rapid-fire post-Connect property sweep)
-  answers in ~0.003s every time, confirming it's a transient connect-adjacent window, not a
-  permanent per-call cost. Which members land inside that window depends on ConformU's exact call
-  order/pacing for a given version, so don't be surprised if it isn't `DeviceState` specifically.
-  Same conclusion applies: treat as accepted, not a bug to chase-fix via caching.
+- **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
+  ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
+  poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
+  warm-up fills the status and position caches (ConformU, which adds its own client overhead,
+  times it at 0.025s in the HM-17 report). A slow one appears when another ClientID is still
+  connected (the web UI, a script, NINA): the server keeps the device open for it, so ConformU's
+  `Connected=False` and `Connect()` change nothing, the caches are past their 2 s TTL, and
+  `DeviceState` refreshes `:GA#`/`:GZ#`/`:GU#`/`:GRa#`/`:GDe#`. That measured ~0.65s while each
+  reply cost ~10 ms per character on top of ~20-25 ms per command (the sleep fixed in #1242). On the HM-17 those five
+  commands now take ~0.11s together (each timed through the wrapper; the five took ~0.66s before),
+  still over the 0.1s target. For a validation run, connect nothing else to the
+  mount before ConformU starts; with an explicit port there is no auto-detect scan to pre-pay.
+- **Other slow first FAST reads in old ConformU 4.5.0 runs were not a cold-start window
+  either.** Two runs showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
+  `EquatorialSystem` (~0.136s) and `SideOfPier Read` (~0.140s) outside the 0.1s FAST target.
+  `AlignmentMode` and `EquatorialSystem` are compile-time constants with no serial I/O, so that
+  time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
+  an enum type, which matches ConformU's first-use JIT cost on enum-typed members
+  (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see AGENTS.md).
+  `Declination` is a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
+  with ~0.16s each, what that pair measured on the HM-17 while the per-character sleep fixed in
+  #1242 was in place. The HM-17 run on ConformU 4.5.2-rc.1, with nothing else connected, has every member
+  within its timing target.
 - **`PulseGuide` residual ConformU issues: North/South at HA ±9 is refraction, the rest is
   noise.** The `-9.0`/`-3.0`/`+3.0`/`+9.0` in ConformU's PulseGuide member names are the **hour
   angles** of the test position (`TestPulseGuide(ha)` in `TelescopeTester.cs`), not guide rates.
@@ -183,7 +185,7 @@ it is never reachable through `router.cpp` or the web UI.
     true, #1216). The maintainer fixed it in ConformU 4.5.2-rc.1 (build 56111) by keeping the test
     declinations within ±65°. A run with an older build still shows these 4 issues; note them in
     the saved report instead of changing the tolerance.
-  - *Other residuals* (East/West at the 0.07″ boundary): treated as hardware noise after (1) an
+  - *Other residuals* (East/West at the 0.07 s boundary): treated as hardware noise after (1) an
     A/B test with refraction rate compensation (`:Tr#`/`:Tn#`) on vs. off, no correlation; (2) mount
     unloaded vs. loaded, no difference; (3) testing far from the pole was blocked by ConformU's own
     `Park()`/`FindHome()` returning near the pole. The earlier reading that all four labels drive
@@ -217,8 +219,8 @@ it is never reachable through `router.cpp` or the web UI.
   (Linux Mint 22.3), not arm64 as its `Linux-arm64.txt` name suggests, made before validation
   became arm64-only: 0 errors, 0 timing violations in the saved run. The only remaining
   findings are the 2 PulseGuide East/West residual issues documented above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
-  runs during this same validation session also hit the DeviceState-cold-start-style FAST
-  timing risk described above (via `get_side_of_pier()`'s live position round trip, since
-  fixed), which is why that failure mode is documented even though the saved log is clean of it.
+  runs during this same validation session also had slow first FAST reads (see the notes
+  above; one came from `get_side_of_pier()`'s live position round trip, since fixed), which is
+  why they are documented even though the saved log is clean of them.
   See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
   `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
