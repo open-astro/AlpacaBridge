@@ -155,6 +155,9 @@ public:
     // sets it on the connect call to hold a connect open.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
+    // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
+    // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
+    bool skip_sleeps{false};
     std::vector<std::string> call_log;
 
     int open_count{0};
@@ -310,7 +313,7 @@ public:
         camera_for(handle);
         ++drain_events_calls;
         drained_budget += budget;
-        std::this_thread::sleep_for(budget);
+        if (!skip_sleeps) std::this_thread::sleep_for(budget);
     }
 
     std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
@@ -321,7 +324,7 @@ public:
         bulb_file_poll_timeouts.push_back(timeout);
         if (bulb_file_polls_before_ready > 0) {
             --bulb_file_polls_before_ready;
-            std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
+            if (!skip_sleeps) std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
             return std::nullopt;
         }
         return capture_result;
