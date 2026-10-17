@@ -233,8 +233,8 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
         alpacacore::AlpacaError::NotImplemented,   alpacacore::AlpacaError::DriverException};
 
     // Mute (and on alternate rounds sever) the handset while the lifecycle and operate threads run, and move the
-    // task clock past the staleness bound so the #1257 fault latch, the lost-link declaration and the relink all
-    // happen under the storm. Each tick of the clock needs the poll (50 ms response timeout) to fail in real time.
+    // task clock past the staleness bound so the lifecycle-churn phase races the poll against connect/disconnect. Each
+    // tick of the clock needs the poll (50 ms response timeout) to fail in real time.
     std::atomic<bool> stop{false};
     std::thread chaos([&] {
         for (int round = 0; !stop.load(); ++round) {
@@ -259,6 +259,47 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+
+    // Lost-link phase: no lifecycle threads, so nothing resets the link health or stops the poll. The chaos thread
+    // mutes and severs the handset, advances the clock until Connected drops (the #1257 latch, then the lost-link
+    // declaration), unmutes and relinks, while getters and slews run on the operate threads.
+    std::atomic<bool> phase_stop{false};
+    std::atomic<int> lost_rounds{0};
+    std::atomic<int> relinked_rounds{0};
+    std::thread lost_chaos([&] {
+        while (!phase_stop.load()) {
+            handset->mute = true;
+            static_cast<void>(server.drop_connections(200ms));
+            const auto lost_deadline = std::chrono::steady_clock::now() + 2s;
+            while (driver->get_connected() && !phase_stop.load() && std::chrono::steady_clock::now() < lost_deadline) {
+                clock.advance(5s);
+                std::this_thread::sleep_for(30ms);
+            }
+            if (!driver->get_connected()) {
+                ++lost_rounds;
+            }
+            handset->mute = false;
+            try {
+                driver->set_connected(true);
+            } catch (const std::exception&) {
+            }
+            if (driver->get_connected()) {
+                ++relinked_rounds;
+            }
+            std::this_thread::sleep_for(60ms);
+        }
+    });
+    alpacacore::test::StressOptions lost_opt;
+    lost_opt.lifecycle_threads = 0;
+    lost_opt.duration = 3s;
+    alpacacore::test::run_lifecycle_stress(
+        *driver, [&guard](AlpacaDriver& d) { lost_link_operate(guard, d); }, lost_opt);
+    phase_stop = true;
+    lost_chaos.join();
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(lost_rounds.load() > 0);
+    CHECK(relinked_rounds.load() > 0);
 
     // Unmuted, a Connected=true relinks whatever state the storm left (a lost link included).
     handset->mute = false;
@@ -301,7 +342,7 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
 // set_connected(true) releases mutex_ before start_status_poller() (the poll slot starts without the lock held), so
 // a concurrent set_connected(false) can land between the unlock and the start. Whichever way the race goes the
 // driver must end consistent: connected means a live status poll, disconnected means none (a late-started poll
-// finds connected_ false on its first tick and makes no exchange).
+// finds connected_ false on its first tick and polls nothing).
 TEST_CASE("SynScan telescope - connect racing disconnect leaves the status poll matching Connected",
           "[synscan][telescope][stress]") {
     using namespace std::chrono_literals;
