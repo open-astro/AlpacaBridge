@@ -133,6 +133,25 @@ it is never reachable through `router.cpp` or the web UI.
   stale-input drain window is `50ms` (one VTIME cycle) for the same reason — `120ms` (2+ cycles)
   pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
   `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17.
+- **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
+  the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
+  lost when that path is gone or points elsewhere, or when a read or write on the fd fails with
+  `EIO`/`ENXIO`/`ENODEV`/`EBADF`. Lost means `Connected` false, `NotConnected` instead of a
+  generic "Failed to send command to mount" while `Connected` still read true (a reply cut off
+  mid-read no longer waits out the response timeout either), the fd closed (so the replugged
+  CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
+  then reconnects. OnStepX keeps running a GOTO while the cable is out, and a `MoveAxis` for up to
+  about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
+  2.5 degrees at 0.25 deg/s in #1241; from the home position it did not move at all, though the
+  call succeeded), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
+  sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
+  loss, stops nothing (#521). The stops also end a park that was running, as AbortSlew's do.
+  The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
+  the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
+  an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
+  no poll thread, and the router reads `Connected` before every Connect, so the first to notice
+  can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
+  lost.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first

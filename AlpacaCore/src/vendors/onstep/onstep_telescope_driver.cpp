@@ -17,14 +17,18 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_policy.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <functional>
 #include <mutex>
@@ -195,7 +199,20 @@ public:
 
     bool get_connected() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
+        // A removed or re-enumerated adapter reads as not connected (#1241).
+        return connected_ && OnStepProtocolWrapper::instance().link_alive();
+    }
+
+    // Why the serial link was lost, kept until the next Connect or Disconnect
+    // (decision 0009). Wrapper state only: never waits on mutex_.
+    std::string get_link_fault() const override {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        (void)protocol.link_alive();  // notice an unplug the listing would otherwise miss
+        const std::string reason = protocol.link_lost_reason();
+        if (reason.empty()) {
+            return {};
+        }
+        return "Link to the mount lost (" + reason + "); reconnect";
     }
 
     void connect() override { start_connection_task(true); }
@@ -206,6 +223,15 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
+        auto& protocol = OnStepProtocolWrapper::instance();
+        // A Connected=true against a lost link must reconnect, not return as
+        // already connected (decision 0009 point 4, #1241).
+        if (connected && connected_ && !protocol.link_alive()) {
+            ALPACA_LOG_WARN("OnStep", "Connect requested on a lost link; reconnecting");
+            protocol.disconnect();
+            connected_ = false;
+            reset_session_state_locked();
+        }
         // Base gates BEFORE the idempotency check: a sync disconnect during
         // an in-flight connect looks idempotent (both sides see
         // disconnected) and would be silently dropped without the record; a
@@ -220,7 +246,6 @@ public:
             return;
         }
 
-        auto& protocol = OnStepProtocolWrapper::instance();
         if (connected) {
             // An auto-detected mount resolves its port here, not in the factory (#659).
             util::connect_resolved(
@@ -236,6 +261,7 @@ public:
                 },
                 "OnStep");
             connected_ = true;
+            stop_motion_after_long_outage_locked(protocol);
             status_cache_valid_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
@@ -368,18 +394,7 @@ public:
         } else {
             protocol.disconnect();
             connected_ = false;
-            refraction_from_firmware_.reset();
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-            }
-            target_ra_set_ = false;
-            target_dec_set_ = false;
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            pulse_guiding_active_ = false;
+            reset_session_state_locked();
         }
     }
 
@@ -1126,6 +1141,74 @@ private:
         if (!connected_) {
             throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
         }
+        // A removed or re-enumerated adapter is NotConnected, not a generic
+        // send failure while Connected still reads true (#1241).
+        if (!OnStepProtocolWrapper::instance().link_alive()) {
+            const std::string reason = OnStepProtocolWrapper::instance().link_lost_reason();
+            throw AlpacaException("OnStep link lost" + (reason.empty() ? std::string{} : " (" + reason + ")") +
+                                      "; set Connected true to reconnect",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // The per-session state a disconnect or a lost link leaves behind.
+    void reset_session_state_locked() {
+        refraction_from_firmware_.reset();
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_cache_.clear();
+        }
+        target_ra_set_ = false;
+        target_dec_set_ = false;
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        pulse_guiding_active_ = false;
+    }
+
+    // open-astro#521: OnStepX keeps running a GOTO while the serial link is
+    // out (on the HM-17 a GOTO pulled mid-slew stopped only when this sent
+    // the stops, #1241), and a MoveAxis for up to about 10 s before the
+    // firmware ends it by itself (#1098). On the connect that follows a
+    // loss, an outage at least as long as the preserve window means nobody
+    // was in control of that motion, so stop it with the same commands
+    // AbortSlew sends. A shorter outage is a glitch the client rides out,
+    // and no recorded loss (e.g. a fresh start) preserves motion: no stamp
+    // is not evidence that anything ran unattended. The outage runs from the
+    // last time the link was seen alive to the end of this reconnect (an
+    // auto-detect re-scan counts): rounds toward stopping. Tracking is kept.
+    void stop_motion_after_long_outage_locked(OnStepProtocolWrapper& protocol) {
+        const auto lost_at = protocol.consume_link_lost_at();
+        const auto alive_at = protocol.consume_last_alive_before_loss();
+        if (!lost_at) {
+            return;
+        }
+        // Timed from the last moment the link was known to be there, not from
+        // when the loss was noticed: with no poll thread, the first to notice
+        // may be the reconnect itself (the router reads Connected before every
+        // Connect), which would make a long unattended outage look like 0 s.
+        const auto outage = util::default_task_clock().now() - (alive_at ? *alive_at : *lost_at);
+        if (outage < detail::relink_motion_preserve_window()) {
+            return;
+        }
+        char seconds[32];
+        std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
+        ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +
+                                      " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
+        // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
+        // not skip the per-axis stops that end a MoveAxis.
+        const auto try_stop = [](const char* what, const std::function<void()>& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                ALPACA_LOG_ERROR("OnStep", std::string("Stop after a long outage failed (") + what + "): " + ex.what());
+            }
+        };
+        try_stop(":Q#", [&protocol]() { protocol.abort_slew(); });
+        for (int dir = 0; dir < 4; ++dir) {
+            try_stop("axis stop", [&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
     }
 
     void check_not_parked_locked(const char* operation) const {
@@ -1517,5 +1600,23 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
         device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
         site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
+
+namespace detail {
+
+namespace {
+std::atomic<std::chrono::milliseconds::rep>& relink_window_ms() {
+    static std::atomic<std::chrono::milliseconds::rep> window{
+        std::chrono::duration_cast<std::chrono::milliseconds>(util::kRelinkMotionPreserveWindow).count()};
+    return window;
+}
+}  // namespace
+
+void set_relink_motion_preserve_window(std::chrono::milliseconds window) { relink_window_ms() = window.count(); }
+
+std::chrono::milliseconds relink_motion_preserve_window() {
+    return std::chrono::milliseconds(relink_window_ms().load());
+}
+
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep
