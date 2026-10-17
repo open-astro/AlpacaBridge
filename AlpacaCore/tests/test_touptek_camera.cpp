@@ -355,6 +355,40 @@ TEST_CASE("ToupTek Camera Driver - thermal cache ages on the task clock", "[toup
     driver->set_connected(false);
 }
 
+TEST_CASE("ToupTek Camera Driver - TEC cache ages on the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    fake.deliver_frame = false;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_get_cooler_power());
+    REQUIRE(spin_until([&] { return fake.call_count("get_tec_voltage_deciV") >= 1; }));
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    // The poller skips its reads while a frame integrates, so the cache ages.
+    fake.hold_wait_image(true);
+    driver->start_exposure(100.0, true);
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    for (int i = 0; i < 4; ++i) {
+        clock.advance(1000ms);
+        REQUIRE(clock.wait_for_woken_settled(5s));
+    }
+    const int before = fake.call_count("get_tec_voltage_deciV");
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before);
+
+    driver->abort_exposure();
+    fake.release_wait_image();
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    // 4 s of clock time old: past the 3 s bound, so one live read ...
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before + 1);
+    // ... which stamps the TEC cache fresh again.
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before + 1);
+    driver->set_connected(false);
+}
+
 TEST_CASE("ToupTek Camera Driver - exposure deadline reads the task clock", "[touptek][camera][unit][taskclock]") {
     alpacacore::test::FakeTaskClock clock;
     auto fake = make_fake_camera();
@@ -402,12 +436,29 @@ TEST_CASE("ToupTek Camera Driver - a superseding pulse cancels the clock wait", 
 
     driver->pulse_guide(0, 10000);
     REQUIRE(clock.wait_for_wait_count(2, 5s));
-    // No advance: replacing the pulse and disconnecting must wake the wait.
-    driver->pulse_guide(1, 10000);
-    CHECK(driver->get_is_pulse_guiding());
-    // A regression in the cancel or its notify would park the fake-clock wait
-    // for ever: bound the disconnect in real time so it fails instead of hanging.
-    auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
-    REQUIRE(disconnect.wait_for(5s) == std::future_status::ready);
-    CHECK_FALSE(driver->get_connected());
+    // No advance: replacing the pulse, disconnecting and destroying the driver
+    // must all wake the wait. A regression in the cancel or its notify would
+    // park the fake-clock wait for ever, in pulse_guide's join as much as in
+    // disconnect or the destructor: run all three in one bounded async so the
+    // case fails instead of hanging.
+    struct Outcome {
+        bool guiding;
+        bool connected;
+    };
+    auto work = std::async(std::launch::async, [&]() -> Outcome {
+        driver->pulse_guide(1, 10000);
+        const bool guiding = driver->get_is_pulse_guiding();
+        driver->set_connected(false);
+        const bool connected = driver->get_connected();
+        driver.reset();
+        return {guiding, connected};
+    });
+    const bool ready = work.wait_for(5s) == std::future_status::ready;
+    // Release every parked timer (the replaced pulse's and the new one's) so the
+    // joins return and the future can be destroyed.
+    for (int i = 0; !ready && i < 200 && work.wait_for(10ms) != std::future_status::ready; ++i) clock.advance(20s);
+    REQUIRE(ready);
+    const Outcome outcome = work.get();
+    CHECK(outcome.guiding);
+    CHECK_FALSE(outcome.connected);
 }
