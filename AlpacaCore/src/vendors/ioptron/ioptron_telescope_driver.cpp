@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
@@ -1506,7 +1507,7 @@ public:
             double phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
-            dispatch_slew_command_locked(phys_ra, phys_dec, false, "SlewToCoordinates");
+            dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
         }
         wait_for_slew_completion("SlewToCoordinates");
     }
@@ -1527,63 +1528,12 @@ public:
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             generation = slew_operation_generation_;
         }
-        try {
-            if (before_slew_reap_) before_slew_reap_();
-            // Joinable member thread (never detached), joined in the
-            // destructor and on disconnect. Join any previous dispatch first
-            // (must run without mutex_ held — the thread takes mutex_).
-            reap_slew_dispatch();
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            if (slew_dispatch_thread_.joinable()) {
-                // A racing async-slew caller spawned between our reap and this
-                // lock — cancel and join it INSIDE the same critical section as
-                // the assignment, so a joinable thread can never be overwritten
-                // (std::terminate) or joined from two threads (UB). Matches the
-                // Celestron/SynScan spawn-site recheck.
-                slew_dispatch_cancel_.store(true);
-                slew_dispatch_thread_.join();
-                slew_dispatch_cancel_.store(false);
-            }
-            slew_dispatch_thread_ = std::thread([this, phys_ra, phys_dec, generation]() {
-                if (before_slew_worker_lock_) before_slew_worker_lock_();
-                std::lock_guard<std::mutex> lock(mutex_);
-                // A superseding initiator already cleared/replaced the GOTO
-                // state before bumping this generation; never publish or
-                // clear state owned by that newer operation.
-                if (generation != slew_operation_generation_) return;
-                if (!connected_ || slew_dispatch_cancel_.load()) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    return;
-                }
-                try {
-                    dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
-                } catch (const std::exception& e) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + e.what();
-                    }
-                    ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
-                } catch (...) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
-                    }
-                    ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
-                }
-            });
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (generation == slew_operation_generation_) {
-                slew_in_progress_ = false;
-                clear_slew_override_locked();
-                last_slew_error_ = std::move(previous_slew_error);
-            }
-            throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
+        start_slew_body(generation, previous_slew_error, "Failed to start async slew",
+                        [this, phys_ra, phys_dec, generation](util::OperationContext& ctx) {
+                            run_slew_body(ctx, generation, "SlewToCoordinatesAsync", [&] {
+                                dispatch_slew_command_locked(phys_ra, phys_dec, &ctx, "SlewToCoordinatesAsync");
+                            });
+                        });
     }
     
     void slew_to_target() override {
@@ -1679,63 +1629,19 @@ public:
             slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         }
 
-        try {
-            if (before_slew_reap_) before_slew_reap_();
-            // Joinable member thread (never detached), joined in the
-            // destructor and on disconnect. Join any previous dispatch first
-            // (must run without mutex_ held — the thread takes mutex_).
-            reap_slew_dispatch();
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            if (slew_dispatch_thread_.joinable()) {
-                // Racing async-slew between reap_slew_dispatch() and this lock —
-                // see the RA/Dec spawn above; join under the same critical section.
-                slew_dispatch_cancel_.store(true);
-                slew_dispatch_thread_.join();
-                slew_dispatch_cancel_.store(false);
-            }
-            slew_dispatch_thread_ = std::thread([this, altitude, azimuth, generation]() {
-                if (before_slew_worker_lock_) before_slew_worker_lock_();
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (generation != slew_operation_generation_) return;
-                if (!connected_ || slew_dispatch_cancel_.load()) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    return;
-                }
-                try {
-                    auto converted = alt_az_to_ra_dec(
-                        altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
-                    double ra_hours = converted.first;
-                    double dec_degrees = converted.second;
-                    // The initiator already claimed and published this generation.
-                    prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees, "SlewToAltAzAsync", false);
-                    dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
-                } catch (const std::exception& e) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = std::string("SlewToAltAzAsync failed: ") + e.what();
-                    }
-                    ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
-                } catch (...) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = "SlewToAltAzAsync failed with an unknown error";
-                    }
-                    ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
-                }
-            });
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (generation == slew_operation_generation_) {
-                slew_in_progress_ = false;
-                clear_slew_override_locked();
-                last_slew_error_ = std::move(previous_slew_error);
-            }
-            throw AlpacaException(std::string("Failed to start async Alt/Az slew: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
+        start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
+                        [this, altitude, azimuth, generation](util::OperationContext& ctx) {
+                            run_slew_body(ctx, generation, "SlewToAltAzAsync", [&] {
+                                auto converted = alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_,
+                                                                  site_longitude_cached_, current_utc_time_locked());
+                                double ra_hours = converted.first;
+                                double dec_degrees = converted.second;
+                                // The initiator already claimed and published this generation.
+                                prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees,
+                                                          "SlewToAltAzAsync", false);
+                                dispatch_slew_command_locked(ra_hours, dec_degrees, &ctx, "SlewToAltAzAsync");
+                            });
+                        });
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -1754,7 +1660,7 @@ public:
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
             dec_degrees = converted.second;
-            start_slew_to_coordinates_locked(ra_hours, dec_degrees, false);
+            start_slew_to_coordinates_locked(ra_hours, dec_degrees);
         }
         wait_for_slew_completion("SlewToAltAz");
     }
@@ -1989,7 +1895,9 @@ private:
 
     void clear_slew_override_locked() { slew_override_until_ = std::chrono::steady_clock::time_point{}; }
 
-    void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
+    // `async_ctx` is the slew slot's context when the GOTO runs on its body: a rejection is then recorded in
+    // last_slew_error_ and logged instead of thrown. Null: the synchronous initiators, which throw.
+    void dispatch_slew_command_locked(double ra, double dec, util::OperationContext* async_ctx, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
@@ -2000,12 +1908,12 @@ private:
         if (!accepted) {
             slew_in_progress_ = false;
             clear_slew_override_locked();
-            if (allow_soft_fail) {
+            if (async_ctx != nullptr) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // AbortSlew cancels and joins the slot (open-astro#768), so none can
                 // record a failure after the abort cleared the error.
-                if (!slew_dispatch_cancel_.load()) {
+                if (async_ctx->stop_reason() == util::StopReason::None) {
                     last_slew_error_ = std::string(label) + " failed: mount rejected the target";
                 }
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
@@ -2018,9 +1926,9 @@ private:
         position_cache_valid_ = false;
     }
 
-    void start_slew_to_coordinates_locked(double ra, double dec, bool allow_soft_fail) {
+    void start_slew_to_coordinates_locked(double ra, double dec) {
         prepare_slew_state_locked(ra, dec, ra, dec, "SlewToCoordinates");
-        dispatch_slew_command_locked(ra, dec, allow_soft_fail, "SlewToCoordinates");
+        dispatch_slew_command_locked(ra, dec, nullptr, "SlewToCoordinates");
     }
 
     void wait_for_slew_completion(const char* label) {
@@ -2657,24 +2565,80 @@ private:
         clock_sync_cancel_.store(false);
     }
 
-    // Join the async slew dispatch thread (if any) and reset its cancel flag.
-    // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
-    // so joining under the lock would deadlock. The thread only dispatches a
-    // single command (no long sleeps), so the join is quick.
-    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
-    // takes it) and touch the cancel flag only there, so a second reaper waits
-    // for the first join instead of returning early and clearing the cancel
-    // the queued dispatch still has to see. Same shape as
-    // stop_clock_sync_thread_locked().
-    void reap_slew_dispatch() {
-        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-        if (slew_dispatch_thread_.joinable()) {
-            slew_dispatch_cancel_.store(true);
-            slew_dispatch_thread_.join();
-            slew_dispatch_cancel_.store(false);
+    // Cancel and join the async slew dispatch on the slew slot (decision 0006).
+    // Must be called WITHOUT mutex_ held -- the body takes mutex_, so joining
+    // under the lock would deadlock -- and every caller holds
+    // slew_handoff_mutex_ (or is the destructor), because the slot requires
+    // its reapers to be serialized across the whole join. The body sends one
+    // command (no long waits), so the join is quick.
+    // open-astro#768: abort and disconnect fence the dispatch through this.
+    void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
+
+    // Starts `body` on the slew slot after the initiator published its state
+    // and bumped slew_operation_generation_. Call without mutex_ held, under
+    // slew_handoff_mutex_. A refused start (no thread) undoes the published
+    // state and restores the error the initiator cleared.
+    void start_slew_body(std::uint64_t generation, std::string& previous_slew_error, const char* failure_prefix,
+                         std::function<void(util::OperationContext&)> body) {
+        try {
+            if (before_slew_reap_) before_slew_reap_();
+            // The previous dispatch is cancelled and joined first, so a newer
+            // initiator never leaves an older body running (open-astro#768).
+            reap_slew_dispatch();
+            slew_.start(std::move(body));
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (generation == slew_operation_generation_) {
+                slew_in_progress_ = false;
+                clear_slew_override_locked();
+                last_slew_error_ = std::move(previous_slew_error);
+            }
+            throw AlpacaException(std::string(failure_prefix) + ": " + e.what(), AlpacaError::DriverException);
         }
     }
 
+    // The body of an async slew: takes mutex_, stands down when a newer
+    // initiator, MoveAxis, Park, disconnect or AbortSlew got there first, and
+    // records a real failure in last_slew_error_ (never one caused by its own
+    // cancellation). `dispatch` runs under mutex_.
+    template <typename Dispatch>
+    void run_slew_body(util::OperationContext& ctx, std::uint64_t generation, const char* label, Dispatch&& dispatch) {
+        if (before_slew_worker_lock_) before_slew_worker_lock_();
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A superseding initiator already cleared/replaced the GOTO state
+        // before bumping this generation; never publish or clear state owned
+        // by that newer operation.
+        if (generation != slew_operation_generation_) return;
+        if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            return;
+        }
+        try {
+            dispatch();
+        } catch (const std::exception& e) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            if (ctx.stop_reason() == util::StopReason::None) {
+                last_slew_error_ = std::string(label) + " failed: " + e.what();
+            }
+            ALPACA_LOG_WARN("iOptron", std::string(label) + " dispatch failed: " + e.what());
+        } catch (...) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            if (ctx.stop_reason() == util::StopReason::None) {
+                last_slew_error_ = std::string(label) + " failed with an unknown error";
+            }
+            ALPACA_LOG_WARN("iOptron", std::string(label) + " dispatch failed with unknown exception");
+        }
+    }
+
+public:
+    void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slew_.set_spawn_for_testing(std::move(spawn));
+    }
+
+private:
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         if (!last_utc_valid_) {
             return std::chrono::system_clock::now();
@@ -2942,12 +2906,6 @@ private:
     // Guards clock_sync_thread_ join/assign across overlapping set_connected
     // bodies — see start_clock_sync_thread(). Never taken by the body.
     std::mutex clock_sync_mutex_;
-    // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ guards the thread handle and every write of the
-    // cancel flag; the dispatch body never takes it.
-    std::mutex slew_dispatch_mutex_;
-    std::thread slew_dispatch_thread_;
-    std::atomic<bool> slew_dispatch_cancel_{false};
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
@@ -2956,6 +2914,12 @@ private:
     const std::function<void()> before_slew_reap_;
     const std::function<void()> before_handoff_lock_;
     std::mutex slew_handoff_mutex_;
+    // The async slew dispatch (decision 0006), declared last so the slot is destroyed, and its body
+    // joined, before any member the body touches. Private generation: only start() bumps it, while the
+    // driver's own slew_operation_generation_ stays the supersede guard (MoveAxis, Park and FindHome bump
+    // it without the handoff lock).
+    util::OperationGeneration slew_slot_generation_;
+    util::AsyncOperation slew_{"iOptron slew", slew_slot_generation_, clock_};
 };
 
 // Factory function implementation
@@ -3074,6 +3038,12 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int devic
     return create_ioptron_telescope_deferred(
         device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
         site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
+}
+
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_slew_spawn_for_testing(std::move(spawn));
+    }
 }
 
 } // namespace alpacacore::vendor::ioptron

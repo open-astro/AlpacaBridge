@@ -992,3 +992,86 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry de
     CHECK(joined_without_advance);
     CHECK_FALSE(driver->get_connected());
 }
+
+namespace {
+
+// Real time: the fake mount answers on the host clock, so the dispatch that runs on the slew slot's thread
+// lands in real milliseconds, not on the driver's FakeTaskClock.
+bool wait_for_slewing_error(alpacacore::TelescopeDriver& driver, std::string& message) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (std::chrono::steady_clock::now() < deadline) {
+        try {
+            (void)driver.get_slewing();
+        } catch (const alpacacore::AlpacaException& ex) {
+            message = ex.what();
+            return ex.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("iOptron slot - a GOTO the mount rejects after SlewToCoordinatesAsync returned surfaces on Slewing",
+          "[ioptron][telescope][async][slot]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    mount.set_reject_goto(true);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::string message;
+    REQUIRE(wait_for_slewing_error(*driver, message));
+    CHECK(message == "SlewToCoordinatesAsync failed: mount rejected the target");
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron slot - a GOTO the mount rejects after SlewToAltAzAsync returned surfaces on Slewing",
+          "[ioptron][telescope][async][slot]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+        0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    mount.set_reject_goto(true);
+    REQUIRE_NOTHROW(driver->slew_to_alt_az_async(30.0, 90.0));
+    std::string message;
+    REQUIRE(wait_for_slewing_error(*driver, message));
+    CHECK(message == "SlewToAltAzAsync failed: mount rejected the target");
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron slot - a refused slew thread throws, keeps the earlier failure and leaves Slewing false",
+          "[ioptron][telescope][async][slot]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(
+        0, loopback_endpoint(mount.port()), -33.856784, 151.215297, std::nullopt, false, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    mount.set_reject_goto(true);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::string earlier;
+    REQUIRE(wait_for_slewing_error(*driver, earlier));
+    const int gotos_before = mount.count(":MS1#");
+
+    alpacacore::vendor::ioptron::set_slew_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(6.5, 25.0); },
+                         alpacacore::AlpacaError::DriverException);
+    require_alpaca_error([&] { driver->slew_to_alt_az_async(30.0, 90.0); }, alpacacore::AlpacaError::DriverException);
+
+    // The refused starts rolled back: the earlier failure is still the one Slewing reports, and no GOTO was sent.
+    std::string after;
+    REQUIRE(wait_for_slewing_error(*driver, after));
+    CHECK(after == earlier);
+    CHECK(mount.count(":MS1#") == gotos_before);
+    driver->set_connected(false);
+}

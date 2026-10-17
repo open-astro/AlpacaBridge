@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::ioptron {
 
@@ -91,5 +92,10 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
     int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
     std::optional<bool> sync_time_on_connect = std::nullopt, util::TaskClock& clock = util::default_task_clock());
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can make a body's start fail. Call only while no start is in flight.
+/// `driver` must come from the factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
 } // namespace alpacacore::vendor::ioptron
