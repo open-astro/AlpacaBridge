@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -404,6 +405,9 @@ TEST_CASE("ToupTek Camera Driver - a superseding pulse cancels the clock wait", 
     // No advance: replacing the pulse and disconnecting must wake the wait.
     driver->pulse_guide(1, 10000);
     CHECK(driver->get_is_pulse_guiding());
-    driver->set_connected(false);
+    // A regression in the cancel or its notify would park the fake-clock wait
+    // for ever: bound the disconnect in real time so it fails instead of hanging.
+    auto disconnect = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    REQUIRE(disconnect.wait_for(5s) == std::future_status::ready);
     CHECK_FALSE(driver->get_connected());
 }
