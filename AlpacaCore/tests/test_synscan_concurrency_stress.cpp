@@ -279,10 +279,7 @@ TEST_CASE("SynScan telescope - handset muted and severed mid-storm, then relinke
                 ++lost_rounds;
             }
             handset->mute = false;
-            try {
-                driver->set_connected(true);
-            } catch (const std::exception&) {
-            }
+            guard([&] { driver->set_connected(true); });
             if (driver->get_connected()) {
                 ++relinked_rounds;
             }
@@ -384,7 +381,16 @@ TEST_CASE("SynScan telescope - connect racing disconnect leaves the status poll 
         }
     }
     INFO("rounds that ended connected: " << connected_rounds);
-    CHECK(alpacacore::test::settle_connected(*driver, true, 5s));
+    // A final round that certainly ends connected, so the poll check cannot pass vacuously when every racing
+    // round above ended disconnected.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, 5s));
+    const int final_before = handset->position_polls.load();
+    const auto final_deadline = std::chrono::steady_clock::now() + 5s;
+    while (handset->position_polls.load() == final_before && std::chrono::steady_clock::now() < final_deadline) {
+        clock.advance(1s);
+        std::this_thread::sleep_for(20ms);
+    }
+    CHECK(handset->position_polls.load() > final_before);
     CHECK(alpacacore::test::settle_connected(*driver, false, 5s));
 }
 
