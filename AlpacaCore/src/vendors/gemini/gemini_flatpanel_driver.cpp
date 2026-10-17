@@ -11,9 +11,11 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -21,6 +23,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -369,23 +372,24 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GeminiFlatPanelV2Driver(int device_number, FlatPanelConnectionConfig config)
+    GeminiFlatPanelV2Driver(int device_number, FlatPanelConnectionConfig config,
+                            util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Gemini"),
+          clock_(clock),
           device_number_(device_number),
           config_(std::move(config)),
           connected_(false),
           protocol_() {}
 
     ~GeminiFlatPanelV2Driver() override {
-        // Reap the cover and calibrator tasks first: both touch protocol_,
-        // which shutdown_connection()/disconnect below may tear down
-        // concurrently. Bounded by kCoverMoveTimeoutS (30s) in the worst
+        // Cancel and join the cover and calibrator bodies first: both touch
+        // protocol_, which shutdown_connection()/disconnect below may tear
+        // down concurrently. Bounded by kCoverMoveTimeoutS (30s) in the worst
         // case -- Rev2 has no native abort, so a stuck motor holds up
         // teardown just as it would hold up HaltCover reporting completion
-        // (see halt_cover()); a calibrator task waiting behind that same
+        // (see halt_cover()); a calibrator body waiting behind that same
         // port mutex is bounded by the same limit.
-        reap_cover_task(/*wait=*/true);
-        reap_calibrator_task(/*wait=*/true);
+        stop_background_operations();
 
         shutdown_connection();
         if (connected_.load()) {
@@ -490,6 +494,13 @@ public:
                 firmware_ = firmware;
             }
 
+            // A new connection starts with no remembered body failure; the
+            // previous disconnect joined every body (stop_background_operations()).
+            {
+                std::lock_guard<std::mutex> lock(failure_mutex_);
+                cover_failure_.reset();
+                calibrator_failure_.reset();
+            }
             // Seed calibrator state from a live read (cover state is never
             // cached -- see get_cover_state()'s doc comment).
             invalidate_cover_status_cache();
@@ -508,7 +519,7 @@ public:
                 // wire read there always misses the 0.1 s FAST target.
                 std::lock_guard<std::mutex> lock(cover_cache_mutex_);
                 cover_status_cache_ = status;
-                cover_status_read_at_ = std::chrono::steady_clock::now();
+                cover_status_read_at_ = clock_.now();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel v2 state seed failed: " + std::string(e.what()));
             }
@@ -527,6 +538,11 @@ public:
                 firmware_.clear();
             }
             connected_.store(false);
+            // Cancel and join the bodies before the port closes: new commands
+            // already throw NotConnected, queued light commands are dropped,
+            // and a cover body mid-transaction finishes it (bounded by the
+            // wire timeout) rather than meeting a closed port.
+            stop_background_operations();
             protocol_.disconnect();
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 disconnected");
         }
@@ -570,6 +586,14 @@ public:
         ensure_connected();
         if (calibrator_pending_count_.load() > 0) {
             return CalibratorState::NotReady;
+        }
+        {
+            // A command that failed on the wire reports Error until the next
+            // calibrator command starts (ICoverCalibratorV2).
+            std::lock_guard<std::mutex> lock(failure_mutex_);
+            if (calibrator_failure_) {
+                return CalibratorState::Error;
+            }
         }
         std::lock_guard<std::mutex> lock(state_mutex_);
         return calibrator_engaged_ ? CalibratorState::Ready : CalibratorState::Off;
@@ -637,12 +661,21 @@ public:
         if (cover_in_flight_.load()) {
             return cover_halted_.load() ? CoverState::Unknown : CoverState::Moving;
         }
+        {
+            // The body records its failure before it clears cover_in_flight_,
+            // so there is no window between "no longer moving" and Error.
+            std::lock_guard<std::mutex> lock(failure_mutex_);
+            if (cover_failure_) {
+                return CoverState::Error;
+            }
+        }
         try {
             FlatPanelMotorizedStatus status;
             {
                 std::lock_guard<std::mutex> lock(cover_cache_mutex_);
-                const auto now = std::chrono::steady_clock::now();
-                if (now - cover_status_read_at_ > std::chrono::milliseconds(kCoverStatusCacheMs)) {
+                const auto now = clock_.now();
+                if (!cover_status_read_at_ ||
+                    now - *cover_status_read_at_ > std::chrono::milliseconds(kCoverStatusCacheMs)) {
                     cover_status_cache_ = protocol_.get_motorized_status();
                     cover_status_read_at_ = now;
                 }
@@ -739,50 +772,82 @@ private:
         }
     }
 
-    // Reaps a finished cover task thread. If wait is false and the task is
-    // still running, a NEW task is refused (InvalidOperation) rather than
-    // blocking the caller -- Rev2's open/close commands block the wire for
-    // up to kCoverMoveTimeoutS, and joining an in-flight one here would blow
-    // OpenCover/CloseCover's STANDARD (1s) ConformU timing budget. wait=true
-    // is only used from the destructor, where blocking is acceptable.
-    void reap_cover_task(bool wait) {
-        std::lock_guard<std::mutex> lock(cover_task_mutex_);
-        if (!cover_task_thread_.joinable()) {
-            return;
+    // The cover and calibrator background bodies run in operation slots
+    // (util::AsyncOperation, decision 0006), one per family. The slot owns
+    // the thread; the wire commands, the port-order rules and what the
+    // failure means stay here.
+
+    // Cancel and join both families' bodies (disconnect and the destructor).
+    // One reap mutex covers the whole join, so a second caller cannot see an
+    // empty slot while the first still owns a running body. stopping_ wakes
+    // the bodies waiting on calibrator_idle_cv_, which the slots' own cancel
+    // does not reach, and makes them skip their wire command; a body already
+    // inside a wire transaction finishes it (bounded by the wire timeout).
+    // Queued calibrator commands that never ran are dropped with their
+    // pending count.
+    void stop_background_operations() {
+        std::lock_guard<std::mutex> reap(reap_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(calibrator_idle_mutex_);
+            stopping_ = true;
         }
-        if (!wait && cover_in_flight_.load()) {
-            return;
+        calibrator_idle_cv_.notify_all();
+        cover_op_.cancel_all_and_join();
+        calibrator_op_.cancel_all_and_join();
+        {
+            std::lock_guard<std::mutex> lock(calibrator_idle_mutex_);
+            calibrator_pending_count_.fetch_sub(static_cast<int>(calibrator_queue_.size()));
+            calibrator_queue_.clear();
+            stopping_ = false;
         }
-        cover_task_thread_.join();
+        calibrator_idle_cv_.notify_all();
     }
 
+    // OpenCover/CloseCover: a second command while one is in flight is
+    // refused (InvalidOperation) rather than queued -- two overlapping
+    // Open/Close calls make no physical sense. The slot's start() never waits
+    // for a body, so the caller returns at once whatever the wire is doing.
     void start_cover_task(const std::function<void()>& fn) {
         std::lock_guard<std::mutex> lock(cover_task_mutex_);
         if (cover_in_flight_.load()) {
             throw AlpacaException("A cover open/close operation is already in progress", AlpacaError::InvalidOperation);
         }
-        if (cover_task_thread_.joinable()) {
-            cover_task_thread_.join();  // previous command already finished; reap it
+        {
+            std::lock_guard<std::mutex> failure_lock(failure_mutex_);
+            cover_failure_.reset();  // a new start clears the previous failure
         }
         cover_halted_.store(false);
         cover_in_flight_.store(true);
         try {
-            cover_task_thread_ = std::thread([this, fn]() {
-                wait_for_calibrator_idle();  // see start_calibrator_task() fast path
-                try {
-                    fn();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + std::string(e.what()));
+            cover_op_.start([this, fn](util::OperationContext& ctx) {
+                std::optional<std::string> failure;
+                if (wait_for_calibrator_idle(ctx)) {  // see start_calibrator_task() fast path
+                    try {
+                        fn();
+                    } catch (const std::exception& e) {
+                        failure = e.what();
+                    } catch (...) {
+                        failure = "unknown error";
+                    }
+                }  // else cancelled by disconnect/destruction: the command never reaches the wire
+                if (failure) {
+                    ALPACA_LOG_WARN("Gemini", "Flat panel v2 cover command failed: " + *failure);
                 }
                 // Drop any pre-move cached >S# BEFORE clearing in-flight, so
                 // the first idle CoverState read after the move goes to the
                 // wire instead of returning the stale pre-move state.
                 invalidate_cover_status_cache();
+                if (failure) {
+                    // Recorded BEFORE in-flight clears: CoverState goes
+                    // Moving -> Error with no live read in between.
+                    std::lock_guard<std::mutex> failure_lock(failure_mutex_);
+                    cover_failure_ = std::move(failure);
+                }
                 cover_in_flight_.store(false);
             });
         } catch (...) {
-            // std::thread ctor can throw (e.g. OS thread limit). Roll back or
-            // cover_in_flight_ stays true forever and every future
+            // The slot refused the thread (OS limit, or its stale bound). Roll
+            // back or cover_in_flight_ stays true forever and every future
             // Open/Close/HaltCover sees a phantom in-flight move.
             cover_in_flight_.store(false);
             throw;
@@ -800,50 +865,30 @@ private:
      * blocked the caller behind an unrelated in-flight cover move: ConformU
      * caught this, timing out CalibratorOn's STANDARD (1s) budget when it
      * fired right after HaltCover on a cover that was still physically
-     * moving. Dispatching to a background thread mirrors start_cover_task()
-     * and lets CalibratorOn/Off return immediately per ICoverCalibratorV2's
-     * documented async contract, with CalibratorChanging/CalibratorState
-     * reporting NotReady until the background command completes.
+     * moving. Dispatching to a background body lets CalibratorOn/Off return
+     * immediately per ICoverCalibratorV2's documented async contract, with
+     * CalibratorChanging/CalibratorState reporting NotReady until the
+     * background command completes.
      *
      * Deliberately asymmetric with start_cover_task(), which REJECTS a new
-     * command (InvalidOperation) when one is already in flight rather than
-     * joining it: two overlapping Open/Close calls make no physical sense,
-     * whereas a calibrator command is routinely re-issued in quick
-     * succession (e.g. a client ramping Brightness through several values --
-     * ConformU itself does this), so rejecting it would break a legitimate
-     * use case. Instead the queued command is serialized behind the
-     * in-flight one -- but the join itself is deferred onto the NEW
-     * background thread (moving the previous std::thread handle into its
-     * capture) rather than run on the caller's thread: an earlier version
-     * joined inline here, which reintroduced exactly the bug class this PR
-     * fixes elsewhere whenever the previous calibrator command was itself
-     * still blocked on protocol_'s port mutex behind a concurrent cover
-     * move (up to kCoverMoveTimeoutS = 30s). This way calibrator_on()/off()
-     * always return immediately, and successive commands still execute in
-     * submission order (each thread joins its predecessor before running
-     * its own wire command).
+     * command (InvalidOperation) when one is already in flight: a calibrator
+     * command is routinely re-issued in quick succession (e.g. a client
+     * ramping Brightness through several values -- ConformU itself does
+     * this), so rejecting it would break a legitimate use case. Every
+     * command is appended to calibrator_queue_ and every call starts a body in
+     * the calibrator slot. start() replaces the previous body without
+     * waiting for it, so the caller returns at once, but a replaced body may
+     * still be inside its wire transaction: only the NEWEST body drains the
+     * queue, one command at a time, and a replaced body that is not on the
+     * wire returns without touching it. The commands therefore still reach
+     * the wire in submission order, none is skipped, and at most one
+     * replaced body (the one on the wire) outlives its start -- the slot
+     * bounds replaced bodies at kMaxStaleBodies and would otherwise make the
+     * Nth queued call wait or fail while a cover move holds the port.
      *
      * calibrator_pending_count_ (not a single bool) tracks in-flight-ness:
-     * with commands chained behind each other, an earlier thread finishing
-     * and clearing a shared bool would report "not changing" while a
-     * later-queued thread is still actually running its own wire command
-     * (review finding). Each thread increments the count for its own
-     * command and decrements it on exit; NotReady is reported as long as
-     * the count is above zero, i.e. until the LAST queued command finishes.
-     *
-     * previous is held via shared_ptr, not moved directly into the new
-     * thread's capture, for exception safety (review finding): std::thread's
-     * constructor decay-copies its callable into internal storage before
-     * attempting to create the OS thread, and destroys that storage if
-     * creation fails (e.g. OS thread-limit exhaustion). If previous were
-     * captured by move, that storage's destruction would run ~thread() on a
-     * still-joinable previous -> std::terminate(), crashing the process
-     * instead of throwing a normal AlpacaException. A shared_ptr copy into
-     * the capture is cheap and noexcept, and this function's own `previous`
-     * keeps a live reference throughout, so if construction below throws,
-     * the failed copy's destruction just drops a refcount rather than
-     * destroying the underlying std::thread -- leaving it here for the
-     * catch block to join safely on the caller's thread.
+     * it counts commands, not bodies, so NotReady is reported until the LAST
+     * queued command finishes (review finding).
      */
     // Drop one calibrator claim (and, for the inline path, its in-flight
     // flag) and wake anything waiting for the port.
@@ -857,26 +902,18 @@ private:
         }
         calibrator_idle_cv_.notify_all();
     }
-
-    // Block a background calibrator command until an inline (fast-path)
-    // toggle has finished its wire transaction. The inline path always
-    // clears the flag (normal return or throw), so this is not bounded.
-    void wait_for_inline_calibrator() {
-        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
-        calibrator_idle_cv_.wait(lock, [this] { return !calibrator_inline_active_.load(); });
-    }
-
     // Let an in-progress calibrator command finish its short wire I/O before
     // a cover move takes the port; bounded so a wedged light command can't
     // hold a cover move hostage (it just falls through to the port mutex).
-    void wait_for_calibrator_idle() {
+    // False when the body was stopped and must not send its command.
+    bool wait_for_calibrator_idle(util::OperationContext& ctx) {
         std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
-        calibrator_idle_cv_.wait_for(lock, kCalibratorIdleWait,
-                                     [this] { return calibrator_pending_count_.load() == 0; });
+        clock_.wait_for(lock, calibrator_idle_cv_, kCalibratorIdleWait,
+                        [this] { return stopping_ || calibrator_pending_count_.load() == 0; });
+        return !stopping_ && ctx.stop_reason() == util::StopReason::None;
     }
-
     // Send the light on/off + brightness pair and commit the commanded state.
-    // Shared by the inline fast path and the background task.
+    // Shared by the inline fast path and the background body.
     void run_calibrator_command(bool on, int brightness) {
         // One port transaction for the on/off + brightness pair: as two
         // separate calls a cover move could take the port in between and
@@ -886,10 +923,54 @@ private:
         commanded_brightness_ = on ? brightness : 0;
         calibrator_engaged_ = on;
     }
-
+    // The body of every calibrator slot start (see start_calibrator_task()).
+    void drain_calibrator_queue(util::OperationContext& ctx) {
+        std::unique_lock<std::mutex> lock(calibrator_idle_mutex_);
+        // Wait for the port: no other drain on the wire and no inline toggle
+        // (submission order behind a fast-path toggle, PR #226 review round
+        // 3). A replaced body does not wait; the newest body drains.
+        calibrator_idle_cv_.wait(lock, [this, &ctx] {
+            return stopping_ || ctx.stop_reason() != util::StopReason::None ||
+                   (!calibrator_draining_ && !calibrator_inline_active_.load());
+        });
+        if (stopping_ || ctx.stop_reason() != util::StopReason::None) {
+            return;
+        }
+        calibrator_draining_ = true;
+        while (!calibrator_queue_.empty()) {
+            const CalibratorCommand cmd = calibrator_queue_.front();
+            calibrator_queue_.pop_front();
+            lock.unlock();
+            std::optional<std::string> failure;
+            try {
+                run_calibrator_command(cmd.on, cmd.brightness);
+            } catch (const std::exception& e) {
+                failure = e.what();
+            } catch (...) {
+                failure = "unknown error";
+            }
+            if (failure) {
+                ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + *failure);
+            }
+            {
+                // Recorded BEFORE the pending count drops, so CalibratorState
+                // goes NotReady -> Error (or Ready) with no gap. The outcome
+                // of the last command wins.
+                std::lock_guard<std::mutex> failure_lock(failure_mutex_);
+                calibrator_failure_ = std::move(failure);
+            }
+            lock.lock();
+            calibrator_pending_count_.fetch_sub(1);
+            calibrator_idle_cv_.notify_all();
+            if (stopping_ || ctx.stop_reason() != util::StopReason::None) {
+                break;  // replaced: the newer body takes the rest of the queue
+            }
+        }
+        calibrator_draining_ = false;
+        calibrator_idle_cv_.notify_all();
+    }
     void start_calibrator_task(bool on, int brightness) {
         std::unique_lock<std::mutex> lock(calibrator_task_mutex_);
-
         // Fast path: with no cover move and no earlier calibrator command in
         // flight, the serial link is free and the two light commands take
         // ~30 ms on the Pro (~250 ms worst case on Lite/Rev2 with their
@@ -904,7 +985,7 @@ private:
         // other way), NOT across the wire I/O: holding it for the whole
         // ~250 ms made a concurrent HaltCover/OpenCover/CalibratorOn block
         // behind an unrelated light toggle (PR #226 review). The claim is
-        // the pending count itself: start_cover_task()'s thread waits for it
+        // the pending count itself: start_cover_task()'s body waits for it
         // to drop before touching the port, so a cover move issued during
         // the toggle cannot grab the port first and stall this inline call
         // behind its 30 s wire wait, and the caller is released before the
@@ -918,6 +999,10 @@ private:
                 claimed = true;
             }
         }
+        {
+            std::lock_guard<std::mutex> failure_lock(failure_mutex_);
+            calibrator_failure_.reset();  // a new command clears the previous failure
+        }
         if (claimed) {
             lock.unlock();  // both task locks released before the wire I/O
             try {
@@ -929,58 +1014,53 @@ private:
             release_calibrator_claim(/*inline_done=*/true);
             return;
         }
-
         // Background path. A command that lands here while an INLINE toggle
-        // is still on the wire has no thread to join (the fast path owns
-        // none), so it must wait for that toggle explicitly or the two
+        // is still on the wire has no body to wait for (the fast path owns
+        // none); the drain waits for that toggle explicitly or the two
         // set_light() transactions would race for the port and the later
-        // command could finish first (PR #226 review, round 3). The wait is
-        // done on the background thread, off the caller, like the join.
-
-        calibrator_pending_count_.fetch_add(1);
-        auto previous = std::make_shared<std::thread>(std::move(calibrator_task_thread_));
+        // command could finish first. The wait is on the body, off the caller.
+        std::uint64_t id = 0;
+        {
+            std::lock_guard<std::mutex> idle_lock(calibrator_idle_mutex_);
+            id = ++calibrator_next_command_id_;
+            calibrator_queue_.push_back({id, on, brightness});
+            calibrator_pending_count_.fetch_add(1);
+        }
         try {
-            calibrator_task_thread_ = std::thread([this, on, brightness, previous]() {
-                if (previous->joinable()) {
-                    previous->join();  // off the caller's thread -- see doc comment above
-                }
-                wait_for_inline_calibrator();  // preserves submission order behind a fast-path toggle
-                try {
-                    run_calibrator_command(on, brightness);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("Gemini", "Flat panel v2 calibrator command failed: " + std::string(e.what()));
-                }
-                release_calibrator_claim();
-            });
+            calibrator_op_.start([this](util::OperationContext& ctx) { drain_calibrator_queue(ctx); });
         } catch (...) {
-            // std::thread ctor can throw (e.g. OS thread limit). previous is
-            // still safely joinable here -- see the doc comment above -- so
-            // join it (this rare failure path already means the system is
-            // resource-starved; blocking briefly is an acceptable tradeoff
-            // against losing track of it or crashing) before rolling back
-            // the pending count and rethrowing.
-            if (previous->joinable()) {
-                previous->join();
+            // The slot refused the body (OS thread limit, or its stale
+            // bound). Take the command back and roll the count back; if a
+            // running drain already took it, it is on its way to the wire
+            // and the call is a success.
+            bool removed = false;
+            {
+                std::lock_guard<std::mutex> idle_lock(calibrator_idle_mutex_);
+                for (auto it = calibrator_queue_.begin(); it != calibrator_queue_.end(); ++it) {
+                    if (it->id == id) {
+                        calibrator_queue_.erase(it);
+                        calibrator_pending_count_.fetch_sub(1);
+                        removed = true;
+                        break;
+                    }
+                }
             }
-            release_calibrator_claim();
-            throw;
-        }
-    }
-
-    // Mirrors reap_cover_task(): wait=false (not currently used, kept for
-    // symmetry) would skip an in-flight task rather than block; wait=true is
-    // used from the destructor.
-    void reap_calibrator_task(bool wait) {
-        std::lock_guard<std::mutex> lock(calibrator_task_mutex_);
-        if (!calibrator_task_thread_.joinable()) {
+            calibrator_idle_cv_.notify_all();
+            if (removed) {
+                throw;
+            }
             return;
         }
-        if (!wait && calibrator_pending_count_.load() > 0) {
-            return;
-        }
-        calibrator_task_thread_.join();
+        calibrator_idle_cv_.notify_all();  // a replaced body waiting for the port returns
     }
 
+    struct CalibratorCommand {
+        std::uint64_t id;
+        bool on;
+        int brightness;
+    };
+
+    util::TaskClock& clock_;
     int device_number_;
     FlatPanelConnectionConfig config_;
     std::atomic<bool> connected_;
@@ -996,22 +1076,34 @@ private:
     std::mutex transition_mutex_;
 
     std::mutex cover_task_mutex_;
-    std::thread cover_task_thread_;
     std::atomic<bool> cover_in_flight_{false};
     std::atomic<bool> cover_halted_{false};
 
-    std::mutex calibrator_task_mutex_;
-    std::thread calibrator_task_thread_;
+    // The last body failure per family, kept until the next start of that
+    // family (ICoverCalibratorV2: CoverState / CalibratorState report Error).
+    // Held here, not in the slot's last_failure(): the inline calibrator fast
+    // path starts no body, and the slot records a failure only after the
+    // body returned, which is after the in-flight flags clear.
+    mutable std::mutex failure_mutex_;
+    std::optional<std::string> cover_failure_;
+    std::optional<std::string> calibrator_failure_;
+
+    std::mutex calibrator_task_mutex_;  // serializes submissions, so queue order is start order
     // Count, not a bool: see start_calibrator_task()'s doc comment for why a
     // single flag misreports "not changing" while queued commands remain.
     std::atomic<int> calibrator_pending_count_{0};
-    // Pairs with calibrator_pending_count_ so a cover task can wait for an
+    // Pairs with calibrator_pending_count_ so a cover body can wait for an
     // inline calibrator toggle to release the port (see wait_for_calibrator_idle()).
+    // Also guards calibrator_queue_, calibrator_draining_, stopping_ and
+    // calibrator_next_command_id_.
     std::mutex calibrator_idle_mutex_;
     std::condition_variable calibrator_idle_cv_;
-    // True while the fast path's set_light() is on the wire; background
-    // commands wait on it so submission order survives a fast->background
-    // transition (see start_calibrator_task()).
+    std::deque<CalibratorCommand> calibrator_queue_;
+    std::uint64_t calibrator_next_command_id_ = 0;
+    bool calibrator_draining_ = false;  // a drain is on the wire
+    bool stopping_ = false;             // stop_background_operations() in progress
+    // True while the fast path's set_light() is on the wire; the drain waits
+    // on it so submission order survives a fast->background transition.
     std::atomic<bool> calibrator_inline_active_{false};
     static constexpr std::chrono::seconds kCalibratorIdleWait{2};
 
@@ -1020,11 +1112,21 @@ private:
     static constexpr int kCoverStatusCacheMs = 1000;
     void invalidate_cover_status_cache() const {
         std::lock_guard<std::mutex> lock(cover_cache_mutex_);
-        cover_status_read_at_ = std::chrono::steady_clock::time_point{};
+        cover_status_read_at_.reset();
     }
     mutable std::mutex cover_cache_mutex_;
     mutable FlatPanelMotorizedStatus cover_status_cache_{};
-    mutable std::chrono::steady_clock::time_point cover_status_read_at_{};
+    mutable std::optional<util::TaskClock::clock::time_point> cover_status_read_at_;
+
+    std::mutex reap_mutex_;  // one stop_background_operations() at a time, across its whole join
+
+    // Declared last: the bodies touch everything above, so the slots (whose
+    // destructors join) are destroyed first. One generation per slot: a
+    // shared one would mark the other family's running body Superseded.
+    util::OperationGeneration cover_generation_;
+    util::OperationGeneration calibrator_generation_;
+    util::AsyncOperation cover_op_{"Gemini flat panel cover", cover_generation_, clock_};
+    util::AsyncOperation calibrator_op_{"Gemini flat panel calibrator", calibrator_generation_, clock_};
 };
 
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
@@ -1061,6 +1163,26 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro_by_index(int 
     config.auto_detect_index = panel_index;
     config.model = FlatPanelModel::Pro;
     return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config));
+}
+
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
+                                                                  int baud_rate, util::TaskClock& clock) {
+    FlatPanelConnectionConfig config;
+    config.type = FlatPanelConnectionType::Serial;
+    config.serial_port = serial_port;
+    config.baud_rate = baud_rate;
+    config.model = FlatPanelModel::Rev2;
+    return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config), clock);
+}
+
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro(int device_number, const std::string& serial_port,
+                                                                   int baud_rate, util::TaskClock& clock) {
+    FlatPanelConnectionConfig config;
+    config.type = FlatPanelConnectionType::Serial;
+    config.serial_port = serial_port;
+    config.baud_rate = baud_rate;
+    config.model = FlatPanelModel::Pro;
+    return std::make_unique<GeminiFlatPanelV2Driver>(device_number, std::move(config), clock);
 }
 
 }  // namespace alpacacore::vendor::gemini

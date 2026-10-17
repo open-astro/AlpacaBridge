@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/covercalibrator_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -108,5 +109,12 @@ std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro(int device_nu
  * @return Unique pointer to CoverCalibrator driver
  */
 std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro_by_index(int device_number, int panel_index = 0);
+
+/// The Rev2 and Pro drivers with the clock their idle CoverState cache and
+/// calibrator-idle wait read (tests pass a FakeTaskClock).
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_v2(int device_number, const std::string& serial_port,
+                                                                  int baud_rate, util::TaskClock& clock);
+std::unique_ptr<CoverCalibratorDriver> create_gemini_flatpanel_pro(int device_number, const std::string& serial_port,
+                                                                   int baud_rate, util::TaskClock& clock);
 
 }  // namespace alpacacore::vendor::gemini

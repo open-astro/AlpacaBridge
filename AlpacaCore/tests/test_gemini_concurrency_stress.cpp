@@ -20,15 +20,15 @@
 //     serial reader thread that a disconnect has to reap, and it writes the
 //     status cache while the Alpaca getters read it.
 //   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h. This one
-//     is strictly request/response -- no reader thread, and set_connected
-//     (false) reaps nothing. The thread this driver owns is
-//     calibrator_task_thread_, reaped by the DESTRUCTOR
-//     (reap_calibrator_task(true)) rather than by a disconnect.
+//     is strictly request/response -- no reader thread. The background work
+//     this driver owns runs in operation slots (cover and calibrator);
+//     set_connected(false) and the destructor both cancel and join them
+//     through stop_background_operations().
 //
 //     Be precise about how often the storm actually reaches it: most
 //     submissions take the INLINE fast path instead. start_calibrator_task()
 //     claims inline whenever !cover_in_flight_ && calibrator_pending_count_
-//     == 0 (gemini_flatpanel_driver.cpp:897). open_cover()/close_cover() set
+//     == 0 (see start_calibrator_task()). open_cover()/close_cover() set
 //     cover_in_flight_, so while a cover move is in flight a calibrator
 //     submission takes the BACKGROUND path instead; the cover moves feed it.
 //     A second op thread slipping between another thread's gate check and
@@ -148,7 +148,7 @@ void flatpanel_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d
     // start_cover_task() spawns one task thread per drain at most instead of
     // an unbounded chain. The gate does not serialize: two op threads can
     // both see "not moving" and the loser gets InvalidOperation from
-    // start_cover_task() (gemini_flatpanel_driver.cpp:762), which the case
+    // start_cover_task() (see start_cover_task()), which the case
     // lists as expected. halt_cover() takes cover_task_mutex_ against the
     // same transition, so it is stormed alongside the submissions.
     guard([&] {
@@ -268,7 +268,7 @@ TEST_CASE("Gemini Flat Panel Pro - concurrent connect/disconnect/operate stress"
     // NotConnected (racing disconnect) plus InvalidOperation: two op threads
     // can pass the get_cover_moving() gate together and the second
     // open_cover()/close_cover() is refused while the first is in flight
-    // (gemini_flatpanel_driver.cpp:762). Nothing else is expected.
+    // (see start_cover_task()). Nothing else is expected.
     alpacacore::test::StressCallGuard guard(
         {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { flatpanel_operate(guard, d); });
