@@ -22,7 +22,7 @@ Keep wall-clock waits and shorten the test timeouts: that trades a slow suite fo
 
 ## Consequences
 
-Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync thread waits through it; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
+Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync thread waits through it; the ToupTek camera and filter wheel drivers followed (#1268): the camera's pulse-guide and thermal-poll waits, exposure deadline and thermal cache ages, and the wheel's homing poll sleep read the clock; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
 
 ## Links
 

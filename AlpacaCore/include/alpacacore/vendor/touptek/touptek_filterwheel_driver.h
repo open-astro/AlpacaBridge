@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -45,9 +46,10 @@ std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int devic
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id);
 
 // Test seams: identical drivers wired to an injected SDK implementation.
-std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int device_number, int wheel_index,
-                                                                       ToupTekSDK& sdk);
-std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id,
-                                                                    ToupTekSDK& sdk);
+std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(
+    int device_number, int wheel_index, ToupTekSDK& sdk, util::TaskClock& clock = util::default_task_clock());
+std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(
+    int device_number, const std::string& wheel_id, ToupTekSDK& sdk,
+    util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::touptek
