@@ -2828,6 +2828,7 @@ private:
 
     // No handset read: the status poll retries an unread site (decision 0010), so a getter never waits on a `w`.
     void require_site_known_locked() const {
+        check_connected();
         if (!site_info_valid_) {
             throw AlpacaException(
                 "SynScan site is not known yet: the handset has not answered a site read and none is "

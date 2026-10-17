@@ -566,6 +566,15 @@ TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongit
     driver->set_connected(false);
 }
 
+bool site_served(const alpacacore::TelescopeDriver& driver) {
+    try {
+        (void)driver.get_site_latitude();
+        return true;
+    } catch (const alpacacore::AlpacaException&) {
+        return false;
+    }
+}
+
 TEST_CASE("SynScan snapshot - a configured, handset-read or set site is served", "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;
     auto st = std::make_shared<Handset>();
@@ -590,6 +599,25 @@ TEST_CASE("SynScan snapshot - a configured, handset-read or set site is served",
         CHECK(driver->get_site_latitude() == Catch::Approx(51.477833));
         CHECK(driver->get_site_longitude() == Catch::Approx(-0.0015));
         driver->set_connected(false);
+    }
+    {
+        // The poll retries an unread site and the getters then serve it.
+        st->w_site = false;
+        FakeTaskClock poll_clock;
+        auto driver = connected_driver_without_site(server, poll_clock, 300);
+        REQUIRE(driver->get_connected());
+        sc::set_status_poll_paused_for_testing(*driver, true);
+        CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+        st->w_site = true;
+        poll_clock.advance(seconds(3));  // past the site retry delay
+        for (int tick = 0; tick < 20 && !site_served(*driver); ++tick) {
+            (void)sc::poll_status_now_for_testing(*driver);
+        }
+        CHECK(driver->get_site_latitude() == Catch::Approx(-(33.0 + 51.0 / 60.0 + 24.0 / 3600.0)));
+        CHECK(driver->get_site_longitude() == Catch::Approx(151.0 + 12.0 / 60.0 + 54.0 / 3600.0));
+        driver->set_connected(false);
+        // Disconnected, the getters refuse before anything else, like the other reads.
+        CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
     }
 }
 
