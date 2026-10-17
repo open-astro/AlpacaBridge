@@ -66,7 +66,8 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    SVBONYCameraDriver(int device_number, int camera_index, SVBSDK& sdk, util::TaskClock& clock)
+    SVBONYCameraDriver(int device_number, int camera_index, SVBSDK& sdk,
+                       util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("SVBONY"),
           sdk_(sdk),
           clock_(clock),

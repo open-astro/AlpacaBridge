@@ -378,7 +378,8 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder, util::TaskClock& clock)
+    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder,
+                       util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("GPhoto"),
           device_number_(device_number),
           camera_index_(camera_index),
@@ -1667,8 +1668,7 @@ DecodedFrame LibRawDecoder::decode(const std::vector<std::uint8_t>& raw_bytes) {
 
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index) {
     static LibRawDecoder decoder;
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder,
-                                                util::default_task_clock());
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder);
 }
 
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
