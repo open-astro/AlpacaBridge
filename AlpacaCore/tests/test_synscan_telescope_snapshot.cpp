@@ -76,6 +76,7 @@ struct Handset {
     std::atomic<bool> w_entered{false};
     std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
     std::atomic<int> w_count{0};
+    std::atomic<bool> w_site{false};  // `w` answers a site (33d51'24" S, 151d12'54" E) instead of an unparseable '#'
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
 };
@@ -123,6 +124,7 @@ std::string reply(Handset& st, const std::string& chunk) {
                 st.w_entered.store(true);
                 return "";
             }
+            if (st.w_site.load()) return std::string("\x21\x33\x18\x01\x97\x0c\x36\x00#", 9);
             if (st.w_latency_ms.load() > 0) {
                 st.w_entered.store(true);
                 std::this_thread::sleep_for(milliseconds(st.w_latency_ms.load()));
@@ -564,7 +566,7 @@ TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongit
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan snapshot - a configured or set site is served", "[synscan][telescope][snapshot]") {
+TEST_CASE("SynScan snapshot - a configured, handset-read or set site is served", "[synscan][telescope][snapshot]") {
     FakeTaskClock clock;
     auto st = std::make_shared<Handset>();
     alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
@@ -576,10 +578,13 @@ TEST_CASE("SynScan snapshot - a configured or set site is served", "[synscan][te
         CHECK(driver->get_site_longitude() == Catch::Approx(151.215297));
         driver->set_connected(false);
     }
+    st->w_site = true;
     {
-        auto driver = connected_driver_without_site(server, clock, 300);
+        auto driver = connected_driver_without_site(server, clock, 300);  // read from the handset at connect
         REQUIRE(driver->get_connected());
         sc::set_status_poll_paused_for_testing(*driver, true);
+        CHECK(driver->get_site_latitude() == Catch::Approx(-(33.0 + 51.0 / 60.0 + 24.0 / 3600.0)));
+        CHECK(driver->get_site_longitude() == Catch::Approx(151.0 + 12.0 / 60.0 + 54.0 / 3600.0));
         driver->set_site_latitude(51.477833);
         driver->set_site_longitude(-0.0015);
         CHECK(driver->get_site_latitude() == Catch::Approx(51.477833));

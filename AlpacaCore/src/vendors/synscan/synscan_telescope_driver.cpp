@@ -900,9 +900,7 @@ public:
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
+        require_site_known_locked();
         return site_latitude_cached_;
     }
 
@@ -923,9 +921,7 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_info_valid_) {
-            ensure_site_info_cached_locked();
-        }
+        require_site_known_locked();
         return site_longitude_cached_;
     }
 
@@ -2827,6 +2823,16 @@ private:
                 throw AlpacaException(
                     "SynScan cannot determine AlignmentMode for mount model ID " + std::to_string(model_id),
                     AlpacaError::DriverException);
+        }
+    }
+
+    // No handset read: the status poll retries an unread site (decision 0010), so a getter never waits on a `w`.
+    void require_site_known_locked() const {
+        if (!site_info_valid_) {
+            throw AlpacaException(
+                "SynScan site is not known yet: the handset has not answered a site read and none is "
+                "configured",
+                AlpacaError::ValueNotSet);
         }
     }
 
