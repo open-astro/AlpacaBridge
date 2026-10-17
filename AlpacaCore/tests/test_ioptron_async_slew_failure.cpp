@@ -10,8 +10,8 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// open-astro#575, iOptron: the async slew dispatch runs on its own thread with
-// allow_soft_fail=true, so a mount that answers ":MS1"/":MS2" with "0" (target
+// open-astro#575, iOptron: the async slew dispatch runs on the slew slot body
+// (a non-null async_ctx), so a mount that answers ":MS1"/":MS2" with "0" (target
 // rejected, e.g. below the altitude limit) is logged as "treating as no-op"
 // and Slewing drops to false -- the client is told nothing. That soft-fail is
 // exactly the "work fails after initiation" case of the completion-property
