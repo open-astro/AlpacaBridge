@@ -595,7 +595,8 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   even before the node lookup reflects it: a tty returns those only when its device is gone or
   the fd is unusable. Silence with the node still present keeps the rules above. The QHY Q-Focuser follows the same
   shape since #527, detected on its next transaction (request/response, no reader thread) with a
-  lock-free `link_lost_` latch the getter reads. The #237 drivers still treat a
+  lock-free `link_lost_` latch the getter reads. OnStep follows the Sky-Watcher shape since #1241
+  (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
 
