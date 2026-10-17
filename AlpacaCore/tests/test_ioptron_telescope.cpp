@@ -1046,7 +1046,7 @@ TEST_CASE("iOptron slot - a GOTO the mount rejects after SlewToAltAzAsync return
     driver->set_connected(false);
 }
 
-TEST_CASE("iOptron slot - a refused slew thread throws, keeps the earlier failure and leaves Slewing false",
+TEST_CASE("iOptron slot - a refused slew thread throws and Slewing still reports the earlier failure",
           "[ioptron][telescope][async][slot]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
     REQUIRE(mount.ok());

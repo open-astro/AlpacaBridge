@@ -122,7 +122,7 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        // Join the async slew dispatch thread before any member it touches is
+        // Cancel and join the async slew dispatch (slew slot) before any member it touches is
         // destroyed. Must run WITHOUT mutex_ held (the thread takes mutex_).
         reap_slew_dispatch();
         if (connected_) {
@@ -415,7 +415,7 @@ public:
         }
         if (disconnect_protocol) {
             stop_clock_sync_thread();
-            // Join the async slew dispatch thread before tearing down the
+            // Cancel and join the async slew dispatch (slew slot) before tearing down the
             // protocol connection (runs after lock.unlock() — the thread
             // takes mutex_, so joining under the lock would deadlock).
             {
@@ -1350,7 +1350,7 @@ public:
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
         // can reach the mount after the stop below. Runs without mutex_ held
-        // (the dispatch thread takes it), like every other reap site. Taking
+        // (the dispatch body takes it), like every other reap site. Taking
         // the handoff lock can wait for a concurrent initiator's in-flight
         // dispatch transaction before the stop can be sent.
         reap_slew_dispatch();
@@ -1625,7 +1625,7 @@ public:
             slew_in_progress_ = true;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
-            // dispatch thread gets the mutex.
+            // dispatch body gets the mutex.
             slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         }
 
@@ -2457,7 +2457,7 @@ private:
         // join and assign clock_sync_thread_ concurrently (UB), or a second
         // start can overwrite a still-joinable thread (std::terminate).
         // The clock-sync body never takes clock_sync_mutex_, so joining
-        // under it cannot deadlock. Same shape as reap_slew_dispatch().
+        // under it cannot deadlock. Same idea as reap_slew_dispatch().
         std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
         stop_clock_sync_thread_locked();
         clock_sync_cancel_.store(false);
@@ -2880,7 +2880,7 @@ private:
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
-    // (under mutex_) on a REAL failure (never on the dispatch thread's own
+    // (under mutex_) on a REAL failure (never on the dispatch body's own
     // cancellation), cleared by the next slew initiator and by AbortSlew.
     // Consulted by get_slewing() before the cached status.
     mutable std::string last_slew_error_;
