@@ -88,11 +88,11 @@ public:
     void set_config_int(int camera_id, int /*config_id*/, long /*value*/, bool /*is_auto*/) override {
         record("set_config_int", camera_id);
     }
-    double get_config_float(int camera_id, int /*config_id*/, bool* is_auto) override {
+    double get_config_float(int camera_id, int /*config_id*/, bool* /*is_auto*/) override {
         record("get_config_float", camera_id);
         return 0.0;
     }
-    bool get_config_bool(int camera_id, int /*config_id*/, bool* is_auto) override {
+    bool get_config_bool(int camera_id, int /*config_id*/, bool* /*is_auto*/) override {
         record("get_config_bool", camera_id);
         return false;
     }
