@@ -292,7 +292,9 @@ def scan_udev_rules(root: Path) -> tuple[list[Path], list[str]]:
 
     Only ``:=`` and ``=`` assignments are expanded. A ``.rules`` path that uses a variable set any other
     way (``?=``, ``+=``, ``$(shell ...)``), or that still holds a ``$(VAR)`` after expansion, is an error:
-    skipping it would drop that file's evidence without a message.
+    skipping it would drop that file's evidence without a message. The one exception is an unresolved
+    ``$(VAR)`` after an absolute prefix that cannot lead into AlpacaCore/external/ (the libgphoto2
+    stage path): that is not vendor evidence and is skipped.
     """
     rules = root / "debian/rules"
     if not rules.is_file():
@@ -328,7 +330,7 @@ def scan_udev_rules(root: Path) -> tuple[list[Path], list[str]]:
         expanded = expand(word)
         if bad:
             errors.append(f"debian/rules: {word} uses {', '.join(f'{v} ({unsupported[v]})' for v in bad)}, "
-                          "which installed_udev_rules() cannot expand: assign it with := or =")
+                          "which scan_udev_rules() cannot expand: assign it with := or =")
             continue
         if "$(" in expanded or "${" in expanded:
             text_prefix = re.split(r"\$[({]", expanded, maxsplit=1)[0]
