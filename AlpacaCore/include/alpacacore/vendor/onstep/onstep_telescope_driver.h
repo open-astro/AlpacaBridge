@@ -16,6 +16,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 
@@ -47,5 +48,14 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
                                                               std::optional<double> site_longitude_deg = std::nullopt,
                                                               std::optional<double> site_elevation_m = std::nullopt,
                                                               std::optional<bool> sync_time_on_connect = std::nullopt);
+
+namespace detail {
+// open-astro#521 / #1241: how long the serial link may be gone before motion
+// that outlived the outage is stopped at relink rather than left running
+// (default util::kRelinkMotionPreserveWindow, 5 s; a test shortens it).
+// Process-wide; tests restore the default afterwards.
+void set_relink_motion_preserve_window(std::chrono::milliseconds window);
+std::chrono::milliseconds relink_motion_preserve_window();
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep
