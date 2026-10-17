@@ -147,8 +147,10 @@ public:
         // destroying a joinable std::thread is std::terminate(), which is how
         // this shows up: an abort in ~iOptronTelescopeDriver with no active
         // exception, under a connect/disconnect storm. Both reapers are
-        // idempotent (each joins only a joinable thread and resets its cancel
-        // flag), so running them again here costs nothing on the normal path.
+        // idempotent (the clock-sync reaper joins only a joinable thread and
+        // resets its cancel flag; the slew reaper cancels and joins the slot,
+        // a no-op when it is idle), so running them again here costs nothing
+        // on the normal path.
         stop_clock_sync_thread();
         reap_slew_dispatch();
     }
