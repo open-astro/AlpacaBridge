@@ -20,10 +20,10 @@
 //     serial reader thread that a disconnect has to reap, and it writes the
 //     status cache while the Alpaca getters read it.
 //   - Flat Panel Pro CoverCalibrator over fake_gemini_flatpanel.h. This one
-//     is strictly request/response -- no reader thread, and set_connected
-//     (false) reaps nothing. The background work this driver owns
-//     runs in operation slots, cancelled and joined by the DESTRUCTOR
-//     (stop_background_operations()) rather than by a disconnect.
+//     is strictly request/response -- no reader thread. The background work
+//     this driver owns runs in operation slots (cover and calibrator);
+//     set_connected(false) and the destructor both cancel and join them
+//     through stop_background_operations().
 //
 //     Be precise about how often the storm actually reaches it: most
 //     submissions take the INLINE fast path instead. start_calibrator_task()
