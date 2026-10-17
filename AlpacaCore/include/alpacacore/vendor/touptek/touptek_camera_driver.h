@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <memory>
 #include <string>
@@ -31,7 +32,8 @@ class ToupTekSDK;  // fault-injection seam (touptek_sdk_wrapper.h, issue #104)
 std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index);
 
 // Test seam: identical driver wired to an injected SDK implementation.
-std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk);
+std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk,
+                                                    util::TaskClock& clock = util::default_task_clock());
 
 /**
  * The identity a ToupTek-family camera presents. OEM brands (Altair) run this
@@ -49,6 +51,7 @@ struct ToupCameraBranding {
  * (create_altair_camera) call it with their own SDK and branding.
  */
 std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
-                                                           ToupCameraBranding branding);
+                                                           ToupCameraBranding branding,
+                                                           util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::touptek

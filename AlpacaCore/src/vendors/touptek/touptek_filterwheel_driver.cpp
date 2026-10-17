@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/poll_settle.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
@@ -42,9 +43,10 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     ToupTekFilterWheelDriver(int device_number, std::optional<int> wheel_index, std::optional<std::string> wheel_id,
-                             ToupTekSDK& sdk)
+                             ToupTekSDK& sdk, util::TaskClock& clock)
         : AsyncConnectable(kLogTag),
           sdk_(sdk),
+          clock_(clock),
           device_number_(device_number),
           wheel_index_(wheel_index),
           wheel_id_(std::move(wheel_id)) {}
@@ -420,7 +422,7 @@ private:
     // settles via the same consecutive-read requirement rather than waiting out
     // the full timeout. The unconditional stability requirement costs at most
     // kStableReads poll intervals over an on-first-slot return.
-    static bool wait_for_home(ToupTekSDK& sdk, HToupcam handle) {
+    bool wait_for_home(ToupTekSDK& sdk, HToupcam handle) {
         constexpr int kPollMs = 100;
         constexpr int kMaxPolls = 60;    // 60 polls x 100 ms = 6 s cap
         constexpr int kStableReads = 3;  // consecutive real-slot reads = settled
@@ -430,7 +432,7 @@ private:
         // loop only supplies the cadence and the reading.
         util::ConsecutiveSettle settle(kStableReads, kMaxPolls);
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+            clock_.sleep_for(std::chrono::milliseconds(kPollMs));
             int pos = sdk.get_filter_wheel_position(handle);
             switch (settle.feed(pos >= 0)) {
                 case util::ConsecutiveSettle::State::Settled:
@@ -485,6 +487,7 @@ private:
 
     // Injected SDK seam (issue #104); see touptek_sdk_wrapper.h.
     ToupTekSDK& sdk_;
+    util::TaskClock& clock_;
     int device_number_;
     std::optional<int> wheel_index_;
     std::optional<std::string> wheel_id_;
@@ -510,22 +513,22 @@ private:
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int device_number, int wheel_index) {
     return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt,
-                                                      ToupTekSDKWrapper::instance());
+                                                      ToupTekSDKWrapper::instance(), util::default_task_clock());
 }
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id) {
     return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id,
-                                                      ToupTekSDKWrapper::instance());
+                                                      ToupTekSDKWrapper::instance(), util::default_task_clock());
 }
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_index(int device_number, int wheel_index,
-                                                                       ToupTekSDK& sdk) {
-    return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt, sdk);
+                                                                       ToupTekSDK& sdk, util::TaskClock& clock) {
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, wheel_index, std::nullopt, sdk, clock);
 }
 
 std::unique_ptr<FilterWheelDriver> create_touptek_filterwheel_by_id(int device_number, const std::string& wheel_id,
-                                                                    ToupTekSDK& sdk) {
-    return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id, sdk);
+                                                                    ToupTekSDK& sdk, util::TaskClock& clock) {
+    return std::make_unique<ToupTekFilterWheelDriver>(device_number, std::nullopt, wheel_id, sdk, clock);
 }
 
 }  // namespace alpacacore::vendor::touptek

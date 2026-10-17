@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -72,10 +73,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk, ToupCameraBranding branding)
+    ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk, ToupCameraBranding branding,
+                        util::TaskClock& clock)
         : AsyncConnectable(branding.label),
           branding_(std::move(branding)),
           sdk_(sdk),
+          clock_(clock),
           device_number_(device_number),
           camera_index_(camera_index),
           handle_(nullptr),
@@ -400,8 +403,7 @@ public:
         if (!connected_.load()) return CameraState::Idle;
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ &&
-                std::chrono::steady_clock::now() >= exposure_deadline_) {
+            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
                 ALPACA_LOG_WARN(branding_.label, "Exposure deadline exceeded; forcing CameraState=Idle.");
                 // Publish the false-transition under readout_mutex_ too, so the
                 // invariant "exposure_active_ only changes under readout_mutex_"
@@ -940,8 +942,8 @@ public:
         pulse_guiding_.store(true);
         pulse_guide_thread_ = std::thread([this, duration]() {
             std::unique_lock<std::mutex> plock(pulse_guide_mutex_);
-            const bool cancelled = pulse_guide_cv_.wait_for(plock, std::chrono::milliseconds(duration),
-                                                            [this] { return pulse_guide_cancel_; });
+            const bool cancelled = clock_.wait_for(plock, pulse_guide_cv_, std::chrono::milliseconds(duration),
+                                                   [this] { return pulse_guide_cancel_; });
             if (!cancelled) {
                 pulse_guiding_.store(false);  // natural completion
             }
@@ -960,10 +962,10 @@ public:
     // DeviceState (temperature first, then CoolerPower) right after connect
     // would serve the zero-initialised TEC values -- and keep serving them for
     // a whole exposure, since the freshness check is bypassed while exposing.
-    bool cache_fresh_locked(bool valid, std::chrono::steady_clock::time_point stamped) const {
+    bool cache_fresh_locked(bool valid, util::TaskClock::clock::time_point stamped) const {
         if (!valid) return false;
         if (exposure_active_.load()) return true;
-        return std::chrono::steady_clock::now() - stamped < kThermalCacheMaxAge;
+        return clock_.now() - stamped < kThermalCacheMaxAge;
     }
 
     // Each live read stamps only its own reading, so a getter's fallback read
@@ -971,7 +973,7 @@ public:
     // kThermalCacheMaxAge instead of every call hitting the SDK.
     void read_temperature_locked(HToupcam h, ToupTekSDK& sdk) const {
         temperature_cache_c_ = static_cast<double>(sdk.get_temperature_deciC(h)) / 10.0;
-        temperature_cache_time_ = std::chrono::steady_clock::now();
+        temperature_cache_time_ = clock_.now();
         temperature_cache_valid_ = true;
     }
 
@@ -981,7 +983,7 @@ public:
             tec_voltage_max_deciV_ = sdk.get_tec_voltage_max_deciV(h);
             tec_voltage_max_valid_ = true;
         }
-        tec_cache_time_ = std::chrono::steady_clock::now();
+        tec_cache_time_ = clock_.now();
         tec_cache_valid_ = true;
     }
 
@@ -1013,7 +1015,7 @@ public:
                 // First tick runs immediately (primes the cache); later ticks
                 // wait out the interval unless stopped.
                 if (!first) {
-                    thermal_cv_.wait_for(tlock, kThermalPollInterval, [this] { return thermal_stop_; });
+                    clock_.wait_for(tlock, thermal_cv_, kThermalPollInterval, [this] { return thermal_stop_; });
                 }
                 first = false;
                 if (thermal_stop_) return;
@@ -1235,9 +1237,7 @@ public:
             exposure_failure_.clear();
             image_ready_ = false;
             image_cached_ = false;
-            exposure_deadline_ = std::chrono::steady_clock::now() +
-                std::chrono::microseconds(exposure_us) +
-                std::chrono::seconds(15);
+            exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
         }
 
@@ -1476,6 +1476,7 @@ private:
     // construction, so read without a lock.
     const ToupCameraBranding branding_;
     ToupTekSDK& sdk_;
+    util::TaskClock& clock_;
     int device_number_;
     int camera_index_;
     HToupcam handle_;
@@ -1523,7 +1524,7 @@ private:
 
     mutable std::atomic<bool> exposure_active_;
     std::thread exposure_thread_;
-    mutable std::chrono::steady_clock::time_point exposure_deadline_{};
+    mutable util::TaskClock::clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
@@ -1533,9 +1534,9 @@ private:
     mutable int tec_voltage_deciV_{0};
     mutable int tec_voltage_max_deciV_{0};
     mutable bool tec_voltage_max_valid_{false};
-    mutable std::chrono::steady_clock::time_point temperature_cache_time_{};
+    mutable util::TaskClock::clock::time_point temperature_cache_time_{};
     mutable bool temperature_cache_valid_{false};
-    mutable std::chrono::steady_clock::time_point tec_cache_time_{};
+    mutable util::TaskClock::clock::time_point tec_cache_time_{};
     mutable bool tec_cache_valid_{false};
     // Poller lifecycle: member thread + stop flag/cv so disconnect and the
     // destructor can wake and join it (never detached).
@@ -1905,13 +1906,15 @@ std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camer
     return create_touptek_camera(device_number, camera_index, ToupTekSDKWrapper::instance());
 }
 
-std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk) {
-    return create_toupcam_family_camera(device_number, camera_index, sdk, ToupCameraBranding{"ToupTek", "TOUPTEK"});
+std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk,
+                                                    util::TaskClock& clock) {
+    return create_toupcam_family_camera(device_number, camera_index, sdk, ToupCameraBranding{"ToupTek", "TOUPTEK"},
+                                        clock);
 }
 
 std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
-                                                           ToupCameraBranding branding) {
-    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk, std::move(branding));
+                                                           ToupCameraBranding branding, util::TaskClock& clock) {
+    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk, std::move(branding), clock);
 }
 
 } // namespace alpacacore::vendor::touptek
