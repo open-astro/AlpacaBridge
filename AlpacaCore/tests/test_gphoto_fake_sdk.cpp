@@ -29,6 +29,7 @@
 #include "catch2_compat.h"
 #include "fake_gphoto_sdk.h"
 #include "fake_raw_decoder.h"
+#include "fake_task_clock.h"
 
 using alpacacore::AlpacaException;
 using alpacacore::test::FakeGPhotoSDK;
@@ -943,4 +944,114 @@ TEST_CASE("GPhoto camera fake - camera gone while an abort closes the shutter ke
 
     driver->set_connected(false);
     CHECK(fake.close_count == fake.open_count);
+}
+
+// The TaskClock cases below pin each driver wait to the injected clock. Virtual time starts at the epoch while
+// the real steady_clock reads machine uptime, so a deadline SET from the real clock never trips against fake
+// time, and a CHECK against the real clock trips at once against a fake-time deadline: each case asserts the
+// state just before the deadline and just after it, so either mutation turns it red.
+
+TEST_CASE("GPhoto camera fake - exposure watchdog deadline reads the TaskClock",
+          "[gphoto][camera][unit][fakesdk][taskclock]") {
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    // Hold the capture so the exposure stays active; released before the driver goes away.
+    std::atomic<bool> armed{false};  // connect makes its own priming capture; hold only the exposure's
+    std::atomic<bool> entered{false};
+    std::atomic<bool> release{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name != "capture_and_download" || !armed.load()) return;
+        entered.store(true);
+        for (int i = 0; i < 5000 && !release.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    };
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    armed.store(true);
+    driver->start_exposure(1.0, true);  // a native shutter choice, so no bulb loop
+    for (int i = 0; i < 2000 && !entered.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    REQUIRE(entered.load());
+
+    // The deadline is the exposure plus a 60 s margin on the clock.
+    clock.advance(std::chrono::seconds(60));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(std::chrono::seconds(2));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+
+    release.store(true);
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - bulb hold deadline reads the TaskClock", "[gphoto][camera][unit][fakesdk][taskclock]") {
+    reset_gphoto_sensor_cache();
+    constexpr int kCap = 200;  // a loop that never sees the deadline ends through the cap, never spins
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    fake.skip_sleeps = true;
+    FakeRawDecoder decoder;
+
+    // Runs on the exposure worker. Every hold slice is 100 ms of virtual time; record whether the shutter was
+    // still open (one toggle so far) at each slice.
+    int slices = 0;
+    bool closed_during_hold = false;
+    fake.before_call = [&](const std::string& name) {
+        if (name != "drain_events") return;
+        if (++slices > kCap) {
+            throw AlpacaException("hold loop ran past the cap", alpacacore::AlpacaError::DriverException);
+        }
+        if (fake.bulb_toggle_history.size() != 1) closed_during_hold = true;
+        clock.advance(std::chrono::milliseconds(100));
+    };
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    driver->start_exposure(1.0, true);  // > 1/50 s native ceiling => bulb path
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_image_ready() == true);
+    CHECK(slices == 10);  // 1 s of hold in 100 ms slices
+    CHECK(fake.drained_budget == std::chrono::milliseconds(1000));
+    CHECK(closed_during_hold == false);
+    REQUIRE(fake.bulb_toggle_history.size() == 2);
+    CHECK(fake.bulb_toggle_history.back() == false);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - bulb file wait deadline reads the TaskClock",
+          "[gphoto][camera][unit][fakesdk][taskclock]") {
+    reset_gphoto_sensor_cache();
+    constexpr int kCap = 200;  // a loop that never sees the deadline ends through the cap, never spins
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    fake.skip_sleeps = true;
+    fake.bulb_file_polls_before_ready = 1000;  // the camera never posts the file
+    FakeRawDecoder decoder;
+
+    int calls = 0;
+    fake.before_call = [&](const std::string& name) {
+        if (name != "drain_events" && name != "poll_bulb_file_and_download") return;
+        if (++calls > kCap) {
+            throw AlpacaException("bulb loops ran past the cap", alpacacore::AlpacaError::DriverException);
+        }
+        // Hold slices are 100 ms; the file poll slice is 1 s.
+        clock.advance(name == "drain_events" ? std::chrono::milliseconds(100) : std::chrono::seconds(1));
+    };
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    driver->start_exposure(1.0, true);
+    wait_for_exposure_to_finish(*driver);
+
+    // The file wait is the exposure plus 30 s: 31 one-second polls, then the refusal that names the window.
+    CHECK(fake.bulb_file_polls == 31);
+    require_exposure_failure_reported(*driver, "no file-added event from camera within 31 s");
+
+    driver->set_connected(false);
 }

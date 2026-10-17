@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/svbony/svbony_sdk.h>
 
 #include <memory>
@@ -33,8 +34,10 @@ std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera
 /**
  * @brief Test seam: as create_svbony_camera(), over an injected SVBONY SDK.
  *
- * @p sdk must outlive the driver.
+ * @p sdk and @p clock must outlive the driver. Every driver wait and deadline
+ * reads @p clock (decision 0005); tests pass a FakeTaskClock.
  */
-std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk);
+std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk,
+                                                   util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::svbony

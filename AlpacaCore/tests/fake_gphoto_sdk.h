@@ -118,6 +118,11 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `drain_events` sleeps out its WHOLE budget where the real wrapper
  *    returns as each event lands and polls again; the fake is the slower of
  *    the two, so the hold loop's timing is exercised at its harshest.
+ *  - With `skip_sleeps` set, `drain_events` returns at once and a "not ready"
+ *    poll does not sleep either: a case then spends no real time in the bulb
+ *    loops and moves a FakeTaskClock from `before_call` instead. Real time no
+ *    longer bounds the loop, so such a case caps the calls and fails through
+ *    the cap.
  *  - `poll_bulb_file_and_download` answers instantly, where the real wrapper
  *    blocks up to its timeout for the file-added event. A "not ready" poll
  *    (`bulb_file_polls_before_ready`) sleeps at most 10 ms of the timeout so
@@ -151,10 +156,14 @@ public:
     std::vector<FakeCamera> cameras;
     std::set<std::string> throw_from;
     // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
-    // throw_from), so a case can make one named call block. Null in every ordinary test; the contract sweep
-    // sets it on the connect call to hold a connect open.
+    // throw_from), so a case can make one named call block or move a FakeTaskClock. Null in every ordinary
+    // test; the contract sweep sets it on the connect call to hold a connect open, and the [taskclock] cases
+    // set it to drive the exposure and bulb loops.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
+    // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
+    // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
+    bool skip_sleeps{false};
     std::vector<std::string> call_log;
 
     int open_count{0};
@@ -310,7 +319,7 @@ public:
         camera_for(handle);
         ++drain_events_calls;
         drained_budget += budget;
-        std::this_thread::sleep_for(budget);
+        if (!skip_sleeps) std::this_thread::sleep_for(budget);
     }
 
     std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
@@ -321,7 +330,7 @@ public:
         bulb_file_poll_timeouts.push_back(timeout);
         if (bulb_file_polls_before_ready > 0) {
             --bulb_file_polls_before_ready;
-            std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
+            if (!skip_sleeps) std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
             return std::nullopt;
         }
         return capture_result;

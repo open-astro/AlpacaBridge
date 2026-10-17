@@ -28,6 +28,7 @@
 
 #include "catch2_compat.h"
 #include "fake_svbony_sdk.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -77,6 +78,14 @@ void require_alpaca_error(const std::function<void()>& operation, int expected) 
 
 std::unique_ptr<alpacacore::CameraDriver> connected_camera(alpacacore::test::FakeSVBSDK& sdk) {
     auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    camera->set_connected(true);
+    REQUIRE(camera->get_connected());
+    return camera;
+}
+
+std::unique_ptr<alpacacore::CameraDriver> connected_camera_on_clock(alpacacore::test::FakeSVBSDK& sdk,
+                                                                    alpacacore::test::FakeTaskClock& clock) {
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk, clock);
     camera->set_connected(true);
     REQUIRE(camera->get_connected());
     return camera;
@@ -1076,4 +1085,82 @@ TEST_CASE("SVBONY Camera - frame storage validation rejects short spans", "[svbo
                     alpacacore::AlpacaException);
     CHECK_THROWS_AS(validate_frame_storage(std::span<const std::uint8_t>(short_frame), 16, 8, SVBImageType::Raw16),
                     alpacacore::AlpacaException);
+}
+
+// The TaskClock cases below pin each driver wait to the injected clock. Virtual time starts at the epoch while
+// the real steady_clock reads machine uptime, so a deadline SET from the real clock never trips against fake
+// time, and a CHECK against the real clock trips at once against a fake-time deadline: each case asserts the
+// state just before the deadline and just after it, so either mutation turns it red.
+
+TEST_CASE("SVBONY Camera - pulse-guide end reads the TaskClock", "[svbony][camera][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera_on_clock(sdk, clock);
+
+    // The pulse is synchronous and clears its flag when the SDK call returns, so the end timestamp is only
+    // observable from inside the call: the hook runs there, on the calling thread.
+    std::vector<bool> seen;
+    sdk.before_call = [&](const std::string& name) {
+        if (name != "pulse_guide") return;
+        seen.push_back(camera->get_is_pulse_guiding());
+        clock.advance(1999ms);
+        seen.push_back(camera->get_is_pulse_guiding());
+        clock.advance(1ms);
+        seen.push_back(camera->get_is_pulse_guiding());
+    };
+    camera->pulse_guide(0, 2000);
+    REQUIRE(seen.size() == 3);
+    CHECK(seen[0] == true);
+    CHECK(seen[1] == true);   // 1 ms before the end
+    CHECK(seen[2] == false);  // at the end
+    CHECK(camera->get_is_pulse_guiding() == false);
+}
+
+TEST_CASE("SVBONY Camera - exposure watchdog deadline reads the TaskClock", "[svbony][camera][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera_on_clock(sdk, clock);
+    sdk.set_max_read_wait(5s);  // real-time bound for the held read, released below
+    sdk.block_video_data();
+    ReleaseVideoDataOnExit release{sdk};
+
+    camera->start_exposure(0.001, true);
+    REQUIRE(sdk.wait_for_video_data(2s));
+
+    // The deadline is exposure + 15 s on the clock: 1 ms before it the held exposure is still running.
+    clock.advance(15s);
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK_NOTHROW(static_cast<void>(camera->get_image_ready()));
+
+    clock.advance(2ms);
+    CHECK(camera->get_camera_state() == alpacacore::CameraState::Idle);
+    wait_for_driver_exception(*camera, "completion deadline");
+}
+
+TEST_CASE("SVBONY Camera - readout wait deadline reads the TaskClock", "[svbony][camera][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    constexpr int kStepMs = 500;
+    constexpr int kCap = 200;  // a loop that never sees the deadline ends through the cap, never spins
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = connected_camera_on_clock(sdk, clock);
+    sdk.timeout_next_video_data(kCap + 10);  // every read answers Timeout at once
+
+    int reads = 0;
+    sdk.before_call = [&](const std::string& name) {
+        if (name != "get_video_data") return;
+        if (++reads > kCap) {
+            throw alpacacore::AlpacaException("readout loop ran past the cap",
+                                              alpacacore::AlpacaError::DriverException);
+        }
+        clock.advance(std::chrono::milliseconds(kStepMs));
+    };
+
+    // A 1 s exposure waits exposure + 10 s = 11 s for a frame: 22 reads of 500 ms virtual time each.
+    camera->start_exposure(1.0, true);
+    wait_for_driver_exception(*camera, "did not deliver a frame before the timeout");
+    CHECK(reads == 22);
+    CHECK(sdk.call_count("get_video_data") == 22);
 }
