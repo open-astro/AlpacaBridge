@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -377,12 +378,14 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder)
+    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder,
+                       util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("GPhoto"),
           device_number_(device_number),
           camera_index_(camera_index),
           sdk_(sdk),
-          decoder_(decoder) {
+          decoder_(decoder),
+          clock_(clock) {
         preload_camera_info_locked();
     }
 
@@ -650,7 +653,7 @@ public:
         if (!connected_.load()) return CameraState::Idle;
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
                 ALPACA_LOG_WARN(kLogTag,
                                 "Exposure deadline exceeded; forcing CameraState=Idle. "
                                 "Exposure thread may still be blocked inside libgphoto2.");
@@ -1021,7 +1024,7 @@ public:
             if (use_bulb) {
                 duration_margin += bulb_file_wait_for(duration);
             }
-            exposure_deadline_ = std::chrono::steady_clock::now() + duration_margin;
+            exposure_deadline_ = clock_.now() + duration_margin;
             exposure_deadline_valid_ = true;
             exposure_active_.store(true);
         }
@@ -1060,6 +1063,7 @@ private:
     int handle_{-1};
     GPhotoSDK& sdk_;
     RawDecoder& decoder_;
+    util::TaskClock& clock_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
@@ -1481,7 +1485,7 @@ private:
     // flag between slices.
     GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
         auto& sdk = sdk_;
-        using clock = std::chrono::steady_clock;
+        using clock = util::TaskClock::clock;
         constexpr auto kHoldSlice = std::chrono::milliseconds(100);
         constexpr auto kFilePollSlice = std::chrono::seconds(1);
 
@@ -1504,14 +1508,14 @@ private:
 
         shutter_open();
         const auto hold_deadline =
-            clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
+            clock_.now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
         // The hold calls into the SDK, so unlike the sleep it replaced it can
         // throw. A throw that skipped the close would leave the shutter open,
         // the exact wedge issue #569 is about, so bulb=0 is sent on every way
         // out of the hold and the original failure is rethrown afterwards.
         try {
             while (!abort_requested_.load()) {
-                const auto now = clock::now();
+                const auto now = clock_.now();
                 if (now >= hold_deadline) break;
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
                 sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
@@ -1528,9 +1532,9 @@ private:
 
         bool aborted = abort_requested_.load();
         auto file_deadline =
-            clock::now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
+            clock_.now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
         while (true) {
-            const auto now = clock::now();
+            const auto now = clock_.now();
             if (now >= file_deadline) break;
             if (!aborted && abort_requested_.load()) {
                 aborted = true;
@@ -1668,8 +1672,8 @@ std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera
 }
 
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
-                                                   RawDecoder& decoder) {
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder);
+                                                   RawDecoder& decoder, util::TaskClock& clock) {
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder, clock);
 }
 
 }  // namespace alpacacore::vendor::gphoto

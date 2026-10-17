@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #include <alpacacore/vendor/svbony/svbony_frame_validation.h>
 #include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
@@ -65,9 +66,11 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    SVBONYCameraDriver(int device_number, int camera_index, SVBSDK& sdk)
+    SVBONYCameraDriver(int device_number, int camera_index, SVBSDK& sdk,
+                       util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("SVBONY"),
           sdk_(sdk),
+          clock_(clock),
           device_number_(device_number),
           camera_index_(camera_index),
           camera_id_(-1),
@@ -670,7 +673,7 @@ public:
         // pulse_guide's fresh flag/end-time write and falsely report
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
-        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
+        if (clock_.now() >= pulse_guiding_end_) {
             pulse_guiding_.store(false);
             return false;
         }
@@ -951,7 +954,7 @@ public:
         // getter covers readers while the call is in flight.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
             pulse_guiding_.store(true);
         }
         // SVBPulseGuide blocks on the camera side for the full pulse — it
@@ -1039,9 +1042,7 @@ public:
             // SVBGetVideoData poll loop. If the exposure thread is still
             // hung past this point, get_camera_state forces Idle so the
             // client can recover instead of polling Exposing forever.
-            exposure_deadline_ = std::chrono::steady_clock::now() +
-                std::chrono::microseconds(exposure_us) +
-                std::chrono::seconds(15);
+            exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
             exposure_worker_running_ = true;
             exposure_active_.store(true);
@@ -1166,10 +1167,10 @@ public:
                     const int total_wait_ms = exposure_wait_ms > std::numeric_limits<int>::max() - 10000L
                                                   ? std::numeric_limits<int>::max()
                                                   : std::max(10000, static_cast<int>(exposure_wait_ms + 10000L));
-                    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(total_wait_ms);
+                    auto deadline = clock_.now() + std::chrono::milliseconds(total_wait_ms);
                     bool got_frame = false;
                     int attempts = 0;
-                    while (exposure_active_.load() && std::chrono::steady_clock::now() < deadline) {
+                    while (exposure_active_.load() && clock_.now() < deadline) {
                         try {
                             if (sdk.get_video_data(active_camera_id, buffer.data(), static_cast<long>(buffer.size()),
                                                    500) == SVBVideoDataResult::Frame) {
@@ -1298,6 +1299,7 @@ private:
     };
 
     SVBSDK& sdk_;
+    util::TaskClock& clock_;
     int device_number_;
     int camera_index_;
     int camera_id_;
@@ -1397,7 +1399,7 @@ private:
     }
 
     void latch_exposure_timeout_locked() const {
-        if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+        if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
             ALPACA_LOG_WARN("SVBONY", "Exposure exceeded its completion deadline; late frame results will be ignored");
             exposure_failure_ = "SVBONY camera exposure exceeded its completion deadline";
             image_ready_ = false;
@@ -1997,8 +1999,9 @@ std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera
     return create_svbony_camera(device_number, camera_index, SVBSDKWrapper::instance());
 }
 
-std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk) {
-    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index, sdk);
+std::unique_ptr<CameraDriver> create_svbony_camera(int device_number, int camera_index, SVBSDK& sdk,
+                                                   util::TaskClock& clock) {
+    return std::make_unique<SVBONYCameraDriver>(device_number, camera_index, sdk, clock);
 }
 
 } // namespace alpacacore::vendor::svbony
