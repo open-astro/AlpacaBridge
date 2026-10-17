@@ -199,7 +199,8 @@ checksum does not match:
 ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.xz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.2/conformu.linux-arm64.tar.xz' && echo '603803767a56bed38fe4ee872da00b5bd4e5f7f4364f17217a8a3e93e06e57b9  cu.tar.xz' | sha256sum -c - && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-The printed version line must start `4.5.2.56139, Build time:` (4.5.2, build 56139). Reports made with
+The printed version line must read `Conform Universal 4.5.2 (Build 56139.4ccb591)`. A saved report's log header
+(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.2.56139, Build time:` (4.5.2, build 56139). Reports made with
 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted only after a
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
 `conformu` watch in `scripts/dependency_sdk_versions.json` and the version AGENTS.md names.
