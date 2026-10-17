@@ -74,6 +74,8 @@ struct Handset {
     std::atomic<char> pier{'E'};       // 0 = the handset does not answer 'p'
     std::atomic<int> w_latency_ms{0};  // a handset slow on `w` (site) only, answering it unparseably
     std::atomic<bool> w_entered{false};
+    std::atomic<bool> w_silent{false};  // the handset ignores `w` (site) entirely
+    std::atomic<int> w_count{0};
     std::atomic<uint32_t> ra_counts{0x5CECE2};  // the position `e` answers (24-bit); a GOTO (`r`) lands on its aim
     std::atomic<uint32_t> dec_counts{0xD001B9};
 };
@@ -116,6 +118,11 @@ std::string reply(Handset& st, const std::string& chunk) {
             if (chunk.size() > 1) st.tracking_mode.store(chunk[1]);
             return "#";
         case 'w':
+            st.w_count.fetch_add(1);
+            if (st.w_silent.load()) {
+                st.w_entered.store(true);
+                return "";
+            }
             if (st.w_latency_ms.load() > 0) {
                 st.w_entered.store(true);
                 std::this_thread::sleep_for(milliseconds(st.w_latency_ms.load()));
@@ -496,6 +503,89 @@ TEST_CASE("SynScan snapshot - a getter does not wait while the poll retries an u
     tick.join();
     st->w_latency_ms = 0;
     driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - a site getter does not hold the driver while the handset ignores w",
+          "[synscan][telescope][snapshot]") {
+    constexpr int kTimeoutMs = 600;
+    for (int round = 0; round < 3; ++round) {
+        FakeTaskClock clock;
+        auto st = std::make_shared<Handset>();
+        alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+        REQUIRE(server.ok());
+        auto driver = connected_driver_without_site(server, clock, kTimeoutMs);
+        REQUIRE(driver->get_connected());
+        sc::set_status_poll_paused_for_testing(*driver, true);
+        sc::poll_status_now_for_testing(*driver);
+        st->w_silent = true;
+        st->w_entered = false;
+        clock.advance(seconds(3));  // past the site retry delay
+        const int w_before = st->w_count.load();
+
+        std::thread site([&] {
+            try {
+                (void)(round % 2 == 0 ? driver->get_site_latitude() : driver->get_site_longitude());
+            } catch (const alpacacore::AlpacaException&) {  // the unread site refuses; only the wait is measured
+            }
+        });
+        // Wait until the site read reached the handset, or finished without sending (the fixed driver).
+        const auto by = std::chrono::steady_clock::now() + milliseconds(200);
+        while (!st->w_entered.load() && std::chrono::steady_clock::now() < by) {
+            std::this_thread::sleep_for(milliseconds(1));
+        }
+        CHECK(timed([&] { (void)driver->get_right_ascension(); }) < milliseconds(kTimeoutMs / 3));
+        CHECK(timed([&] { (void)driver->get_device_state(); }) < milliseconds(kTimeoutMs / 3));
+        site.join();
+        CHECK(st->w_count.load() == w_before);  // no handset transaction from a getter
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("SynScan snapshot - an unread site refuses SiteLatitude and SiteLongitude as not known yet",
+          "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    st->w_silent = true;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = connected_driver_without_site(server, clock, 300);
+    REQUIRE(driver->get_connected());
+    sc::set_status_poll_paused_for_testing(*driver, true);
+    for (const auto& read : {std::function<void()>([&] { (void)driver->get_site_latitude(); }),
+                             std::function<void()>([&] { (void)driver->get_site_longitude(); })}) {
+        try {
+            read();
+            FAIL("an unread site must not read as 0.0");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::ValueNotSet);
+            CHECK(std::string(e.what()).find("not known yet") != std::string::npos);
+        }
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan snapshot - a configured or set site is served", "[synscan][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<Handset>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return reply(*st, c); });
+    REQUIRE(server.ok());
+    {
+        auto driver = connected_driver(server, clock);  // configured site
+        REQUIRE(driver->get_connected());
+        CHECK(driver->get_site_latitude() == Catch::Approx(-33.856784));
+        CHECK(driver->get_site_longitude() == Catch::Approx(151.215297));
+        driver->set_connected(false);
+    }
+    {
+        auto driver = connected_driver_without_site(server, clock, 300);
+        REQUIRE(driver->get_connected());
+        sc::set_status_poll_paused_for_testing(*driver, true);
+        driver->set_site_latitude(51.477833);
+        driver->set_site_longitude(-0.0015);
+        CHECK(driver->get_site_latitude() == Catch::Approx(51.477833));
+        CHECK(driver->get_site_longitude() == Catch::Approx(-0.0015));
+        driver->set_connected(false);
+    }
 }
 
 TEST_CASE("SynScan snapshot - DestinationSideOfPier with no site refuses a faulted link like the other reads",
