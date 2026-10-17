@@ -27,6 +27,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -92,6 +93,19 @@ public:
     void set_reply_delay(const std::string& prefix, std::chrono::milliseconds delay) {
         std::lock_guard<std::mutex> lock(mutex_);
         delays_.emplace_back(prefix, delay);
+    }
+
+    /// Answer any command starting with `prefix` with `reply` instead of its
+    /// normal ack (the command's side effect still happens). An empty `reply`
+    /// removes the override. A reply longer than the wrapper's 32-character
+    /// limit with no terminator makes the driver's transaction throw at once,
+    /// without waiting out the serial read timeout.
+    void set_reply_override(const std::string& prefix, const std::string& reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        overrides_.erase(prefix);
+        if (!reply.empty()) {
+            overrides_.emplace(prefix, reply);
+        }
     }
 
     bool light_on() const { return light_on_.load(); }
@@ -169,6 +183,15 @@ private:
         } else {
             reply = "*?#";
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [prefix, text] : overrides_) {
+                if (cmd.rfind(prefix, 0) == 0) {
+                    reply = text;
+                    break;
+                }
+            }
+        }
         const auto delay = delay_for(cmd);
         if (delay.count() > 0) {
             std::this_thread::sleep_for(delay);
@@ -190,6 +213,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
     std::vector<std::pair<std::string, std::chrono::milliseconds>> delays_;
+    std::map<std::string, std::string> overrides_;
 
     std::atomic<bool> light_on_{false};
     std::atomic<int> brightness_{0};
