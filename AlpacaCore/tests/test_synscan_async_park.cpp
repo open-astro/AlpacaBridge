@@ -182,6 +182,34 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     return pred();
 }
 
+// RA in hours of a SynScan GOTO command: "r%08X,%08X" (precise) or "R%04X,%04X".
+double goto_ra_hours(const std::string& cmd) {
+    const bool precise = cmd.front() == 'r';
+    const std::string ra_hex = cmd.substr(1, precise ? 8 : 4);
+    const double full_scale = precise ? 4294967296.0 : 65536.0;
+    return static_cast<double>(std::stoul(ra_hex, nullptr, 16)) / full_scale * 24.0;
+}
+
+// SetPark saves an hour angle against the host clock's LST and Park converts it
+// back against the host clock's LST, so after a six-hour shift the RA target is
+// 6 h plus the sidereal time that passed between the two calls. Bound that by
+// the wall time the test measured around both calls, plus one count of the
+// command's resolution (24 bits for "r", 16 for "R"). The bound needs a
+// sub-second LST: one cut to whole UTC seconds jumped a full second (r4000C300)
+// whenever the two calls straddled a second boundary (#1298). Dec is not
+// time-dependent and stays exact.
+void check_six_hour_park_goto(const std::string& cmd, std::chrono::system_clock::duration measured) {
+    CHECK(cmd.substr(cmd.find(',')) == (cmd.front() == 'r' ? ",00000000" : ",0000"));
+    constexpr double kSiderealPerSolar = 1.00273790935;
+    const double resolution_hours = 24.0 / (cmd.front() == 'r' ? 16777216.0 : 65536.0);
+    const double elapsed_hours = std::chrono::duration<double, std::ratio<3600>>(measured).count();
+    const double past_six = goto_ra_hours(cmd) - 6.0;
+    INFO("RA target past 6 h: " << past_six * 3600.0
+                                << " s; measured between SetPark and Park: " << elapsed_hours * 3600.0 << " s");
+    CHECK(past_six >= -resolution_hours);
+    CHECK(past_six <= elapsed_hours * kSiderealPerSolar + resolution_hours);
+}
+
 // Steps the fake clock one `step` at a time, once the driver's task is parked
 // on it, until `pred` holds or `max_steps` steps pass. Each step waits for the
 // woken task to settle, so no step lands between two of its waits.
@@ -560,16 +588,18 @@ TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    const auto measured_from = std::chrono::system_clock::now();
     driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
     st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
     driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
     driver->park();
     REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+    const auto measured = std::chrono::system_clock::now() - measured_from;
 
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
     INFO("Park GOTO after a six-hour sidereal shift: " << gotos.front());
-    CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+    check_six_hour_park_goto(gotos.front(), measured);
     driver->set_connected(false);
 }
 
@@ -638,16 +668,18 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
             std::nullopt, std::nullopt, SynScanAlignmentSetting::Equatorial, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+        const auto measured_from = std::chrono::system_clock::now();
         driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
         st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
         driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
         driver->park();
         REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
+        const auto measured = std::chrono::system_clock::now() - measured_from;
 
         const auto gotos = st->goto_snapshot();
         REQUIRE(gotos.size() == 1);
         INFO("AZ-EQ equatorial Park GOTO after a six-hour sidereal shift: " << gotos.front());
-        CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+        check_six_hour_park_goto(gotos.front(), measured);
         driver->set_connected(false);
     }
 }
@@ -722,12 +754,7 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
     INFO("Park GOTO after a reconnect without a site: " << gotos.front());
-    const std::string& cmd = gotos.front();
-    const bool precise = cmd.front() == 'r';
-    const std::string ra_hex = cmd.substr(1, precise ? 8 : 4);
-    const double full_scale = precise ? 4294967296.0 : 65536.0;
-    const double ra_hours = static_cast<double>(std::stoul(ra_hex, nullptr, 16)) / full_scale * 24.0;
-    CHECK(std::abs(ra_hours - 6.0) < 0.01);
+    CHECK(std::abs(goto_ra_hours(gotos.front()) - 6.0) < 0.01);
     driver->set_connected(false);
 }
 

@@ -18,7 +18,8 @@
 #                  plus [stress-guard] (the harness's own self-tests, issue #322)
 #   coverage       informational gcovr line coverage, all vendors ON, per
 #                  component + combined in the job summary, HTML/JSON artifact
-#                  (no threshold, not a required check; bound 30 min)
+#                  (no threshold, not a required check; bound 30 min). Runs on
+#                  pushes to main/stable and manual runs, not on pull requests
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
@@ -498,7 +499,12 @@ jobs:
     # Informational only: no --fail-under threshold and not a required check.
     # A separate job so instrumentation adds no time to build-test or
     # build-vendors; it runs in parallel with them.
+    # Not run on pull requests: at -O0 with gcov it is the longest job (767 s
+    # against 432 s for build-vendors, run 39080745502), so it set how long
+    # every PR waited for a result that gates nothing. Every merge to main or
+    # stable still produces the report, and workflow_dispatch runs it on demand.
     name: Line coverage (gcovr, all vendors, arm64)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
@@ -726,6 +732,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             clang-tidy \
             pkg-config \
@@ -775,6 +782,17 @@ jobs:
           set -euo pipefail
           sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
+      - name: Restore the compiler cache
+        # Restore only, from build-vendors' cache: run_all_tests.sh configures
+        # AlpacaHTTP/build with the same options (vendors ON, tests ON), so the
+        # objects match. This job runs on pull requests only, and a cache saved
+        # there would be visible to that PR alone, so it saves nothing.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-vendors-${{ github.sha }}
+          restore-keys: ccache-build-vendors-
+
       - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
         # configure+build yields a compile DB covering both source trees and
@@ -783,6 +801,10 @@ jobs:
         # vendors OFF they are absent from the DB and clang-tidy interpolates a
         # command without the vendored SDK include dirs, failing on e.g.
         # <PlayerOnePW.h> with a spurious clang-diagnostic-error.
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
         run: |
           set -euo pipefail
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
@@ -791,6 +813,7 @@ jobs:
             -DALPACACORE_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
+          ccache --show-stats
 
       - name: Run clang-tidy on changed lines
         run: |
@@ -1174,15 +1197,33 @@ jobs:
 
   cppcheck:
     name: cppcheck (changed files)
-    if: github.event_name == 'pull_request'
+    # Runs on pushes too, but only to build and save the cppcheck cache: a cache
+    # saved by a pull request is visible to that PR alone, one saved on main to
+    # every PR. The analysis step stays pull-request only.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    env:
+      CPPCHECK_PREFIX: /home/runner/.local/cppcheck
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Restore the cppcheck build
+        id: cppcheck-cache
+        # The pin lives in the next step's ver=/sha256= lines (scripts/
+        # dependency_snapshot.py reads it there), so the key follows ci.yml and
+        # restore-keys falls back to an older entry. The next step decides
+        # whether that entry is usable: it rebuilds unless the restored binary
+        # reports the pinned version. The prefix is fixed because cppcheck
+        # compiles its data directory path in.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CPPCHECK_PREFIX }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: cppcheck-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build cppcheck 2.17.x from source
         # The ubuntu-24.04 runner ships cppcheck 2.13, which classifies some
@@ -1194,21 +1235,41 @@ jobs:
         # pattern below); the tarball is checksum-verified before it is unpacked.
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake g++
           ver=2.17.1
           sha256=bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c
+          if [ -x "${CPPCHECK_PREFIX}/bin/cppcheck" ] \
+             && [ "$("${CPPCHECK_PREFIX}/bin/cppcheck" --version)" = "Cppcheck ${ver}" ]; then
+            echo "Restored cppcheck ${ver} from the cache; not rebuilding."
+            exit 0
+          fi
+          rm -rf "${CPPCHECK_PREFIX}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake g++
           curl -fsSL "https://github.com/danmar/cppcheck/archive/refs/tags/${ver}.tar.gz" \
             -o /tmp/cppcheck.tar.gz
           echo "${sha256}  /tmp/cppcheck.tar.gz" | sha256sum --check --strict -
           mkdir -p /tmp/cppcheck
           tar -xf /tmp/cppcheck.tar.gz -C /tmp/cppcheck --strip-components=1
-          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${CPPCHECK_PREFIX}"
           cmake --build /tmp/cppcheck/build --parallel "$(nproc)"
-          sudo cmake --install /tmp/cppcheck/build
-          cppcheck --version
+          cmake --install /tmp/cppcheck/build
+
+      - name: Save the cppcheck build
+        if: github.event_name == 'push' && steps.cppcheck-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CPPCHECK_PREFIX }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Put cppcheck on the PATH
+        run: |
+          set -euo pipefail
+          echo "${CPPCHECK_PREFIX}/bin" >> "$GITHUB_PATH"
+          "${CPPCHECK_PREFIX}/bin/cppcheck" --version
 
       - name: Analyze changed C/C++ files
+        if: github.event_name == 'pull_request'
         # A second static-analysis engine alongside clang-tidy — it catches
         # different defects. Scoped to files this PR changes so the existing
         # tree is not bulk-flagged (same policy as clang-tidy/clang-format);

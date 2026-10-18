@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
@@ -535,3 +536,25 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
 }
 
 #endif  // _WIN32
+
+#ifndef _WIN32
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under a second", "[zwo][telescope][unit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk.find(":GAT") != std::string::npos) {
+            return "1#";
+        }
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 250;
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+    driver->set_connected(false);
+}
+#endif

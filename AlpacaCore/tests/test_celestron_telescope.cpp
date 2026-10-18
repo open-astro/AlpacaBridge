@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
@@ -700,3 +701,13 @@ TEST_CASE("Celestron Telescope Driver - AbortSlew reports a stop it could not se
 }
 
 #endif  // _WIN32
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("Celestron Telescope Driver - SiderealTime follows the clock to under a second",
+          "[celestron][telescope][unit]") {
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+}

@@ -74,7 +74,7 @@ int rate_to_speed_index(double rate_deg_per_sec) {
 double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
                                          double longitude_degrees) {
     using namespace std::chrono;
-    double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
+    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     double jd = 2440587.5 + days_since_epoch;
     double t = (jd - 2451545.0) / 36525.0;
     double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)

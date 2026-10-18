@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
@@ -694,3 +695,13 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
 }
 
 #endif  // _WIN32
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("SynScan Telescope Driver - SiderealTime follows the clock to under a second", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+}
