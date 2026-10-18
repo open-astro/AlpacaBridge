@@ -3045,13 +3045,16 @@ private:
     // mutex, so a join under either deadlocks. Does not reset goto_cancel_;
     // only slew_to_target_async() does, under goto_mutex_.
     void cancel_and_join_goto_thread() {
-        std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
-        cancel_goto_thread_request();
-        if (goto_thread_.joinable()) {
-            goto_thread_.join();
+        {
+            std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
+            cancel_goto_thread_request();
+            if (goto_thread_.joinable()) {
+                goto_thread_.join();
+            }
         }
         // Every caller starts other motion or none (Park, FindHome, MoveAxis,
         // AbortSlew, disconnect): the driver's GOTO is no longer in flight.
+        // Taken after the reap lock is released, never nested in it.
         std::lock_guard<std::mutex> lock(mutex_);
         goto_active_ = false;
     }
