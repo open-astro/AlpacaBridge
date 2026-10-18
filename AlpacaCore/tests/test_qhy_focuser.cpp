@@ -227,9 +227,9 @@ TEST_CASE("QHY Q-Focuser Driver - Connect applies settings and reports motion", 
 
     driver->move(2000);
     // 400 steps/poll from 1000 never reaches 2000 on the first poll, so this is
-    // deterministic. The exact intermediate position is not asserted: each read
-    // may or may not share the 100 ms cache window with the next on a loaded or
-    // ASan runner, so the fake could have advanced — the settle loop below
+    // deterministic. The exact intermediate position is not asserted: reads
+    // follow the 250 ms poll, so on a loaded or ASan runner the fake could
+    // have advanced — the settle loop below
     // proves arrival instead.
     CHECK(driver->get_is_moving() == true);
     for (int i = 0; i < 20 && driver->get_is_moving(); ++i) {

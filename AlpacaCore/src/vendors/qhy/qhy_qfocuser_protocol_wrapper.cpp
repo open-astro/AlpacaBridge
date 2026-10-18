@@ -663,8 +663,9 @@ private:
             // reply is dropped by the next command's tcflush. Harmless in
             // practice (a one-poll lag in Position/IsMoving during a move,
             // ConformU-clean) because distinct-idx commands never collide and
-            // the caches above already coalesce rapid reads; revisit if the
-            // cache TTL or poll cadence changes.
+            // the driver's poll sends cmd_id 5 then cmd_id 4 each tick, so two
+            // position polls are never adjacent; revisit if the poll sends
+            // two commands with one idx back to back.
             if (idx == expected_idx || idx == alt_idx) return fields;
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");
