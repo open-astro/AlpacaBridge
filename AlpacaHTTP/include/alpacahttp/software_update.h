@@ -79,7 +79,7 @@ private:
 // keeps no copy of it. One mapping decides everything that must agree: the
 // Packages index the check reads and the apt component the drop-in enables
 // (both name the same `main` or `beta`), and the helper unit instance.
-enum class UpdateChannel { Stable, Beta };
+enum class UpdateChannel : std::uint8_t { Stable, Beta };
 
 // "stable" / "beta": the request body value, the status value and the
 // instance name of alpacabridge-channel@.service.
