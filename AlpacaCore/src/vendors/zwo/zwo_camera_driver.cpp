@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/version_format.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
@@ -65,12 +66,13 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOCameraDriver(int device_number, ZwoCameraBinding binding, ZWOSDK& sdk)
+    ZWOCameraDriver(int device_number, ZwoCameraBinding binding, ZWOSDK& sdk, util::TaskClock& clock)
         : AsyncConnectable("ZWO"),
           device_number_(device_number),
           binding_(std::move(binding)),
           camera_id_(binding_.identity.camera_id),
           sdk_(sdk),
+          clock_(clock),
           serial_number_(),
           camera_info_(),
           camera_info_valid_(false),
@@ -95,7 +97,7 @@ public:
           last_exposure_start_(),
           last_exposure_valid_(false),
           pulse_guiding_(std::make_shared<std::atomic<bool>>(false)),
-          pulse_guiding_end_(std::chrono::steady_clock::time_point{}) {
+          pulse_guiding_end_(util::TaskClock::clock::time_point{}) {
         preload_camera_info_locked();
     }
 
@@ -382,7 +384,7 @@ public:
         // returns what it has. Later reads are never delayed or cached.
         if (first_temperature_read_pending_.exchange(false) && value == 0) {
             for (int attempt = 0; attempt < kFirstTemperatureRetries && value == 0; ++attempt) {
-                std::this_thread::sleep_for(kFirstTemperatureRetryDelay);
+                clock_.sleep_for(kFirstTemperatureRetryDelay);
                 value = get_control_value_or_throw(ZWOControlType::Temperature);
             }
         }
@@ -693,7 +695,7 @@ public:
         // pulse_guide's fresh flag/end-time write and falsely report
         // "not guiding" mid-pulse (PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
-        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
+        if (clock_.now() >= pulse_guiding_end_) {
             pulse_guiding_->store(false);
             return false;
         }
@@ -921,18 +923,20 @@ public:
         // fix alongside the Player One instance.
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration);
+            pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
             pulse_guiding_->store(true);
         }
 
         // The detached turn-off thread captures NO object state — only the id
-        // snapshot — so it cannot dereference a destroyed driver if the
+        // snapshot, the SDK seam and the task clock (both outlive the driver,
+        // see zwo_camera_driver.h) — so it cannot dereference a destroyed driver if the
         // object is torn down mid-pulse. A disconnect (or destruction) racing
         // the sleep costs at most a rejected pulse_guide_off on a closed id.
         // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
         // so the thread does not need to touch the flag either.
-        std::thread([sdk = &sdk_, pulse_camera_id, guide_direction, duration, flag = pulse_guiding_]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(duration));
+        std::thread([sdk = &sdk_, clock = &clock_, pulse_camera_id, guide_direction, duration,
+                     flag = pulse_guiding_]() {
+            clock->sleep_for(std::chrono::milliseconds(duration));
             try {
                 sdk->pulse_guide_off(pulse_camera_id, guide_direction);
             } catch (const std::exception&) {
@@ -1111,6 +1115,7 @@ private:
     ZwoCameraBinding binding_;
     std::optional<int> camera_id_;
     ZWOSDK& sdk_;
+    util::TaskClock& clock_;
     std::string serial_number_;
     ZWOCameraInfo camera_info_;
     bool camera_info_valid_;
@@ -1177,7 +1182,7 @@ private:
     std::uint64_t exposure_seq_{0};
     mutable int exposure_retries_left_{0};
     mutable bool exposure_failed_{false};
-    mutable std::chrono::steady_clock::time_point last_exposure_retry_{};
+    mutable util::TaskClock::clock::time_point last_exposure_retry_{};
 
     // shared_ptr so the detached pulse-off thread can co-own the flag and
     // clear it unconditionally after the pulse WITHOUT capturing `this`
@@ -1185,7 +1190,7 @@ private:
     // IsPulseGuiding must not leave the flag latched true (round 9). The
     // timestamp getter still self-clears for readers in the interim.
     std::shared_ptr<std::atomic<bool>> pulse_guiding_;
-    std::chrono::steady_clock::time_point pulse_guiding_end_;
+    util::TaskClock::clock::time_point pulse_guiding_end_;
 
     void ensure_connected() const {
         if (!connected_.load()) {
@@ -1333,7 +1338,7 @@ private:
             // the pacing window, report Working and let a later poll retry.
             // The pacing check and the decrement share one lock hold, so
             // exactly one poller wins each window.
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
             if (now - last_exposure_retry_ < kExposureRetryInterval) {
                 return ZWOExposureStatus::Working;
             }
@@ -1886,11 +1891,11 @@ std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id
     return create_zwo_camera_bound(device_number, binding);
 }
 
-std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk) {
+std::unique_ptr<CameraDriver> create_zwo_camera(int device_number, int camera_id, ZWOSDK& sdk, util::TaskClock& clock) {
     ZwoCameraBinding binding;
     binding.identity.camera_id = camera_id;
     binding.unique_id = generate_zwo_unique_id();
-    return create_zwo_camera_bound(device_number, binding, sdk);
+    return create_zwo_camera_bound(device_number, binding, sdk, clock);
 }
 
 std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index) {
@@ -1908,15 +1913,17 @@ std::vector<ZwoEnumeratedCamera> enumerate_zwo_cameras(const std::string& only_m
     return ZWOSDKWrapper::instance().enumerate_identified_cameras(trim_zwo_name(only_model_name));
 }
 
-std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index, ZWOSDK& sdk) {
+std::unique_ptr<CameraDriver> create_zwo_camera_by_index(int device_number, int camera_index, ZWOSDK& sdk,
+                                                         util::TaskClock& clock) {
     ZwoCameraBinding binding;
     binding.identity.camera_index = camera_index;
     binding.unique_id = generate_zwo_unique_id();
-    return create_zwo_camera_bound(device_number, binding, sdk);
+    return create_zwo_camera_bound(device_number, binding, sdk, clock);
 }
 
-std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding, ZWOSDK& sdk) {
-    return std::make_unique<ZWOCameraDriver>(device_number, binding, sdk);
+std::unique_ptr<CameraDriver> create_zwo_camera_bound(int device_number, const ZwoCameraBinding& binding, ZWOSDK& sdk,
+                                                      util::TaskClock& clock) {
+    return std::make_unique<ZWOCameraDriver>(device_number, binding, sdk, clock);
 }
 
 }  // namespace alpacacore::vendor::zwo
