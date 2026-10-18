@@ -25,6 +25,7 @@
 
 #include "catch2_compat.h"
 #include "fake_zwo_sdk.h"
+#include "locked_zwo_sdk.h"
 
 namespace {
 
@@ -839,4 +840,57 @@ TEST_CASE("ZWO fake SDK - a first CCDTemperature read that stays 0 returns 0.0 w
     // The retry is spent: the next read is a single SDK call.
     CHECK(camera->get_ccd_temperature() == Catch::Approx(0.0));
     CHECK(sdk.call_count("get_control_value") == 7);
+}
+
+TEST_CASE("FakeZWOSDK behind LockedZWOSDK - forwards every entry point", "[zwo][camera][unit][fake-sdk]") {
+    using namespace alpacacore::vendor::zwo;
+    FakeZWOSDK fake;
+    alpacacore::test::LockedZWOSDK sdk(fake);
+    ZWOCameraInfo info;
+    long value = 0;
+    bool is_auto = true;
+    std::vector<std::uint8_t> buf(16 * 8 * 2, 0);
+    fake.frame_bytes.assign(buf.size(), 0x5a);
+    const int id = fake.camera.camera_id;
+
+    CHECK(sdk.enumerate_cameras().size() == 1);
+    CHECK(sdk.enumerate_identified_cameras().size() == 1);
+    sdk.open_camera(id);
+    CHECK(sdk.get_camera_info_by_id(id, info));
+    CHECK(sdk.get_camera_info_by_index(0, info));
+    CHECK_FALSE(sdk.get_camera_info_by_index(3, info));
+    sdk.init_camera(id);
+    CHECK(sdk.get_control_caps(id).size() == 9);
+    sdk.set_control_value(id, ZWOControlType::Gain, 42, false);
+    CHECK(sdk.get_control_value(id, ZWOControlType::Gain, value, is_auto));
+    CHECK(value == 42);
+    sdk.set_roi_format(id, 16, 8, 1, ZWOImageType::Raw16);
+    CHECK(sdk.get_roi_format(id).width == 16);
+    sdk.set_start_pos(id, 2, 4);
+    CHECK(sdk.get_start_pos(id).start_x == 2);
+    sdk.start_exposure(id, false);
+    CHECK(sdk.get_exposure_status(id) == ZWOExposureStatus::Success);
+    sdk.get_data_after_exposure(id, buf.data(), static_cast<long>(buf.size()));
+    CHECK(buf[0] == 0x5a);
+    sdk.stop_exposure(id);
+    sdk.pulse_guide_on(id, ZWOGuideDirection::North);
+    sdk.pulse_guide_off(id, ZWOGuideDirection::North);
+    CHECK(sdk.get_serial_number(id) == "FAKE-ZWO-17");
+    CHECK(sdk.get_sdk_version() == "fake-zwo-sdk-1.0");
+    sdk.close_camera(id);
+
+    for (const char* name : {"enumerate_cameras",     "enumerate_identified_cameras",
+                             "get_camera_info_by_id", "get_camera_info_by_index",
+                             "open_camera",           "init_camera",
+                             "close_camera",          "get_control_caps",
+                             "get_control_value",     "set_control_value",
+                             "get_roi_format",        "set_roi_format",
+                             "get_start_pos",         "set_start_pos",
+                             "start_exposure",        "stop_exposure",
+                             "get_exposure_status",   "get_data_after_exposure",
+                             "pulse_guide_on",        "pulse_guide_off",
+                             "get_serial_number",     "get_sdk_version"}) {
+        INFO(name);
+        CHECK(fake.call_count(name) >= 1);
+    }
 }
