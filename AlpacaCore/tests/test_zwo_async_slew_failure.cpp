@@ -68,6 +68,9 @@ struct FakeZwoState {
     std::atomic<bool> serve_position{false};
     // What ":GAT" answers: tracking on (the default) or off.
     std::atomic<bool> tracking_on{true};
+    // A GOTO in flight that reports no tracking: ":GU" answers "n#" (not
+    // tracking, no 'N': slewing) and ":GAT" "0#".
+    std::atomic<bool> goto_not_tracking{false};
 };
 
 // A chunk can carry more than one command, so count occurrences.
@@ -114,7 +117,10 @@ alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr
             return "1";
         }
         if (chunk.find(":GAT") != std::string::npos) {
-            return st->tracking_on.load() ? "1#" : "0#";
+            return st->tracking_on.load() && !st->goto_not_tracking.load() ? "1#" : "0#";
+        }
+        if (st->goto_not_tracking.load() && chunk.find(":GU") != std::string::npos) {
+            return "n#";
         }
         // ":GU" carries the tracking flag too: 'n' is "not tracking", 'N' "not slewing". The status poll
         // refreshes the cached Tracking state from it, so the fake must agree with ":GAT".
@@ -228,6 +234,39 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
     REQUIRE(wait_until([&] { return driver->get_tracking(); }, 5000));  // the cached read ages out after 2 s
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     CHECK(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    driver->set_connected(false);
+}
+
+// ":GU" may drop the tracking flag while a GOTO runs: a retarget of the driver's own GOTO is not refused for
+// it, past the 5 s force window too. A commanded Tracking=false is still off.
+TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused for Tracking",
+          "[zwo][telescope][async][tracking-guard]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_tracking());
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    st->goto_not_tracking.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5500));  // past the 5 s Slewing force window
+    REQUIRE(wait_until([&] { return !driver->get_tracking(); }, 3000));
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
+    CHECK(wait_until([&] { return st->goto_count.load() >= 2; }, 5000));
+
+    // Tracking=false during the GOTO is a commanded off: the next slew is refused, nothing more sent.
+    driver->set_tracking(false);
+    try {
+        driver->slew_to_coordinates_async(6.5, 25.0);
+        FAIL("Expected an AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
+    CHECK_FALSE(wait_until([&] { return st->goto_count.load() > 2; }, 500));
     driver->set_connected(false);
 }
 

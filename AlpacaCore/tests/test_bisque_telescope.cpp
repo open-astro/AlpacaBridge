@@ -598,6 +598,28 @@ TEST_CASE("Bisque Telescope Driver - all four equatorial slews are refused while
     CHECK(rig.mount.slew_commands.load() == 1);
 }
 
+// The TheSkyX docs do not say what IsTracking reads during a GOTO: a retarget of the driver's own slew in
+// flight is not refused for it. Once TheSkyX reports the slew complete, IsTracking decides again.
+TEST_CASE("Bisque Telescope Driver - a retarget of its own slew in flight is not refused for Tracking",
+          "[bisque][telescope][unit][tracking-guard]") {
+    ClockedBisque rig;
+    rig.mount.slew_polls_needed = 1000;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    rig.clock.advance(std::chrono::seconds(9));  // past the 8 s force window: TheSkyX decides Slewing
+    rig.mount.tracking = false;
+    REQUIRE_FALSE(rig.driver->get_tracking());
+
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(6.0, 25.0));
+    CHECK(rig.mount.slew_commands.load() == 2);
+
+    // The slew lands with no Slewing read in between: the next slew is refused.
+    rig.clock.advance(std::chrono::seconds(9));
+    rig.mount.slewing = false;
+    require_alpaca_error([&]() { rig.driver->slew_to_coordinates_async(6.5, 25.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    CHECK(rig.mount.slew_commands.load() == 2);
+}
+
 TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid replies are preserved",
           "[bisque][telescope][async][slewfailure]") {
     auto completion_state = std::make_shared<std::atomic<int>>(0);

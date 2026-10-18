@@ -1870,9 +1870,22 @@ private:
     void check_equatorial_slew_allowed_locked(const char* label) const {
         check_connected();
         ensure_not_parked_locked(label);
-        if (!get_tracking_locked()) {
+        if (tracking_off_for_slew_locked()) {
             throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
+    }
+
+    // Not get_tracking_locked(): :GLS reports slewing (2), guiding (3) and a
+    // meridian flip (4) instead of tracking, so the getter reads them as off,
+    // and refusing there would refuse a retarget of a GOTO in flight. Off is a
+    // commanded Tracking=false still in its read-back window, or a stopped
+    // mount (0, or 7 at home); parked (6) is refused before this runs.
+    bool tracking_off_for_slew_locked() const {
+        if (tracking_override_until_ > clock_.now() && status_cache_valid_) {
+            return !cached_status_.is_tracking;
+        }
+        refresh_status_cache_locked();
+        return cached_status_.system_status == 0 || cached_status_.system_status == 7;
     }
 
     void prepare_slew_state_locked(double ascom_ra, double ascom_dec, double phys_ra, double phys_dec,

@@ -405,8 +405,12 @@ ITelescopeV4 raises `InvalidOperation` for `SlewToCoordinates`, `SlewToCoordinat
 `SlewToTargetAsync` while `Tracking` is false (#775 SynScan, #1274 the rest of the telescope drivers except OnStep, which its owner
 keeps). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
 or sends anything, so a refused slew leaves a park, goto or pulse guide in flight running. Read Tracking the way the
-driver's own `Tracking` getter does. Syncs and Alt/Az slews are exempt. A driver test that slews turns Tracking on
-first; do not leave it off and assert only that the slew threw.
+driver's own `Tracking` getter does, a commanded `Tracking=false` still in flight included, with two exceptions that do
+not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO,
+guiding or a meridian flip in place of tracking, so its guard refuses only a stopped mount), and a retarget of the
+driver's own slew still in flight (ZWO `:GU`, Bisque `IsTracking`: nothing says what they report during a GOTO).
+Syncs and Alt/Az slews are exempt. A driver test that slews turns Tracking on first; do not leave it off and assert
+only that the slew threw.
 
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 

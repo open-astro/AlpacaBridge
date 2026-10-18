@@ -1017,6 +1017,9 @@ public:
         const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!tracking) {
+                goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
+            }
             if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
                 tracking_state_cached_ == tracking) {
                 return;
@@ -1976,9 +1979,10 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        // Validation only; slew_to_target_async() handles ensure_not_parked and
-        // reset_position_offsets — calling them here would add redundant mount
-        // round-trips that push Wi-Fi response times past the STANDARD 1.0s target.
+        // slew_to_target_async() handles reset_position_offsets and the target
+        // checks. The parked and Tracking gate runs here too, before the target
+        // is replaced: both read cached state, and Tracking reads the mount (":GAT")
+        // only when its 2 s cache has aged out.
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
         check_equatorial_slew_allowed("SlewToCoordinatesAsync");
@@ -2036,8 +2040,8 @@ public:
             validate_ra(target_ra, "RightAscension");
             validate_dec(target_dec, "Declination");
             // ITelescopeV4: an equatorial slew with Tracking false is
-            // InvalidOperation (open-astro#1274). Read as the Tracking getter
-            // reads it, and before reset_position_offsets() cancels a pulse in
+            // InvalidOperation (open-astro#1274; see require_tracking_for_slew),
+            // checked before reset_position_offsets() cancels a pulse in
             // flight, so a refused slew leaves that motion alone.
             require_tracking_for_slew("SlewToTargetAsync");
             reset_position_offsets();
@@ -2054,6 +2058,7 @@ public:
             manual_axis_tracking_restore_[0] = std::nullopt;
             manual_axis_tracking_restore_[1] = std::nullopt;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            goto_active_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
             // failed.
@@ -2096,6 +2101,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
                         slew_force_until_ = std::chrono::steady_clock::time_point{};
+                        goto_active_ = false;
                     }
                 }
                 resume_poll();
@@ -2557,11 +2563,32 @@ private:
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Read as the Tracking getter reads it.
+    // (open-astro#1274). Read as the Tracking getter reads it, except during
+    // this driver's own GOTO: ":GU" may drop the tracking flag while a GOTO
+    // runs, and a retarget of it must not be refused for that.
     void require_tracking_for_slew(const char* who) const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (own_goto_in_flight_locked()) {
+                return;
+            }
+        }
         if (!get_tracking()) {
             throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
+    }
+
+    // Set by slew_to_target_async(); the force window covers the GOTO's start,
+    // then the polled ":GU" (no 'N': the mount is slewing) its flight. A
+    // rejected GOTO (last_slew_error_) is not in flight.
+    bool own_goto_in_flight_locked() const {
+        if (!goto_active_ || !last_slew_error_.empty()) {
+            return false;
+        }
+        if (slew_force_until_ > std::chrono::steady_clock::now()) {
+            return true;
+        }
+        return cached_status_.has_value() && !cached_status_->stop_or_tracking;
     }
 
     // The gate the coordinate forms run before they touch the target: they
@@ -2701,6 +2728,9 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             cached_status_ = status;
             cached_status_at_ = now;
+            if (status.stop_or_tracking && slew_force_until_ <= now) {
+                goto_active_ = false;  // the driver's GOTO has landed
+            }
             tracking_state_cached_ = !status.no_tracking;
             tracking_state_valid_ = true;
             tracking_state_at_ = now;
@@ -3020,6 +3050,10 @@ private:
         if (goto_thread_.joinable()) {
             goto_thread_.join();
         }
+        // Every caller starts other motion or none (Park, FindHome, MoveAxis,
+        // AbortSlew, disconnect): the driver's GOTO is no longer in flight.
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_active_ = false;
     }
 
     const int device_number_;
@@ -3085,6 +3119,9 @@ private:
     std::array<bool, 2> manual_axis_slewing_;
     std::array<std::optional<bool>, 2> manual_axis_tracking_restore_;
     std::chrono::steady_clock::time_point slew_force_until_;
+    // A GOTO this driver started may still be in flight (open-astro#1274):
+    // see own_goto_in_flight_locked(). Under mutex_.
+    mutable bool goto_active_ = false;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, logged and forgotten by the setup thread) used
     // to leave Slewing read FALSE once slew_force_until_ expired --
