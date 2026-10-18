@@ -112,13 +112,13 @@ jobs:
         # The pin is read from ci.yml, the one place it lives, so a bump cannot skew this job.
         run: |
           set -euo pipefail
-          ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          gpiod_ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
           sha="$(sed -n 's/^  LIBGPIOD_SHA256: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
-          if [ -z "${ver}" ] || [ -z "${sha}" ]; then
+          if [ -z "${gpiod_ver}" ] || [ -z "${sha}" ]; then
             echo "libgpiod pin not found in ci.yml"
             exit 1
           fi
-          cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
+          cp "AlpacaCore/external/libgpiod/libgpiod-${gpiod_ver}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${sha}  /tmp/libgpiod.tar.xz" | sha256sum -c -
           mkdir -p /tmp/libgpiod
           tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
