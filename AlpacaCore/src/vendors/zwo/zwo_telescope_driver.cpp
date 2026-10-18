@@ -1965,7 +1965,11 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
-        // reset_position_offsets; avoid redundant mount queries here.
+        // reset_position_offsets; avoid redundant mount queries here. The Tracking
+        // gate runs first, though: the target setters below write to the mount.
+        validate_ra(ra, "RightAscension");
+        validate_dec(dec, "Declination");
+        check_equatorial_slew_allowed("SlewToCoordinates");
         set_target_right_ascension(ra);
         set_target_declination(dec);
         slew_to_target();
@@ -1977,6 +1981,7 @@ public:
         // round-trips that push Wi-Fi response times past the STANDARD 1.0s target.
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
+        check_equatorial_slew_allowed("SlewToCoordinatesAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_ra_hours_ = ra;
@@ -2014,31 +2019,28 @@ public:
         // reset_position_offsets use only cached state / atomics, so pausing
         // the poll thread first is safe and avoids contention on Wi-Fi links.
         poll_pause_.store(true);
-        // Sibling of the move_axis M9 fix: ensure_not_parked can throw
-        // (Parked) — never leave poll_pause_ stuck true.
-        try {
-            ensure_not_parked("SlewToTargetAsync");
-            reset_position_offsets();
-        } catch (...) {
-            poll_pause_.store(false);
-            throw;
-        }
-
+        // Sibling of the move_axis M9 fix: every gate below can throw -- never
+        // leave poll_pause_ stuck true.
         double target_ra = 0.0;
         double target_dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                poll_pause_.store(false);
-                throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
-            }
-            target_ra = target_ra_hours_;
-            target_dec = target_dec_degrees_;
-        }
-
         try {
+            ensure_not_parked("SlewToTargetAsync");
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!target_ra_set_ || !target_dec_set_) {
+                    throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
+                }
+                target_ra = target_ra_hours_;
+                target_dec = target_dec_degrees_;
+            }
             validate_ra(target_ra, "RightAscension");
             validate_dec(target_dec, "Declination");
+            // ITelescopeV4: an equatorial slew with Tracking false is
+            // InvalidOperation (open-astro#1274). Read as the Tracking getter
+            // reads it, and before reset_position_offsets() cancels a pulse in
+            // flight, so a refused slew leaves that motion alone.
+            require_tracking_for_slew("SlewToTargetAsync");
+            reset_position_offsets();
         } catch (...) {
             poll_pause_.store(false);
             throw;
@@ -2552,6 +2554,22 @@ private:
     bool is_equipment_moving_error(const AlpacaException& ex) const {
         const std::string message = ex.what();
         return message.find("e4") != std::string::npos;
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter reads it.
+    void require_tracking_for_slew(const char* who) const {
+        if (!get_tracking()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+    }
+
+    // The gate the coordinate forms run before they touch the target: they
+    // write it to the mount, which a refused slew must not.
+    void check_equatorial_slew_allowed(const char* who) const {
+        check_connected();
+        ensure_not_parked(who);
+        require_tracking_for_slew(who);
     }
 
     void reset_position_offsets() {
