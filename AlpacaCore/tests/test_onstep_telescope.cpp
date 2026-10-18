@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
@@ -997,3 +998,25 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
 }
 
 #endif  // _WIN32
+
+#ifndef _WIN32
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("OnStep Telescope Driver - SiderealTime follows the clock to under a second", "[onstep][telescope][unit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& chunk) {
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+    driver->set_connected(false);
+}
+#endif

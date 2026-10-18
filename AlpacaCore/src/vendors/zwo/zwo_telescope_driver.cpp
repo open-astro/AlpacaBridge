@@ -199,7 +199,7 @@ double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point u
                                          double longitude_degrees) {
     using namespace std::chrono;
     const double unix_epoch_jd = 2440587.5;
-    const double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
+    const double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     const double jd = unix_epoch_jd + days_since_epoch;
     const double t = (jd - 2451545.0) / 36525.0;
     double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)

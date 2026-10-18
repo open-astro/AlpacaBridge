@@ -84,7 +84,7 @@ std::unique_ptr<AlpacaDriver> create_telescope(const DeviceConfig& config, int d
     return telescope;
 }
 
-std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int device_number) {
+std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, [[maybe_unused]] int device_number) {
     if (const auto refusal = ioptron_switch_refusal(config)) {
         throw AlpacaException(*refusal, AlpacaError::InvalidValue);
     }

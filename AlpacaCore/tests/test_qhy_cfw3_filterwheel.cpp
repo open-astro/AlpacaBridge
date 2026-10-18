@@ -450,16 +450,25 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A goto racing a disconnect never outli
         CHECK_FALSE(driver->get_connected());
         // If the goto reached the wire the fake is mid-travel and, like the
         // real wheel, silent until it arrives; a reconnect handshake during
-        // that window would time out. Wait for it to land first.
+        // that window would time out. Wait until the fake has read and handled
+        // everything the driver wrote. Counting the goto right after the join
+        // is not enough: the byte can still be on its way to the fake's
+        // reader, and under the -O0 coverage build it often was, so the round
+        // skipped the wait and the next handshake met a travelling wheel. The
+        // pty hands a write to the master side asynchronously, so quiescent()
+        // must hold for a stretch, not once. Worst case is the fake's
+        // shortest-path distance times its travel time (3 slots x 1.5 s from
+        // slot 0), plus slack.
+        const auto settled_by = std::chrono::steady_clock::now() + std::chrono::seconds(7);
+        int quiet_polls = 0;
+        while (quiet_polls < 10 && std::chrono::steady_clock::now() < settled_by) {
+            quiet_polls = fake.quiescent() ? quiet_polls + 1 : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        REQUIRE(quiet_polls == 10);
         const std::string goto_char(1, static_cast<char>('0' + target));
         if (fake.count(goto_char) > gotos_seen) {
             gotos_seen = fake.count(goto_char);
-            // Worst case is the fake's shortest-path distance times its
-            // travel time (3 slots x 1.5 s from slot 0), plus slack.
-            const auto landed = std::chrono::steady_clock::now() + std::chrono::seconds(7);
-            while (fake.position() != target && std::chrono::steady_clock::now() < landed) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-            }
             REQUIRE(fake.position() == target);
         }
     }

@@ -19,7 +19,9 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <future>
 #include <limits>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -27,6 +29,7 @@
 
 #include "catch2_compat.h"
 #include "fake_playerone_sdk.h"
+#include "fake_task_clock.h"
 #include "locked_playerone_sdk.h"
 
 namespace {
@@ -1042,6 +1045,134 @@ TEST_CASE("Player One Camera Driver - Pulse-off failure remains observable", "[p
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
     CHECK(sdk.open_count() == sdk.close_count());
+}
+
+// --- Waits on the task clock (issue #1279) ------------------------------------
+
+namespace {
+
+using namespace std::chrono_literals;
+
+std::unique_ptr<alpacacore::CameraDriver> make_clocked_driver(alpacacore::test::FakePlayerOneSDK& sdk,
+                                                              alpacacore::test::FakeTaskClock& clock,
+                                                              std::chrono::steady_clock::duration grace = 15s) {
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk, grace, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+}  // namespace
+
+TEST_CASE("Player One Camera Driver - pulse guide timer waits on the task clock",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));  // the pulse timer's wait
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(499ms);
+    CHECK(driver->get_is_pulse_guiding());
+    CHECK(sdk.pulse_off_count() == 0);
+    clock.advance(1ms);
+    CHECK(eventually([&] { return !driver->get_is_pulse_guiding(); }));
+    CHECK(sdk.pulse_off_count() == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - disconnect and destruction cancel the pulse clock wait",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->pulse_guide(0, 10000);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    // No advance: disconnecting and destroying the driver must wake the wait.
+    // A lost cancel or notify would park the fake-clock wait for ever, so both
+    // run in one bounded async and the case fails instead of hanging.
+    auto work = std::async(std::launch::async, [&] {
+        driver->set_connected(false);
+        driver.reset();
+    });
+    if (work.wait_for(5s) != std::future_status::ready) {
+        clock.advance(10s);  // unblock the join so the case can report
+        work.wait();
+        FAIL("disconnect or destruction did not wake the pulse timer wait");
+    }
+    work.get();
+    CHECK(sdk.pulse_off_count() == 1);
+    CHECK(sdk.open_count() == sdk.close_count());
+}
+
+TEST_CASE("Player One Camera Driver - exposure deadline reads the task clock", "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_hold_image_data(true);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(1.0, true);  // deadline: 1 s exposure + 15 s grace
+    REQUIRE(eventually([&] { return sdk.image_data_started(); }));
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(15999ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(1ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_ready()); },
+                         alpacacore::AlpacaError::DriverException);
+    sdk.set_hold_image_data(false);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - readiness poll sleeps on the task clock",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(0.001, true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));  // the poll's 50 ms sleep
+    sdk.set_image_ready(true);
+    // Real time passes, virtual time does not: the poll must not look again.
+    std::this_thread::sleep_for(200ms);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(50ms);
+    CHECK(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - readiness poll gives up at the deadline on the task clock",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock, 80ms);
+
+    driver->start_exposure(0.020, true);  // deadline: 20 ms + 80 ms = 100 ms
+    std::uint64_t waits = 1;
+    REQUIRE(clock.wait_for_wait_count(waits, 5s));
+    clock.advance(50ms);  // 50 ms: before the deadline, the poll sleeps again
+    REQUIRE(clock.wait_for_wait_count(++waits, 5s));
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(49ms);  // 99 ms: the worker wakes at 100 ms, not yet
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(1ms);  // 100 ms: the loop condition fails and the worker gives up
+    CHECK(eventually([&] {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    }));
+    driver->set_connected(false);
 }
 
 // --- SDK seam: LockedPlayerOneSDK (issue #1256) -------------------------------

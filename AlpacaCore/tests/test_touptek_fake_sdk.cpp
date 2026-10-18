@@ -222,7 +222,12 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
         }
         return pred();
     };
-    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }, std::chrono::milliseconds(2000)));
+    // Wait on the tick's LAST read: it reads the temperature first and the TEC
+    // voltages after, so waiting on the temperature alone let the checks below
+    // run mid-tick, which the slow -O0 coverage build did (0 >= 1).
+    REQUIRE(
+        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(2000)));
+    CHECK(fake.call_count("get_temperature_deciC") >= 1);
     CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
     CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
 

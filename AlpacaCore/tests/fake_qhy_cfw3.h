@@ -31,6 +31,7 @@
 // VRS/MXP/NOW the way firmware before 201409 does.
 
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -82,6 +83,17 @@ public:
         return n;
     }
 
+    /// True once the fake has read and acted on every byte the driver wrote:
+    /// nothing unread on the master and no command still being handled (a goto
+    /// is handled until its travel ends). count() alone cannot say whether a
+    /// byte the driver already wrote has arrived, because the reader thread
+    /// consumes the master on its own schedule.
+    bool quiescent() const {
+        int unread = 0;
+        if (ioctl(pty_.master_fd(), FIONREAD, &unread) != 0) return false;
+        return unread == 0 && !handling_.load();
+    }
+
     /// Handshakes that reached the wire: one MXP per connect.
     int connects() const { return count("MXP"); }
 
@@ -126,8 +138,14 @@ private:
             pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             if (poll(&pfd, 1, 20) <= 0) continue;
+            // Raised before the read so quiescent() never sees the bytes neither
+            // unread nor in hand; lowered once the whole batch is handled.
+            handling_.store(true);
             const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
-            if (n <= 0) continue;
+            if (n <= 0) {
+                handling_.store(false);
+                continue;
+            }
             for (ssize_t i = 0; i < n; ++i) {
                 const char ch = buf[i];
                 if (pending.empty() && slot_from_char(ch) >= 0) {
@@ -145,6 +163,7 @@ private:
                     pending.clear();  // not a command the firmware knows; it stays silent
                 }
             }
+            handling_.store(false);
         }
     }
 
@@ -207,6 +226,7 @@ private:
     std::atomic<bool> old_firmware_{false};
     std::atomic<bool> muted_{false};
     std::atomic<int> hold_ms_{0};
+    std::atomic<bool> handling_{false};
 };
 
 }  // namespace alpacacore::test

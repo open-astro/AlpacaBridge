@@ -41,6 +41,7 @@
 #include "fake_ioptron_mount.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 
@@ -1074,5 +1075,17 @@ TEST_CASE("iOptron slot - a refused slew thread throws and Slewing still reports
     REQUIRE(wait_for_slewing_error(*driver, after));
     CHECK(after == earlier);
     CHECK(mount.count(":MS1#") == gotos_before);
+    driver->set_connected(false);
+}
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a second",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
 }

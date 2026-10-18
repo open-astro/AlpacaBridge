@@ -32,6 +32,7 @@
 #include "fake_bisque_mount.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
+#include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
 
@@ -1126,4 +1127,13 @@ TEST_CASE("Bisque position cache - the alt-az read ages on the task clock too", 
     rig.clock.advance(std::chrono::seconds(1));
     static_cast<void>(rig.driver->get_azimuth());
     CHECK(rig.mount.altaz_reads.load() == after_connect + 1);
+}
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("Bisque Telescope Driver - SiderealTime follows the clock to under a second", "[bisque][telescope][unit]") {
+    alpacacore::vendor::bisque::ConnectionInfo conn;
+    conn.host = "localhost";
+    conn.tcp_port = 3040;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, conn);
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
 }
