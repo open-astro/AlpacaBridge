@@ -114,7 +114,10 @@ jobs:
           set -euo pipefail
           ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
           sha="$(sed -n 's/^  LIBGPIOD_SHA256: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
-          [ -n "${ver}" ] && [ -n "${sha}" ]
+          if [ -z "${ver}" ] || [ -z "${sha}" ]; then
+            echo "libgpiod pin not found in ci.yml"
+            exit 1
+          fi
           cp "AlpacaCore/external/libgpiod/libgpiod-${ver}.tar.xz" /tmp/libgpiod.tar.xz
           echo "${sha}  /tmp/libgpiod.tar.xz" | sha256sum -c -
           mkdir -p /tmp/libgpiod
