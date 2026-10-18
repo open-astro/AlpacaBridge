@@ -659,7 +659,7 @@ against its checklist, 2026-09-06:
 - [ ] ConformU 4.5.x on a classic mount — blocked on Pi 5 hardware availability; not the
   EQM-35 specifically, but the issue's ask applies equally.
 - [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
-  in `AlpacaCore/tests/fake_skywatcher_mount.h` is a REAL EQM-35 Pro capture (its built-in PL2303
+  in `AlpacaCore/tests/fake_skywatcher_board.h` is a REAL EQM-35 Pro capture (its built-in PL2303
   port answers only at 115200), used by the `[eqm35]`-tagged cases in
   `AlpacaCore/tests/test_skywatcher_async.cpp`: identity from the mount code, the count-frame
   FindHome fallback, the board's own sidereal period, and the `[hemisphere]` southern-hemisphere

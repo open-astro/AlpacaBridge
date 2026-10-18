@@ -1513,6 +1513,7 @@ ROSTER_ARRAY_RE = re.compile(r"kFakeConnectableRoster\[\]\s*=\s*\{(.*?)\n\};", r
 # fake_*.h files that are helpers other fakes and tests build on, not a driver's
 # connect path, so they carry no roster row.
 HELPER_FAKES = {
+    "fake_skywatcher_board.h": "transport-free Sky-Watcher axis model and command handler; the UDP fake in fake_skywatcher_mount.h is the transport the roster connects",
     "fake_bisque_mount.h": "stateful TheSkyX responder plugged into FakeMountServer for the Bisque task-clock cases",
     "fake_pty_write.h": "bounded pty-master write and PtyPair, shared by the pty-backed fakes",
     "fake_raw_decoder.h": "fake RawDecoder seam for the gphoto camera, used together with fake_gphoto_sdk.h",

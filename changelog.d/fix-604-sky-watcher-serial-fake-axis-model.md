@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **Sky-Watcher fake: the axis model and `:` command handler move out of the UDP fake into a transport-free `FakeSkyWatcherBoard`** (AlpacaCore tests, issue #604, slice 1 of 3): `AlpacaCore/tests/fake_skywatcher_board.h` now holds `FakeMountProfile`, the continuous axis model, the knobs and `handle(frame)`, moved from `fake_skywatcher_mount.h` with no logic change. `FakeSkyWatcherMount` keeps its public API and is the UDP socket and serve loop over it, so every UDP-fake suite runs unchanged (375 of 375 Sky-Watcher cases pass on x86_64 with only the Sky-Watcher vendor on). The serial fake and the `[eqm35]` cases move in the follow-up slices. No product code is changed.
