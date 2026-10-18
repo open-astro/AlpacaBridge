@@ -63,6 +63,10 @@ It also sorts above every beta of the stable line, so apt offers a tester on a n
 install one by hand. A maintainer can force a build with
 `gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
 
+The same workflow also builds all vendors `Release` and runs the full test suite (job `test-optimized`),
+because CI's all-vendors job is instrumented and unoptimized; a failure fails the run but does not stop the
+`.deb` from publishing.
+
 ## Branch model
 
 - `main`: all development. PRs go here as usual.
