@@ -17,6 +17,7 @@
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -68,6 +69,12 @@ void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std:
 void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 /// Takes or drops the hold the readback-tick hunt keeps while it owns the line; a held poll tick makes no exchange.
 void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold);
+
+/// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
+/// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
+/// the factories above.
+void set_sidereal_wall_clock_for_testing(TelescopeDriver& driver,
+                                         std::function<std::chrono::system_clock::time_point()> now);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.

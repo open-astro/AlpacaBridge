@@ -851,8 +851,7 @@ public:
         if (!site_info_valid_) {
             return served_frame_locked().value.side_of_pier;  // the same link checks as every other frame read
         }
-        double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(),
-                                                            site_longitude_cached_);
+        double lst_hours = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
         double hour_angle = shortest_ra_delta_hours(lst_hours, ra);
         return hour_angle >= 0.0 ? 0 : 1;
     }
@@ -883,7 +882,7 @@ public:
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         // No handset read here: the poll retries an unread site (decision 0010), so DeviceState costs no transaction.
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+        return compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
     }
 
     double get_site_elevation() const override {
@@ -1115,8 +1114,7 @@ public:
                 // An hour angle is saved only while a site is known, so a
                 // handset that has since stopped reporting one (a reconnect
                 // without location) still leaves the last known longitude here.
-                const double lst =
-                    compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+                const double lst = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
                 park_target_first = park_ra_from_hour_angle(lst, park_hour_angle_hours_);
                 park_target_second = park_dec_degrees_;
                 validate_ra_dec(park_target_first, park_target_second, "Park");
@@ -2037,6 +2035,12 @@ public:
         status_poll_before_sample_hook_ = std::move(hook);
     }
 
+    // Replaces the wall time every local-sidereal-time read uses; an empty function restores system_clock.
+    void set_sidereal_wall_clock_for_testing(std::function<std::chrono::system_clock::time_point()> now) {
+        std::lock_guard<std::mutex> lock(sidereal_wall_clock_mutex_);
+        sidereal_wall_clock_ = std::move(now);
+    }
+
     // Called between a poll's sample and its publish, with no lock held.
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
@@ -2904,8 +2908,7 @@ private:
                 return;
             }
             const auto equatorial = measure_equatorial_locked();
-            const double lst =
-                compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_cached_);
+            const double lst = compute_local_sidereal_time_hours(sidereal_wall_now(), site_longitude_cached_);
             park_hour_angle_hours_ = shortest_ra_delta_hours(lst, equatorial.first);
             park_ra_hours_ = equatorial.first;
             park_dec_degrees_ = equatorial.second;
@@ -3370,6 +3373,19 @@ private:
     // AbortSlew, Unpark, and disconnect. Never taken under mutex_; a blocking
     // slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
+    // Wall time behind every local-sidereal-time read (park and SetPark target, DestinationSideOfPier,
+    // SiderealTime). Only a test replaces it, so hardware keeps std::chrono::system_clock. Own mutex: the
+    // reads run on client calls (some under mutex_), the test setter on another thread.
+    std::chrono::system_clock::time_point sidereal_wall_now() const {
+        std::function<std::chrono::system_clock::time_point()> now;
+        {
+            std::lock_guard<std::mutex> lock(sidereal_wall_clock_mutex_);
+            now = sidereal_wall_clock_;
+        }
+        return now ? now() : std::chrono::system_clock::now();
+    }
+    mutable std::mutex sidereal_wall_clock_mutex_;
+    std::function<std::chrono::system_clock::time_point()> sidereal_wall_clock_;
     // Declared last, initialised last; must outlive the driver (decision 0005).
     util::TaskClock& clock_;
     // Declared after clock_ (the slots take it) and last, so they are destroyed
@@ -3432,6 +3448,13 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
         synscan->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_sidereal_wall_clock_for_testing(TelescopeDriver& driver,
+                                         std::function<std::chrono::system_clock::time_point()> now) {
+    if (auto* synscan = dynamic_cast<SynScanTelescopeDriver*>(&driver)) {
+        synscan->set_sidereal_wall_clock_for_testing(std::move(now));
     }
 }
 
