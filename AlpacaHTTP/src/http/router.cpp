@@ -8084,8 +8084,10 @@ Response Router::handle_software_update(const Request& request, const RouteMatch
     // threat model, see handle_sync_time). What a caller can make happen is
     // bounded outside this process: the helper unit installs one fixed
     // package from the host's own signed apt sources, and the polkit rule
-    // lets the service user start that one unit and nothing else. The
-    // check is read-only.
+    // lets the service user start three units and nothing else: the update
+    // unit and the two channel instances. The channel route takes no request
+    // text into a unit name (a two-entry table picks it). The check is
+    // read-only.
     Response response;
     response.set_content_type("application/json");
 

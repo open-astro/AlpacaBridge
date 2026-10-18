@@ -893,6 +893,17 @@ int main() {
         EXPECT(text.find("chmod 0644 \"$tmp\"") != std::string::npos);
         EXPECT(text.find("mv -f \"$tmp\" \"$DROPIN\"") != std::string::npos);
         EXPECT(text.find("rm -f \"$DROPIN\"") != std::string::npos);
+        // A failing apt-get update is a failed switch: the exit status is
+        // kept, the drop-in is put back, and the marker carries the status.
+        const auto apt = text.find("apt-get update -o");
+        EXPECT(apt != std::string::npos);
+        const auto after_apt = text.substr(apt);
+        EXPECT(after_apt.find("rc=$?") != std::string::npos);
+        EXPECT(after_apt.find("if [ \"$rc\" -ne 0 ]") != std::string::npos);
+        EXPECT(after_apt.find("=== RESULT: failure $(stamp) apt-get update exit $rc") != std::string::npos);
+        EXPECT(after_apt.find("exit \"$rc\"") != std::string::npos);
+        EXPECT(after_apt.find("mv -f \"$backup\" \"$DROPIN\"") != std::string::npos);
+        EXPECT(after_apt.find("=== RESULT: failure") < after_apt.find("=== RESULT: success"));
     }
 
     {

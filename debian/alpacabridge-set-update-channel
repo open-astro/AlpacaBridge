@@ -56,9 +56,17 @@ echo "=== AlpacaBridge update channel switch started $(stamp)"
 echo "=== channel: $CHANNEL"
 
 fail() {
+    [ -z "${backup:-}" ] || rm -f "$backup"
     echo "=== RESULT: failure $(stamp) $1"
     exit 1
 }
+
+# Keep what was there so a failed apt-get update can put it back.
+backup=""
+if [ -e "$DROPIN" ]; then
+    backup="$(mktemp "$DROPIN_DIR/.alpacabridge-beta.XXXXXX")" || fail "mktemp"
+    cp -p "$DROPIN" "$backup" || { rm -f "$backup"; fail "backup"; }
+fi
 
 if [ "$CHANNEL" = beta ]; then
     tmp="$(mktemp "$DROPIN_DIR/.alpacabridge-beta.XXXXXX")" || fail "mktemp"
@@ -85,7 +93,21 @@ fi
 # Refresh the package lists so the next check and install see the new source.
 echo "=== apt-get update"
 apt-get update -o DPkg::Lock::Timeout=120
-echo "=== apt-get update exit $?"
+rc=$?
+echo "=== apt-get update exit $rc"
+if [ "$rc" -ne 0 ]; then
+    # A source apt cannot verify or reach must not stay behind: put the
+    # drop-in back as it was before this run.
+    if [ -n "$backup" ]; then
+        mv -f "$backup" "$DROPIN"
+    else
+        rm -f "$DROPIN"
+    fi
+    echo "=== restored the previous channel source"
+    echo "=== RESULT: failure $(stamp) apt-get update exit $rc"
+    exit "$rc"
+fi
+[ -z "$backup" ] || rm -f "$backup"
 
 echo "=== RESULT: success $(stamp) channel $CHANNEL"
 exit 0

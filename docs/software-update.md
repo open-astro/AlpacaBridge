@@ -98,7 +98,12 @@ any argument but `stable` or `beta` before it touches apt.
   `Architectures: arm64`, `Signed-By` the OpenAstro keyring) through a
   `mktemp` file in `/etc/apt/sources.list.d`, `chmod 0644`, `mv -f`.
 - **Stable** removes that file.
-- Both then run `apt-get update`. `/etc/apt/sources.list.d/openastro.list` is
+- Both then run `apt-get update`. If it exits non-zero the helper puts the
+  source back as it was before the run (removes it if this run created it,
+  restores it if Stable removed it), ends the transcript with `=== RESULT:
+  failure ... apt-get update exit N` and exits with N, so the card reports the
+  failure (a host that installed the `.deb` from a release lacks the keyring
+  and cannot verify the beta source). `/etc/apt/sources.list.d/openastro.list` is
   never edited, and `apt purge alpacabridge` removes the beta source.
 
 The transcript is `/var/log/alpacabridge-update/channel.log` (same root-owned
@@ -119,7 +124,9 @@ update_packages_url", and the channel route refuses. A result fetched for the
 other channel is not reported after a switch; check again.
 
 Choosing Stable on a beta build does not downgrade: apt never does, so the
-card says "You stay on X.Y.0~betaN until the stable release overtakes it".
+card shows this under the selector while Stable is selected on a beta build
+and repeats it in the confirmation: "You stay on X.Y.0~betaN until the stable
+release overtakes it".
 
 ## API
 

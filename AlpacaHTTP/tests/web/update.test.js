@@ -167,6 +167,13 @@ test('selector shows the host channel and is enabled when idle', () => {
     assert.strictEqual(channelSelectorState(undefined).value, 'stable');
 });
 
+test('the selector note on Stable names the beta build that stays installed', () => {
+    const note = channelSelectorState({ Channel: 'stable', InstalledVersion: '5.0.0~beta2' }).note;
+    assert.match(note, /You stay on 5\.0\.0~beta2 until the stable release overtakes it/);
+    assert.strictEqual(channelSelectorState({ Channel: 'stable', InstalledVersion: '5.0.0' }).note, '');
+    assert.strictEqual(channelSelectorState({ Channel: 'beta', InstalledVersion: '5.0.0~beta2' }).note, '');
+});
+
 test('selector is disabled and says why when update_packages_url overrides the channel', () => {
     const state = channelSelectorState({ Channel: 'beta', ChannelOverridden: true });
     assert.strictEqual(state.disabled, true);

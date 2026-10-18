@@ -267,7 +267,7 @@ function channelSelectorState(status) {
     if ((source.ChannelSwitch || {}).State === 'unavailable') {
         return { value, disabled: true, note: 'Not available on this host.' };
     }
-    return { value, disabled: false, note: '' };
+    return { value, disabled: false, note: channelDowngradeNotice(value, source.InstalledVersion) };
 }
 
 // What choosing Stable does to a host on a beta build: apt never downgrades,
