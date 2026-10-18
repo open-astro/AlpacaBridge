@@ -1,14 +1,18 @@
 // Allow the alpacabridge service user to start the root-owned software
 // update unit for the web UI's "Install Update" button
-// (/management/v1/update/install, docs/software-update.md). systemctl and the
-// daemon's own sd-bus call both ask systemd over D-Bus, and systemd asks
-// polkit; this rule answers. The daemon's unit runs with
+// (/management/v1/update/install) and the two update channel units for its
+// Stable/Beta switch (/management/v1/update/channel); docs/software-update.md.
+// systemctl and the daemon's own sd-bus call both ask systemd over D-Bus, and
+// systemd asks polkit; this rule answers. The daemon's unit runs with
 // NoNewPrivileges=true, so sudo/setuid cannot be used for this.
 //
-// Scoped to exactly one unit and one verb: stop, restart, mask, edit and
-// every other unit stay NOT_HANDLED, which falls through to the default
-// (admin authentication, i.e. denied for a service user). Same shape as
-// 50-alpacabridge-wifi.rules.
+// Scoped to exactly three units and one verb, each by string equality (no
+// prefix, regex or indexOf match, so alpacabridge-channel@evil.service and
+// every other instance stay refused): alpacabridge-update.service,
+// alpacabridge-channel@stable.service and alpacabridge-channel@beta.service.
+// Stop, restart, mask, edit and every other unit stay NOT_HANDLED, which falls
+// through to the default (admin authentication, i.e. denied for a service
+// user). Same shape as 50-alpacabridge-wifi.rules.
 polkit.addRule(function(action, subject) {
     if (subject.user !== "alpacabridge") {
         return polkit.Result.NOT_HANDLED;
@@ -16,7 +20,10 @@ polkit.addRule(function(action, subject) {
     if (action.id !== "org.freedesktop.systemd1.manage-units") {
         return polkit.Result.NOT_HANDLED;
     }
-    if (action.lookup("unit") !== "alpacabridge-update.service") {
+    var unit = action.lookup("unit");
+    if (unit !== "alpacabridge-update.service" &&
+        unit !== "alpacabridge-channel@stable.service" &&
+        unit !== "alpacabridge-channel@beta.service") {
         return polkit.Result.NOT_HANDLED;
     }
     if (action.lookup("verb") === "start") {

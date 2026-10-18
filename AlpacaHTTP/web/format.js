@@ -249,6 +249,52 @@ function installerStateText(installer) {
     }
 }
 
+// Channel selector of the Software Update card (docs/software-update.md).
+// `status` is the /management/v1/update/status payload. The selector shows the
+// host's effective channel and is disabled, with the reason, while
+// update_packages_url pins the check (ChannelOverridden) or a switch/install
+// is running.
+function channelSelectorState(status) {
+    const source = status || {};
+    const value = source.Channel === 'beta' ? 'beta' : 'stable';
+    if (source.ChannelOverridden) {
+        return { value, disabled: true, note: 'set by update_packages_url' };
+    }
+    const switching = (source.ChannelSwitch || {}).State === 'running';
+    const installing = (source.Installer || {}).State === 'running';
+    if (switching) return { value, disabled: true, note: 'Switching the channel...' };
+    if (installing) return { value, disabled: true, note: 'An update is installing.' };
+    if ((source.ChannelSwitch || {}).State === 'unavailable') {
+        return { value, disabled: true, note: 'Not available on this host.' };
+    }
+    return { value, disabled: false, note: '' };
+}
+
+// What choosing Stable does to a host on a beta build: apt never downgrades,
+// so the build stays until the stable release overtakes it. '' when the
+// installed version is not a pre-release, or the choice is not Stable.
+function channelDowngradeNotice(choice, installedVersion) {
+    const installed = String(installedVersion || '');
+    if (choice !== 'stable' || installed.indexOf('~') < 0) return '';
+    return 'You stay on ' + installed + ' until the stable release overtakes it. ' +
+           'The update card then offers stable releases only.';
+}
+
+// The channel helper half of the payload; '' when there is nothing to say.
+function channelSwitchText(channelSwitch) {
+    const source = channelSwitch || {};
+    switch (source.State) {
+        case 'running':
+            return 'Switching the update channel...';
+        case 'succeeded':
+            return 'The update channel was switched. Check for updates to see what it offers.';
+        case 'failed':
+            return 'Switching the update channel failed.' + (source.Detail ? ' (' + source.Detail + ')' : '');
+        default:
+            return '';
+    }
+}
+
 // Release notes for the Software Update card (docs/software-update.md).
 //
 // docs/releases/X.Y.Z.md is written in a small Markdown subset: "#"/"##"
@@ -602,6 +648,7 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
+                       channelSelectorState, channelDowngradeNotice, channelSwitchText,
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,

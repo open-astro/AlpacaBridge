@@ -24,7 +24,8 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
 
-const { updateStatusText, installerStateText, renderReleaseNotes } =
+const { updateStatusText, installerStateText, renderReleaseNotes,
+        channelSelectorState, channelDowngradeNotice, channelSwitchText } =
     require(path.join(__dirname, '..', '..', 'web', 'format.js'));
 
 test('nothing checked yet', () => {
@@ -155,4 +156,43 @@ test('a disabled check is worded as such, before any stale result', () => {
         'Checking for updates is turned off in the server configuration.');
     assert.strictEqual(updateStatusText({ InstalledVersion: '4.1.0', CheckEnabled: true, LatestVersion: null }),
                        'Not checked yet.');
+});
+
+// --- Stable/Beta channel selector (issue #1103)
+
+test('selector shows the host channel and is enabled when idle', () => {
+    assert.deepStrictEqual(channelSelectorState({ Channel: 'beta', ChannelOverridden: false }),
+                           { value: 'beta', disabled: false, note: '' });
+    assert.strictEqual(channelSelectorState({ Channel: 'stable' }).value, 'stable');
+    assert.strictEqual(channelSelectorState(undefined).value, 'stable');
+});
+
+test('selector is disabled and says why when update_packages_url overrides the channel', () => {
+    const state = channelSelectorState({ Channel: 'beta', ChannelOverridden: true });
+    assert.strictEqual(state.disabled, true);
+    assert.strictEqual(state.value, 'beta');
+    assert.match(state.note, /set by update_packages_url/);
+});
+
+test('selector is disabled while a switch or an install runs, or the helper is missing', () => {
+    assert.strictEqual(channelSelectorState({ Channel: 'stable', ChannelSwitch: { State: 'running' } }).disabled, true);
+    assert.strictEqual(channelSelectorState({ Channel: 'stable', Installer: { State: 'running' } }).disabled, true);
+    assert.strictEqual(channelSelectorState({ Channel: 'stable', ChannelSwitch: { State: 'unavailable' } }).disabled, true);
+    assert.strictEqual(channelSelectorState({ Channel: 'stable', ChannelSwitch: { State: 'succeeded' } }).disabled, false);
+});
+
+test('choosing stable on a beta build says the build stays until stable overtakes it', () => {
+    const text = channelDowngradeNotice('stable', '5.0.0~beta4');
+    assert.match(text, /^You stay on 5\.0\.0~beta4 until the stable release overtakes it\./);
+    assert.strictEqual(channelDowngradeNotice('stable', '5.0.0'), '');
+    assert.strictEqual(channelDowngradeNotice('beta', '5.0.0~beta4'), '');
+    assert.strictEqual(channelDowngradeNotice('stable', undefined), '');
+});
+
+test('channel switch progress and result text', () => {
+    assert.match(channelSwitchText({ State: 'running' }), /Switching/);
+    assert.match(channelSwitchText({ State: 'succeeded' }), /was switched/);
+    assert.strictEqual(channelSwitchText({ State: 'failed', Detail: 'x' }), 'Switching the update channel failed. (x)');
+    assert.strictEqual(channelSwitchText({ State: 'idle' }), '');
+    assert.strictEqual(channelSwitchText(undefined), '');
 });

@@ -175,6 +175,12 @@ override_dh_auto_install:
 	  $(STAGING)/usr/libexec/alpacabridge/software-update
 	install -D -m 644 $(CURDIR)/debian/alpacabridge-update.service \
 	  $(STAGING)/usr/lib/systemd/system/alpacabridge-update.service
+	# Update channel (Stable/Beta) helper: a template unit, started as the
+	# two instances the polkit rule names; also kept out of the snippets.
+	install -D -m 755 $(CURDIR)/debian/alpacabridge-set-update-channel \
+	  $(STAGING)/usr/libexec/alpacabridge/set-update-channel
+	install -D -m 644 $(CURDIR)/debian/alpacabridge-channel@.service \
+	  $(STAGING)/usr/lib/systemd/system/alpacabridge-channel@.service
 	install -D -m 644 $(CURDIR)/debian/alpacabridge-update.polkit-rules \
 	  $(STAGING)/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules
 
@@ -199,7 +205,8 @@ override_dh_auto_clean:
 # dh_installsystemd otherwise acts on EVERY non-template unit in the package,
 # [Install] section or not, and would have the new package's postinst
 # `deb-systemd-invoke restart alpacabridge-update.service` -- from inside the
-# apt run that unit is executing (docs/software-update.md).
+# apt run that unit is executing (docs/software-update.md). The channel
+# helper template (alpacabridge-channel@.service) is left out the same way.
 override_dh_installsystemd:
 	dh_installsystemd alpacabridge.service
 

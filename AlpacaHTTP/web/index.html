@@ -1857,6 +1857,19 @@
                             <button id="update-install" class="btn btn-primary" type="button" onclick="updateInstallClicked()" hidden>Install Update</button>
                         </div>
                     </div>
+                    <div class="update-row">
+                        <div class="wifi-row-label">
+                            <label for="update-channel">Update channel</label>
+                            <small id="update-channel-note"></small>
+                        </div>
+                        <div class="update-actions">
+                            <select id="update-channel" onchange="updateChannelChanged()" disabled>
+                                <option value="stable">Stable</option>
+                                <option value="beta">Beta</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p id="update-channel-line" class="wifi-substatus"></p>
                     <p class="wifi-hint">Checks the OpenAstro repository for a newer release. Installing runs the same upgrade as <code>apt</code> and restarts the server for a few seconds, so do it between exposures.<button class="info-btn" type="button" aria-label="About software updates" data-info-title="Software Update" data-info-text="Check for Updates reads the newest AlpacaBridge version from apt.openastro.net and compares it with the running one. Install Update asks the system to upgrade the alpacabridge package through apt, exactly as 'sudo apt install --only-upgrade alpacabridge' would, so the download is signature-checked. The server restarts at the end and every connected client is disconnected for a few seconds. Nothing updates on its own.">i</button></p>
                     <div id="update-notes" class="update-notes hidden">
                         <div class="update-notes-header">

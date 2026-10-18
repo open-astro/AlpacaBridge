@@ -1,0 +1,32 @@
+[Unit]
+Description=AlpacaBridge update channel switch (%i)
+Documentation=https://github.com/open-astro/AlpacaBridge
+# Root-side half of the web UI's Stable/Beta switch (docs/software-update.md).
+# The daemon runs as the alpacabridge user with NoNewPrivileges=true and cannot
+# write /etc/apt, so it asks systemd over D-Bus to start exactly one of two
+# instances, alpacabridge-channel@stable.service or alpacabridge-channel@beta.service,
+# and the polkit rule in 50-alpacabridge-update.rules names both by exact
+# string. The instance name is the helper's only argument; the helper refuses
+# any other value. The transcript goes to /var/log/alpacabridge-update/channel.log.
+#
+# No [Install] section on purpose: started on demand only, and debian/rules
+# keeps dh_installsystemd from generating enable/start/restart snippets for it.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/alpacabridge/set-update-channel %i
+# Same root-owned directory as the update transcript, never the daemon's own
+# /var/log/AlpacaBridge. Keep in step with kChannelLogPath in
+# AlpacaHTTP/include/alpacahttp/software_update.h; test_software_update checks
+# the two agree.
+LogsDirectory=alpacabridge-update
+LogsDirectoryMode=0755
+PrivateTmp=true
+# A wedged apt-get update is killed rather than left running; the transcript
+# then ends without a result marker and the UI reports the switch failed.
+TimeoutStartSec=10min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=alpacabridge-channel

@@ -2122,8 +2122,13 @@ function updateEl(id) {
     return document.getElementById(id);
 }
 
-async function updateApi(sub, method) {
-    const response = await fetch(UPDATE_BASE + '/' + sub, { method: method || 'GET' });
+async function updateApi(sub, method, body) {
+    const options = { method: method || 'GET' };
+    if (body !== undefined) {
+        options.headers = { 'Content-Type': 'application/json' };
+        options.body = JSON.stringify(body);
+    }
+    const response = await fetch(UPDATE_BASE + '/' + sub, options);
     const result = await response.json();
     if (result.ErrorNumber !== 0) throw new Error(result.ErrorMessage || 'unknown error');
     return result.Value;
@@ -2191,6 +2196,8 @@ function updateRender(status) {
         }
     }
 
+    updateRenderChannel(status);
+
     installerLine.textContent = installerStateText(installer);
     installerLine.classList.toggle('error', installer.State === 'failed');
     if (installer.Log) {
@@ -2203,11 +2210,94 @@ function updateRender(status) {
     }
 }
 
+// The channel selector, its note and the switch progress line.
+function updateRenderChannel(status) {
+    const select = updateEl('update-channel');
+    const note = updateEl('update-channel-note');
+    const line = updateEl('update-channel-line');
+    if (!select) return;
+    const state = channelSelectorState(status);
+    select.value = state.value;
+    select.disabled = state.disabled;
+    if (note) note.textContent = state.note;
+    const channelSwitch = status.ChannelSwitch || {};
+    if (line) {
+        line.textContent = channelSwitchText(channelSwitch);
+        line.classList.toggle('error', channelSwitch.State === 'failed');
+    }
+}
+
+let channelPollTimer = null;
+let channelPollInFlight = false;
+
+function channelStopPolling() {
+    if (!channelPollTimer) return;
+    clearInterval(channelPollTimer);
+    channelPollTimer = null;
+}
+
+// Follow a running switch until it ends. A tick is skipped while the previous
+// status request is still in flight, so a slow server cannot stack requests.
+function channelStartPolling() {
+    if (channelPollTimer) return;
+    channelPollTimer = setInterval(async () => {
+        if (channelPollInFlight) return;
+        channelPollInFlight = true;
+        try {
+            const status = await updateApi('status', 'GET');
+            updateRender(status);
+            const state = (status.ChannelSwitch || {}).State;
+            if (state !== 'running') {
+                channelStopPolling();
+                if (state === 'succeeded' && !updateEl('update-check').disabled) updateCheckClicked();
+            }
+        } catch (error) {
+            updateMessage('Could not read the update status: ' + error.message, true);
+        } finally {
+            channelPollInFlight = false;
+        }
+    }, 2000);
+}
+
+async function updateChannelChanged() {
+    const select = updateEl('update-channel');
+    if (!select) return;
+    const choice = select.value;
+    let installed = '';
+    try {
+        const status = await updateApi('status', 'GET');
+        installed = status.InstalledVersion || '';
+        if (choice === (status.Channel || 'stable')) {
+            updateRender(status);
+            return;
+        }
+    } catch (error) {
+        updateMessage('Could not read the update status: ' + error.message, true);
+        return;
+    }
+    const notice = channelDowngradeNotice(choice, installed);
+    if (!confirm('Switch the update channel to ' + (choice === 'beta' ? 'Beta' : 'Stable') + '?' +
+                 (notice ? '\n\n' + notice : ''))) {
+        select.value = choice === 'beta' ? 'stable' : 'beta';
+        return;
+    }
+    select.disabled = true;
+    updateMessage('');
+    try {
+        updateRender(await updateApi('channel', 'POST', { Channel: choice }));
+        channelStartPolling();
+    } catch (error) {
+        updateMessage(error.message, true);
+        try { updateRender(await updateApi('status', 'GET')); } catch (e) { /* message already shown */ }
+    }
+}
+
 async function updateRefresh() {
     if (!updateEl('update-installed')) return;
     try {
         const status = await updateApi('status', 'GET');
         updateRender(status);
+        if ((status.ChannelSwitch || {}).State === 'running') channelStartPolling();
         if ((status.Installer || {}).State === 'running') {
             // A page opened (or reloaded) mid-install joins the run: remember
             // the version now answering so the poll can still detect the

@@ -1296,7 +1296,7 @@ Related decision: [Documentation drift gates](docs/decisions/0003-docs-drift-gat
 - Retention: `logging.retention_days` (default 90, 0 = forever, env `ALPACAHTTP_LOG_RETENTION_DAYS`) auto-deletes daily files whose embedded date is older than `today − retention_days`. Pruning runs once on startup and again on day-rollover inside the file sink. Today's active file is never pruned.
 - Web portal exposes `GET /management/v1/logfiles`, `GET /management/v1/logfiles/{name}[?download=1]`, and `DELETE /management/v1/logfiles/{name}`. Filenames are validated against the daily pattern to prevent path traversal. `util::read_log_file` enforces a 10 MiB per-request cap; web viewer warns and suggests download above 5 MiB.
 - Log level set via `POST/PUT /management/v1/loglevel` is persisted to `config/runtime_state.json` and reapplied on the next start (overrides `default.yaml`'s `logging.level`). Delete that file to fall back to the YAML default. Persistence failures are logged at WARNING and never block the API response.
-- Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status. One exception: `configuredevice` refusals of a GPIO line, GPIO chip or device path outside the board's allowlist, and a duplicate GPIO line, answer HTTP 400 (issue #765).
+- Alpaca-style management responses (including the new logfile endpoints) return HTTP 200 even when `ErrorNumber != 0` — clients must inspect the body, not the HTTP status. One exception: `configuredevice` refusals of a GPIO line, GPIO chip or device path outside the board's allowlist, and a duplicate GPIO line, answer HTTP 400 (issue #765), and so does `POST /management/v1/update/channel` with a body that is not `{"Channel":"stable"|"beta"}` (issue #1103).
 
 ## Privileged operations from the daemon (polkit + root helper unit)
 
@@ -1320,7 +1320,14 @@ the operation needs, never add a fourth without a decision record:
   has no D-Bus API (apt, dpkg, mount, mkfs). Rules that came out of building it:
   - **The daemon passes no arguments.** What runs is fixed in the unit's
     `ExecStart`; parameters travel through a file the daemon writes and the
-    helper reads if they ever must, never through the D-Bus call.
+    helper reads if they ever must, never through the D-Bus call. The one
+    exception is the update channel switch (`alpacabridge-channel@.service`,
+    `debian/alpacabridge-set-update-channel`, issue #1103): its template
+    instance name is the argument, which is safe only because the polkit rule
+    names each allowed instance by exact string (`stable`, `beta`), the daemon
+    takes the unit from a two-entry table and never builds it from request
+    text, and the helper rejects any other argument before it touches apt. A
+    new template unit needs all three.
   - **Pass only `alpacabridge.service` to `dh_installsystemd`**
     (`override_dh_installsystemd` in `debian/rules`). It otherwise generates
     enable/start/restart snippets for EVERY non-template unit in the package,
@@ -1332,7 +1339,8 @@ the operation needs, never add a fourth without a decision record:
     follows a symlink the service user planted, and no `[ -L ]` check in the
     script closes the race (PR #745 review). Give the helper unit its own
     `LogsDirectory=` (root:root 0755) and pin the path on both sides with a test
-    (`kUpdateLogPath` vs `LOG=` in the script).
+    (`kUpdateLogPath` vs `LOG=` in the script; the channel helper's
+    `kChannelLogPath` and `kChannelDropInPath` are pinned the same way).
   - **The helper's transcript is the durable record**, not systemd's state: a
     finished oneshot unit is garbage-collected and `LoadUnit` then reports it
     as never run. The helper ends its log with a result marker the daemon

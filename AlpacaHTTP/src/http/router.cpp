@@ -1916,7 +1916,7 @@ RouteMatch Router::parse_route(const std::string& path) {
         }
     }
     {
-        // Software update: /management/v1/update/<status|check|install>.
+        // Software update: /management/v1/update/<status|check|install|channel>.
         static const std::regex kUpdateRegex(R"(^/management/(?:v1/)?update/([a-z]+)/?$)");
         std::smatch update_match;
         if (std::regex_match(path, update_match, kUpdateRegex)) {
@@ -8122,6 +8122,22 @@ Response Router::handle_software_update(const Request& request, const RouteMatch
             ok.value = software_update_->check();
         } else if (sub == "install" && is_put) {
             ok.value = software_update_->install();
+        } else if (sub == "channel" && is_put) {
+            // Body {"Channel":"stable"|"beta"}; anything else is refused
+            // before the manager is reached. The unit started is picked from
+            // the manager's two-entry table, never built from this text, and
+            // the text is not echoed.
+            const auto body = nlohmann::json::parse(request.body(), nullptr, false);
+            std::optional<util::UpdateChannel> channel;
+            if (body.is_object() && body.contains("Channel") && body["Channel"].is_string()) {
+                channel = util::parse_channel(body["Channel"].get<std::string>());
+            }
+            if (!channel) {
+                auto bad = fail(util::ErrorCode::INVALID_VALUE, "Channel must be \"stable\" or \"beta\"");
+                bad.set_status(400, "Bad Request");
+                return bad;
+            }
+            ok.value = software_update_->set_channel(*channel);
         } else {
             return fail(util::ErrorCode::INVALID_VALUE, "Unknown update endpoint or method: " + sub);
         }

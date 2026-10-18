@@ -7680,6 +7680,7 @@ int main() {
             // the network, install starts the root helper unit.
             {"POST", "/management/v1/update/check", "{}", "software update"},
             {"POST", "/management/v1/update/install", "{}", "software update"},
+            {"POST", "/management/v1/update/channel", R"({"Channel":"beta"})", "software update"},
             {"DELETE", "/management/v1/logfiles/alpaca.log", "", "log file"},
             // The collection form deletes EVERY log file. Guarding the
             // per-file DELETE and not this one would have been exactly the
@@ -7769,6 +7770,15 @@ int main() {
                 state.state = "running";
             }
             alpacahttp::util::InstallerState installer_state() override { return state; }
+            alpacahttp::util::UpdateChannel channel = alpacahttp::util::UpdateChannel::Stable;
+            std::vector<alpacahttp::util::UpdateChannel> switches;
+            alpacahttp::util::InstallerState channel_state;
+            alpacahttp::util::UpdateChannel read_channel() override { return channel; }
+            void start_channel_switch(alpacahttp::util::UpdateChannel requested) override {
+                switches.push_back(requested);
+                channel_state.state = "running";
+            }
+            alpacahttp::util::InstallerState channel_switch_state() override { return channel_state; }
         };
 
         alpacahttp::Router router;
@@ -7829,6 +7839,56 @@ int main() {
         json =
             nlohmann::json::parse(route_request(router, "GET", "/management/v1/update/bogus").body(), nullptr, false);
         EXPECT(json.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
+        {
+            // case: update channel route
+            // Channel switch (issue #1103): body {"Channel":"stable"|"beta"}.
+            // The stock stable index follows the channel; a configured URL would pin it.
+            alpacahttp::Router router;
+            auto channel_backend = std::make_unique<ScriptedBackend>();
+            auto* scripted = channel_backend.get();
+            router.set_software_update_manager(std::make_unique<alpacahttp::util::SoftwareUpdateManager>(
+                alpacahttp::util::SoftwareUpdateSettings{alpacahttp::kVersion, alpacahttp::util::kDefaultPackagesUrl,
+                                                         "alpacabridge", "", ""},
+                std::move(channel_backend)));
+            auto channel_json = [&](const std::string& method, const std::string& body) {
+                const auto response = route_request(router, method, "/management/v1/update/channel", body);
+                return std::make_pair(response.status_code(), nlohmann::json::parse(response.body(), nullptr, false));
+            };
+            for (const char* bad : {"{}", "", "not json", R"({"Channel":"Beta"})", R"({"Channel":"beta;x"})",
+                                    R"({"Channel":1})", R"({"Channel":null})", R"({"Channel":"../stable"})"}) {
+                const auto [status, reply] = channel_json("POST", bad);
+                EXPECT(status == 400);
+                EXPECT(!reply.is_discarded());
+                EXPECT(reply.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_VALUE);
+                // The rejected text is not echoed back.
+                EXPECT(reply.value("ErrorMessage", "").find("beta;x") == std::string::npos);
+            }
+            EXPECT(scripted->switches.empty());
+            EXPECT(route_request(router, "GET", "/management/v1/update/channel").status_code() == 200);
+            EXPECT(scripted->switches.empty());
+            {
+                const auto [status, reply] = channel_json("POST", R"({"Channel":"beta"})");
+                EXPECT(status == 200);
+                EXPECT(reply.value("ErrorNumber", -1) == 0);
+                EXPECT(scripted->switches.size() == 1);
+                EXPECT(scripted->switches[0] == alpacahttp::util::UpdateChannel::Beta);
+                EXPECT(reply["Value"]["Channel"] == "stable");  // the marker has not changed yet
+                EXPECT(reply["Value"]["ChannelSwitch"]["State"] == "running");
+                // Busy: refused with the install route's INVALID_OPERATION, 200 envelope.
+                const auto [busy_status, busy] = channel_json("PUT", R"({"Channel":"stable"})");
+                EXPECT(busy_status == 200);
+                EXPECT(busy.value("ErrorNumber", 0) == alpacahttp::util::ErrorCode::INVALID_OPERATION);
+                EXPECT(scripted->switches.size() == 1);
+            }
+            scripted->channel = alpacahttp::util::UpdateChannel::Beta;
+            scripted->channel_state.state = "succeeded";
+            json = nlohmann::json::parse(route_request(router, "GET", "/management/v1/update/status").body(), nullptr,
+                                         false);
+            EXPECT(json["Value"]["Channel"] == "beta");
+            EXPECT(json["Value"]["ChannelOverridden"] == false);
+            EXPECT(json["Value"]["ChannelSwitch"]["State"] == "succeeded");
+        }
+
         // A path outside the sub-endpoint grammar is not a management route.
         EXPECT(route_request(router, "GET", "/management/v1/update/status/extra").status_code() == 404);
     }

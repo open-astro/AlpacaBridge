@@ -6,9 +6,18 @@ and then promoted to stable. Day-to-day PR work on `main` does not change.
 
 ## For users: opt in to the beta
 
-Do both edits together. The web UI update check does not read apt sources; it fetches only
-`update_packages_url`, and the install always goes through apt. With the apt line alone the
-update card never offers a beta. With the URL alone it offers a beta that apt cannot find.
+**Web UI.** Open the Software Update card on the Server Info tab and set **Update channel** to
+**Beta**. One switch changes both halves: the host's apt source and the index the update check
+reads, so they cannot disagree. Then press **Check for Updates**. Setting it back to **Stable**
+reverses both. See [software-update.md](software-update.md#update-channel) for what the switch
+runs and how it is scoped.
+
+**Headless, by hand.** On a host without the card, make both edits by hand and together: the
+update check reads only `update_packages_url`, and the install always goes through apt. With the
+apt line alone the card never offers a beta. With the URL alone it offers a beta that apt cannot
+find. A `beta` component in `openastro.list` plus the beta URL below shows in the card as an
+override ("set by update_packages_url"): the selector is disabled and you remove the URL line to
+hand the channel back to the card.
 
 1. Add `beta` to the apt line (same line as the README install step):
 
@@ -38,8 +47,8 @@ just that it matches its `.sha256`, run on any machine with the GitHub CLI signe
 The same works for a nightly `.deb`. Each attestation, and the SBOM attached to it, is also
 listed under the repository's Actions > Attestations.
 
-**Opt out** by removing `beta` from the apt line and restoring the default
-`update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
+**Opt out** by choosing **Stable** in the card, or on a headless install by removing `beta` from
+the apt line and restoring the default `update_packages_url`. apt does not downgrade on its own, so a user who leaves mid-beta stays
 on the beta build until the stable release overtakes it.
 
 Every stable release is published to both `main` and `beta`, so the beta index always holds the
