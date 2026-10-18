@@ -928,7 +928,8 @@ public:
         }
 
         // The detached turn-off thread captures NO object state — only the id
-        // snapshot — so it cannot dereference a destroyed driver if the
+        // snapshot, the SDK seam and the task clock (both outlive the driver,
+        // see zwo_camera_driver.h) — so it cannot dereference a destroyed driver if the
         // object is torn down mid-pulse. A disconnect (or destruction) racing
         // the sleep costs at most a rejected pulse_guide_off on a closed id.
         // IsPulseGuiding self-clears from pulse_guiding_end_ in the getter,
