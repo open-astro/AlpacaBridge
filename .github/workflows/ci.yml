@@ -11,15 +11,13 @@
 # Jobs:
 #   build-test     build vendor-neutral core + run unit tests (the base gate)
 #   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
-#                  vendors ON
+#                  vendors ON, instrumented for gcov; per-component + combined
+#                  line coverage in the job summary, HTML/JSON artifact (no
+#                  threshold)
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
 #                  connect/disconnect/operate concurrency suite (issue #101),
 #                  plus [stress-guard] (the harness's own self-tests, issue #322)
-#   coverage       informational gcovr line coverage, all vendors ON, per
-#                  component + combined in the job summary, HTML/JSON artifact
-#                  (no threshold, not a required check; bound 30 min). Runs on
-#                  pushes to main/stable and manual runs, not on pull requests
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
 #   package-deb    build the .deb in debian:trixie, install it, run
@@ -51,7 +49,7 @@ concurrency:
   cancel-in-progress: true
 
 # Single source of truth for the vendored libgpiod build dependency — the
-# build-vendors, sanitizers-tsan, coverage and clang-tidy jobs consume these,
+# build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
@@ -136,9 +134,13 @@ jobs:
         run: scripts/check_beta_configure.sh
 
   build-vendors:
+    # The all-vendors suite runs once, instrumented for coverage: the build,
+    # the tests and the gcovr report are this one job (the separate coverage
+    # job ran the same 2413 tests a second time, also at -O0). The report is
+    # informational: no --fail-under threshold.
     name: Build + test (all vendors, arm64)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -172,7 +174,8 @@ jobs:
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            gcovr
 
       - name: Build libgpiod v2 from source
         # The ZWO switch drivers require libgpiod >= 2.0 (gpiod_chip_request_lines),
@@ -235,32 +238,104 @@ jobs:
           done
           sudo ldconfig
 
+      - name: Wrap the compilers for -fprofile-update=atomic
+        # See the script: ccache cannot cache a compile that carries the option.
+        run: .github/scripts/coverage-compilers.sh
+
       - name: Restore the compiler cache
-        # Keyed per job; see the build-test job.
+        # Keyed per job; see the build-test job. A new prefix, because the
+        # objects are now built with --coverage.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-vendors-${{ github.sha }}
-          restore-keys: ccache-build-vendors-
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+          restore-keys: ccache-all-vendors-coverage-
 
-      - name: Build + run tests (all vendors)
+      - name: Build + run tests with coverage (all vendors)
+        # CMake takes CXXFLAGS / LDFLAGS on a fresh configure and
+        # run_all_tests.sh wipes its build tree first. -fprofile-update=atomic
+        # comes from the compiler wrappers (CC/CXX), not CXXFLAGS.
         env:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-        run: ./run_all_tests.sh
+          CXXFLAGS: "--coverage -O0 -g"
+          LDFLAGS: "--coverage"
+        # Zeroed first: the statistics live in the cached directory, so they
+        # would otherwise add up every run since the cache was first saved.
+        run: |
+          ccache --zero-stats
+          ./run_all_tests.sh
 
       - name: Compiler cache statistics
+        # --verbose lists why calls were uncacheable.
         if: always()
-        run: ccache --show-stats
+        run: ccache --show-stats --verbose
 
       - name: Save the compiler cache
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-vendors-${{ github.sha }}
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+
+      - name: Generate coverage report
+        # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
+        # AlpacaCore as a subdirectory, and both suites write the same .gcda
+        # files there (issue #1251).
+        run: |
+          set -euo pipefail
+          mkdir -p coverage/html
+          excludes=(
+            --exclude '.*/tests/'
+            --exclude '.*/external/'
+            --exclude '.*/examples/'
+            --exclude '.*/build[^/]*/'
+          )
+          # gcov runs once, for the combined report, which also writes the
+          # raw data as JSON; the two component reports are filtered from that
+          # JSON (-a) instead of running gcov over every .gcda again.
+          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json coverage/combined-raw.json \
+            --txt coverage/combined.txt \
+            --json-summary-pretty --json-summary coverage/combined.json \
+            --html-details coverage/html/index.html \
+            AlpacaHTTP/build
+          report() {
+            local name="$1"
+            shift
+            gcovr --root . -a coverage/combined-raw.json "$@" \
+              --txt "coverage/${name}.txt" \
+              --json-summary-pretty --json-summary "coverage/${name}.json"
+          }
+          report alpacacore --filter 'AlpacaCore/(src|include)/'
+          report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
+          cat coverage/combined.txt
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          rows = [("AlpacaCore", "alpacacore"), ("AlpacaHTTP", "alpacahttp"),
+                  ("Combined", "combined")]
+          print("## Line coverage (all vendors, arm64)\n")
+          print("| Component | Lines covered | Lines total | Line % |")
+          print("|---|---:|---:|---:|")
+          for label, name in rows:
+              with open(f"coverage/{name}.json") as f:
+                  s = json.load(f)
+              print(f"| {label} | {s['line_covered']} | {s['line_total']} "
+                    f"| {s['line_percent']:.1f} |")
+          PY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
 
   sanitizers:
     name: Sanitizers (ASan + UBSan, arm64)
@@ -495,181 +570,6 @@ jobs:
           path: ~/.cache/ccache
           key: ccache-sanitizers-tsan-${{ github.sha }}
 
-  coverage:
-    # Informational only: no --fail-under threshold and not a required check.
-    # A separate job so instrumentation adds no time to build-test or
-    # build-vendors; it runs in parallel with them.
-    # Not run on pull requests: at -O0 with gcov it is the longest job (767 s
-    # against 432 s for build-vendors, run 39080745502), so it set how long
-    # every PR waited for a result that gates nothing. Every merge to main or
-    # stable still produces the report, and workflow_dispatch runs it on demand.
-    name: Line coverage (gcovr, all vendors, arm64)
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Install build dependencies
-        # Same set as build-vendors (libgpiod-dev omitted, built from source
-        # below; catch2 required, issue #586), plus gcovr for the report.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ccache \
-            g++ \
-            catch2 \
-            pkg-config \
-            libusb-1.0-0-dev \
-            libudev-dev \
-            libsystemd-dev \
-            libhidapi-dev \
-            libltdl-dev \
-            libexif-dev \
-            libjpeg-dev \
-            libraw-dev \
-            nlohmann-json3-dev \
-            zlib1g-dev \
-            libcurl4-openssl-dev \
-            gcovr
-
-      - name: Build libgpiod v2 from source
-        # Copied from build-vendors; see the comments there.
-        run: |
-          set -euo pipefail
-          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
-          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
-            | sha256sum -c -
-          mkdir -p /tmp/libgpiod
-          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
-
-      - name: Build bundled libgphoto2
-        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
-        # libgphoto2/), never the distro copy. The script verifies the tarball's
-        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
-        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
-        # sudo leaves no root-owned files in the checkout.
-        run: |
-          set -euo pipefail
-          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
-
-      - name: Stage vendor SDK shared libraries
-        # Copied from build-vendors; keep the two lists in step.
-        run: |
-          set -euo pipefail
-          core="AlpacaCore/external"
-          libs=(
-            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
-            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
-            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
-          )
-          for lib in "${libs[@]}"; do
-            if compgen -G "${lib}*" > /dev/null; then
-              echo "Staging $(basename "$lib")*"
-              sudo cp -a "${lib}"* /usr/local/lib/
-            else
-              echo "WARNING: ${lib}* not found — skipping"
-            fi
-          done
-          sudo ldconfig
-
-      - name: Restore the compiler cache
-        # Keyed per job; see the build-test job.
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/ccache
-          key: ccache-coverage-${{ github.sha }}
-          restore-keys: ccache-coverage-
-
-      - name: Build + run tests with coverage (all vendors)
-        # Same seeding as the sanitizers job: CMake takes CXXFLAGS / LDFLAGS
-        # on a fresh configure and run_all_tests.sh wipes its build tree first.
-        # -fprofile-update=atomic because the [stress] cases are
-        # multi-threaded and plain counter updates would race.
-        env:
-          CMAKE_C_COMPILER_LAUNCHER: ccache
-          CMAKE_CXX_COMPILER_LAUNCHER: ccache
-          CCACHE_MAXSIZE: 2G
-          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-          CXXFLAGS: "--coverage -O0 -g -fprofile-update=atomic"
-          LDFLAGS: "--coverage"
-        run: ./run_all_tests.sh
-
-      - name: Compiler cache statistics
-        if: always()
-        run: ccache --show-stats
-
-      - name: Save the compiler cache
-        if: always() && github.event_name == 'push'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: ~/.cache/ccache
-          key: ccache-coverage-${{ github.sha }}
-
-      - name: Generate coverage report
-        # One gcovr call per component plus a combined total, over the one
-        # tree run_all_tests.sh builds: AlpacaHTTP/build holds AlpacaCore as a
-        # subdirectory, and both suites write the same .gcda files there
-        # (issue #1251).
-        run: |
-          set -euo pipefail
-          mkdir -p coverage/html
-          excludes=(
-            --exclude '.*/tests/'
-            --exclude '.*/external/'
-            --exclude '.*/examples/'
-            --exclude '.*/build[^/]*/'
-          )
-          report() {
-            local name="$1"
-            shift
-            gcovr --root . -j "$(nproc)" "$@" "${excludes[@]}" \
-              --gcov-ignore-parse-errors=all \
-              --txt "coverage/${name}.txt" \
-              --json-summary-pretty --json-summary "coverage/${name}.json" \
-              AlpacaHTTP/build
-          }
-          report alpacacore --filter 'AlpacaCore/(src|include)/'
-          report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
-          report combined \
-            --filter 'AlpacaCore/(src|include)/' \
-            --filter 'AlpacaHTTP/(src|include)/' \
-            --html-details coverage/html/index.html
-          cat coverage/combined.txt
-          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json
-          rows = [("AlpacaCore", "alpacacore"), ("AlpacaHTTP", "alpacahttp"),
-                  ("Combined", "combined")]
-          print("## Line coverage (all vendors, arm64)\n")
-          print("| Component | Lines covered | Lines total | Line % |")
-          print("|---|---:|---:|---:|")
-          for label, name in rows:
-              with open(f"coverage/{name}.json") as f:
-                  s = json.load(f)
-              print(f"| {label} | {s['line_covered']} | {s['line_total']} "
-                    f"| {s['line_percent']:.1f} |")
-          PY
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
-        with:
-          name: coverage
-          path: coverage/
-          if-no-files-found: error
-
   format:
     name: clang-format (changed lines)
     if: github.event_name == 'pull_request'
@@ -782,16 +682,22 @@ jobs:
           set -euo pipefail
           sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
 
+      - name: Wrap the compilers like build-vendors
+        # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
+        # without the wrappers every lookup misses, silently.
+        run: .github/scripts/coverage-compilers.sh
+
       - name: Restore the compiler cache
         # Restore only, from build-vendors' cache: run_all_tests.sh configures
-        # AlpacaHTTP/build with the same options (vendors ON, tests ON), so the
-        # objects match. This job runs on pull requests only, and a cache saved
-        # there would be visible to that PR alone, so it saves nothing.
+        # AlpacaHTTP/build with the same options (vendors ON, tests ON), and
+        # this job builds with the same wrappers and flags, so the objects
+        # match. This job runs on pull requests only, and a cache saved there
+        # would be visible to that PR alone, so it saves nothing.
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-build-vendors-${{ github.sha }}
-          restore-keys: ccache-build-vendors-
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+          restore-keys: ccache-all-vendors-coverage-
 
       - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
@@ -805,6 +711,9 @@ jobs:
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
           CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          CXXFLAGS: "--coverage -O0 -g"
+          LDFLAGS: "--coverage"
         run: |
           set -euo pipefail
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \

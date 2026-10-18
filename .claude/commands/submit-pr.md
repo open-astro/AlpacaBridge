@@ -290,7 +290,7 @@ The script reproduces, in order, the CI jobs that can run on this arm64 host and
 1. **clang-format** changed lines (CI `format`)
 2. **Unicode / Trojan-Source** scan (CI `unicode`)
 3. **Build + unit tests, vendors OFF** — `run_all_tests.sh` (CI `build-test`)
-4. **Build + unit tests, vendors ON** — `run_all_tests.sh` (CI `build-vendors`)
+4. **Build + unit tests, vendors ON** — `run_all_tests.sh` (CI `build-vendors`, which builds instrumented for gcov with atomic counters; pre-flight does not, so a test that only fails instrumented can pass here and fail CI)
 5. **clang-tidy** changed lines (CI `clang-tidy`)
 6. **cppcheck** changed files (CI `cppcheck`)
 7. **shellcheck** — only if shell scripts changed (CI `shellcheck`)
