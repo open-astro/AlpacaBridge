@@ -18,8 +18,9 @@
 // wandererastro_rotator_protocol_wrapper.cpp parses:
 //
 //   "1500001"        -> "WandererRotatorMiniA<fw>A<angle*1000>A<backlash>A<reverse>A"
-//                       (do_handshake; five 'A'-terminated fields, firmware >=
-//                       kRotatorMiniMinFirmware, no '.' in the angle = V1 integer format)
+//                       (do_handshake; five 'A'-terminated fields; firmware is the literal
+//                       20250101, so a change to the wrapper's firmware floor shows up here;
+//                       no '.' in the angle = V1 integer format)
 //   "1500002"        -> no reply; the tracked angle goes to zero (set_zero)
 //   "1600000"+n*10   -> no reply (set_backlash); "1700000"/"1700001" -> no reply (set_reverse)
 //   "Stop"           -> no reply (a fake move is already complete)
@@ -33,8 +34,9 @@
 // (-180, 180] so a long storm never reaches the wrapper's 400 degree reset path.
 // Every command is recorded ("Stop" and the digit strings) in wire order.
 //
-// Not named fake_*.h: scripts/check_docs_drift.py pins every fake_*.h file to a row of
-// the contract-sweep roster or its helper list, and this rotator has neither.
+// Stress-only fake with no tier-2 contract-sweep roster row yet. check_docs_drift.py pins
+// every fake_*.h file to a roster row or its helper list, so a roster row would also
+// rename this file to fake_*.h.
 
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 #include <poll.h>
@@ -147,8 +149,7 @@ private:
         if (cmd == "Stop") return;
         const long value = std::atol(cmd.c_str());
         if (cmd == "1500001") {
-            reply("WandererRotatorMiniA" + std::to_string(vendor::wandererastro::kRotatorMiniMinFirmware) + "A" +
-                  std::to_string(angle_milli_) + "A0A0A");
+            reply(std::string("WandererRotatorMiniA20250101A") + std::to_string(angle_milli_) + "A0A0A");
         } else if (cmd == "1500002") {
             angle_milli_ = 0;
         } else if (value < 1500000) {

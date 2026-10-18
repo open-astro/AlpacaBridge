@@ -38,6 +38,7 @@
 #include <alpacacore/vendor/wandererastro/wandererastro_covercalibrator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
+#include <unistd.h>
 
 #include <chrono>
 #include <filesystem>
@@ -75,6 +76,27 @@ const char* const kBoxFrame =
 // practice, but it is the code these calls legitimately throw once the latch
 // trips, and a set that counts it as a regression would contradict this
 // comment (review note on PR #468).
+
+// sync() persists its offset; keep the storm's writes out of config/ in the working directory, and
+// restore the process-wide path even when a REQUIRE throws.
+class OffsetStoreRedirect {
+public:
+    OffsetStoreRedirect()
+        : path_(std::filesystem::temp_directory_path() /
+                ("wandererastro_rotator_stress_offsets_" + std::to_string(::getpid()) + ".json")),
+          previous_(alpacacore::util::RotatorSyncOffsetStore::set_default_path(path_.string())) {}
+    ~OffsetStoreRedirect() {
+        std::error_code ec;
+        std::filesystem::remove(path_, ec);
+        alpacacore::util::RotatorSyncOffsetStore::set_default_path(previous_);
+    }
+    OffsetStoreRedirect(const OffsetStoreRedirect&) = delete;
+    OffsetStoreRedirect& operator=(const OffsetStoreRedirect&) = delete;
+
+private:
+    std::filesystem::path path_;
+    std::string previous_;
+};
 
 void cover_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
     auto& panel = static_cast<alpacacore::CoverCalibratorDriver&>(d);
@@ -276,10 +298,7 @@ TEST_CASE("WandererAstro box switch - destruction races an in-flight connect", "
 }
 
 TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress", "[wandererastro][rotator][stress]") {
-    // sync() persists its offset; keep the storm's writes out of config/ in the working directory.
-    const auto offsets = std::filesystem::temp_directory_path() / "wandererastro_rotator_stress_offsets.json";
-    const std::string previous_offsets_path =
-        alpacacore::util::RotatorSyncOffsetStore::set_default_path(offsets.string());
+    OffsetStoreRedirect redirect;
 
     {
         PtyWandererRotator fake;
@@ -307,10 +326,6 @@ TEST_CASE("WandererAstro rotator - concurrent connect/disconnect/operate stress"
         CHECK(fake.handshakes() > 0);
         CHECK(fake.moves() > 0);
     }
-
-    std::error_code ec;
-    std::filesystem::remove(offsets, ec);
-    alpacacore::util::RotatorSyncOffsetStore::set_default_path(previous_offsets_path);
 }
 
 TEST_CASE("WandererAstro rotator - destruction races an in-flight connect", "[wandererastro][rotator][stress]") {
