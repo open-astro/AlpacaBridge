@@ -38,6 +38,24 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
+// The getters are served from the state snapshot (open-astro#1310), so a dead
+// port is seen by the next poll (250 ms period), not by the getter itself: wait
+// for the getter to say NotConnected, and return how long that took.
+std::chrono::milliseconds wait_not_connected(const std::function<void()>& fn,
+                                             std::chrono::milliseconds budget = std::chrono::seconds(3)) {
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+        try {
+            fn();
+        } catch (const alpacacore::AlpacaException& ex) {
+            REQUIRE(ex.error_code() == static_cast<int>(alpacacore::AlpacaError::NotConnected));
+            return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+        }
+        if (std::chrono::steady_clock::now() - start > budget) FAIL("the getter never reported the dead link");
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
 // Never a real device path: a plausible /dev/ttyACM0 could be the actual focuser.
 constexpr const char* kAbsentPort = "/dev/qhy-qfocuser-absent";
 
@@ -310,11 +328,8 @@ TEST_CASE("QHY Q-Focuser Driver - dead link fails fast, no busy-spin", "[qhy][fo
 
     fake.sever();
 
-    const auto start = std::chrono::steady_clock::now();
-    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
-    const auto elapsed =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-    CHECK(elapsed < 1000);  // « the 3 s serial timeout a busy-spin would burn
+    const auto elapsed = wait_not_connected([&]() { driver->get_position(); }).count();
+    CHECK(elapsed < 1500);  // one 250 ms poll tick plus a fast failure, « the 3 s serial timeout a busy-spin would burn
 
     driver->set_connected(false);
 }
@@ -330,7 +345,7 @@ TEST_CASE("QHY Q-Focuser Driver - lost link drops Connected and reconnects", "[q
     CHECK(fake.connects() == 1);
 
     port.unplug();
-    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    wait_not_connected([&]() { driver->get_position(); });
     CHECK(driver->get_connected() == false);
     require_alpaca_error([&]() { driver->get_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(1200); }, alpacacore::AlpacaError::NotConnected);
@@ -356,16 +371,21 @@ TEST_CASE("QHY Q-Focuser Driver - garbage replies do not busy-spin the kick loop
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path());
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    // The state poll (250 ms period) now drives the wire: let the first garbage
+    // poll start, then watch it through its 3 s deadline plus the next poll.
     fake.set_garbage(true);
     const int before = fake.kicks();
     const auto start = std::chrono::steady_clock::now();
-    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::DriverException);
-    const auto elapsed_ms =
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+    while (fake.kicks() == before && std::chrono::steady_clock::now() - start < std::chrono::seconds(3)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const int first = fake.kicks();
+    std::this_thread::sleep_for(std::chrono::milliseconds(3200));
     const int kicks = fake.kicks() - before;
-    INFO("kicks=" << kicks << " elapsed_ms=" << elapsed_ms);
-    // 3 s deadline / 50 ms floor = 60 kicks at most, plus the proactive one.
-    CHECK(kicks <= 70);
+    INFO("kicks=" << kicks << " first=" << first - before);
+    // 3 s deadline / 50 ms floor = 60 kicks at most per poll, plus the proactive
+    // one; the window holds at most two polls. A busy-spin is thousands.
+    CHECK(kicks <= 140);
     CHECK(kicks >= 1);
 
     fake.set_garbage(false);
@@ -408,7 +428,7 @@ TEST_CASE("QHY Q-Focuser Driver - explicit disconnect after lost link clears sta
     REQUIRE(driver->get_device_firmware().has_value());
 
     port.unplug();
-    require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    wait_not_connected([&]() { driver->get_position(); });
     CHECK(driver->get_connected() == false);
 
     driver->set_connected(false);

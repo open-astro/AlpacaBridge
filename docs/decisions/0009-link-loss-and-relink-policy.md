@@ -47,7 +47,7 @@ Revert the PR. The bound is one constant, so "never lost by silence" is a one-li
 | WandererAstro (cover, filter wheel, box, rotator) | Stream latch; `Connected` stays true | planned follow-up |
 | Gemini PDH, flat panel, focuser | Polled latch; `Connected` stays true | planned follow-up |
 | iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | planned follow-up |
-| QHY Q-Focuser | `link_lost_` latch on the next transaction (#527) | planned follow-up |
+| QHY Q-Focuser | `link_lost_` latch on the next transaction (#527); applied with the state snapshot (#1310): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault | #1310 |
 | OnStep (serial) | Applied: node check, fd errors, relink; the #521 window is timed from the last time the link was seen alive to the end of the reconnect (see the OnStep instructions) | #1241 |
 | SynScan, Celestron, Bisque | No latch; transport errors only | planned follow-up |
 | Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One, Astroasis) | SDK error on the next call | planned follow-up |

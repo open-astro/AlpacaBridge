@@ -76,6 +76,7 @@ if(TARGET alpacacore_qhy)
     # Q-Focuser: serial JSON protocol, no SDK; the pty fake gives it a real
     # connect path, so it carries its own [stress] registration.
     list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
+    list(APPEND TEST_SOURCES test_qhy_focuser_snapshot.cpp)
     list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_qhy_focuser_deferred_connect.cpp)

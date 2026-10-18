@@ -14,6 +14,7 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 
 #include <memory>
@@ -49,6 +50,11 @@ struct QFocuserSettings {
  */
 std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::string& serial_port,
                                                   const QFocuserSettings& settings = {});
+
+/// As above, with the clock the state poll waits on injected (tests pass a
+/// FakeTaskClock so a poll tick is an advance(), not a sleep).
+std::unique_ptr<FocuserDriver> create_qhy_focuser(int device_number, const std::string& serial_port,
+                                                  const QFocuserSettings& settings, util::TaskClock& clock);
 
 /// Port resolved at connect time by `resolver` (#659); the by-index factory
 /// below wraps it, tests inject a fake's pty path.
