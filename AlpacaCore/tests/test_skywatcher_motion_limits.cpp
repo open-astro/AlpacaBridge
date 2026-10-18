@@ -243,6 +243,7 @@ TEST_CASE("SkyWatcher limits - a refused goto leaves a goto in flight running", 
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, floor_deg(15.0));
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = near_pole_ra(*driver);
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
     REQUIRE(driver->get_slewing());
@@ -266,6 +267,7 @@ TEST_CASE("SkyWatcher limits - a legal goto during a park in flight is refused a
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, floor_deg(15.0));
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.jump_axis_degrees(1, 30.0);
     mount.jump_axis_degrees(2, 20.0);
     driver->park();
@@ -313,6 +315,7 @@ TEST_CASE("SkyWatcher limits - a later Park supersedes a synchronous slew withou
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.jump_axis_degrees(1, 30.0);
     mount.jump_axis_degrees(2, 20.0);
     const double ra = near_pole_ra(*driver);
@@ -328,7 +331,7 @@ TEST_CASE("SkyWatcher limits - a later Park supersedes a synchronous slew withou
         }
     });
     REQUIRE(follow_until(
-        clock, [&] { return mount.axis_running(1) || mount.axis_running(2); }, std::chrono::milliseconds(5000)));
+        clock, [&] { return mount.axis_in_goto(1) || mount.axis_in_goto(2); }, std::chrono::milliseconds(5000)));
 
     driver->park();
     REQUIRE(pump_until(clock, mount, [&] { return slew_result.load() != -1; }, std::chrono::seconds(10)));
@@ -344,6 +347,7 @@ TEST_CASE("SkyWatcher limits - AbortSlew supersedes a blocking synchronous slew"
     REQUIRE(mount.ok());
     mount.set_stop_ramp_ms(800);
     auto driver = connected_driver(mount);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.jump_axis_degrees(1, 30.0);
     mount.jump_axis_degrees(2, 20.0);
     const double ra = near_pole_ra(*driver);
@@ -358,7 +362,7 @@ TEST_CASE("SkyWatcher limits - AbortSlew supersedes a blocking synchronous slew"
             result.store(-2);
         }
     });
-    REQUIRE(wait_until([&] { return mount.axis_running(1) || mount.axis_running(2); }, 5000));
+    REQUIRE(wait_until([&] { return mount.axis_in_goto(1) || mount.axis_in_goto(2); }, 5000));
 
     driver->abort_slew();
     sync_slew.join();
@@ -417,6 +421,7 @@ TEST_CASE("SkyWatcher limits - an out-of-range goto leaves a slew in flight runn
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, floor_deg(15.0));
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = near_pole_ra(*driver);
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
     REQUIRE(driver->get_slewing());
@@ -469,6 +474,7 @@ TEST_CASE("SkyWatcher limits - a goto above the floor is unchanged, sync and asy
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, floor_deg(15.0));
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = near_pole_ra(*driver);
 
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
@@ -492,6 +498,7 @@ TEST_CASE("SkyWatcher limits - limits off means no behaviour change", "[skywatch
     // absent or null config field produces. The same target the refused
     // cases use must now go through.
     auto driver = connected_driver(mount, MotionLimits{});
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = near_pole_ra(*driver);
 
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
@@ -511,6 +518,7 @@ TEST_CASE("SkyWatcher limits - a meridian limit alone never refuses a goto", "[s
     MotionLimits limits;
     limits.meridian_limit_minutes = 5.0;
     auto driver = connected_driver(mount, limits);
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = near_pole_ra(*driver);
 
     driver->slew_to_coordinates_async(ra, kNearPoleDec);
@@ -641,6 +649,7 @@ TEST_CASE("SkyWatcher limits - a MoveAxis that supersedes a synchronous slew is 
     REQUIRE(mount.ok());
     mount.jump_axis_degrees(2, kGuardDecAxisDeg);
     auto driver = connected_driver(mount, floor_deg(kGuardAltitudeDeg - 1.5));
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     REQUIRE(std::abs(driver->get_altitude() - kGuardAltitudeDeg) < 0.2);
     const double ra = driver->get_right_ascension();  // same hour angle: a Dec-only goto that raises the tube
     std::atomic<int> result{-1};
@@ -1102,6 +1111,42 @@ TEST_CASE("SkyWatcher limits - disconnect during a guarded MoveAxis joins the gu
     CHECK_FALSE(driver->get_connected());
     driver.reset();
     CHECK(sw::detail::limit_guard_bodies_running() == 0);
+}
+
+TEST_CASE("SkyWatcher tracking guard - all four equatorial slews are refused while Tracking is false",
+          "[skywatcher][telescope][tracking-guard]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    REQUIRE_FALSE(driver->get_tracking());
+    const double ra = near_pole_ra(*driver);
+    const auto before = MotionFrames::snapshot(mount);
+
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&] { driver->slew_to_coordinates(ra, kNearPoleDec); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(ra, kNearPoleDec); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    driver->set_target_right_ascension(ra);
+    driver->set_target_declination(kNearPoleDec);
+    require_alpaca_error([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+
+    // The async forms return at once, so give a wrongly started task time to show itself.
+    CHECK_FALSE(wait_until([&] { return !(MotionFrames::snapshot(mount) == before); }, 500));
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    CHECK_FALSE(driver->get_slewing());
+
+    // With Tracking on the same call goes through.
+    driver->set_tracking(true);
+    driver->slew_to_coordinates_async(ra, kNearPoleDec);
+    CHECK(driver->get_slewing());
+    REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 30000));
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

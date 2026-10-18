@@ -5971,6 +5971,13 @@ private:
             check_not_parked_locked(who);
             validate_ra_dec(ra, dec, who);
             check_target_altitude_locked(ra, dec, who);
+            // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+            // (open-astro#1274). Read it as the Tracking getter does.
+            settle_unconfirmed_tracking_stop_locked();
+            if (!tracking_) {
+                throw AlpacaException(std::string(who) + " requires Tracking to be true",
+                                      AlpacaError::InvalidOperation);
+            }
         };
         {
             // A refused goto must not cancel a goto, park or pulse in flight,

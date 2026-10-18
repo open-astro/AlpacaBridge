@@ -106,6 +106,7 @@ TEST_CASE("SkyWatcher async - a slew that fails after dispatch surfaces through 
     // The goto starts RA first; refusing that ":J" with "!2" (Motor not
     // stopped) makes dispatch_predicted_goto_locked() throw INSIDE the slew
     // task, after slew_to_coordinates_async() has already returned.
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);
     const double lst = driver->get_sidereal_time();
     const double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
@@ -131,6 +132,8 @@ TEST_CASE("SkyWatcher async - a slew that fails after dispatch surfaces through 
 
     // And a fresh async slew (the fake accepts this one) is a clean start:
     // Slewing=true with no stale error in the way, landing as usual.
+    // The failed goto left Tracking off, so the client switches it on again first.
+    driver->set_tracking(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(target_ra, 40.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
     REQUIRE(run_clock_until(
@@ -145,6 +148,7 @@ TEST_CASE("SkyWatcher async - a new slew initiator replaces the stored failure (
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
 
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);
     const double lst = driver->get_sidereal_time();
     const double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);

@@ -339,6 +339,7 @@ TEST_CASE("SkyWatcher snapshot - asynchronous initiators make no position read",
         initiator();
         return mount.frames_seen('j') - before;
     };
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double lst = driver->get_sidereal_time();
     CHECK(position_reads([&] { driver->move_axis(1, 0.0); }) == 0);  // nothing moving: the no-op
     CHECK(position_reads([&] { driver->move_axis(1, 1.0); }) == 0);

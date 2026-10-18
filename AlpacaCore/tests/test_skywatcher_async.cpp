@@ -3982,6 +3982,7 @@ TEST_CASE("SkyWatcher async - a slew refused at dispatch still publishes the tar
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
+    driver->set_tracking(true);       // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);  // kAxisRa; the goto starts RA first, so that throw is the dispatch failure
     CHECK_THROWS_AS(driver->slew_to_coordinates(5.5, -25.0), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_slewing());

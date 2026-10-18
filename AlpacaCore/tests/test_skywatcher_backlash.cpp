@@ -262,6 +262,7 @@ struct Run {
 Run run(const FakeMountProfile& profile, const sw::BacklashSettings& backlash, const std::vector<double>& decs) {
     Rig rig(backlash, profile, kSouth, /*shared_clock=*/true);
     auto& [clock, mount, driver] = rig;
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = driver->get_sidereal_time();
     Run result;
     for (const double dec : decs) {
@@ -551,6 +552,7 @@ TEST_CASE("SkyWatcher backlash - Dec landings after guide pulses stay within one
         Rig rig(backlash, profile, kSouth, /*shared_clock=*/true);
         auto& [clock, mount, driver] = rig;
         mount.set_gear_gap(2, kGap);
+        driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
         const double ra = driver->get_sidereal_time();
         const auto pulse = [&](int direction) {
             const double before = mount.axis_degrees(2);
@@ -613,6 +615,7 @@ TEST_CASE("SkyWatcher backlash - a slew wait that times out with a final leg owe
 TEST_CASE("SkyWatcher backlash - a second goto during the first leg lands on its own target",
           "[skywatcher][telescope][backlash]") {
     MidFirstLeg rig;
+    rig.driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     rig.mount.clear_motion_log();
     // Three hours west of the meridian: on this board and site that is the
     // Dec branch whose axis angle for Dec -70 is +20 degrees, so the second
@@ -724,6 +727,7 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
         auto* t = dynamic_cast<alpacacore::TelescopeDriver*>(idle.get());
         REQUIRE(t != nullptr);
         t->set_connected(true);
+        t->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
         const double ra0 = t->get_sidereal_time();
         mount.clear_motion_log();
         for (const double dec : kBackAndForth) land(clock, *t, mount, ra0, dec);
@@ -770,6 +774,7 @@ TEST_CASE("SkyWatcher backlash - the catalog keys default to off, are range-chec
     auto* telescope = dynamic_cast<alpacacore::TelescopeDriver*>(driver.get());
     REQUIRE(telescope != nullptr);
     telescope->set_connected(true);
+    telescope->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     const double ra = telescope->get_sidereal_time();
     mount.clear_motion_log();
     for (const double dec : kBackAndForth) land(clock, *telescope, mount, ra, dec);

@@ -1179,7 +1179,7 @@ TEST_CASE("SkyWatcher pointing - MoveAxis is sky-referenced on the primary axis,
             REQUIRE(mount.ok());
             auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
             driver->set_connected(true);
-            driver->set_tracking(false);
+            driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
 
             const double lst = driver->get_sidereal_time();
             land_on_fake_clock(clock, *driver, mount, std::fmod(lst + 1.0, 24.0), site.dec);  // HA -1 h
@@ -1214,7 +1214,7 @@ TEST_CASE(
                 REQUIRE(mount.ok());
                 auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site.latitude, site.longitude, 40.0);
                 driver->set_connected(true);
-                driver->set_tracking(false);
+                driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
 
                 const double lst = driver->get_sidereal_time();
                 const LandedFrame f =
@@ -1540,9 +1540,9 @@ TEST_CASE("SkyWatcher pointing - landing is reported when the board reports stop
     const double latitude = 45.0;
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), latitude, 11.0, 100.0);
     driver->set_connected(true);
-    // Tracking stays off: the RA axis is stationary between gotos, so no
-    // sidereal motion in virtual time can drift from the driver's wall-clock
-    // LST, and the landing is the only thing being timed.
+    // Equatorial slews need Tracking (open-astro#1274). It is switched on here, before
+    // the clock-timed goto, so the landing is still the only thing being timed.
+    driver->set_tracking(true);
     const double lst = driver->get_sidereal_time();
     const double target_ra = std::fmod(lst - 1.0 + 24.0, 24.0);  // HA +1 h
     const double target_dec = 30.0;                              // 60 deg on the dec axis: 18 s at 800x sidereal
@@ -1568,7 +1568,8 @@ TEST_CASE("SkyWatcher pointing - landing is reported when the board reports stop
     const double took = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_started).count();
     const int polls = mount.frames_seen('f') - polls_at_start;
     INFO("Slewing cleared " << took << " s after the goto started; " << polls << " status polls reached the board");
-    CHECK(!mount.axis_running(1));
+    // RA is back on its sidereal drive (Tracking was on for the goto), so only the goto has ended.
+    CHECK(!mount.axis_in_goto(1));
     CHECK(!mount.axis_running(2));
     CHECK(polls > 0);
     CHECK(took < 5.0);
