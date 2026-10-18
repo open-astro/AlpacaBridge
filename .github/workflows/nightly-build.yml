@@ -23,7 +23,7 @@
 #
 # The same run also builds all vendors optimized and runs the full suite
 # (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
-# nothing else tests the optimized, NDEBUG code the .deb ships. The test job
+# nothing else tests optimized, NDEBUG code like the .deb's. The test job
 # runs beside the .deb build, not before it: a red suite fails the run but
 # does not stop the nightly from publishing.
 #
@@ -164,7 +164,7 @@ jobs:
           restore-keys: ccache-nightly-optimized-
 
       - name: Build + run tests (all vendors, Release)
-        # Release is what debian/rules ships (-O3 -DNDEBUG). CMake reads
+        # Release is optimized like the .deb (-O3 -DNDEBUG). CMake reads
         # CMAKE_BUILD_TYPE from the environment on a fresh configure, and
         # run_all_tests.sh wipes its build tree first.
         env:
