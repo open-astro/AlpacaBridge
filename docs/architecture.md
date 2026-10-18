@@ -195,7 +195,7 @@ over the same sd-bus connection to start the root-owned oneshot unit
 `alpacabridge-update.service`, whose `ExecStart` is fixed to the packaged
 helper script, and a second polkit rule
 (`50-alpacabridge-update.rules`) lets the service user start exactly that unit
-and nothing else. The version check needs no privilege at all: it fetches the
+and the two update-channel instances (`alpacabridge-channel@stable.service`, `@beta.service`, which add or remove the beta apt source) and nothing else. The version check needs no privilege at all: it fetches the
 repository's `Packages` index with libcurl in-process. Routes live under
 `/management/v1/update/`.
 
@@ -211,7 +211,7 @@ issue #348 the rest:
 `restart`, `shutdown`, `configuredevice`, `removedevice`, `loglevel`, the
 `description` `PUT`/`POST` and both forms of `DELETE /management/v1/logfiles` (the
 collection and a single named file), and since 4.2.0 `update/check` and
-`update/install`. Note that
+`update/install` (and `update/channel`). Note that
 it compares the request's `Origin` against the request's own `Host`, so it
 stops a drive-by from an attacker-controlled origin but not DNS rebinding
 (issue #392). `GET /management/v1/buildinfo` (3.6.0) is a read-only companion

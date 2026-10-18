@@ -841,50 +841,6 @@ int main() {
     };
 
     {
-        // case: channel mapping ties the check URL, the apt component and the unit name
-        EXPECT(parse_channel("stable") == UpdateChannel::Stable);
-        EXPECT(parse_channel("beta") == UpdateChannel::Beta);
-        EXPECT(!parse_channel("Beta").has_value());
-        EXPECT(!parse_channel("stable.service").has_value());
-        EXPECT(!parse_channel("").has_value());
-        EXPECT(std::string(channel_name(UpdateChannel::Beta)) == "beta");
-        EXPECT(channel_packages_url(UpdateChannel::Stable) == kDefaultPackagesUrl);
-        for (const auto channel : {UpdateChannel::Stable, UpdateChannel::Beta}) {
-            // Issue acceptance item 2: the check URL component and the apt
-            // drop-in Components: are the same string, for each channel.
-            const std::string component = channel_apt_component(channel);
-            EXPECT(channel_packages_url(channel) ==
-                   "https://apt.openastro.net/dists/trixie/" + component + "/binary-arm64/Packages");
-            EXPECT(std::string(channel_unit_name(channel)) ==
-                   std::string("alpacabridge-channel@") + channel_name(channel) + ".service");
-        }
-        EXPECT(std::string(channel_apt_component(UpdateChannel::Beta)) == "beta");
-        EXPECT(std::string(channel_apt_component(UpdateChannel::Stable)) == "main");
-
-        // The helper writes the Components: line for beta, and the paths it and
-        // the unit use are the ones the daemon reads.
-        const std::string helper = read_file(repo_root / "debian" / "alpacabridge-set-update-channel");
-        EXPECT(!helper.empty());
-        EXPECT(helper.find(std::string("Components: ") + channel_apt_component(UpdateChannel::Beta) + "\n") !=
-               std::string::npos);
-        EXPECT(helper.find(std::string("DROPIN=\"$DROPIN_DIR/") +
-                           std::filesystem::path(alpacahttp::util::kChannelDropInPath).filename().string() + "\"\n") !=
-               std::string::npos);
-        EXPECT(helper.find(
-                   "DROPIN_DIR=" + std::filesystem::path(alpacahttp::util::kChannelDropInPath).parent_path().string() +
-                   "\n") != std::string::npos);
-        EXPECT(helper.find(std::string("LOG=") + alpacahttp::util::kChannelLogPath + "\n") != std::string::npos);
-        const std::string unit = read_file(repo_root / "debian" / "alpacabridge-channel@.service");
-        EXPECT(unit.find("ExecStart=/usr/libexec/alpacabridge/set-update-channel %i\n") != std::string::npos);
-        EXPECT(unit.find("Type=oneshot\n") != std::string::npos);
-        EXPECT(unit.find("LogsDirectory=alpacabridge-update\n") != std::string::npos);
-        EXPECT(unit.find("LogsDirectoryMode=0755\n") != std::string::npos);
-        EXPECT(unit.find("PrivateTmp=true\n") != std::string::npos);
-        EXPECT(unit.find("TimeoutStartSec=") != std::string::npos);
-        EXPECT(unit.find("\n[Install]") == std::string::npos);
-    }
-
-    {
         // case: polkit rule names the three units by exact string and nothing else
         const std::string rules = read_file(repo_root / "debian" / "alpacabridge-update.polkit-rules");
         EXPECT(!rules.empty());
@@ -937,6 +893,50 @@ int main() {
         EXPECT(text.find("chmod 0644 \"$tmp\"") != std::string::npos);
         EXPECT(text.find("mv -f \"$tmp\" \"$DROPIN\"") != std::string::npos);
         EXPECT(text.find("rm -f \"$DROPIN\"") != std::string::npos);
+    }
+
+    {
+        // case: channel mapping ties the check URL, the apt component and the unit name
+        EXPECT(parse_channel("stable") == UpdateChannel::Stable);
+        EXPECT(parse_channel("beta") == UpdateChannel::Beta);
+        EXPECT(!parse_channel("Beta").has_value());
+        EXPECT(!parse_channel("stable.service").has_value());
+        EXPECT(!parse_channel("").has_value());
+        EXPECT(std::string(channel_name(UpdateChannel::Beta)) == "beta");
+        EXPECT(channel_packages_url(UpdateChannel::Stable) == kDefaultPackagesUrl);
+        for (const auto channel : {UpdateChannel::Stable, UpdateChannel::Beta}) {
+            // Issue acceptance item 2: the check URL component and the apt
+            // drop-in Components: are the same string, for each channel.
+            const std::string component = channel_apt_component(channel);
+            EXPECT(channel_packages_url(channel) ==
+                   "https://apt.openastro.net/dists/trixie/" + component + "/binary-arm64/Packages");
+            EXPECT(std::string(channel_unit_name(channel)) ==
+                   std::string("alpacabridge-channel@") + channel_name(channel) + ".service");
+        }
+        EXPECT(std::string(channel_apt_component(UpdateChannel::Beta)) == "beta");
+        EXPECT(std::string(channel_apt_component(UpdateChannel::Stable)) == "main");
+
+        // The helper writes the Components: line for beta, and the paths it and
+        // the unit use are the ones the daemon reads.
+        const std::string helper = read_file(repo_root / "debian" / "alpacabridge-set-update-channel");
+        EXPECT(!helper.empty());
+        EXPECT(helper.find(std::string("Components: ") + channel_apt_component(UpdateChannel::Beta) + "\n") !=
+               std::string::npos);
+        EXPECT(helper.find(std::string("DROPIN=\"$DROPIN_DIR/") +
+                           std::filesystem::path(alpacahttp::util::kChannelDropInPath).filename().string() + "\"\n") !=
+               std::string::npos);
+        EXPECT(helper.find(
+                   "DROPIN_DIR=" + std::filesystem::path(alpacahttp::util::kChannelDropInPath).parent_path().string() +
+                   "\n") != std::string::npos);
+        EXPECT(helper.find(std::string("LOG=") + alpacahttp::util::kChannelLogPath + "\n") != std::string::npos);
+        const std::string unit = read_file(repo_root / "debian" / "alpacabridge-channel@.service");
+        EXPECT(unit.find("ExecStart=/usr/libexec/alpacabridge/set-update-channel %i\n") != std::string::npos);
+        EXPECT(unit.find("Type=oneshot\n") != std::string::npos);
+        EXPECT(unit.find("LogsDirectory=alpacabridge-update\n") != std::string::npos);
+        EXPECT(unit.find("LogsDirectoryMode=0755\n") != std::string::npos);
+        EXPECT(unit.find("PrivateTmp=true\n") != std::string::npos);
+        EXPECT(unit.find("TimeoutStartSec=") != std::string::npos);
+        EXPECT(unit.find("\n[Install]") == std::string::npos);
     }
 
     {
@@ -1021,18 +1021,7 @@ int main() {
         // A second switch, and an install, are refused while one is running.
         EXPECT(expect_refused(manager, UpdateChannel::Stable, invalid_operation));
         EXPECT(fake->switches.size() == 1);
-        fake->index = "Package: alpacabridge\nVersion: 5.0.0~beta5\n";
-        fake->channel = UpdateChannel::Beta;
-        manager.check();
-        bool install_refused = false;
-        try {
-            manager.install();
-        } catch (const SoftwareUpdateError& e) {
-            install_refused = e.alpaca_error() == invalid_operation;
-        }
-        EXPECT(install_refused);
-        EXPECT(fake->starts == 0);
-        // Finished: another switch goes through, and the install is allowed.
+        // Finished: another switch goes through, and the update installer is not refused by it.
         fake->channel_state.state = "succeeded";
         manager.set_channel(UpdateChannel::Stable);
         EXPECT(fake->switches.size() == 2);

@@ -403,7 +403,7 @@ The Debian package is built from the `debian/` directory. It installs:
 - Vendor libraries under `/usr/lib/alpacabridge`, and libgphoto2 with its camlibs under `/usr/lib/alpacabridge/libgphoto2` (built from the vendored tarball; the executables find it through an rpath, so the host's own libgphoto2 packages are untouched and still used by other programs, and AlpacaBridge no longer depends on them; [decision 0012](decisions/0012-bundled-libgphoto2.md))
 - Configuration under `/etc/alpacabridge`
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
-- The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit (see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
+- The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit and the two `alpacabridge-channel@stable`/`@beta` update-channel units (helper `/usr/libexec/alpacabridge/set-update-channel`; see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
 
 ## Releases
 
