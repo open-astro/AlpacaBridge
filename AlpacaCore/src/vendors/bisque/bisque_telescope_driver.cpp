@@ -1074,6 +1074,7 @@ private:
             }
             slewing_cached_ = false;
         } catch (const std::exception&) {
+            return false;  // keep slewing_cached_: a failed poll is not completion
         }
         return false;
     }
