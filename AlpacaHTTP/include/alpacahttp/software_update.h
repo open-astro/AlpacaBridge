@@ -134,6 +134,11 @@ struct InstallerState {
 InstallerState classify_installer_state(const std::string& active_state, const std::string& sub_state,
                                         const std::string& result, bool job_pending, const std::string& log);
 
+// The channel switch with no unit running: judged by the transcript alone,
+// and `detail` is the transcript's last result line (it carries the apt exit
+// code of a failed switch).
+InstallerState classify_channel_switch_log(const std::string& log);
+
 class SoftwareUpdateBackend {
 public:
     virtual ~SoftwareUpdateBackend() = default;

@@ -106,7 +106,7 @@ any argument but `stable` or `beta` before it touches apt.
   and cannot verify the beta source). `/etc/apt/sources.list.d/openastro.list` is
   never edited, and `apt purge alpacabridge` removes the beta source.
 
-The transcript is `/var/log/alpacabridge-update/channel.log` (same root-owned
+The card shows a finished switch only on the page that started or joined it, and a failed one carries the helper's result line (with the apt exit code) as its detail. The transcript is `/var/log/alpacabridge-update/channel.log` (same root-owned
 `LogsDirectory=` as the update transcript, `kChannelLogPath`), ending in the
 same `=== RESULT: success|failure` markers. A finished switch is judged by that
 transcript, never by a template instance's own `failed` state, which stays

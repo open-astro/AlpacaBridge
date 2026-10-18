@@ -2222,11 +2222,14 @@ function updateRenderChannel(status) {
     if (note) note.textContent = state.note;
     const channelSwitch = status.ChannelSwitch || {};
     if (line) {
-        line.textContent = channelSwitchText(channelSwitch);
-        line.classList.toggle('error', channelSwitch.State === 'failed');
+        line.textContent = channelSwitchText(channelSwitch, channelSwitchStartedHere);
+        line.classList.toggle('error', channelSwitchStartedHere && channelSwitch.State === 'failed');
     }
 }
 
+// True once this page started a switch; a finished switch from an earlier
+// session is not announced again.
+let channelSwitchStartedHere = false;
 let channelPollTimer = null;
 let channelPollInFlight = false;
 
@@ -2284,6 +2287,7 @@ async function updateChannelChanged() {
     select.disabled = true;
     updateMessage('');
     try {
+        channelSwitchStartedHere = true;
         updateRender(await updateApi('channel', 'POST', { Channel: choice }));
         channelStartPolling();
     } catch (error) {
@@ -2297,7 +2301,10 @@ async function updateRefresh() {
     try {
         const status = await updateApi('status', 'GET');
         updateRender(status);
-        if ((status.ChannelSwitch || {}).State === 'running') channelStartPolling();
+        if ((status.ChannelSwitch || {}).State === 'running') {
+            channelSwitchStartedHere = true;
+            channelStartPolling();
+        }
         if ((status.Installer || {}).State === 'running') {
             // A page opened (or reloaded) mid-install joins the run: remember
             // the version now answering so the poll can still detect the

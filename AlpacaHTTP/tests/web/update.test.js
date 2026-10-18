@@ -198,8 +198,10 @@ test('choosing stable on a beta build says the build stays until stable overtake
 
 test('channel switch progress and result text', () => {
     assert.match(channelSwitchText({ State: 'running' }), /Switching/);
-    assert.match(channelSwitchText({ State: 'succeeded' }), /was switched/);
-    assert.strictEqual(channelSwitchText({ State: 'failed', Detail: 'x' }), 'Switching the update channel failed. (x)');
+    assert.match(channelSwitchText({ State: 'succeeded' }, true), /was switched/);
+    assert.strictEqual(channelSwitchText({ State: 'succeeded' }), '');
+    assert.strictEqual(channelSwitchText({ State: 'failed', Detail: 'x' }), '');
+    assert.strictEqual(channelSwitchText({ State: 'failed', Detail: 'x' }, true), 'Switching the update channel failed. (x)');
     assert.strictEqual(channelSwitchText({ State: 'idle' }), '');
     assert.strictEqual(channelSwitchText(undefined), '');
 });

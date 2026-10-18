@@ -520,6 +520,22 @@ InstallerState SystemSoftwareUpdateBackend::installer_state() {
     return state;
 }
 
+InstallerState classify_channel_switch_log(const std::string& log) {
+    InstallerState state = classify_installer_state("inactive", "dead", "", false, log);
+    // No unit is running, so the made-up systemd snapshot says nothing; the
+    // helper's own result line (it carries the apt exit code) does.
+    if (last_result_marker(log) != 0) {
+        const std::string tag = "=== RESULT: ";
+        const auto pos = log.rfind(tag);
+        if (pos != std::string::npos) {
+            auto end = log.find('\n', pos);
+            if (end == std::string::npos) end = log.size();
+            state.detail = log.substr(pos + tag.size(), end - pos - tag.size());
+        }
+    }
+    return state;
+}
+
 InstallerState SystemSoftwareUpdateBackend::channel_switch_state() {
     InstallerState state;
     state.log = read_log_tail(channel_log_path_, SoftwareUpdateManager::kLogTailBytes);
@@ -538,7 +554,7 @@ InstallerState SystemSoftwareUpdateBackend::channel_switch_state() {
     const InstallerState classified =
         snapshot_running(stable) || snapshot_running(beta)
             ? classify_installer_state(busy.active, busy.sub, busy.result, busy.job_pending, state.log)
-            : classify_installer_state("inactive", "dead", "", false, state.log);
+            : classify_channel_switch_log(state.log);
     state.state = classified.state;
     state.detail = classified.detail;
     return state;

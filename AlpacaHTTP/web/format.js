@@ -281,8 +281,11 @@ function channelDowngradeNotice(choice, installedVersion) {
 }
 
 // The channel helper half of the payload; '' when there is nothing to say.
-function channelSwitchText(channelSwitch) {
+// A finished switch is reported only when this page started it: the helper's
+// transcript outlives the run, and a reload weeks later must not repeat it.
+function channelSwitchText(channelSwitch, startedHere) {
     const source = channelSwitch || {};
+    if (source.State !== 'running' && !startedHere) return '';
     switch (source.State) {
         case 'running':
             return 'Switching the update channel...';
