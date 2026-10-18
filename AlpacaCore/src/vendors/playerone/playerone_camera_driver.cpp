@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -148,12 +149,13 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     PlayerOneCameraDriver(int device_number, int camera_index, PlayerOneSDK& sdk,
-                          std::chrono::steady_clock::duration completion_grace)
+                          std::chrono::steady_clock::duration completion_grace, util::TaskClock& clock)
         : AsyncConnectable("PlayerOne"),
           device_number_(device_number),
           camera_index_(camera_index),
           sdk_(sdk),
-          completion_grace_(completion_grace) {
+          completion_grace_(completion_grace),
+          clock_(clock) {
         preload_camera_info();
     }
 
@@ -520,7 +522,7 @@ public:
         if (!connected_.load()) return CameraState::Idle;
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_.load() || !exposure_active_.load() || !exposure_failure_.empty()) return CameraState::Idle;
-        if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+        if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
             ALPACA_LOG_WARN("PlayerOne", "Exposure deadline exceeded; forcing CameraState=Idle.");
             exposure_deadline_valid_ = false;
             exposure_failure_ = "Player One exposure exceeded its completion deadline";
@@ -998,7 +1000,8 @@ public:
         }
         auto pulse_task = [this, pulse_camera_id, dir, duration]() {
             std::unique_lock<std::mutex> lock(pulse_timer_mutex_);
-            pulse_timer_cv_.wait_for(lock, std::chrono::milliseconds(duration), [this] { return cancel_pulse_timer_; });
+            clock_.wait_for(lock, pulse_timer_cv_, std::chrono::milliseconds(duration),
+                            [this] { return cancel_pulse_timer_; });
             lock.unlock();
             try {
                 sdk_.pulse_guide_off(pulse_camera_id, dir);
@@ -1134,8 +1137,7 @@ public:
             exposure_failure_.clear();
             image_ready_ = false;
             last_image_.reset();
-            active_deadline =
-                std::chrono::steady_clock::now() + std::chrono::microseconds(exposure_us_long) + completion_grace_;
+            active_deadline = clock_.now() + std::chrono::microseconds(exposure_us_long) + completion_grace_;
             exposure_deadline_ = active_deadline;
             exposure_deadline_valid_ = true;
             exposure_cancel_requested_.store(false);
@@ -1266,13 +1268,13 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (exposure_cancel_requested_.load()) throw ExposureCancelled{};
-                    if (std::chrono::steady_clock::now() >= active_deadline) {
+                    if (clock_.now() >= active_deadline) {
                         throw AlpacaException("Exposure setup exceeded its completion deadline",
                                               AlpacaError::DriverException);
                     }
                     sdk.set_config_int(id, /*config_id=*/0, exposure_us_long, false);  // POA_EXPOSURE
                     exposure_start_ = std::chrono::system_clock::now();
-                    exposure_steady_start_ = std::chrono::steady_clock::now();
+                    exposure_steady_start_ = clock_.now();
                     sdk_exposure_started_ = true;
                     sdk.start_exposure(id, /*single_frame=*/true);
                 }
@@ -1304,7 +1306,7 @@ public:
                 bool ready = false;
                 std::string readiness_failure;
                 while (exposure_active_.load() && !exposure_cancel_requested_.load() &&
-                       std::chrono::steady_clock::now() < active_deadline) {
+                       clock_.now() < active_deadline) {
                     try {
                         if (sdk.image_ready(id)) {
                             ready = true;
@@ -1315,7 +1317,7 @@ public:
                         ALPACA_LOG_WARN("PlayerOne", std::string("image_ready failed: ") + e.what());
                         break;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    clock_.sleep_for(std::chrono::milliseconds(50));
                 }
 
                 if (!ready || exposure_cancel_requested_.load()) {
@@ -1337,8 +1339,8 @@ public:
                             download_active_ = true;
                         }
                     }
-                    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        active_deadline - std::chrono::steady_clock::now());
+                    const auto remaining =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(active_deadline - clock_.now());
                     const int download_timeout_ms =
                         static_cast<int>(std::clamp<std::int64_t>(remaining.count(), 0, 5000));
                     const bool got = exposure_cancel_requested_.load()
@@ -1362,7 +1364,7 @@ public:
                         std::lock_guard<std::mutex> lock(mutex_);
                         if (exposure_cancel_requested_.load()) {
                             // Cancellation owns the terminal state; never publish this frame.
-                        } else if (std::chrono::steady_clock::now() < active_deadline && exposure_failure_.empty()) {
+                        } else if (clock_.now() < active_deadline && exposure_failure_.empty()) {
                             last_image_ = std::move(cached_image);
                             image_ready_ = true;
                             exposure_active_.store(false);
@@ -1420,6 +1422,7 @@ private:
     int camera_index_;
     PlayerOneSDK& sdk_;
     const std::chrono::steady_clock::duration completion_grace_;
+    util::TaskClock& clock_;
     PlayerOneCameraInfo camera_info_{};
     bool camera_info_valid_{false};
     PlayerOneConfigCaps caps_{};
@@ -1892,8 +1895,9 @@ std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int cam
 }
 
 std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int camera_index, PlayerOneSDK& sdk,
-                                                      std::chrono::steady_clock::duration completion_grace) {
-    return std::make_unique<PlayerOneCameraDriver>(device_number, camera_index, sdk, completion_grace);
+                                                      std::chrono::steady_clock::duration completion_grace,
+                                                      util::TaskClock& clock) {
+    return std::make_unique<PlayerOneCameraDriver>(device_number, camera_index, sdk, completion_grace, clock);
 }
 
 }  // namespace alpacacore::vendor::playerone
