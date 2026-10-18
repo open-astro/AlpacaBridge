@@ -14,8 +14,10 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
+#include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -25,6 +27,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -381,6 +384,89 @@ private:
     bool download_entered_{false};
     bool download_in_progress_{false};
     bool closed_during_download_{false};
+};
+
+// Scripted ZWODewHeaterSdk for the dew heater switch. Thread-safe: the driver
+// calls the SDK without its own lock, so the stress registration reaches this
+// fake from several threads. Setup fields (cameras, heater_by_id,
+// serial_by_id) are written before the driver exists and only read after; the
+// rest is atomic or behind call_mutex_. No method blocks.
+class FakeDewHeaterSdk final : public vendor::zwo::ZWODewHeaterSdk {
+public:
+    std::atomic<int> reads{0};
+    std::atomic<bool> fail_reads{false};
+    std::atomic<int> last_read_id{-1};
+    std::atomic<int> enumerations{0};
+    std::atomic<int> serial_reads{0};
+    std::atomic<long> heater{40};
+
+    std::vector<vendor::zwo::ZWOCameraInfo> cameras;
+    // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
+    std::map<int, bool> heater_by_id;
+    std::map<int, std::string> serial_by_id;
+
+    /// Every camera id any per-camera call (info, open, init, close, caps,
+    /// value read, serial) was made with.
+    std::set<int> touched_ids() const {
+        std::lock_guard<std::mutex> lock(call_mutex_);
+        return touched_;
+    }
+
+    std::vector<vendor::zwo::ZWOCameraInfo> enumerate_cameras() override {
+        ++enumerations;
+        return cameras;
+    }
+    bool get_camera_info_by_id(int id, vendor::zwo::ZWOCameraInfo&) override {
+        touch(id);
+        return false;
+    }
+    void open_camera(int id) override { touch(id); }
+    void init_camera(int id) override { touch(id); }
+    void close_camera(int id) override { touch(id); }
+    std::vector<vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
+        touch(id);
+        if (!heater_by_id.empty()) {
+            const auto it = heater_by_id.find(id);
+            if (it == heater_by_id.end() || !it->second) {
+                return {};
+            }
+        }
+        vendor::zwo::ZWOControlCaps cap;
+        cap.type = vendor::zwo::ZWOControlType::AntiDewHeater;
+        cap.max_value = 100;
+        cap.is_writable = true;
+        return {cap};
+    }
+    bool get_control_value(int id, vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
+        touch(id);
+        ++reads;
+        last_read_id = id;
+        if (fail_reads) {
+            return false;
+        }
+        value = heater;
+        is_auto = false;
+        return true;
+    }
+    void set_control_value(int id, vendor::zwo::ZWOControlType, long value, bool) override {
+        touch(id);
+        heater = value;
+    }
+    std::string get_serial_number(int id) override {
+        touch(id);
+        ++serial_reads;
+        const auto it = serial_by_id.find(id);
+        return it == serial_by_id.end() ? "FAKE1" : it->second;
+    }
+
+private:
+    void touch(int id) {
+        std::lock_guard<std::mutex> lock(call_mutex_);
+        touched_.insert(id);
+    }
+
+    mutable std::mutex call_mutex_;
+    std::set<int> touched_;
 };
 
 }  // namespace alpacacore::test

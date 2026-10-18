@@ -212,9 +212,9 @@ jobs:
           fi
 
   beta-deb:
-    # Betas only: until the apt `beta` component carries a beta, the .deb on
-    # its pre-release is how a tester installs it. Stable releases stay
-    # notes-only; their .deb ships through apt.openastro.net alone.
+    # Betas only: the apt `beta` component carries betas, and the .deb on the
+    # pre-release is the manual alternative to apt for a tester. Stable
+    # releases stay notes-only; their .deb ships through apt.openastro.net alone.
     name: Attach the .deb to a beta pre-release
     permissions:
       contents: write       # gh release upload

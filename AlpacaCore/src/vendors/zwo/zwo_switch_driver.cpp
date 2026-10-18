@@ -464,11 +464,11 @@ private:
     // A cameraId with no index or serial is the legacy binding: that SDK id, as is.
     bool camera_bound_by_id_only() const { return !camera_index_.has_value() && bound_serial_.empty(); }
 
-    // Lists the attached cameras into `listing` (the capability refusal names
-    // them too) and picks the one this switch means.
+    // Picks the camera this switch means. The legacy id-only binding returns its
+    // id without listing (a listing opens every attached camera, and an id-only
+    // switch must open only its own); an index or serial binding lists the
+    // attached cameras into `listing`, which the capability refusal names too.
     int resolve_camera_id_locked(std::vector<ZwoDewHeaterCamera>& listing) {
-        std::vector<ZwoUnreadableSlot> unreadable;
-        listing = list_dew_heater_cameras(sdk_, &unreadable);
         if (camera_bound_by_id_only()) {
             if (camera_id_.has_value()) {
                 return camera_id_.value();
@@ -476,6 +476,8 @@ private:
             throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
 
+        std::vector<ZwoUnreadableSlot> unreadable;
+        listing = list_dew_heater_cameras(sdk_, &unreadable);
         util::ThermalCameraRequest request;
         request.camera_index = camera_index_.value_or(util::kAutoThermalCamera);
         request.serial = bound_serial_;
@@ -504,7 +506,7 @@ private:
         }
     }
 
-    void load_dew_caps_locked(int camera_id, const std::vector<ZwoDewHeaterCamera>& listing) {
+    void load_dew_caps_locked(int camera_id, std::vector<ZwoDewHeaterCamera>& listing) {
         dew_caps_.reset();
         auto caps = sdk_.get_control_caps(camera_id);
         for (const auto& cap : caps) {
@@ -512,6 +514,11 @@ private:
                 dew_caps_ = cap;
                 return;
             }
+        }
+        // An id-only binding connected without a listing; the refusal names the
+        // other cameras, so list them now (a failed connect, not the usual path).
+        if (listing.empty() && camera_bound_by_id_only()) {
+            listing = list_dew_heater_cameras(sdk_, nullptr);
         }
         util::ThermalCameraCandidate bound;
         bound.name = camera_name_;

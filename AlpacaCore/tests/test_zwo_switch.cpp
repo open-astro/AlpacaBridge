@@ -24,6 +24,7 @@
 
 #include "../src/vendors/zwo/zwo_fields.h"
 #include "catch2_compat.h"
+#include "fake_zwo_sdk.h"
 
 namespace {
 
@@ -127,48 +128,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - Disconnected DeviceState", "[zwo][swit
 
 namespace {
 
-struct FakeDewSdk final : alpacacore::vendor::zwo::ZWODewHeaterSdk {
-    std::atomic<int> reads{0};
-    std::atomic<bool> fail_reads{false};
-    std::atomic<int> last_read_id{-1};
-    long heater{40};
-
-    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> cameras;
-    // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
-    std::map<int, bool> heater_by_id;
-    std::map<int, std::string> serial_by_id;
-
-    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override { return cameras; }
-    bool get_camera_info_by_id(int, alpacacore::vendor::zwo::ZWOCameraInfo&) override { return false; }
-    void open_camera(int) override {}
-    void init_camera(int) override {}
-    void close_camera(int) override {}
-    std::vector<alpacacore::vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
-        if (!heater_by_id.empty() && !heater_by_id[id]) {
-            return {};
-        }
-        alpacacore::vendor::zwo::ZWOControlCaps cap;
-        cap.type = alpacacore::vendor::zwo::ZWOControlType::AntiDewHeater;
-        cap.max_value = 100;
-        cap.is_writable = true;
-        return {cap};
-    }
-    bool get_control_value(int id, alpacacore::vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
-        ++reads;
-        last_read_id = id;
-        if (fail_reads) {
-            return false;
-        }
-        value = heater;
-        is_auto = false;
-        return true;
-    }
-    void set_control_value(int, alpacacore::vendor::zwo::ZWOControlType, long value, bool) override { heater = value; }
-    std::string get_serial_number(int id) override {
-        const auto it = serial_by_id.find(id);
-        return it == serial_by_id.end() ? "FAKE1" : it->second;
-    }
-};
+using FakeDewSdk = alpacacore::test::FakeDewHeaterSdk;
 
 void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
 
@@ -289,6 +249,40 @@ void add_mini_and_pro(FakeDewSdk& sdk, bool mini_has_heater) {
 }
 
 }  // namespace
+
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, call list_dew_heater_cameras before the
+// camera_bound_by_id_only() return
+TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without touching other cameras",
+          "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, true);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 9, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_switch_value(0) == 40.0);
+    driver->set_connected(false);
+
+    CHECK(sdk.enumerations == 0);
+    const auto touched = sdk.touched_ids();
+    CHECK(touched.count(7) == 0);
+    CHECK(touched.count(9) == 1);
+}
+
+// Falsified by: zwo_switch_driver.cpp load_dew_caps_locked, skip the lazy listing for an id-only binding
+TEST_CASE("ZWO Dew Heater Switch Driver - an id-only camera with no heater names the one that has it",
+          "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, false);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 7, sdk);
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == static_cast<int>(alpacacore::AlpacaError::NotImplemented));
+        CHECK(std::string(ex.what()).find("ZWO ASI2600MM Pro") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
 
 TEST_CASE("ZWO Dew Heater Switch Driver - Auto binds the one camera with a heater", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
