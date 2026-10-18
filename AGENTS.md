@@ -135,27 +135,42 @@ vendor-agnostic; do them in the driver from the start.
   only see an *async* connect, so a sync disconnect landing inside a sync connect saw
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
-- **Operation task threads belong to the slot; do not hand-roll one.** A telescope,
-  focuser or cover-calibrator operation body (async slew, park, home, pulse-guide timer,
-  slew-completion tail) runs in a `util::AsyncOperation` slot
+- **Operation task threads: use the slot where a driver has adopted it.** The Celestron
+  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers and the Gemini
+  focuser and flat panel run their operation bodies (async slew, park, home, pulse-guide
+  timer, slew-completion tail) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
   reasons, cancellable `ctx.wait_for()` polling, the kept failure and the join at
-  destruction; it never detaches a thread. A new driver must not declare its own task
-  `std::thread` member, `.detach()` a thread that touches `this`, or write a
-  `reap_*`/`task_wait_for` helper. Call `start()` and `cancel_all_and_join()` without the
-  driver `mutex_` held, join the slots in the destructor before members are destroyed, and
-  keep a body from calling `start()` or `cancel_all_and_join()` on its own slot (header
-  comment, rules 8 and 10). A body that calls anything throwing still catches it to reset
-  the driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
-  an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK call stays the caller's job
-  (see the handle-reference-counting item below).
-- **Threads outside the slot keep their own rules.** No camera driver uses the slot yet:
-  the exposure workers (`exposure_thread_`), the QHY cooler-off and temperature workers
-  and the GPIO soft-PWM workers are hand-rolled threads. The destructor joins **every**
-  background thread that is not in a slot (connection, exposure, timers), and a worker
-  bounded by the detach-on-timeout rule below follows that rule, not the slot's no-detach
-  rule. Do not add a new hand-rolled thread where a slot body fits.
+  destruction; it never detaches a thread. **A new driver must not hand-roll a task
+  thread (no own `std::thread` member, no `reap_*`/`task_wait_for` helper): use the slot.**
+  Call `start()` and `cancel_all_and_join()` without the driver `mutex_` held, join the
+  slots in the destructor before members are destroyed, and never call `start()` or
+  `cancel_all_and_join()` from a body of the same slot (the paragraph after rule 10 in the
+  header comment). A body that calls anything throwing still catches it to reset the
+  driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
+  an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
+  call stays the caller's job (see the handle-reference-counting item below).
+- **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
+  ZWO telescope (`goto_thread_`, `pulse_thread_`, `poll_thread_`, `disconnect_thread_`),
+  the Bisque pulse-guide thread, the iOptron clock-sync thread, the QHYCFW3 move thread,
+  the camera exposure workers, the QHY cooler-off and temperature workers and the GPIO
+  soft-PWM workers; the list is a sample, not a roster.
+  - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
+    writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
+    freed memory (UB). Make it a joinable member thread with a cancel flag +
+    `std::condition_variable`, and cancel + join it in the destructor. The one
+    sanctioned exception is the bounded detach-on-timeout worker below. The 2026-07
+    full-codebase audit found this rule held on every connect/disconnect *lifecycle*
+    path but violated on a dozen *operational* paths; apply it to every thread a driver
+    spawns, not just the connection machinery.
+  - An async tail that calls anything throwing (e.g. a `*_locked()` helper that rethrows
+    `NotConnected`) must be wrapped in try/catch inside the lambda or it
+    `std::terminate`s the whole server.
+  - A `joinable()` pre-check before spawning a shared member thread is a double-start
+    race unless the check, spawn and assign run under one mutex.
+  - The destructor joins **every** background thread that is not in a slot (connection,
+    exposure, timers) before members are destroyed.
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
   slot while the first still owns a running worker. A driver-level lifecycle/handoff
