@@ -135,8 +135,8 @@ vendor-agnostic; do them in the driver from the start.
   only see an *async* connect, so a sync disconnect landing inside a sync connect saw
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
-- **Operation task threads belong to the slot; do not hand-roll one.** A driver's
-  cancellable background body (async slew, park, home, pulse-guide timer, cooler-off,
+- **Operation task threads belong to the slot; do not hand-roll one.** A telescope,
+  focuser or cover-calibrator operation body (async slew, park, home, pulse-guide timer,
   slew-completion tail) runs in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
@@ -150,6 +150,12 @@ vendor-agnostic; do them in the driver from the start.
   the driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK call stays the caller's job
   (see the handle-reference-counting item below).
+- **Threads outside the slot keep their own rules.** No camera driver uses the slot yet:
+  the exposure workers (`exposure_thread_`), the QHY cooler-off and temperature workers
+  and the GPIO soft-PWM workers are hand-rolled threads. The destructor joins **every**
+  background thread that is not in a slot (connection, exposure, timers), and a worker
+  bounded by the detach-on-timeout rule below follows that rule, not the slot's no-detach
+  rule. Do not add a new hand-rolled thread where a slot body fits.
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
   slot while the first still owns a running worker. A driver-level lifecycle/handoff
@@ -348,7 +354,7 @@ operation slot (`util::AsyncOperation`, see Threads & shutdown above: the slot o
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes and cancels the body); disconnect and the destructor cancel + join through the slot. Keep any
+stops the axes, then cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
