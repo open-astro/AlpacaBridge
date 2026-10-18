@@ -296,6 +296,44 @@ TEST_CASE("iOptron Telescope Driver - Target Range Validation over the fake moun
     driver->set_connected(false);
 }
 
+TEST_CASE("iOptron Telescope Driver - all four equatorial slews are refused while Tracking is false",
+          "[ioptron][telescope][unit][fake][tracking-guard]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    mount.set_system_status(0);  // stopped: the firmware reports no tracking
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE_FALSE(driver->get_tracking());
+
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 95.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    driver->set_target_right_ascension(12.0);
+    driver->set_target_declination(20.0);
+    require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+
+    // Nothing reached the mount, and the driver is not slewing.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(mount.count(":MS1#") == 0);
+    CHECK(mount.count(":MS2#") == 0);
+    CHECK_FALSE(driver->get_slewing());
+
+    // With the mount tracking the same call goes through.
+    mount.set_system_status(1);
+    driver->set_tracking(true);
+    REQUIRE(driver->get_tracking());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 20.0));
+    CHECK(wait_for_goto_dispatch(mount));
+    driver->set_connected(false);
+}
+
 TEST_CASE("iOptron Telescope Driver - HAE16 EQ (0012) GOTO settle is closed by the pulse-guide trim",
           "[ioptron][telescope][unit][fake]") {
     alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/12.0);
@@ -729,6 +767,7 @@ TEST_CASE("iOptron Telescope Driver - firmware motion with no PulseGuide still r
 
     // A driver-initiated GOTO started during a pulse keeps Slewing true.
     driver->pulse_guide(3, 9000);
+    driver->set_tracking(true);  // slews need Tracking (open-astro#1274); the write reads back true for 2 s
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
     CHECK(driver->get_slewing());
@@ -835,6 +874,7 @@ TEST_CASE("iOptron Telescope Driver - Slewing stays true for a PulseGuide after 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
 
+    driver->set_tracking(true);  // slews need Tracking (open-astro#1274); the write reads back true for 2 s
     driver->slew_to_coordinates_async(13.0, 20.0);
     REQUIRE(wait_for_goto_dispatch(mount));
     driver->move_axis(0, 0.0);

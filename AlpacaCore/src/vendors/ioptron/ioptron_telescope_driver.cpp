@@ -669,12 +669,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = clock_.now();
-        if (tracking_override_until_ > now && status_cache_valid_) {
-            return cached_status_.is_tracking;
-        }
-        refresh_status_cache_locked();
-        return cached_status_.is_tracking;
+        return get_tracking_locked();
     }
     
     void set_tracking(bool tracking) override {
@@ -1508,6 +1503,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             double phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
+            check_equatorial_slew_allowed_locked("SlewToCoordinates");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
             dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
         }
@@ -1527,6 +1523,7 @@ public:
             phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
+            check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
             generation = slew_operation_generation_;
         }
@@ -1854,6 +1851,27 @@ private:
             last_site_info_fetch_ = now;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", "Failed to prefetch site info cache: " + std::string(e.what()));
+        }
+    }
+
+    bool get_tracking_locked() const {
+        auto now = clock_.now();
+        if (tracking_override_until_ > now && status_cache_valid_) {
+            return cached_status_.is_tracking;
+        }
+        refresh_status_cache_locked();
+        return cached_status_.is_tracking;
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Runs after the parked check and before the new slew
+    // supersedes a dispatch in flight, so a refusal leaves that motion alone.
+    // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
+    void check_equatorial_slew_allowed_locked(const char* label) const {
+        check_connected();
+        ensure_not_parked_locked(label);
+        if (!get_tracking_locked()) {
+            throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
     }
 
