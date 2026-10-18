@@ -399,6 +399,15 @@ then write Dec and expect both. A driver whose setters write to the mount (iOptr
 the fake rather than a disconnected instance. Disconnected getters still return
 `NotConnected` first.
 
+### Equatorial slews require Tracking (all telescope drivers)
+
+ITelescopeV4 raises `InvalidOperation` for `SlewToCoordinates`, `SlewToCoordinatesAsync`, `SlewToTarget` and
+`SlewToTargetAsync` while `Tracking` is false (#775 SynScan, #1274 the rest of the telescope drivers except OnStep, which its owner
+keeps). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
+or sends anything, so a refused slew leaves a park, goto or pulse guide in flight running. Read Tracking the way the
+driver's own `Tracking` getter does. Syncs and Alt/Az slews are exempt. A driver test that slews turns Tracking on
+first; do not leave it off and assert only that the slew threw.
+
 ### ASCOM exception vocabulary (pick the right one — ConformU checks it)
 
 | Throw | When |
