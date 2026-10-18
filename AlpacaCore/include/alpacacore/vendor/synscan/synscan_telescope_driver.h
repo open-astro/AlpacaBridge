@@ -71,7 +71,8 @@ void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std
 void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold);
 
 /// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
-/// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from the factories above.
+/// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
+/// the factories above.
 void set_sidereal_wall_clock_for_testing(TelescopeDriver& driver,
                                          std::function<std::chrono::system_clock::time_point()> now);
 
