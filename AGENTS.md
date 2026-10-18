@@ -369,7 +369,7 @@ operation slot (`util::AsyncOperation`, see Threads & shutdown above: the slot o
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes, then cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
+stops the axes and cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
