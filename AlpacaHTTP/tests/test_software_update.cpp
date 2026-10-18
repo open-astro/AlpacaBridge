@@ -826,8 +826,8 @@ int main() {
         EXPECT(classify_installer_state("inactive", "dead", "success", false, ok).log == ok);
     }
 
-    // The channel switch reports the helper's result line, not a made-up systemd state.
     {
+        // case: a finished channel switch reports the helper's result line as its detail
         using alpacahttp::util::classify_channel_switch_log;
         const auto failed = classify_channel_switch_log(
             "=== started\n=== RESULT: failure 2026-09-30T00:00:00Z apt-get update exit 100\n");
