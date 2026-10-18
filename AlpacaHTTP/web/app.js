@@ -2287,8 +2287,9 @@ async function updateChannelChanged() {
     select.disabled = true;
     updateMessage('');
     try {
+        const started = await updateApi('channel', 'POST', { Channel: choice });
         channelSwitchStartedHere = true;
-        updateRender(await updateApi('channel', 'POST', { Channel: choice }));
+        updateRender(started);
         channelStartPolling();
     } catch (error) {
         updateMessage(error.message, true);
