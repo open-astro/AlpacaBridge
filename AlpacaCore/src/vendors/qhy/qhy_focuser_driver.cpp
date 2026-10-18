@@ -310,6 +310,16 @@ private:
         QFocuserTelemetry telemetry;
     };
 
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.faulted()) return health_.fault();
+        }
+        return link_lost_.load() ? "no answer to the state poll" : std::string();
+    }
+
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
     std::optional<std::chrono::nanoseconds> device_state_age() const override {
         const auto reading = snapshot_.read();

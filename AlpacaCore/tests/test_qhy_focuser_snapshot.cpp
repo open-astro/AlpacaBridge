@@ -150,8 +150,8 @@ TEST_CASE("QHY Q-Focuser Snapshot - a stale frame is served until the link-loss 
     clock.advance(31s);
     REQUIRE(clock.wait_for_woken_settled(kBound));
     CHECK(driver->get_connected() == false);
-    expect_code([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
-    expect_code([&] { (void)driver->get_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    expect_code([&] { (void)driver->get_position(); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
+    expect_code([&] { (void)driver->get_temperature(); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
     CHECK(driver->get_device_state().empty());
     // The poll in flight ends with the loss; no tick is left waiting.
     const auto deadline = std::chrono::steady_clock::now() + kBound;
@@ -159,6 +159,15 @@ TEST_CASE("QHY Q-Focuser Snapshot - a stale frame is served until the link-loss 
         std::this_thread::sleep_for(10ms);
     }
     CHECK(clock.waiter_count() == 0);
+    CHECK(driver->get_link_fault() == "no answer to the state poll");
+
+    // No autonomous reconnect, but Connected=true relinks and serves a fresh frame.
+    fake.set_muted(false);
+    fake.set_position(1700);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_position() == 1700);
+    CHECK(driver->get_link_fault().empty());
 
     driver->set_connected(false);
 }
@@ -176,12 +185,19 @@ TEST_CASE("QHY Q-Focuser Snapshot - three failed polls latch a fault that the ne
     // Faulted, not lost: Connected stays true, the cache is refused, static
     // metadata answers.
     CHECK(driver->get_connected() == true);
-    expect_code([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::DriverException);
-    expect_code([&] { (void)driver->get_is_moving(); }, alpacacore::AlpacaError::DriverException);
-    expect_code([&] { driver->move(1200); }, alpacacore::AlpacaError::DriverException);
+    expect_code([&] { (void)driver->get_position(); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
+    expect_code([&] { (void)driver->get_is_moving(); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
     CHECK(driver->get_max_step() > 0);
+    CHECK(driver->get_link_fault().find("no valid reply to the state poll") == 0);
 
+    // Move is refused by the latch, not by a wire timeout: the fake answers
+    // again and still sees no move. Halt is never refused.
     fake.set_muted(false);
+    expect_code([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::DriverException));
+    CHECK(fake.count("\"cmd_id\":6") == 0);
+    CHECK_NOTHROW(driver->halt());
+    CHECK(fake.count("\"cmd_id\":3}") == 1);
+
     fake.set_position(1800);
     tick(clock);
     CHECK(driver->get_position() == 1800);

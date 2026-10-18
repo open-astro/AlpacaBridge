@@ -388,6 +388,21 @@ TEST_CASE("QHY Q-Focuser Driver - garbage replies do not busy-spin the kick loop
     CHECK(kicks <= 140);
     CHECK(kicks >= 1);
 
+    // Garbage is no valid reply: the polls fail, three in a row latch the
+    // fault, and the getter reports it (as get_position() did before the
+    // snapshot, when the read itself hit the wire). Three 3 s polls.
+    const auto fault_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    for (;;) {
+        try {
+            (void)driver->get_position();
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == static_cast<int>(alpacacore::AlpacaError::DriverException));
+            break;
+        }
+        if (std::chrono::steady_clock::now() > fault_deadline) FAIL("garbage polls never latched the fault");
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     fake.set_garbage(false);
     driver->set_connected(false);
 }
