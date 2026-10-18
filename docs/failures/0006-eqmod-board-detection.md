@@ -30,7 +30,7 @@ fake profiles rather than inventing plausible values.
   hardware observations dated 2026-09-06.
 - Regression coverage: `AlpacaCore/tests/test_skywatcher_serial.cpp`,
   `AlpacaCore/tests/test_skywatcher_async.cpp`, and captured profiles in
-  `AlpacaCore/tests/fake_skywatcher_mount.h`.
+  `AlpacaCore/tests/fake_skywatcher_board.h`.
 
 This is a record of the support bring-up failures, not a new claim that every
 classic EQ board or feature has been hardware validated.
