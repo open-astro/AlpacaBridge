@@ -135,21 +135,21 @@ vendor-agnostic; do them in the driver from the start.
   only see an *async* connect, so a sync disconnect landing inside a sync connect saw
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
-- **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
-  writes a member (e.g. a pulse-guide flag) is the classic trap: if the object dies
-  mid-sleep the wakeup writes freed memory (UB). Make it a joinable member thread
-  with a cancel flag + `std::condition_variable`, and cancel + join it in the
-  destructor. **The 2026-07 full-codebase audit found this rule held on every
-  connect/disconnect *lifecycle* path but was violated on a dozen *operational*
-  paths** (async slews, GOTO setup, pulse-guide timers, cooler-off, slew-completion
-  tails) — apply the checklist to every thread a driver spawns, not just the
-  connection machinery. Two corollaries from the same audit: an async tail that
-  calls anything throwing (e.g. a `*_locked()` helper that rethrows `NotConnected`)
-  must be wrapped in try/catch inside the lambda or it `std::terminate`s the whole
-  server; and a `joinable()` pre-check before spawning a shared member thread is a
-  double-start race unless the check+spawn+assign runs under one mutex.
-- The destructor joins **every** background thread (connection, exposure, timers)
-  before members are destroyed.
+- **Operation task threads belong to the slot; do not hand-roll one.** A driver's
+  cancellable background body (async slew, park, home, pulse-guide timer, cooler-off,
+  slew-completion tail) runs in a `util::AsyncOperation` slot
+  (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](docs/decisions/0006-async-operation-ownership.md)).
+  The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
+  reasons, cancellable `ctx.wait_for()` polling, the kept failure and the join at
+  destruction; it never detaches a thread. A new driver must not declare its own task
+  `std::thread` member, `.detach()` a thread that touches `this`, or write a
+  `reap_*`/`task_wait_for` helper. Call `start()` and `cancel_all_and_join()` without the
+  driver `mutex_` held, join the slots in the destructor before members are destroyed, and
+  keep a body from calling `start()` or `cancel_all_and_join()` on its own slot (header
+  comment, rules 8 and 10). An async tail that calls anything throwing must still not
+  let the exception escape the body unhandled (the slot keeps the failure rather than
+  terminating). Bounding a body stuck in a no-timeout SDK call stays the caller's job
+  (see the handle-reference-counting item below).
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
   slot while the first still owns a running worker. A driver-level lifecycle/handoff
@@ -342,14 +342,13 @@ choreography, not a driver fault — verify by checking that every slew lands on
 
 ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
 target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
-The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): reap the
-slew task, snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
-`parking_` flag, then dispatch the slew + completion poll + tracking stop in the joinable
-task thread, releasing the mutex between polls (`ctx.wait_for()` on the operation slot, cancellable). `AtPark` and
+The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
+`parking_` flag, then run the slew + completion poll + tracking stop as a body in the driver's
+operation slot (`util::AsyncOperation`, see Threads & shutdown above: the slot owns the thread, the reaping and the cancellable `ctx.wait_for()` between polls). `AtPark` and
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
-`parking_`; the task polls the hardware through a separate `poll_hardware_slewing_locked`).
+`parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes and joins the task); disconnect and the destructor cancel + join. Keep any
+stops the axes and cancels the body); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
@@ -546,6 +545,8 @@ notes carry only the pin map and per-board deltas.
   while the ASCOM API reports success. Two-phase shutdown: signal stop under the
   mutex, join outside it, release/close back under it (the classic
   join-under-the-same-mutex deadlock otherwise).
+  These per-port periodic workers are not operation-slot bodies; a cancellable one-shot
+  or polling body added to a GPIO driver uses the slot (Threads & shutdown above).
 - **PWM frequency is the lever, not load type** — a flat panel's internal LED driver
   smooths a too-fast chop into plain on/off (a panel that "won't dim" at 1 kHz dims
   fine at 50 Hz); resistive dew heaters dim at any frequency; regulated gear
