@@ -37,6 +37,7 @@
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
 #include "fake_zwo_sdk.h"
+#include "locked_zwo_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -127,6 +128,34 @@ TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][came
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
     CHECK(sdk.call_count("get_data_after_exposure") > 0);
+}
+
+// Same storm over the serialised seam (issue #1295): LockedZWOSDK around FakeZWOSDK, so every SDK call
+// is one mutex-guarded forward and the driver, not the fake, owns the interleaving.
+TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][camera][stress]") {
+    alpacacore::test::FakeZWOSDK fake;
+    fake.frame_bytes.resize(16 * 8 * 2, 0x5a);
+    alpacacore::test::LockedZWOSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, fake.camera.camera_id, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& camera = static_cast<alpacacore::CameraDriver&>(d);
+        guard([&] { camera.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_image_array()); });
+        guard([&] { camera.stop_exposure(); });
+        guard([&] { static_cast<void>(camera.get_camera_state()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_count() == 0);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.call_count("get_data_after_exposure") > 0);
 }
 
 // Focuser stress (#271): same shape as the EFW/camera cases above — no fake
