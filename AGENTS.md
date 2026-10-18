@@ -146,9 +146,9 @@ vendor-agnostic; do them in the driver from the start.
   `reap_*`/`task_wait_for` helper. Call `start()` and `cancel_all_and_join()` without the
   driver `mutex_` held, join the slots in the destructor before members are destroyed, and
   keep a body from calling `start()` or `cancel_all_and_join()` on its own slot (header
-  comment, rules 8 and 10). An async tail that calls anything throwing must still not
-  let the exception escape the body unhandled (the slot keeps the failure rather than
-  terminating). Bounding a body stuck in a no-timeout SDK call stays the caller's job
+  comment, rules 8 and 10). A body that calls anything throwing still catches it to reset
+  the driver's own state (`slewing_cached_`, `parking_`) before the slot keeps the failure;
+  an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK call stays the caller's job
   (see the handle-reference-counting item below).
 - **Serialize reapers across the whole join.** `AsyncOperation::cancel_all_and_join()`
   takes its body out of the slot before joining; a second caller can see an empty
