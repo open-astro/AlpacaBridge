@@ -840,8 +840,8 @@ int main() {
         return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     };
 
-    // case: channel mapping ties the check URL, the apt component and the unit name
     {
+        // case: channel mapping ties the check URL, the apt component and the unit name
         EXPECT(parse_channel("stable") == UpdateChannel::Stable);
         EXPECT(parse_channel("beta") == UpdateChannel::Beta);
         EXPECT(!parse_channel("Beta").has_value());
@@ -884,8 +884,8 @@ int main() {
         EXPECT(unit.find("\n[Install]") == std::string::npos);
     }
 
-    // case: polkit rule names the three units by exact string and nothing else
     {
+        // case: polkit rule names the three units by exact string and nothing else
         const std::string rules = read_file(repo_root / "debian" / "alpacabridge-update.polkit-rules");
         EXPECT(!rules.empty());
         EXPECT(rules.find("unit !== \"alpacabridge-update.service\"") != std::string::npos);
@@ -908,8 +908,8 @@ int main() {
         EXPECT(units == 3);
     }
 
-    // case: channel helper refuses any argument but stable or beta before touching anything
     {
+        // case: channel helper refuses any argument but stable or beta before touching anything
         const std::string helper = (repo_root / "debian" / "alpacabridge-set-update-channel").string();
         const auto run = [&](const std::string& args) {
             // stderr goes to the null device: the usage message is expected.
@@ -924,7 +924,8 @@ int main() {
         const std::string text = read_file(helper);
         // The validation precedes the first write: the case statement comes
         // before the transcript is opened and before apt runs.
-        const auto validated = text.find("stable|beta) ;;");
+        const auto validated = text.find(std::string(channel_name(UpdateChannel::Stable)) + "|" +
+                                         channel_name(UpdateChannel::Beta) + ") ;;");
         EXPECT(validated != std::string::npos);
         EXPECT(validated < text.find(": > \"$LOG\""));
         EXPECT(validated < text.find("apt-get update"));
@@ -938,8 +939,8 @@ int main() {
         EXPECT(text.find("rm -f \"$DROPIN\"") != std::string::npos);
     }
 
-    // case: the check URL follows the channel unless update_packages_url overrides it
     {
+        // case: the check URL follows the channel unless update_packages_url overrides it
         auto backend = std::make_unique<FakeBackend>();
         auto* fake = backend.get();
         fake->index = "Package: alpacabridge\nVersion: 5.0.0~beta5\n";
@@ -973,8 +974,8 @@ int main() {
         EXPECT(disabled.status()["ChannelOverridden"] == false);
     }
 
-    // case: a check made for the other channel is not offered after a switch
     {
+        // case: a check made for the other channel is not offered after a switch
         auto backend = std::make_unique<FakeBackend>();
         auto* fake = backend.get();
         fake->channel = UpdateChannel::Beta;
@@ -998,8 +999,8 @@ int main() {
         EXPECT(fake->starts == 0);
     }
 
-    // case: set_channel starts the unit instance from the table and refuses while busy
     {
+        // case: set_channel starts the unit instance from the table and refuses while busy
         const auto expect_refused = [](SoftwareUpdateManager& manager, UpdateChannel channel, std::int32_t code) {
             try {
                 manager.set_channel(channel);
@@ -1073,8 +1074,8 @@ int main() {
         EXPECT(denied->switches.size() == 1);
     }
 
-    // case: an update installer run refuses nothing it did not before, but waits for a running switch
     {
+        // case: an update installer run refuses nothing it did not before, but waits for a running switch
         auto backend = std::make_unique<FakeBackend>();
         auto* fake = backend.get();
         fake->index = "Package: alpacabridge\nVersion: 5.0.0\n";
@@ -1094,8 +1095,8 @@ int main() {
         EXPECT(fake->starts == 1);
     }
 
-    // case: the system backend reads the channel from the drop-in marker file
     {
+        // case: the system backend reads the channel from the drop-in marker file
         const std::filesystem::path dir = std::filesystem::temp_directory_path() / "alpacabridge-channel-marker-test";
         std::filesystem::remove_all(dir);
         std::filesystem::create_directories(dir);
