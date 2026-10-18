@@ -268,6 +268,22 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without to
     CHECK(touched.count(9) == 1);
 }
 
+// Falsified by: zwo_switch_driver.cpp load_dew_caps_locked, skip the lazy listing for an id-only binding
+TEST_CASE("ZWO Dew Heater Switch Driver - an id-only camera with no heater names the one that has it",
+          "[zwo][switch][unit]") {
+    FakeDewSdk sdk;
+    add_mini_and_pro(sdk, false);
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 7, sdk);
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == static_cast<int>(alpacacore::AlpacaError::NotImplemented));
+        CHECK(std::string(ex.what()).find("ZWO ASI2600MM Pro") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
+}
+
 TEST_CASE("ZWO Dew Heater Switch Driver - Auto binds the one camera with a heater", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
     add_mini_and_pro(sdk, false);

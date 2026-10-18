@@ -246,8 +246,10 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - concurrent connect/disconnect
     add_fake_dew_camera(sdk);
     auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch_by_index(0, 0, sdk);
 
-    // Connected registration: a disconnect racing a getter can clear the heater
-    // capability after the connection check passed, which answers NotImplemented.
+    // Connected registration: a disconnect racing a getter clears the heater
+    // capability after ensure_connected() passed, so the getter answers
+    // NotImplemented ("Dew heater not supported", 0x400) instead of NotConnected
+    // (seen ~90 times per run with the default guard).
     alpacacore::test::StressCallGuard guard(
         {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::NotImplemented});
     std::atomic<bool> saw_connected{false};
