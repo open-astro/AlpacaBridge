@@ -260,7 +260,13 @@ TEST_CASE("Celestron async - Unpark during a park cancels it", "[celestron][tele
     driver->park();
     REQUIRE(driver->get_slewing());
     CHECK_THROWS_AS(driver->move_axis(0, 0.5), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(driver->slew_to_coordinates_async(5.0, 20.0), alpacacore::AlpacaException);
+    // Tracking is off on this fake: the parked refusal comes first (open-astro#1274).
+    try {
+        driver->slew_to_coordinates_async(5.0, 20.0);
+        FAIL("a slew during a park in flight must be refused");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidWhileParked);
+    }
     CHECK_THROWS_AS(driver->sync_to_coordinates(5.0, 20.0), alpacacore::AlpacaException);
     try {
         driver->move_axis(0, 0.5);

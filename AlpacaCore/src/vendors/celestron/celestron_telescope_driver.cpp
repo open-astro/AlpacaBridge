@@ -1460,6 +1460,7 @@ public:
             check_not_parked_locked("SlewToCoordinates");
             validate_ra_dec(ra, dec, "SlewToCoordinates");
             check_slew_safety_locked("SlewToCoordinates");
+            check_tracking_for_slew_locked("SlewToCoordinates");
         }
         cancel_async_tasks();
         std::unique_lock<std::mutex> lock(mutex_);
@@ -1486,6 +1487,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_parked_locked("SlewToCoordinatesAsync");
+            validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+            check_tracking_for_slew_locked("SlewToCoordinatesAsync");
         }
         uint32_t ra_raw = 0;
         uint32_t dec_raw = 0;
@@ -2265,6 +2268,14 @@ private:
             }
             fail_home_locked("FindHome completion polling failed after " + std::to_string(failures) +
                              " consecutive failures: unknown exception");
+        }
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter reads it.
+    void check_tracking_for_slew_locked(const char* who) const {
+        if (!get_tracking_locked()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
     }
 
