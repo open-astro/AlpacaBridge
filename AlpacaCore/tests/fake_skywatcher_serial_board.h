@@ -16,15 +16,15 @@
 // wrapper's SERIAL transport (exchange_serial, settle_serial, the dirty-link
 // bookkeeping and the mis-paired-reply shape check) can be exercised without
 // hardware. FakeSkyWatcherMount covers the driver over UDP; this one covers
-// the serial path only and speaks just enough of the ":" command set for the
-// wrapper's inquiries and the step-period write/readback.
+// the serial path only and serves the full ":" command set and axis model of
+// the shared core.
 //
 // The axis model, the profile and the ":" command handler are the shared
 // FakeSkyWatcherBoard core (fake_skywatcher_board.h, open-astro#604), the same
 // one FakeSkyWatcherMount drives over UDP; this class adds the pty transport
 // and the serial-only knobs. Where the two transports differed, the serial
 // answer is kept by a transport setting here, or the core's answer is taken
-// (the full list is in the slice B PR description):
+// (open-astro/AlpacaBridge#1330 lists each one):
 //   - set_muted() (frame reaches the board, is recorded, is NOT applied, no
 //     reply) is not the UDP set_silent() (frame applied, no reply).
 //   - frames() is the raw frame log including unapplied frames; the core's
