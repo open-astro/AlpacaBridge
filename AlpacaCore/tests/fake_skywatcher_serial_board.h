@@ -16,8 +16,23 @@
 // wrapper's SERIAL transport (exchange_serial, settle_serial, the dirty-link
 // bookkeeping and the mis-paired-reply shape check) can be exercised without
 // hardware. FakeSkyWatcherMount covers the driver over UDP; this one covers
-// the serial path only and speaks just enough of the ":" command set for the
-// wrapper's inquiries and the step-period write/readback.
+// the serial path only and serves the full ":" command set and axis model of
+// the shared core.
+//
+// The axis model, the profile and the ":" command handler are the shared
+// FakeSkyWatcherBoard core (fake_skywatcher_board.h, open-astro#604), the same
+// one FakeSkyWatcherMount drives over UDP; this class adds the pty transport
+// and the serial-only knobs. Where the two transports differed, the serial
+// answer is kept by a transport setting here, or the core's answer is taken
+// (open-astro/AlpacaBridge#1330 lists each one):
+//   - set_muted() (frame reaches the board, is recorded, is NOT applied, no
+//     reply) is not the UDP set_silent() (frame applied, no reply).
+//   - frames() is the raw frame log including unapplied frames; the core's
+//     frames_seen() counts frames the core handled.
+//   - set_reply_latency() takes int milliseconds (UDP: chrono::milliseconds).
+//   - ":M" answers "=" here (the core and UDP answer "!0").
+//   - ":E" on a running axis answers "!2" (core); this fake used to answer "=".
+//   - ":f" char 0 carries the direction and fast bits too (core).
 //
 // Test knobs model the two failure shapes seen on an EQM-35 Pro's PL2303
 // link: a reply that arrives after the wrapper's timeout (delay_next_reply),
@@ -38,18 +53,18 @@
 #include <vector>
 
 #include "fake_pty_write.h"
-#include "fake_skywatcher_mount.h"
+#include "fake_skywatcher_board.h"
 
 namespace alpacacore::test {
 
-class FakeSkyWatcherSerialBoard {
+class FakeSkyWatcherSerialBoard : public FakeSkyWatcherBoard {
 public:
     // The board answers the geometry and feature inquiries (":a", ":b", ":g",
     // ":q", ":s") and the version of @p profile, the same FakeMountProfile the
     // UDP fake takes, so a serial test of an EQM-35 Pro is not served the
     // Wave 100i's counts or its HOME_INDEXER bit.
     explicit FakeSkyWatcherSerialBoard(FakeMountProfile profile = FakeMountProfile::wave_100i())
-        : pty_("FakeSkyWatcherSerialBoard"), profile_(std::move(profile)), version_reply_(profile_.version_reply) {
+        : FakeSkyWatcherBoard(std::move(profile)), pty_("FakeSkyWatcherSerialBoard") {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387). Its keep-alive slave is what holds
@@ -82,12 +97,6 @@ public:
         pty_.sever();
     }
 
-    /// Position counts the board reports for ":j<axis>".
-    void set_counts(int axis, uint32_t counts) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        counts_[axis - 1] = counts & 0xFFFFFF;
-    }
-
     /// open-astro#505: a hung MCU behind a perfectly healthy fd — the mount
     /// powered off with the USB adapter left plugged in, or the EQDIR cable
     /// pulled at the mount end. Distinct from sever_link(), which removes the
@@ -95,7 +104,7 @@ public:
     /// never answers, so link_alive() stays true and only the exchange
     /// timeouts can reveal it. Same knob name as the #237 fakes.
     void set_muted(bool muted) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         muted_ = muted;
     }
 
@@ -106,7 +115,7 @@ public:
     /// termios), after the reader's own tcsetattr, so any blocking read on
     /// it waits for a byte. Only a poll()-bounded read keeps its budget.
     void set_reads_ignore_vtime(bool ignore) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         reads_ignore_vtime_ = ignore;
     }
 
@@ -114,45 +123,11 @@ public:
     /// probe's read loop, so a test that saw the hang can still join.
     void release_blocked_reader() { pty_write_bounded(pty_.master_fd(), std::string("\r"), stop_); }
 
-    /// open-astro#521: start an axis in the running state, as a board whose
-    /// motion outlived the driver's link does. @p speed_mode true models a
-    /// MoveAxis or tracking drive — the case the driver classifies as NOT
-    /// slewing — and false a GOTO. ":K"/":L" clear it, so a driver-side
-    /// stop-and-confirm loop terminates against this fake instead of spinning.
-    void set_axis_running(int axis, bool running, bool speed_mode = true) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        running_[axis - 1] = running;
-        speed_mode_[axis - 1] = speed_mode;
-    }
-
-    bool axis_running(int axis) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return running_[axis - 1];
-    }
-
-    /// The mode the last ":G" selected for @p axis: true = speed mode (a
-    /// MoveAxis or tracking drive), false = GOTO. Review of #553: pins the
-    /// bit-0 decode of the mode digit against what the driver sends.
-    bool axis_speed_mode(int axis) const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return speed_mode_[axis - 1];
-    }
-
-    /// open-astro#505: the board's ":F" initialization bit, per axis. A board
-    /// that power-cycles mid-session comes back with this false and its
-    /// position registers reset, while answering every frame normally.
-    /// Confirmed on an EQM-35 Pro 2026-09-17 (":f1" read "=100").
-    void set_init_done(bool init_done) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        init_done_[0] = init_done;
-        init_done_[1] = init_done;
-    }
-
     /// Hold the reply to the next frame (any command, or only @p command if
     /// given) for @p ms before sending it, so it lands after the wrapper's
     /// timeout: the "late reply" that the next exchange must not consume.
     void delay_next_reply(int ms, char command = 0) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         delay_ms_ = ms;
         delay_command_ = command;
     }
@@ -170,7 +145,7 @@ public:
     /// Distinct from delay_next_reply(): here a ":K" that is dropped leaves
     /// the axis RUNNING, which is what turns a lost stop into pulse overshoot.
     void drop_next_frames(char command, int times = 1) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         drop_command_ = command;
         drop_left_ = times;
     }
@@ -182,7 +157,7 @@ public:
     /// it: a caller that gives up on the mis-pair must settle the line, or
     /// its next command is answered by this frame instead.
     void mispair_next(int times = 1, std::string straggler = "", int straggler_ms = 0) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         mispair_left_ = times;
         straggler_ = std::move(straggler);
         straggler_ms_ = straggler_ms;
@@ -193,20 +168,20 @@ public:
     /// link. The wrapper must settle and resend rather than fail the command
     /// outright.
     void malform_next(int times = 1) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         malform_left_ = times;
     }
 
     /// Answer ":J" on an axis that is already running with "!2" (motor not
     /// stopped), as a board that refuses to start a running axis does.
     void reject_j_on_running_axis(bool reject = true) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         reject_j_on_running_ = reject;
     }
 
     /// The ":e1" payload (default: the profile's, "033A44" for the Wave 100i); overrides it.
     void set_version_reply(std::string payload) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         version_reply_ = std::move(payload);
     }
 
@@ -216,7 +191,7 @@ public:
     /// the same slave, so this models a board that only decodes at its own
     /// rate: the 9600 probe gets silence, the 115200 one an answer.
     void answer_only_at_baud(int baud) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         answer_baud_ = baud;
     }
 
@@ -233,7 +208,7 @@ public:
     /// Refuse ":i" with "!0" (Unknown command), as a board without the
     /// step-period readback does.
     void set_no_readback(bool no_readback) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         no_readback_ = no_readback;
     }
 
@@ -242,7 +217,7 @@ public:
     /// `negative` (the direction). `wrong_value` >= 0 answers that raw value
     /// instead, to model a readback that fits neither encoding.
     void set_readback_div16(bool negative, int64_t wrong_value = -1) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         div16_readback_ = true;
         div16_negative_ = negative;
         div16_wrong_ = wrong_value;
@@ -250,19 +225,19 @@ public:
 
     /// Refuse the next ":i" with "!<code>" once (e.g. "2", Motor not stopped).
     void reject_next_readback(std::string code) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         reject_readback_code_ = std::move(code);
     }
 
     /// Every frame received so far, without the ':' and the trailing CR
     /// (e.g. "j1", "I1123456").
     std::vector<std::string> frames() const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         return frames_;
     }
 
     int count_frames(char command) const {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(smutex_);
         int n = 0;
         for (const auto& f : frames_) {
             if (!f.empty() && f[0] == command) ++n;
@@ -271,26 +246,6 @@ public:
     }
 
 private:
-    static std::string u24(uint32_t v) {
-        static constexpr char kHex[] = "0123456789ABCDEF";
-        std::string out;
-        for (int byte = 0; byte < 3; ++byte) {
-            const uint32_t b = (v >> (8 * byte)) & 0xFF;
-            out += kHex[b >> 4];
-            out += kHex[b & 0xF];
-        }
-        return out;
-    }
-
-    static uint32_t parse_u24(const std::string& data) {
-        if (data.size() < 6) return 0;
-        uint32_t v = 0;
-        for (int byte = 0; byte < 3; ++byte) {
-            v |= static_cast<uint32_t>(std::stoul(data.substr(byte * 2, 2), nullptr, 16)) << (8 * byte);
-        }
-        return v;
-    }
-
     // Returns the reply for one frame (without the trailing CR).
     // The speed currently configured on the slave (the wrapper's fd and the
     // keepalive fd share one termios).
@@ -315,120 +270,68 @@ private:
         tcsetattr(pty_.keepalive_fd(), TCSANOW, &tty);
     }
 
-    // Returns the reply for one frame (without the trailing CR), or an empty
-    // string for "stay silent".
-    std::string handle(const std::string& frame) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (answer_baud_ != 0 && line_baud() != answer_baud_) {
-            return "";  // wrong rate for this board: nothing decodable arrives
-        }
-        if (muted_) {
-            // The frame arrived (the fd is healthy and the node is there); the
-            // board is simply not answering. Recorded so a test can assert the
-            // driver kept talking while faulted — which is what lets the next
-            // good reply clear the latch without a reconnect.
+    // The reply for one frame (without the trailing CR), or an empty string for
+    // "stay silent". The transport and failure knobs decide first; every other
+    // frame goes to the shared core as ":" + frame.
+    std::string handle_frame(const std::string& frame) {
+        bool reject_j = false;
+        bool apply_j_then_garble = false;
+        bool div16 = false;
+        bool div16_negative = false;
+        int64_t div16_wrong = -1;
+        {
+            std::lock_guard<std::mutex> lock(smutex_);
+            if (answer_baud_ != 0 && line_baud() != answer_baud_) {
+                return "";  // wrong rate for this board: nothing decodable arrives
+            }
+            // A muted board: the frame arrived (the fd is healthy and the node is
+            // there); the board is simply not answering. Recorded so a test can
+            // assert the driver kept talking while faulted, which is what lets the
+            // next good reply clear the latch without a reconnect.
             frames_.push_back(frame);
-            return "";
-        }
-        frames_.push_back(frame);
-        if (frame.size() < 2) return "!3";
-        const char cmd = frame[0];
-        if (drop_left_ > 0 && cmd == drop_command_) {
-            --drop_left_;
-            return "";  // lost on the wire: not applied, not answered (#559)
-        }
-        const int axis = frame[1] == '2' ? 2 : 1;
-        const std::string data = frame.substr(2);
-        if (mispair_left_ > 0) {
-            if (--mispair_left_ == 0 && !straggler_.empty()) {
-                straggler_pending_ = true;
+            if (muted_) return "";
+            if (frame.size() < 2) return "!3";
+            const char cmd = frame[0];
+            if (drop_left_ > 0 && cmd == drop_command_) {
+                --drop_left_;
+                return "";  // lost on the wire: not applied, not answered (#559)
             }
-            return "=00";  // OK reply, wrong length for anything the wrapper asks
-        }
-        if (malform_left_ > 0) {
-            --malform_left_;
-            // The board decoded and APPLIED a start before its ack was garbled.
-            if (cmd == 'J') running_[axis - 1] = true;
-            return "25278";  // no leading "=" / "!": a byte dropped on a noisy link
-        }
-        switch (cmd) {
-            case 'e':
-                return "=" + version_reply_;
-            case 'a':
-                // Same rule as FakeSkyWatcherMount: axis 2 reports cpr_dec when set.
-                return "=" + u24(axis == 2 && profile_.cpr_dec != 0 ? profile_.cpr_dec : profile_.cpr);
-            case 'b':
-                return "=" + u24(profile_.timer_freq);
-            case 'g':
-                return "=" + profile_.high_speed_ratio_reply;
-            case 's':
-                if (!profile_.steps_per_worm) return "!0";
-                return "=" + u24(*profile_.steps_per_worm);
-            case 'j':
-                return "=" + u24(counts_[axis - 1]);
-            case 'f': {
-                // char0 bit0 speed-mode, char1 bit0 running, char2 bit0 init-done.
-                const int c0 = speed_mode_[axis - 1] ? 1 : 0;
-                const int c1 = running_[axis - 1] ? 1 : 0;
-                const int c2 = init_done_[axis - 1] ? 1 : 0;
-                return std::string("=") + static_cast<char>('0' + c0) + static_cast<char>('0' + c1) +
-                       static_cast<char>('0' + c2);
+            if (mispair_left_ > 0) {
+                if (--mispair_left_ == 0 && !straggler_.empty()) {
+                    straggler_pending_ = true;
+                }
+                return "=00";  // OK reply, wrong length for anything the wrapper asks
             }
-            case 'q': {
-                const uint32_t inquiry = parse_u24(data);
-                if (inquiry == 0x000001) return "=" + u24(profile_.features);
-                if (inquiry == 0x000000) return "=" + u24(0);  // indexer word: never armed here
-                return "!0";
+            if (malform_left_ > 0) {
+                --malform_left_;
+                // The board decoded and APPLIED a start before its ack was garbled.
+                if (cmd != 'J') return "25278";  // no leading "=" / "!": a byte dropped on a noisy link
+                apply_j_then_garble = true;
             }
-            case 'I':
-                t1_[axis - 1] = parse_u24(data);
-                return "=";
-            case 'i':
+            if (cmd == 'e' && !version_reply_.empty()) return "=" + version_reply_;
+            if (cmd == 'M') return "=";
+            if (cmd == 'i') {
                 if (!reject_readback_code_.empty()) {
                     std::string code;
                     code.swap(reject_readback_code_);
                     return "!" + code;
                 }
                 if (no_readback_) return "!0";
-                if (div16_readback_) {
-                    if (div16_wrong_ >= 0) return "=" + u24(static_cast<uint32_t>(div16_wrong_));
-                    const uint32_t q = t1_[axis - 1] / 16;
-                    return "=" + u24(div16_negative_ ? (0x1000000u - q) & 0xFFFFFFu : q);
-                }
-                return "=" + u24(t1_[axis - 1]);
-            case 'K':
-            case 'L':
-                // Stop: the axis actually comes to rest, so a driver-side
-                // stop-and-confirm loop terminates against this fake instead
-                // of spinning (open-astro#521).
-                running_[axis - 1] = false;
-                return "=";
-            case 'J':
-                if (reject_j_on_running_ && running_[axis - 1]) return "!2";
-                running_[axis - 1] = true;
-                return "=";
-            case 'F':
-                init_done_[axis - 1] = true;
-                return "=";
-            case 'G':
-                // ":G<mode><dir>": the mode digit is a bit field. Bit 0 set
-                // (1 or 3) selects SPEED mode, clear (0 or 2) selects GOTO;
-                // bit 1 picks the fast/slow rate. The driver sends '3' for a
-                // fast speed move and '1' for a slow one, so decode bit 0 the
-                // way the board does rather than listing digits (review of
-                // #553: the old "1 or 2" list recorded a fast MoveAxis as a
-                // GOTO, which get_hardware_slewing_locked() reports as Slewing).
-                if (!data.empty()) {
-                    speed_mode_[axis - 1] = ((data[0] - '0') & 1) != 0;
-                }
-                return "=";
-            case 'S':
-            case 'E':
-            case 'M':
-                return "=";
-            default:
-                return "!0";
+                div16 = div16_readback_;
+                div16_negative = div16_negative_;
+                div16_wrong = div16_wrong_;
+            }
+            reject_j = cmd == 'J' && reject_j_on_running_;
         }
+        const int axis = frame[1] == '2' ? 2 : 1;
+        if (reject_j && axis_running(axis)) return "!2";
+        if (div16) {
+            if (div16_wrong >= 0) return "=" + u24(static_cast<uint32_t>(div16_wrong));
+            const uint32_t q = step_period(axis) / 16;
+            return "=" + u24(div16_negative ? (0x1000000u - q) & 0xFFFFFFu : q);
+        }
+        std::string reply = FakeSkyWatcherBoard::handle(":" + frame);
+        return apply_j_then_garble ? "25278" : reply;
     }
 
     void run() {
@@ -442,7 +345,7 @@ private:
             if (r <= 0) continue;
             const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
             if (n > 0) {
-                std::lock_guard<std::mutex> lock(mutex_);
+                std::lock_guard<std::mutex> lock(smutex_);
                 if (muted_ && reads_ignore_vtime_) force_blocking_reads();
             }
             for (ssize_t i = 0; i < n; ++i) {
@@ -457,14 +360,14 @@ private:
                 }
                 const std::string frame = pending;
                 pending.clear();
-                const std::string body = handle(frame);
+                const std::string body = handle_frame(frame);
                 if (body.empty()) {
                     continue;  // silent: the board did not decode the frame
                 }
                 const std::string reply = body + "\r";
                 int delay = 0;
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::lock_guard<std::mutex> lock(smutex_);
                     if (delay_ms_ > 0 && (delay_command_ == 0 || delay_command_ == frame[0])) {
                         delay = delay_ms_;
                         delay_ms_ = 0;
@@ -482,7 +385,7 @@ private:
                 std::string straggler;
                 int straggler_ms = 0;
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::lock_guard<std::mutex> lock(smutex_);
                     if (straggler_pending_) {
                         straggler_pending_ = false;
                         straggler = straggler_ + "\r";
@@ -500,17 +403,14 @@ private:
     // First member: constructed before the worker, destroyed after it has
     // been joined.
     PtyPair pty_;
-    const FakeMountProfile profile_;
     std::thread worker_;
     std::atomic<bool> stop_{false};
     std::atomic<int> latency_ms_{0};
     std::atomic<int> served_{0};
-    mutable std::mutex mutex_;
-    uint32_t counts_[2] = {0x800000, 0x800000};
-    uint32_t t1_[2] = {0, 0};
+    mutable std::mutex smutex_;  // the transport and failure knobs; the core's mutex_ guards the axes
     int delay_ms_ = 0;
     char delay_command_ = 0;
-    std::string version_reply_;  // seeded from profile_.version_reply
+    std::string version_reply_;  // empty: the profile's
     int answer_baud_ = 0;
     int mispair_left_ = 0;
     bool reject_j_on_running_ = false;
@@ -525,13 +425,8 @@ private:
     bool div16_negative_ = false;
     int64_t div16_wrong_ = -1;
     std::string reject_readback_code_;
-    // Defaults reproduce the fixed "=101" this fake used to answer for ":f":
-    // speed mode, not running, initialized.
     bool muted_ = false;
     bool reads_ignore_vtime_ = false;
-    bool running_[2] = {false, false};
-    bool speed_mode_[2] = {true, true};
-    bool init_done_[2] = {true, true};
     std::vector<std::string> frames_;
 };
 

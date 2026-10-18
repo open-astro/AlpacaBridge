@@ -428,6 +428,51 @@ public:
         return static_cast<uint32_t>(ax(axis).t1);
     }
 
+    /// Position counts ":j" reports for @p axis (24 bit), set without any
+    /// motion: a test's way to put the axis somewhere. Unlike
+    /// jump_axis_degrees() it takes the raw register value, so a case can
+    /// place the axis at any count.
+    void set_counts(int axis, uint32_t counts) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        a.counts = counts & 0xFFFFFF;
+        a.shaft = a.counts + a.frame_shift;
+    }
+
+    /// open-astro#521: put @p axis in the running state with no motion, as a
+    /// board whose motion outlived the driver's link is. @p speed_mode true
+    /// models a MoveAxis or tracking drive (the case the driver classifies as
+    /// NOT slewing), false a GOTO that ":f" reports as one. The axis holds its
+    /// count until a ":G"/":I"/":J" gives it a motion (a goto is not driven
+    /// to a target here); ":K"/":L" clear it.
+    void set_axis_running(int axis, bool running, bool speed_mode = true) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Axis& a = ax(axis);
+        a.advance(now());
+        a.running = running;
+        a.speed_mode = speed_mode;
+        a.in_goto = false;
+        a.rate_counts = 0.0;
+        a.stopping = false;
+    }
+
+    /// The mode the last ":G" (or set_axis_running()) selected for @p axis:
+    /// true = speed mode (a MoveAxis or tracking drive), false = GOTO.
+    bool axis_speed_mode(int axis) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return ax(axis).speed_mode;
+    }
+
+    /// open-astro#505: the ":F" initialization bit on both axes. A board that
+    /// power-cycles mid-session comes back with this false while answering
+    /// every frame normally.
+    void set_init_done(bool init_done) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        axes_[0].init_done = init_done;
+        axes_[1].init_done = init_done;
+    }
+
     /// Move the simulated axes instantly (test setup).
     void jump_axis_degrees(int axis, double deg) {
         std::lock_guard<std::mutex> lock(mutex_);
