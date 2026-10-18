@@ -39,6 +39,9 @@ public:
     std::atomic<int> slew_polls_needed{0};
     std::atomic<int> fail_slew_polls{0};
 
+    /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
+    std::atomic<bool> tracking{true};
+
     std::atomic<bool> parked{false};
     std::atomic<bool> slewing{false};
     std::atomic<int> park_commands{0};
@@ -92,7 +95,7 @@ private:
             if (slewing && ++slew_polls > slew_polls_needed.load()) slewing = false;
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
         }
-        if (has(command, "IsTracking")) return "|No error. Error = 0.1#";
+        if (has(command, "IsTracking")) return tracking ? "|No error. Error = 0.1#" : "|No error. Error = 0.0#";
         return "|No error. Error = 0.OK#";
     }
 

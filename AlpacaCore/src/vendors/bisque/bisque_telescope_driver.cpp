@@ -779,6 +779,7 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
+        check_tracking_for_slew_locked("SlewToCoordinates");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -802,6 +803,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
+        check_tracking_for_slew_locked("SlewToCoordinatesAsync");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -1041,6 +1043,14 @@ private:
             slewing_cached_ = false;
         }
         return !complete;
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter does: a failed query is off.
+    void check_tracking_for_slew_locked(const char* who) const {
+        if (!get_tracking_locked()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
     }
 
     bool get_tracking_locked() const {

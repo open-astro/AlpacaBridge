@@ -567,6 +567,36 @@ TEST_CASE("Bisque Telescope Driver - connected slew, sync and MoveAxis refuse no
     driver->set_connected(false);
 }
 
+TEST_CASE("Bisque Telescope Driver - all four equatorial slews are refused while Tracking is false",
+          "[bisque][telescope][unit][tracking-guard]") {
+    ClockedBisque rig;
+    rig.mount.tracking = false;
+    REQUIRE_FALSE(rig.driver->get_tracking());
+
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_alpaca_error([&]() { rig.driver->slew_to_coordinates(5.5, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { rig.driver->slew_to_coordinates_async(5.5, 95.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+
+    require_alpaca_error([&]() { rig.driver->slew_to_coordinates(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { rig.driver->slew_to_coordinates_async(5.5, 20.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    rig.driver->set_target_right_ascension(5.5);
+    rig.driver->set_target_declination(20.0);
+    require_alpaca_error([&]() { rig.driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&]() { rig.driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+
+    // Nothing reached TheSkyX and the driver is not slewing.
+    CHECK(rig.mount.slew_commands.load() == 0);
+    CHECK_FALSE(rig.driver->get_slewing());
+
+    // With Tracking on the same call goes through.
+    rig.mount.tracking = true;
+    REQUIRE_NOTHROW(rig.driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
+
 TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid replies are preserved",
           "[bisque][telescope][async][slewfailure]") {
     auto completion_state = std::make_shared<std::atomic<int>>(0);
@@ -575,6 +605,8 @@ TEST_CASE("Bisque async slew - completion poll errors are surfaced and valid rep
         if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
         if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
         if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("IsTracking") != std::string::npos)
+            return "|No error. Error = 0.1#";  // slews need Tracking (#1274)
         if (command.find("IsSlewComplete") != std::string::npos) {
             switch (completion_state->load()) {
                 case 0:
@@ -710,6 +742,8 @@ TEST_CASE("Bisque PulseGuide - async status remains readable and negative durati
         if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
         if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
         if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("IsTracking") != std::string::npos)
+            return "|No error. Error = 0.1#";  // slews need Tracking (#1274)
         if (command.find("MoveTelescope") != std::string::npos) {
             state->entered.store(true);
             state->calls.fetch_add(1);
@@ -762,6 +796,8 @@ alpacacore::test::FakeMountServer::Responder bisque_guide_responder(std::chrono:
         if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
         if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
         if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("IsTracking") != std::string::npos)
+            return "|No error. Error = 0.1#";  // slews need Tracking (#1274)
         if (command.find("MoveTelescope") != std::string::npos) {
             std::this_thread::sleep_for(guide_delay);
             return guide_reply;
@@ -954,6 +990,8 @@ TEST_CASE("Bisque sync slew - a transient poll failure is tolerated and a persis
         if (command.find("GetRaDec") != std::string::npos) return "|No error. Error = 0.5.5,20.0#";
         if (command.find("GetAzAlt") != std::string::npos) return "|No error. Error = 0.100.0,45.0#";
         if (command.find("IsParked") != std::string::npos) return "|No error. Error = 0.false#";
+        if (command.find("IsTracking") != std::string::npos)
+            return "|No error. Error = 0.1#";  // slews need Tracking (#1274)
         if (command.find("IsSlewComplete") != std::string::npos) {
             polls->fetch_add(1);
             if (fail_polls->load() != 0) {
