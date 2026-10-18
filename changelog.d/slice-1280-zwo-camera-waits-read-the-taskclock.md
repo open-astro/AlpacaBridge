@@ -1,0 +1,2 @@
+### Changed (tests)
+- **ZWO camera waits read the task clock**: the first-temperature retry sleep, the pulse-guide end deadline and turn-off sleep and the exposure-retry pacing window now go through `util::TaskClock` (issue #1280, `create_zwo_camera*` take an optional clock, default the real one), and `test_zwo_camera_clock.cpp` drives each wait with `FakeTaskClock::advance()` instead of sleeping. No behaviour change in production.
