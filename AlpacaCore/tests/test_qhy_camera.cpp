@@ -443,7 +443,13 @@ TEST_CASE("QHY Camera Driver - CCDTemperature is readable right after connect", 
     // open-astro#941. The telemetry worker's first CURTEMP poll lands after
     // Connected=true returns, so a read in that window failed with
     // InvalidOperation. Connect now seeds the cache with one CURTEMP read.
+    // open-astro#1307: connect also starts the temperature-control worker
+    // (cooler on, target 0 C), which steps CURTEMP toward 0 and the telemetry
+    // worker then overwrites the seed, so a slow build read -4.5 for -5.0.
+    // A negligible step (0.0 would settle at once) keeps CURTEMP at the seeded
+    // value, as the neighbouring case at the telemetry restart does.
     auto fake = FakeQHYSDK::with_one_cooled_camera();
+    fake.temp_settle_step_c = 1e-9;
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
 
