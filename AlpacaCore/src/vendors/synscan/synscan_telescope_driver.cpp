@@ -3373,8 +3373,9 @@ private:
     // AbortSlew, Unpark, and disconnect. Never taken under mutex_; a blocking
     // slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
-    // Wall time behind every local-sidereal-time read (park target, side of pier, SiderealTime). Only a test
-    // replaces it, so hardware keeps std::chrono::system_clock. Own mutex: read under mutex_ and by the poll.
+    // Wall time behind every local-sidereal-time read (park and SetPark target, DestinationSideOfPier,
+    // SiderealTime). Only a test replaces it, so hardware keeps std::chrono::system_clock. Own mutex: the
+    // reads run on client calls (some under mutex_), the test setter on another thread.
     std::chrono::system_clock::time_point sidereal_wall_now() const {
         std::function<std::chrono::system_clock::time_point()> now;
         {
