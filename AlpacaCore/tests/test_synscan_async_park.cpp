@@ -560,6 +560,10 @@ TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[
         std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    // Pinned sidereal wall time: a real second between the two calls moved the target by 0xC300 counts (#976).
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
+
     driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
     st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
     driver->set_site_longitude(90.0);        // longitude +90 degrees has the same six-hour LST effect
@@ -637,6 +641,11 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
             std::nullopt, std::nullopt, SynScanAlignmentSetting::Equatorial, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        // Pin the sidereal wall time (a real clock passing a second between the two calls moved the target by
+        // 0xC300 counts, #976), so the 90 degree longitude shift is the only sidereal change the target follows.
+        auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+        alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [&] { return wall; });
 
         driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
         st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
