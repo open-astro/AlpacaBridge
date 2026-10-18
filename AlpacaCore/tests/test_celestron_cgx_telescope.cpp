@@ -1909,6 +1909,45 @@ TEST_CASE("Celestron CGX USB Telescope Driver - keeps Slewing true through the c
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron CGX USB Telescope Driver - the asynchronous equatorial slews are refused while Tracking is false",
+          "[celestron][cgx][telescope][integration][tracking-guard]") {
+    // CanSlew is false on this mount, so SlewToCoordinates and SlewToTarget are
+    // MethodNotImplemented; the two Async forms share start_slew_operation().
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    driver->set_connected(true);
+    driver->find_home();
+    REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
+    REQUIRE_FALSE(driver->get_tracking());
+
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 1.0 + 24.0, 24.0);
+    const auto motion_commands = [&] {
+        return mount.count_command(0x10, 0x02) + mount.count_command(0x11, 0x02) + mount.count_command(0x10, 0x0b) +
+               mount.count_command(0x11, 0x0b);
+    };
+    const int before = motion_commands();
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, 95.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, 25.0); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    driver->set_target_right_ascension(target_ra);
+    driver->set_target_declination(25.0);
+    require_alpaca_error([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { driver->slew_to_coordinates(target_ra, 25.0); },
+                         alpacacore::AlpacaError::MethodNotImplemented);
+    CHECK(motion_commands() == before);
+    CHECK_FALSE(driver->get_slewing());
+
+    driver->set_tracking(true);
+    CHECK_NOTHROW(driver->slew_to_coordinates_async(target_ra, 25.0));
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron CGX USB Telescope Driver - failed tracking shutdown leaves flip calibration idle",
           "[celestron][cgx][telescope][integration]") {
     alpacacore::test::FakeCelestronCgxMount mount;
