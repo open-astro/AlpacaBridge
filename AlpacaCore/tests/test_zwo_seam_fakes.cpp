@@ -110,7 +110,8 @@ TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filt
 
 // Falsified by: locked_zwo_efw_sdk.h set_position() forwarding wheel_id as the slot (get_position reads
 // 5, not 3).
-TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked decorators - forward every call", "[zwo][unit][fake-sdk]") {
+TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked decorators - forward every call",
+          "[zwo][unit][fake-sdk]") {
     FakeZWOEFWSDK efw;
     LockedZWOEFWSDK locked_efw(efw);
     zwo::ZWOEFWInfo wheel;
@@ -161,7 +162,8 @@ TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked de
 
 // Falsified by: locked_zwo_eaf_sdk.h not forwarding a throw from the inner SDK (the scripted open
 // failure is swallowed and the by-index driver reports connected).
-TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the driver and releases the lock", "[zwo][unit][fake-sdk]") {
+TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the driver and releases the lock",
+          "[zwo][unit][fake-sdk]") {
     FakeZWOEAFSDK fake;
     fake.fail_open = true;
     LockedZWOEAFSDK sdk(fake);
