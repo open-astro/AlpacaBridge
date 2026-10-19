@@ -49,7 +49,8 @@ Revert the PR. The bound is one constant, so "never lost by silence" is a one-li
 | iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | planned follow-up |
 | QHY Q-Focuser | `link_lost_` latch on the next transaction (#527); applied with the state snapshot (#1310): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault | #1310 |
 | OnStep (serial) | Applied: node check, fd errors, relink; the #521 window is timed from the last time the link was seen alive to the end of the reconnect (see the OnStep instructions) | #1241 |
-| SynScan, Celestron, Bisque | No latch; transport errors only | planned follow-up |
+| Celestron telescope (NexStar) | Applied with the state snapshot (#1337): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters `NotConnected`, `DeviceState` empty); no `LinkLostStamp` (no #521 consumer) | #1337 |
+| SynScan, Celestron CGX, Bisque | No latch; transport errors only | planned follow-up |
 | Astroasis focuser | Applied with the state snapshot (#1327): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault; a removed hidraw node is found by the bound, not at once | #1327 |
 | Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One) | SDK error on the next call | planned follow-up |
 | GPhoto camera | A failed exposure is reported by `ImageReady`/`ImageArray` (`CameraState` stays Idle); a camera gone from the USB bus mid-exposure reports `Connected` false; no automatic reopen (#1064, #1204) | planned follow-up |

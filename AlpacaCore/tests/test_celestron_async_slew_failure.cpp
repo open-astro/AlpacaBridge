@@ -449,14 +449,20 @@ TEST_CASE("Celestron async - HC completion-poll failure persists through Slewing
 TEST_CASE("Celestron Slewing - a direct hardware status-poll failure is propagated",
           "[celestron][telescope][async][slewfailure]") {
     auto st = std::make_shared<FakeCelestronState>();
-    st->malformed_slew_status.store(1);
     alpacacore::test::FakeMountServer server(celestron_responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    // The status poll asks the mount for Slewing (the getter serves its frame): pause its own ticks and drive it.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    const int polls_before = st->slew_status_polls.load();
+    st->malformed_slew_status.store(1);
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    CHECK_FALSE(driver->get_slewing());  // the last good frame is served while the fault is young
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     CHECK_FALSE(driver->get_slewing());
-    CHECK_FALSE(driver->get_slewing());
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     try {
         static_cast<void>(driver->get_slewing());
         FAIL("Slewing returned the cached state after three status polls failed");
@@ -464,7 +470,7 @@ TEST_CASE("Celestron Slewing - a direct hardware status-poll failure is propagat
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("invalid response") != std::string::npos);
     }
-    CHECK(st->slew_status_polls.load() == 3);
+    CHECK(st->slew_status_polls.load() - polls_before == 3);
     CHECK(st->cancel_goto_count.load() == 0);  // an idle status GET does not stop a mount
     driver->set_connected(false);
 }
@@ -487,6 +493,8 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         REQUIRE(server.ok());
         auto driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        // The status poll's own L reads would add to the count this case pins: pause its ticks.
+        alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
         REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));
@@ -523,6 +531,9 @@ TEST_CASE("Celestron sync slew - three status-poll failures abort the wait",
     REQUIRE(server.ok());
     auto driver = make_driver(server.port(), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The status poll's own L reads would add to the count this case pins: pause its ticks. It still parks on the
+    // clock, so the slew's completion loop is the second waiter.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
     std::exception_ptr slew_error;
     std::atomic<bool> finished{false};
@@ -535,7 +546,8 @@ TEST_CASE("Celestron sync slew - three status-poll failures abort the wait",
         finished.store(true);
     });
     const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5000);
-    const bool waiting_for_poll = clock.wait_for_waiters(1, std::chrono::seconds(2));
+    const bool waiting_for_poll = clock.wait_for_waiters(2, std::chrono::seconds(2));
+    const int polls_before = st->slew_status_polls.load();
     st->malformed_slew_status.store(1);
     clock.advance(std::chrono::seconds(9));
     clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -552,7 +564,7 @@ TEST_CASE("Celestron sync slew - three status-poll failures abort the wait",
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
         CHECK(std::string(ex.what()).find("invalid response") != std::string::npos);
     }
-    CHECK(st->slew_status_polls.load() == 3);
+    CHECK(st->slew_status_polls.load() - polls_before == 3);
     driver->set_connected(false);
 }
 
@@ -578,7 +590,7 @@ TEST_CASE("Celestron sync slew - tracking restoration failure is propagated",
         finished.store(true);
     });
     const bool goto_dispatched = wait_until([&] { return st->goto_count.load() > 0; }, 5000);
-    const bool waiting_for_completion = clock.wait_for_waiters(1, std::chrono::seconds(2));
+    const bool waiting_for_completion = clock.wait_for_waiters(2, std::chrono::seconds(2));  // + the status poll
     st->reject_next_tracking_write.store(true);
     clock.advance(std::chrono::seconds(9));
     clock.wait_for_woken_settled(std::chrono::seconds(2));
@@ -866,8 +878,11 @@ TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome", "
         0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);  // no tick of its own overlaps
     driver->find_home();
-    REQUIRE(read_slewing(*driver) == SlewingRead::False);  // the poll completes the homing
+    REQUIRE(
+        alpacacore::vendor::celestron::poll_status_now_for_testing(*driver));  // the status poll completes the homing
+    REQUIRE(read_slewing(*driver) == SlewingRead::False);
     REQUIRE(driver->get_at_home());
 
     refuse_slot_threads(*driver);
@@ -1077,7 +1092,7 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         driver->pulse_guide(second_direction, 1500);
         const double held = is_ra ? driver->get_right_ascension() : driver->get_declination();
         st->shifted_position.store(true);
-        clock.advance(std::chrono::milliseconds(2100));  // Expire the 2 s position cache.
+        clock.advance(std::chrono::milliseconds(2100));  // Poll ticks may now publish the shifted position.
         CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
 
         const double during = is_ra ? driver->get_right_ascension() : driver->get_declination();
@@ -1096,19 +1111,26 @@ TEST_CASE("Celestron position - stale cache faults after repeated failed polls a
         0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The status poll reads the mount (the getters serve its frame): pause its own ticks and drive it.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
     const double ra = driver->get_right_ascension();
-    clock.advance(std::chrono::milliseconds(2100));  // expire the 2 s position cache
     st->mute.store(true);
 
+    // Two failed polls: the last good frame is still served and no fault is latched.
+    for (int i = 0; i < 2; ++i) {
+        alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+        CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
+        CHECK(driver->get_link_fault().empty());
+    }
+    // The third latches the fault: the frame is no longer served.
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     std::string last_error;
-    for (int i = 0; i < 3; ++i) {
-        try {
-            (void)driver->get_right_ascension();
-            FAIL("stale position must not be served after a failed mount read");
-        } catch (const alpacacore::AlpacaException& e) {
-            CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
-            last_error = e.what();
-        }
+    try {
+        (void)driver->get_right_ascension();
+        FAIL("stale position must not be served after a failed mount read");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        last_error = e.what();
     }
     CHECK(driver->get_connected());
     CHECK(last_error.find("communications compromised") != std::string::npos);
@@ -1116,22 +1138,20 @@ TEST_CASE("Celestron position - stale cache faults after repeated failed polls a
 
     try {
         (void)driver->get_altitude();
-        FAIL("faulted position cache must force a hardware poll");
+        FAIL("a faulted link must refuse the alt/az read too");
     } catch (const alpacacore::AlpacaException& e) {
         CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
     }
     st->mute.store(false);
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
     CHECK(driver->get_link_fault().empty());
 
+    // One failed poll after the recovery starts the count again: no fault, the frame is served.
     st->mute.store(true);
-    clock.advance(std::chrono::milliseconds(2100));  // expire the recovered position cache
-    try {
-        (void)driver->get_right_ascension();
-        FAIL("an unavailable mount must not return cached coordinates");
-    } catch (const alpacacore::AlpacaException& e) {
-        CHECK(std::string(e.what()).find("communications compromised") == std::string::npos);
-    }
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    CHECK(driver->get_link_fault().empty());
+    CHECK(std::abs(driver->get_right_ascension() - ra) < 1e-6);
     st->mute.store(false);
     driver->set_connected(false);
 }

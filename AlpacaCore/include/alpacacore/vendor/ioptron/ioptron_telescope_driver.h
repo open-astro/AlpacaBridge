@@ -20,6 +20,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::ioptron {
@@ -97,5 +98,16 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(
 /// can make a body's start fail. Call only while no start is in flight.
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam: `hook` runs on the clock-sync body after its start delay (it may block or throw).
+/// Set it before connecting. A driver not from the factories above is ignored.
+void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: starts the clock-sync body again, as a connect that released the driver mutex late does.
+/// Call with no driver lock held. A driver not from the factories above is ignored.
+void start_clock_sync_for_testing(TelescopeDriver& driver);
+
+/// Test seam: the kept failure of the clock-sync slot, until its next start.
+std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver);
 
 } // namespace alpacacore::vendor::ioptron
