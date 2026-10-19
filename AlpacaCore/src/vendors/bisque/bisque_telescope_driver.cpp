@@ -734,10 +734,10 @@ public:
         // bumps again after the retiring call.
         lock.unlock();
         try {
-            pulse_guide_op_.start([this, request, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext&) {
+            pulse_guide_op_.start([this, request, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if (!connected_ || request != pulse_request_) {
+                    if (!connected_ || ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
                         return;
                     }
                 }
@@ -751,7 +751,7 @@ public:
                 }
                 // The request check and the state write share one mutex_ hold.
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (request != pulse_request_) {
+                if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
                     return;
                 }
                 if (error.empty()) {
