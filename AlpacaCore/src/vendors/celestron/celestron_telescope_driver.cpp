@@ -3021,12 +3021,16 @@ private:
         set_utc_date_locked(now_utc);
     }
 
+    // The lazy re-seed below can now also follow a disconnect, which clears
+    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         const auto now = clock_.now();
-        if (!utc_offset_.valid()) {
-            utc_offset_.set(std::chrono::system_clock::now(), now);
+        if (const auto utc = utc_offset_.current(now)) {
+            return *utc;
         }
-        return *utc_offset_.current(now);
+        const auto seeded = std::chrono::system_clock::now();
+        utc_offset_.set(seeded, now);
+        return seeded;
     }
 
     static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,

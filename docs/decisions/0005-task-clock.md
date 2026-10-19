@@ -14,7 +14,7 @@ The fake's `advance()` takes each due waiter's mutex before notifying it, so a w
 
 Once a driver is on the clock, every wait in it goes through the clock: the task waits, the rate-verify window, and the raw settle and poll sleeps. A test that sleeps to wait for a driver timer on such a driver is a review-blocking regression. `StreamLinkHealth` callers take `now()` from the clock; `ConsecutiveSettle` and `PolledLinkHealth` stay clock-free.
 
-Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for LST or UTCDate.
+Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for the LST or UTCDate value; [decision 0014](0014-utc-offset.md) splits the two: the UTC value stays on `system_clock`, and only the host time elapsed since the write reads this clock.
 
 ## Alternatives rejected
 
