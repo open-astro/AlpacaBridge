@@ -30,7 +30,7 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 
 ### Celestron telescope adoption (#1337)
 
-- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, slewing flag, and every fifth tick alt-az, pier side and tracking mode. Exchanges run without the driver `mutex_`; the frame is published under it. `kSnapshotMaxAge` is 3 s and stale is served, never refused.
+- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, slewing flag, and every fourth tick alt-az, pier side and tracking mode. Exchanges run without the driver `mutex_`; the frame is published under it. `kSnapshotMaxAge` is 3 s and stale is served, never refused.
 - Served from the frame: RightAscension, Declination, Altitude, Azimuth, Slewing, SideOfPier, Tracking, AtHome while homing, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache and its stamps are gone. Control-path reads (SetPark, Park, the slew loops) measure directly and write through.
 - Slewing carries a `slewing_known` flag: a connect whose slewing query failed serves "not available yet" until a poll answers, not a guessed `false`.
 - The site read the poll does for a mount whose connect-time read failed stores its result only while no client write has made the site valid.

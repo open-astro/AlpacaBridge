@@ -771,6 +771,10 @@ struct SnapshotMount {
     std::atomic<bool> shifted{false};
     std::atomic<bool> w_fail{false};  // the location query goes unanswered
     std::atomic<int> w_delay_ms{0};   // the location query answers after this long
+    std::atomic<int> w_count{0};      // location queries received
+    std::atomic<bool> l_fail{false};  // the slewing query goes unanswered
+    std::atomic<bool> z_fail{false};  // the alt-az query goes unanswered
+    std::atomic<int> slow_count{0};   // pier-side and tracking-mode queries received
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -784,6 +788,7 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'V':
             return std::string("\x05\x23#", 3);
         case 'w':
+            st.w_count.fetch_add(1);
             if (st.w_fail.load()) return "";
             if (st.w_delay_ms.load() > 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(st.w_delay_ms.load()));
@@ -794,14 +799,18 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             return st.shifted.load() ? "13AB0500,21000500#" : "12AB0500,20000500#";
         case 'z':
         case 'Z':
+            if (st.z_fail.load()) return "";
             return "20AB0500,10000500#";
         case 'L':
+            if (st.l_fail.load()) return "";
             return st.slewing.load() ? "1#" : "0#";
         case 'J':
             return "1#";
         case 'p':
+            st.slow_count.fetch_add(1);
             return std::string(1, st.pier.load()) + "#";
         case 't':
+            st.slow_count.fetch_add(1);
             return st.tracking.load() ? std::string("\x02#") : std::string("\x00#", 2);
         case 'T':
             st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
@@ -1001,11 +1010,59 @@ TEST_CASE("Celestron snapshot - a site written during the poll's location read i
     st->w_fail = false;
     st->w_delay_ms = 200;
     clock.advance(std::chrono::seconds(10));  // the site retry delay has passed
+    const int w_before = st->w_count.load();
     std::thread poll([&] { (void)cel::poll_status_now_for_testing(*driver); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // The write must land while the poll's location read is in flight: wait for the mount to receive it.
+    for (int i = 0; i < 500 && st->w_count.load() == w_before; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(st->w_count.load() > w_before);
     driver->set_site_latitude(-33.856784);
     poll.join();
     CHECK(std::abs(driver->get_site_latitude() - (-33.856784)) < 1e-6);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - Slewing is unknown, not false, until a query has answered",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    st->l_fail = true;  // the connect-time slewing query goes unanswered
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK_NOTHROW(driver->get_right_ascension());  // the position is known
+    try {
+        (void)driver->get_slewing();
+        FAIL("an unanswered slewing query must not be served as false");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("not available yet") != std::string::npos);
+    }
+    st->l_fail = false;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - the slow fields of a tick stop at the first failure",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    st->z_fail = true;  // alt-az times out; pier side and tracking mode would each wait out their own timeout
+    st->slow_count = 0;
+    (void)cel::poll_status_now_for_testing(*driver);  // tick 0 is a full tick
+    CHECK(st->slow_count.load() == 0);
+    st->z_fail = false;
+    (void)cel::poll_status_now_for_testing(*driver);
+    CHECK(st->slow_count.load() > 0);  // the same tick asks for them when alt-az answers
     driver->set_connected(false);
 }
 
