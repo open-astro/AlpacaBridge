@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-18
+## Updated 2026-10-19
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -181,14 +181,15 @@ This document lists all hardware vendors and device types that are verified to w
 | GPM662M (mono, IMX662) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/GPM662M/) |
 | ATR585M (cooled mono, IMX585) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/ATR585M/) |
 | G3M715C (IMX715, rebadged as SVBONY SC715C) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/SVBONY/SC715C/) |
+| G3M678C (color, IMX678) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ToupTek/G3M678C/) |
 
 <details>
 <summary><strong>ToupTek Driver Notes</strong></summary>
 
 - **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
-- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571), ATR2600C (cooled APS-C color, IMX571, sold rebadged as the SVBONY SC571CC), ATR585M (cooled mono, IMX585, HCG/LCG/HDR readout modes) and GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) — all ConformU-validated on Linux arm64. G3M715C (also sold rebadged as SVBONY SC715C — see the SVBONY section) is validated too. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
-- **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128). 4.5.0 — GPM662M (Raspberry Pi, 2026-08-26): 0 errors, 0 issues, all members within timing targets. 4.5.1 — G3M715C (sold as the SVBONY SC715C, 2026-09-11): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC715C/`. 4.5.1 — ATR2600C (sold as the SVBONY SC571CC, 2026-09-13): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC571CC/`.
+- **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571), ATR2600C (cooled APS-C color, IMX571, sold rebadged as the SVBONY SC571CC), ATR585M (cooled mono, IMX585, HCG/LCG/HDR readout modes), GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) and G3M678C (uncooled color, IMX678) — all ConformU-validated on Linux arm64. G3M715C (also sold rebadged as SVBONY SC715C — see the SVBONY section) is validated too. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
+- **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128). 4.5.0 — GPM662M (Raspberry Pi, 2026-08-26): 0 errors, 0 issues, all members within timing targets. 4.5.1 — G3M715C (sold as the SVBONY SC715C, 2026-09-11): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC715C/`. 4.5.1 — ATR2600C (sold as the SVBONY SC571CC, 2026-09-13): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC571CC/`. 4.5.2 — G3M678C (a user's Raspberry Pi 5, Debian 13, AlpacaBridge 5.1.0 nightly `g7f037d8`, 2026-10-18, issue #1300): 0 errors, 0 issues, 0 timing issues.
 - **Cooling (TEC)**: Capability-gated on `TOUPCAM_FLAG_TEC` / `TOUPCAM_FLAG_TEC_ONOFF`. Uncooled cameras report `CanSetCCDTemperature = false`. On cooled models (ATR2600M) `CoolerOn` / `SetCCDTemperature` / `CoolerPower` drive the TEC; verified reaching −10 °C on hardware.
 - **Readout modes (conversion gain + High Full Well)**: on sensors that support them, ASCOM `ReadoutModes` exposes the conversion-gain (`HCG` / `LCG`, plus `HDR` on HDR-capable models) and `High Full Well` hardware modes as a dropdown (e.g. NINA). On the IMX571 these trade read-noise vs full-well (HCG = low noise; LCG / High Full Well = larger full well, ~51 ke⁻ → ~100 ke⁻). Sensors without these keep a single `Normal` mode.
 - **Offset**: exposed as ASCOM `Offset` (black level, `TOUPCAM_OPTION_BLACKLEVEL`) on cameras reporting `TOUPCAM_FLAG_BLACKLEVEL`; `OffsetMax` scales with the output bit depth. Cameras without it report `PropertyNotImplemented`.
@@ -204,6 +205,7 @@ This document lists all hardware vendors and device types that are verified to w
 |--------------|------------|------------------|--------|
 | ASI120MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI120MM%20Mini/) |
 | ASI174MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI174MM%20Mini/) |
+| ASI178MC | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI178MC/) |
 | ASI2600MC Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MC%20Pro/) |
 | ASI2600MM Pro | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI2600MM%20Pro/) |
 | ASI290MM Mini | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/ASI/ASI290MM%20Mini/) |
@@ -219,6 +221,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: ZWO ASI Camera SDK Version 1.41 (build target)
 - **Connection**: USB (requires libusb-1.0)
 - **ASI533MC Pro and ASI120MM Mini validation**: both re-validated with ConformU 4.5.1 on Linux arm64 with ASI Camera SDK 1.41, 2026-10-15: 0 errors, 0 issues, all members within timing targets.
+- **ASI178MC validation**: ConformU 4.5.2 on a user's Raspberry Pi 5 (Debian 13, AlpacaBridge 5.1.0 nightly `g7f037d8`, 2026-10-18, issue #1299): 0 errors, 0 issues, all members within timing targets.
 - **Camera identity**: a saved camera binds by its serial number, not by the SDK's enumeration order, which can change across a reboot. The first start records `serialNumber` and `cameraName` in the entry (`cameraIndex` and `cameraId` stay as hints), so the device number keeps following the same camera. A body whose serial cannot be read binds by `cameraName` and reports a stored `ZWO_UID_...` UniqueID; two serial-less bodies of one model are told apart by `cameraIndex` only. An entry with no `cameraName` (a new entry, or the first start after the upgrade) opens each connected ZWO camera once to read its serial; while another program holds a camera (for example a guiding app on the same host) that open fails, so the entry binds by model name plus `cameraIndex` like a serial-less body and reports a stored `ZWO_UID_...` UniqueID; once the serial can be read at a later start (or when the entry is saved again), it binds by serial and the UniqueID changes to `ZWO_SN_<serial>`; until then the UniqueID reads `ZWO_SN_<serial>` while the camera is connected and the stored `ZWO_UID_...` while it is not. Behaviour with a guider running is not checked on hardware.
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 - **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
