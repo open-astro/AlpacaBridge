@@ -447,7 +447,8 @@ private:
     }
 
     double normalize_angle(double angle) const {
-        double wrap = max_degree_ > 0.0 ? max_degree_ : 360.0;
+        const double max_degree = max_degree_.load();
+        double wrap = max_degree > 0.0 ? max_degree : 360.0;
         if (wrap <= 0.0) {
             return angle;
         }
@@ -481,7 +482,9 @@ private:
     ZWOCAARotatorInfo rotator_info_;
     bool rotator_info_valid_;
     double min_degree_;
-    double max_degree_;
+    // Written under mutex_ by the connect path, read lock-free by normalize_angle() from
+    // move()/move_absolute()/sync() before they take mutex_; atomic so the two never race.
+    std::atomic<double> max_degree_;
     double target_position_;
     bool has_target_position_;
     double sync_offset_;
