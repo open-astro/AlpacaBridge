@@ -282,6 +282,9 @@ public:
     double get_temperature() const override { return served_frame().temperature; }
 
     void halt() override {
+        // No transition_mutex_: a command may reach the device while a disconnect runs. Accepted:
+        // the wrapper's Impl::mutex_ and require_connected() order it before the close or make it
+        // throw NotConnected.
         ensure_connected();
         // Never refused for a link fault: Halt is the safety stop, and the wrapper
         // serialises the exchange. The write drops a poll in flight whatever the
@@ -298,6 +301,7 @@ public:
     }
 
     void move(int position) override {
+        // No transition_mutex_: see halt().
         ensure_connected();
         throw_if_faulted();
         const int max_step = max_step_.load();
