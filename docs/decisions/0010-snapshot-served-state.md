@@ -28,6 +28,14 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
    - *Lost*, [decision 0009](0009-link-loss-and-relink-policy.md) unchanged: `util::kLinkStalenessBound` of latched fault, or transport-gone evidence at once. Lost: the getters and setters throw `NotConnected`, `Connected` reads false, `DeviceState` is the empty list, `link_lost_at` is stamped (serial and UDP), the poll body ends and the frame is dropped. A frame older than the bound with no latch (a poll that stopped answering the clock) is lost too, but nothing ends its poll body or drops it then: a Connect relinks, stamps `link_lost_at` at the moment the frame crossed the bound, and drops the frame. Faulted (latched, younger than the bound): the getters throw the `DriverException` with the fault text, `Connected` stays true.
    - Rejected: a 200 ms `NotConnected` bound (decision 0009 alternative B: it drops `Connected` on any Wi-Fi hiccup) and a single bound for both (it cannot be both under 250 ms and at least twice the link latency). Reverse: revert the slice; the getters return to per-call reads.
 
+### Celestron telescope adoption (#1337)
+
+- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, slewing flag, and every fifth tick alt-az, pier side and tracking mode. Exchanges run without the driver `mutex_`; the frame is published under it. `kSnapshotMaxAge` is 3 s and stale is served, never refused.
+- Served from the frame: RightAscension, Declination, Altitude, Azimuth, Slewing, SideOfPier, Tracking, AtHome while homing, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache and its stamps are gone. Control-path reads (SetPark, Park, the slew loops) measure directly and write through.
+- Slewing carries a `slewing_known` flag: a connect whose slewing query failed serves "not available yet" until a poll answers, not a guessed `false`.
+- The site read the poll does for a mount whose connect-time read failed stores its result only while no client write has made the site valid.
+- Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; the slow fields of a tick stop at their first failure so a Disconnect waits for one exchange timeout at most.
+
 ## Alternatives rejected
 
 - **Extend `TtlStatusCache`.** Different ownership of the fetch (see point 6).

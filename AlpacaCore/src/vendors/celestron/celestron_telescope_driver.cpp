@@ -74,6 +74,7 @@ struct PolledFrame {
     double alt_degrees = 0.0;
     bool altaz_known = false;
     bool slewing = false;
+    bool slewing_known = false;  // false until a query (or a control-path write) has answered
     int side_of_pier = -1;    // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
     bool pier_known = false;  // the handset has answered the pier query at least once
     int tracking_mode = -1;   // handset tracking mode, -1 unknown
@@ -2128,22 +2129,29 @@ private:
             sample.dec_degrees = decode_angle(dec_raw, 24);
         }
         if (plan.full) {
+            // The slow fields stop at the first failure: on a dead link each would wait out its own response
+            // timeout, and a Disconnect waiting on this tick would pass the ~5 s client budget.
+            bool slow_ok = true;
             try {
                 const int bits = plan.precise ? 24 : 16;
                 const auto raw = protocol.get_alt_az_raw(plan.precise);
                 sample.altaz = {wrap_degrees(decode_angle(raw.first, bits)), decode_angle(raw.second, bits)};
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                slow_ok = false;
             }
-            if (plan.hc) {
+            if (plan.hc && slow_ok) {
                 try {
                     const char side = protocol.get_pier_side();
                     sample.pier = side == 'W' ? 0 : (side == 'E' ? 1 : -1);  // ASCOM: 0 = pierEast, 1 = pierWest
                 } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                    slow_ok = false;
                 }
             }
-            try {
-                sample.tracking_mode = protocol.get_tracking_mode();
-            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+            if (slow_ok) {
+                try {
+                    sample.tracking_mode = protocol.get_tracking_mode();
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): keeps the last value
+                }
             }
         }
         return sample;
@@ -2154,6 +2162,7 @@ private:
         PolledFrame frame = previous;
         if (sample.slewing) {
             frame.slewing = *sample.slewing;
+            frame.slewing_known = true;
         }
         frame.ra_hours = sample.ra_hours;
         frame.dec_degrees = sample.dec_degrees;
@@ -2260,7 +2269,10 @@ private:
     // The slewing value the control path just decided (a slew started or ended, an abort), written through.
     void set_slewing_locked(bool slewing) const {
         slewing_cached_ = slewing;
-        snapshot_.write([slewing](PolledFrame& frame) { frame.slewing = slewing; });
+        snapshot_.write([slewing](PolledFrame& frame) {
+            frame.slewing = slewing;
+            frame.slewing_known = true;
+        });
     }
 
     // A re-read of the mount's slewing flag (the slew-complete and Park loops). Writes only a change: every write
@@ -2268,7 +2280,7 @@ private:
     // and freeze the position.
     void note_slewing_read_locked(bool slewing) const {
         const auto held = snapshot_.read();
-        if (held && held->value.slewing == slewing) {
+        if (held && held->value.slewing_known && held->value.slewing == slewing) {
             slewing_cached_ = slewing;
             return;
         }
@@ -2370,6 +2382,11 @@ private:
     // which also ignores the pause.
     bool poll_status_once(util::OperationContext* ctx, int tick) {
         const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
+        // Held for the whole tick of the poll body, so pausing it can wait out a tick already in flight.
+        std::unique_lock<std::mutex> tick_lock(status_poll_tick_mutex_, std::defer_lock);
+        if (ctx != nullptr) {
+            tick_lock.lock();
+        }
         if (ctx != nullptr && status_poll_paused_for_testing_.load()) {
             return true;
         }
@@ -2399,7 +2416,8 @@ private:
             if (!connected_ || stopped()) {
                 return false;
             }
-            if (site) {
+            // A client's SiteLatitude/SiteLongitude write that landed during the read wins over the older value.
+            if (site && !site_info_valid_) {
                 site_latitude_cached_ = site->latitude_degrees;
                 site_longitude_cached_ = site->longitude_degrees;
                 site_info_valid_ = true;
@@ -2467,7 +2485,12 @@ private:
     }
 
 public:
-    void set_status_poll_paused_for_testing(bool paused) { status_poll_paused_for_testing_ = paused; }
+    // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
+    // without a tick started before the pause adding to them.
+    void set_status_poll_paused_for_testing(bool paused) {
+        status_poll_paused_for_testing_ = paused;
+        std::lock_guard<std::mutex> drain(status_poll_tick_mutex_);
+    }
 
     bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
 
@@ -2528,7 +2551,13 @@ private:
         if (fresh) {
             return poll_hardware_slewing_locked();
         }
-        return served_frame_locked().value.slewing;
+        const auto reading = served_frame_locked();
+        if (!reading.value.slewing_known) {
+            // The connect-time query failed; no guess is served until a poll (or the control path) answers.
+            throw AlpacaException("Celestron mount state is not available yet: the slewing flag has not been answered",
+                                  AlpacaError::DriverException);
+        }
+        return reading.value.slewing;
     }
 
     bool poll_hardware_slewing_locked() const {
@@ -3181,6 +3210,7 @@ private:
     util::AsyncOperation status_poll_{"Celestron status poll", poll_generation_, clock_};
     std::atomic<bool> link_lost_{false};  // decision 0009: set under mutex_ by the poll body, cleared by a connect
     std::atomic<bool> status_poll_paused_for_testing_{false};
+    std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
 };

@@ -493,6 +493,8 @@ TEST_CASE("Celestron async - one bad HC or MC status poll recovers before the fa
         REQUIRE(server.ok());
         auto driver = make_driver(server.port(), clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        // The status poll's own L reads would add to the count this case pins: pause its ticks.
+        alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
 
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
         REQUIRE(wait_until([&] { return st->goto_count.load() > 0; }, 5000));

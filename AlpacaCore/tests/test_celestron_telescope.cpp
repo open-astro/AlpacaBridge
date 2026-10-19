@@ -769,6 +769,8 @@ struct SnapshotMount {
     std::atomic<bool> tracking{true};
     std::atomic<char> pier{'W'};
     std::atomic<bool> shifted{false};
+    std::atomic<bool> w_fail{false};  // the location query goes unanswered
+    std::atomic<int> w_delay_ms{0};   // the location query answers after this long
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -782,6 +784,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'V':
             return std::string("\x05\x23#", 3);
         case 'w':
+            if (st.w_fail.load()) return "";
+            if (st.w_delay_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(st.w_delay_ms.load()));
+            }
             return std::string(8, '\0') + "#";
         case 'e':
         case 'E':
@@ -970,6 +976,36 @@ TEST_CASE("Celestron snapshot - a position the mount moved is served after the n
     const auto age = std::chrono::system_clock::now() - snapshot_time_stamp(*driver);
     CHECK(age > std::chrono::milliseconds(1500));
     CHECK(age < std::chrono::milliseconds(4000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a site written during the poll's location read is not overwritten",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    st->w_fail = true;  // the connect-time location read fails: the site is not valid yet
+    auto driver = cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+
+    st->w_fail = false;
+    st->w_delay_ms = 200;
+    clock.advance(std::chrono::seconds(10));  // the site retry delay has passed
+    std::thread poll([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    driver->set_site_latitude(-33.856784);
+    poll.join();
+    CHECK(std::abs(driver->get_site_latitude() - (-33.856784)) < 1e-6);
     driver->set_connected(false);
 }
 
