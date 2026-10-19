@@ -1068,11 +1068,11 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry de
     REQUIRE(driver->get_connected());
     // The clock-sync body is parked in its 250 ms start delay.
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    // Drop the link, so the first set_latitude send fails and the thread lands in its retry delay.
+    // Drop the link, so the first set_latitude send fails and the body lands in its retry delay.
     mount.reset_link();
     const auto waits = clock.wait_count();
     clock.advance(std::chrono::milliseconds(250));
-    // The first set_latitude fails; the thread registers its retry delay as the next wait.
+    // The first set_latitude fails; the body registers its retry delay as the next wait.
     REQUIRE(clock.wait_for_wait_count(waits + 1, std::chrono::seconds(5)));
 
     std::promise<void> disconnected;
@@ -1082,7 +1082,7 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the site-sync retry de
         disconnected.set_value();
     });
     const bool joined_without_advance = done.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
-    // Release the parked thread (one retry delay per attempt) so the test can end.
+    // Release the parked body (one retry delay per attempt) so the test can end.
     while (!joined_without_advance && done.wait_for(std::chrono::milliseconds(50)) != std::future_status::ready) {
         clock.advance(std::chrono::seconds(10));
     }
