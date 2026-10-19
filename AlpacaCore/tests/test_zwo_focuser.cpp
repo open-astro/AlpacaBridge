@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_zwo_eaf_sdk.h"
 
 namespace {
 
@@ -51,88 +52,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-// Scripted EAF SDK: one focuser (id 3), single-threaded tests only.
-class FakeEAFSDK final : public alpacacore::vendor::zwo::ZWOEAFSDK {
-public:
-    using Info = alpacacore::vendor::zwo::ZWOEAFFocuserInfo;
-
-    int id{3};
-    int max_step{60000};
-    int step_range{1000};
-    int position{500};
-    bool moving{false};
-    double temperature{12.5};
-    bool fail_reads{false};
-    bool fail_temperature{false};
-    bool temperature_not_supported{false};
-    int moving_calls{0};
-    int position_calls{0};
-    int temperature_calls{0};
-    int max_step_calls{0};
-    int step_range_calls{0};
-    int set_max_step_calls{0};
-    int last_set_max_step{-1};
-    int open_calls{0};
-    int close_calls{0};
-    bool step_range_fails{false};
-
-    std::vector<Info> enumerate_focusers() override { return {Info{id, "EAF", max_step}}; }
-    bool get_focuser_info_by_id(int focuser_id, Info& info) override {
-        if (focuser_id != id) {
-            return false;
-        }
-        info = Info{id, "EAF", max_step};
-        return true;
-    }
-    bool get_focuser_info_by_index(int, Info& info) override { return get_focuser_info_by_id(id, info); }
-    void open_focuser(int) override { ++open_calls; }
-    void close_focuser(int) override { ++close_calls; }
-    bool is_moving(int) override {
-        ++moving_calls;
-        if (fail_reads) {
-            throw std::runtime_error("link down");
-        }
-        return moving;
-    }
-    int get_position(int) override {
-        ++position_calls;
-        if (fail_reads) {
-            throw std::runtime_error("link down");
-        }
-        return position;
-    }
-    void move(int, int target) override { position = target; }
-    void stop(int) override { moving = false; }
-    int get_max_step(int) override {
-        ++max_step_calls;
-        return max_step;
-    }
-    void set_max_step(int, int value) override {
-        ++set_max_step_calls;
-        last_set_max_step = value;
-        max_step = value;  // the unit stores what it is given
-    }
-    int get_step_range(int) override {
-        ++step_range_calls;
-        if (step_range_fails) {
-            throw std::runtime_error("step range unavailable");
-        }
-        return step_range;
-    }
-    double get_temperature(int) override {
-        ++temperature_calls;
-        if (temperature_not_supported) {
-            throw alpacacore::AlpacaException("EAF temperature not supported", alpacacore::AlpacaError::NotImplemented);
-        }
-        if (fail_temperature) {
-            throw std::runtime_error("temp sensor down");
-        }
-        return temperature;
-    }
-    std::string get_serial_number(int) override { return "EAF-SN-1"; }
-    std::string get_firmware_version(int) override { return "1.0"; }
-    std::string get_sdk_version() override { return "1, 7, 0, 0"; }
-};
+using FakeEAFSDK = alpacacore::test::FakeZWOEAFSDK;
 
 void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
 
