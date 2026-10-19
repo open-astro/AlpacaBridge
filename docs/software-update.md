@@ -105,6 +105,11 @@ any argument but `stable` or `beta` before it touches apt.
   failure (a host that installed the `.deb` from a release lacks the keyring
   and cannot verify the beta source). `/etc/apt/sources.list.d/openastro.list` is
   never edited, and `apt purge alpacabridge` removes the beta source.
+- The helper does not look for `beta` in other apt sources. A host that added
+  `beta` to the `openastro.list` line by hand (an older opt-in step in
+  [beta-channel.md](beta-channel.md)) gets beta packages on either channel, and
+  after a switch to Beta `apt update` warns that each beta target is configured
+  multiple times. The fix is to put that line back to `trixie main`.
 
 The card shows a finished switch only on the page that started or joined it, and a failed one carries the helper's result line (with the apt exit code) as its detail. The transcript is `/var/log/alpacabridge-update/channel.log` (same root-owned
 `LogsDirectory=` as the update transcript, `kChannelLogPath`), ending in the

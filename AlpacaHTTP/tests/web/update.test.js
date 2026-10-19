@@ -205,3 +205,15 @@ test('channel switch progress and result text', () => {
     assert.strictEqual(channelSwitchText({ State: 'idle' }), '');
     assert.strictEqual(channelSwitchText(undefined), '');
 });
+
+// The card's HTML ships a disabled selector on Stable and "..." for the
+// installed version; only updateRender() fills them in. Opening or reloading
+// the page must ask for the status, or a beta host reads as Stable and the
+// selector stays locked until Check for Updates is pressed.
+test('the update card loads its status when the page opens', () => {
+    const fs = require('node:fs');
+    const app = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'app.js'), 'utf8');
+    const onLoad = app.match(/document\.addEventListener\('DOMContentLoaded', function\(\) \{([\s\S]*?)\n\}\);/);
+    assert.ok(onLoad, 'no DOMContentLoaded handler in app.js');
+    assert.match(onLoad[1], /^\s*updateRefresh\(\);$/m);
+});
