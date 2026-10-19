@@ -338,6 +338,43 @@ TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead o
     driver->set_connected(false);
 }
 
+// #910: Connected is read lock-free from a flag raised only at the end of a
+// connect. The relink drops it first, so the lost session's Connected cannot
+// show through the new link's warm-up while Connecting is still true.
+TEST_CASE("OnStep link loss - Connected stays false through the relink's warm-up", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    FakeOnStepSerialMount replugged;
+    replugged.hold_replies(300);  // a slow warm-up on the new link
+    first.sever_link();
+    link.repoint(replugged.slave_path());
+
+    driver->connect();
+    // The firmware query (:GVP#) is the first step of the warm-up on the new
+    // link, and every reply takes 300 ms, so the warm-up still has seconds to
+    // run when it arrives: one sample there sees the relink mid-way.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!replugged.received(":GVP#") && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(replugged.received(":GVP#"));
+    const bool connected_mid_relink = driver->get_connected();
+    CHECK(driver->get_connecting());
+    CHECK_FALSE(connected_mid_relink);
+    const auto done_by = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (driver->get_connecting() && std::chrono::steady_clock::now() < done_by) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    REQUIRE_FALSE(driver->get_connecting());
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outage", "[onstep][serial][connected]") {
     WrapperReset reset;
     WindowReset window_reset;
