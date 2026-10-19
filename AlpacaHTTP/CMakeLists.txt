@@ -461,6 +461,15 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_log_text alpacahttp)
     add_test(NAME test_log_text COMMAND test_log_text)
 
+    # open-astro#1333: log level of the router's line for a driver exception.
+    # Own working directory, like test_routing: constructing a Router reads
+    # config/registered_devices.json relative to the cwd.
+    add_executable(test_router_log_level tests/test_router_log_level.cpp)
+    target_link_libraries(test_router_log_level alpacahttp)
+    set(TEST_ROUTER_LOG_LEVEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_router_log_level_cwd)
+    file(MAKE_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
+    add_test(NAME test_router_log_level COMMAND test_router_log_level WORKING_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
+
     add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
     target_link_libraries(test_yaml_comment alpacahttp)
     add_test(NAME test_yaml_comment COMMAND test_yaml_comment)
