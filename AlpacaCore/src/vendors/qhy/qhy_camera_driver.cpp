@@ -570,9 +570,7 @@ public:
     }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) {
-            return CameraState::Idle;
-        }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         switch (exposure_status_) {
         case QHYExposureStatus::Working:
@@ -1079,9 +1077,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) {
-            return 0.0;
-        }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (exposure_status_ == QHYExposureStatus::Success) {
             return 100.0;

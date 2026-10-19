@@ -156,11 +156,10 @@ public:
     void stop_exposure() override { throw_not_connected(); }
 };
 
-// Mirrors zwo_camera_driver.cpp/gphoto_camera_driver.cpp et al.: these vendor
-// drivers answer CameraState and PercentCompleted with a default value while
-// disconnected instead of throwing NotConnected. get_device_state() must
-// still report the empty list for a disconnected driver regardless of what
-// an individual vendor getter does.
+// Guards against a driver that leaks a value (Idle, 0) from CameraState and
+// PercentCompleted while disconnected instead of throwing NotConnected.
+// get_device_state() must still report the empty list for a disconnected
+// driver regardless of what an individual getter does (#635).
 class LeakyDisconnectedCamera final : public DisconnectedCamera {
 public:
     alpacacore::CameraState get_camera_state() const override { return alpacacore::CameraState::Idle; }

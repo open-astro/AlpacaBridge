@@ -54,8 +54,25 @@ FakeGPhotoSDK::FakeCamera make_camera(const std::string& model = "Nikon DSC D530
     return cam;
 }
 
+void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
+    try {
+        fn();
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& ex) {
+        REQUIRE(ex.error_code() == expected_code);
+    }
+}
+
+// A camera that left the USB bus mid-exposure disconnects itself, and CameraState then throws NotConnected:
+// no exposure is in progress either way.
 void wait_for_exposure_to_finish(alpacacore::CameraDriver& driver) {
-    for (int i = 0; i < 500 && driver.get_camera_state() == alpacacore::CameraState::Exposing; ++i) {
+    for (int i = 0; i < 500; ++i) {
+        try {
+            if (driver.get_camera_state() != alpacacore::CameraState::Exposing) return;
+        } catch (const AlpacaException& e) {
+            if (e.error_code() == alpacacore::AlpacaError::NotConnected) return;
+            throw;
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
@@ -790,7 +807,7 @@ TEST_CASE("GPhoto camera fake - camera gone from the USB bus mid-exposure report
 
     // The body left the bus: the client must see Connected false and reconnect.
     CHECK(driver->get_connected() == false);
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&] { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
 
     driver->set_connected(false);  // joins the worker
     CHECK(fake.close_count == fake.open_count);
