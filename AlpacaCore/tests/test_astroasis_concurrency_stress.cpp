@@ -62,7 +62,8 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
     // open-astro#326: StressCallGuard replaces the local call() lambda. Same
     // per-call isolation, but it now COUNTS what it swallows, so an unexpected
     // throw fails the case instead of being discarded silently.
-    // Connected, step size and temperature compensation answer NotImplemented, the Oasis having neither.
+    // NotConnected while a lifecycle thread has the driver down; step size and temperature
+    // compensation answer NotImplemented (PropertyNotImplemented == 0x400), the Oasis having neither.
     alpacacore::test::StressCallGuard guard(
         {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::NotImplemented});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
@@ -79,7 +80,7 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
         guard([&] { static_cast<void>(focuser.get_temperature()); });
         guard([&] { static_cast<void>(focuser.get_step_size()); });
         guard([&] { focuser.set_temp_comp(true); });
-        guard([&] { focuser.move(1234); });
+        guard([&] { focuser.move(2000); });
         guard([&] { focuser.halt(); });
     });
 

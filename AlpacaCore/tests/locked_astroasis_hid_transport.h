@@ -33,7 +33,9 @@ namespace alpacacore::test {
  *
  * The mutex is a leaf (the inner transport never calls back into this
  * interface). It is held across a blocking read, as a real hid_read_timeout
- * would be held by a single-threaded library.
+ * would be held by a single-threaded library. Never gate Move (0x36) behind this
+ * decorator: the mutex stays held while FakeHidTransport::hold_gate() waits, so
+ * Halt would block. Keep gated cases on the bare fake.
  */
 class LockedAstroasisHidTransport final : public vendor::astroasis::AstroasisHidTransport {
 public:
