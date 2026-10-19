@@ -997,6 +997,101 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     driver->set_connected(false);
 }
 
+// #1274: ITelescopeV4 refuses an equatorial slew while Tracking is false.
+// OnStepX itself turns tracking on at the end of a GOTO (HM-17, 2026-10-18),
+// so this is the interface contract, not a landing the mount gets wrong.
+TEST_CASE("OnStep Telescope Driver - an equatorial slew needs Tracking", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("nNpEW180#");  // not tracking, not slewing, not parked
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE_FALSE(driver->get_tracking());
+    driver->set_target_right_ascension(12.0);
+    driver->set_target_declination(45.0);
+    mount->clear_log();
+
+    const auto nothing_sent = [&]() {
+        CHECK(mount->count(":Sr") == 0);
+        CHECK(mount->count(":Sd") == 0);
+        CHECK(mount->count(":MS#") == 0);
+        CHECK_FALSE(driver->get_slewing());
+    };
+
+    SECTION("all four forms are InvalidOperation and nothing reaches the mount") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 45.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 45.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+        require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+        nothing_sent();
+    }
+
+    SECTION("a bad coordinate is InvalidValue first") {
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(25.0, 45.0); },
+                             alpacacore::AlpacaError::InvalidValue);
+        nothing_sent();
+    }
+
+    SECTION("parked is InvalidWhileParked first") {
+        mount->set_status("nNPHEo180#");  // parked at home, not tracking
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        mount->clear_log();
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 45.0); },
+                             alpacacore::AlpacaError::InvalidWhileParked);
+        nothing_sent();
+    }
+
+    SECTION("a Tracking=false just written counts as off") {
+        mount->set_status("NpEW180#");  // the mount still reports tracking
+        REQUIRE_NOTHROW(driver->set_tracking(true));
+        REQUIRE_NOTHROW(driver->set_tracking(false));
+        mount->clear_log();
+        require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 45.0); },
+                             alpacacore::AlpacaError::InvalidOperation);
+        nothing_sent();
+    }
+
+    SECTION("with Tracking on the slew goes out") {
+        REQUIRE_NOTHROW(driver->set_tracking(true));
+        mount->set_status("NpEW180#");
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        CHECK(mount->count(":MS#") == 1);
+    }
+
+    driver->set_connected(false);
+}
+
+// Alt/Az slews are not equatorial: ITelescopeV4 does not ask for Tracking there.
+TEST_CASE("OnStep Telescope Driver - an Alt/Az slew does not need Tracking", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("nNpEW180#");  // not tracking, not slewing, not parked
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE_FALSE(driver->get_tracking());
+    mount->clear_log();
+
+    REQUIRE_NOTHROW(driver->slew_to_alt_az_async(45.0, 180.0));
+    CHECK(mount->count(":MS#") == 1);
+
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
 
 #ifndef _WIN32

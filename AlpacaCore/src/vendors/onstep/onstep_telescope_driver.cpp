@@ -891,16 +891,14 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SlewToCoordinates");
+        check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
         start_slew_locked(ra, dec, "SlewToCoordinates");
         wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SlewToCoordinatesAsync");
+        check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
@@ -1107,26 +1105,27 @@ public:
         }
     }
 
+    // An Alt/Az slew is not equatorial, so it skips the Tracking check
+    // (open-astro#1274) and goes straight to the GOTO.
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        }
-        slew_to_coordinates(ra, dec);
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_connected();
+        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
+        check_not_parked_locked("SlewToCoordinates");
+        start_slew_locked(ra, dec, "SlewToCoordinates");
+        wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        }
-        slew_to_coordinates_async(ra, dec);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
+        check_not_parked_locked("SlewToCoordinatesAsync");
+        start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1207,6 +1206,21 @@ private:
         try_stop(":Q#", [&protocol]() { protocol.abort_slew(); });
         for (int dir = 0; dir < 4; ++dir) {
             try_stop("axis stop", [&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Runs after the parked check and argument validation and
+    // before any target or GOTO command is sent, and reads Tracking as the getter
+    // does (a :GU# query when the cache is stale), so a Tracking=false just
+    // written counts as off.
+    void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
+        check_connected();
+        check_not_parked_locked(who);
+        validate_ra_dec(ra, dec, who);
+        refresh_status_cache_locked(false);
+        if (!cached_status_.is_tracking) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
     }
 

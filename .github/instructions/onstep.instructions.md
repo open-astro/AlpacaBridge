@@ -152,6 +152,16 @@ it is never reachable through `router.cpp` or the web UI.
   no poll thread, and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost.
+- **An equatorial slew needs Tracking** (#1274, the AGENTS.md rule): `SlewToCoordinates(Async)` and
+  `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
+  `Tracking` reads false, after the parked check and coordinate validation and before any target or
+  GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
+  just written counts as off. `SlewToAltAz(Async)` skips the check: it converts to RA/Dec and calls
+  `start_slew_locked()` directly. The firmware itself turns tracking on at the end of a GOTO (HM-17,
+  2026-10-18: tracking off, GOTO, `Tracking` read true after it), so the refusal is the interface
+  contract, not a fix for an untracked landing. No exception is needed for a retarget of a GOTO in
+  flight: `:GU#` kept the tracking flag through a whole GOTO, and OnStepX answers `:MS#` with an error
+  while a GOTO runs, so a second slew is refused by the mount either way.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first
@@ -213,7 +223,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
   telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
-  by an ordinary equatorial slew (the router refuses synchronous `SlewToAltAz` with
+  by an ordinary GOTO that skips the Tracking check (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.

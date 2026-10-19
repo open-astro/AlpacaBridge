@@ -422,8 +422,8 @@ the fake rather than a disconnected instance. Disconnected getters still return
 ### Equatorial slews require Tracking (all telescope drivers)
 
 ITelescopeV4 raises `InvalidOperation` for `SlewToCoordinates`, `SlewToCoordinatesAsync`, `SlewToTarget` and
-`SlewToTargetAsync` while `Tracking` is false (#775 SynScan, #1274 the rest of the telescope drivers except OnStep, which its owner
-keeps). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
+`SlewToTargetAsync` while `Tracking` is false (#775 SynScan, #1274 every other telescope
+driver). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
 or sends anything, so a refused slew leaves a park, goto or pulse guide in flight running. Read Tracking the way the
 driver's own `Tracking` getter does, a commanded `Tracking=false` still in flight included, with two exceptions that do
 not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO,
