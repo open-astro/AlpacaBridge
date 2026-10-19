@@ -2369,8 +2369,8 @@ private:
         return true;
     }
 
-    // True when the unread site (a connect that could not reach it) is due another attempt of the poll (kSitePollRetryDelay). Like the sample, its
-    // exchange runs without mutex_.
+    // True when the unread site (a connect that could not reach it) is due another attempt of the poll
+    // (kSitePollRetryDelay). Like the sample, its exchange runs without mutex_.
     bool site_read_due_locked() {
         const auto now = clock_.now();
         if (last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
@@ -2384,9 +2384,9 @@ private:
     // One poll tick. The site read and the sample exchanges run WITHOUT mutex_, so a getter never waits behind a
     // slow link and the snapshot mutex is never held across I/O; the frame is decoded and published under mutex_.
     // The exception is a FindHome in flight: its completion check (check_homing_complete_locked) runs under mutex_,
-    // so on a dead link during FindHome each tick holds mutex_ for one exchange timeout and the getters wait. Returns false when the
-    // connection is gone or lost and the poll body should end. `ctx` is null for the test seam's direct tick,
-    // which also ignores the pause.
+    // so on a dead link during FindHome each tick holds mutex_ for one exchange timeout and the getters wait. Returns
+    // false when the connection is gone or lost and the poll body should end. `ctx` is null for the test seam's direct
+    // tick, which also ignores the pause.
     bool poll_status_once(util::OperationContext* ctx, int tick) {
         const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
         // Held for the whole tick of the poll body, so pausing it can wait out a tick already in flight.
