@@ -37,7 +37,7 @@ Walks through building, extending, or fixing device drivers:
 - Creates the feature branch (`driver/<vendor>-<device>`)
 - Guides through the 3-layer architecture, SDK cleanup, auto-detection, CMake setup, and AlpacaHTTP/web UI integration
 - Enforces Catch2 tests (8 cases, 30+ assertions) and ASCOM Alpaca API compliance
-- Validates with ConformU on arm64 and updates AGENTS.md with lessons learned
+- Validates with ConformU on arm64 and records lessons learned in the instruction files
 
 ### `/deploy-test` — push the build to a test SBC
 
@@ -76,14 +76,14 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 
 - Safety checks: refuses to PR from `main`, blocks on uncommitted changes and failing ConformU reports
 - Auto-detects direct contributor vs fork and handles both flows
-- Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, AGENTS.md, license headers, SDK cleanup)
+- Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, instruction files, license headers, SDK cleanup)
 - Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
 - Builds the PR title and a body that follows `.github/PULL_REQUEST_TEMPLATE.md` (thinking path, linked issues, what changed, verification, risks, model used, checklist), then creates the PR via `gh`; the `pr-template` job in `.github/workflows/pr-body.yml` (`scripts/check_pr_template.py`) fails a PR whose body drops a template section or leaves one unfilled
 - Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
 
 ### AGENTS.md — the knowledge base
 
-[AGENTS.md](../AGENTS.md) is the project's living memory: architecture rules, the three-layer driver pattern, ConformU failure patterns, and per-vendor quirks discovered on real hardware. Every driver session ends by updating it — if something surprising was learned, it gets documented so the next session (human or agent) doesn't rediscover it. Read it before touching any driver code.
+[AGENTS.md](../AGENTS.md) and the shared topic files it routes to ([index](agent-instructions.md)) are the project's living memory: architecture rules, the three-layer driver pattern, ConformU failure patterns, and per-vendor quirks discovered on real hardware. Every driver session ends by updating it — if something surprising was learned, it gets documented so the next session (human or agent) doesn't rediscover it. Read it before touching any driver code.
 
 ## Prerequisites
 

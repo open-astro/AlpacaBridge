@@ -34,4 +34,4 @@ instruction files it loaded before answering:
 
 Inspect the client's loaded rules and file-read trace rather than accepting its
 claim that it read a file. All substantive rules have one canonical owner; adapters
-and indexes contain routing instructions only. Cross-vendor rules stay in `AGENTS.md`.
+and indexes contain routing instructions only. Cross-vendor rules stay in `AGENTS.md` (core) or its shared topic files.

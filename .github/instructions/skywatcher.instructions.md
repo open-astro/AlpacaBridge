@@ -387,7 +387,7 @@ datagrams before each send so replies cannot get off-by-one.
   `poll(POLLIN)` within the command budget, and frame sends use a `poll(POLLOUT)`-bounded
   write (`write_all_bounded`) rather than `util::write_all` — which only retries `EAGAIN`
   after a partial write and would fail a frame fast once the fd is non-blocking. This is the
-  deliberate exception to the shared "always `clear_nonblocking`" serial rule in `AGENTS.md`;
+  deliberate exception to the shared "always `clear_nonblocking`" serial rule in `.github/instructions/serial-autodetect.instructions.md`;
   do not revert it. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
   within the command budget (catches a revert of the read `poll()`), and a write seam that
   reports `EAGAIN` is waited out (catches a revert of the bounded write). The auto-detect

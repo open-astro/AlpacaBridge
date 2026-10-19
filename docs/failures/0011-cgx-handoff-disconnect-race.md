@@ -32,7 +32,7 @@ and the shared coordinate/target GOTO start. PulseGuide holds the motion mutex
 across its dispatch and does not perform this unlocked reaper handoff; it is N/A
 to this particular shape. The stress guard was not broadened to accept the error.
 
-The caller-serialization rule is recorded in `AGENTS.md` and the slot header;
+The caller-serialization rule is recorded in `.github/instructions/driver-lifecycle.instructions.md` and the slot header;
 the Celestron owner links here for the concrete driver fix.
 
 ## Evidence

@@ -5,7 +5,7 @@
 This skill is vendored in the repository at `.claude/skills/ascom-alpaca-protocol/`. Claude is also instructed through:
 
 1. `CLAUDE.md`, which imports `AGENTS.md` and `docs/agent-instructions.md`.
-2. `AGENTS.md`, the repository-wide architecture, safety, testing, and historical decision record.
+2. `AGENTS.md` and the shared topic files under `.github/instructions/` it routes to, the repository-wide architecture, safety, testing, and historical decision record.
 3. `.claude/rules/*.md`, which route to scoped `.github/instructions/*.instructions.md` files.
 4. `.claude/commands/*.md`, including `/driver-build` and `/conformu` workflows.
 5. Vendor-specific rules and retained failure/decision records.
@@ -39,7 +39,7 @@ It is not appropriate to copy a driver's capability choices, public state behavi
 - `DeviceState` intentionally calls individual getters and is not an atomic snapshot. Do not add a cross-device snapshot lock merely to satisfy a generic desire for atomicity.
 - `AsyncConnectable` owns connection-thread lifecycle. Do not create a per-vendor replacement.
 - Per-client connection tracking exists so one client's disconnect does not tear down another client's session.
-- The project advertises Platform 7 interface versions (Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2, per `AGENTS.md`); changing one requires fresh real-hardware ConformU validation.
+- The project advertises Platform 7 interface versions (Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2, per `.github/instructions/ascom-contract.instructions.md`); changing one requires fresh real-hardware ConformU validation.
 - ConformU telescope testing requires a bare mount with no OTA. This safety rule overrides convenience.
 - Current repository policy targets Linux arm64 and rejects x86/amd64 builds.
 

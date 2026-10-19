@@ -176,7 +176,7 @@ across its filter wheel lineup? (e.g. ZWO EFW and Player One Phoenix Wheel both 
 
 The answer drives the web UI slot-count selector in Step 6 — the select must list
 exactly the manufacturer's offered slot counts (with model names in the labels where
-known) plus a Custom option. See "FilterWheel vendors — required web UI" in AGENTS.md.
+known) plus a Custom option. See "FilterWheel vendors — required web UI" in `.github/instructions/http-integration.instructions.md`.
 
 ### Question 5: Protocol documentation
 
@@ -410,7 +410,7 @@ Key compliance rules:
 - **Return types and value ranges** must match the spec exactly. RA is in hours (0-24), Dec in degrees (-90 to +90), angles in degrees, exposure in seconds, etc.
 - **Error codes** must use the correct ASCOM error numbers: NotImplemented `0x400`, InvalidValue `0x401`, NotConnected `0x407`, InvalidWhileParked `0x408`, InvalidOperation `0x40B`, etc. (see `AlpacaCore/include/alpacacore/alpaca_errors.h`).
 - **`CanXxx` properties** must accurately reflect hardware capabilities. If `CanPulseGuide` returns true, `PulseGuide` must work. If the hardware doesn't support it, `CanPulseGuide` must return false and `PulseGuide` must throw `MethodNotImplemented`.
-- **Interface version** must match the current ASCOM spec version for the device type — AlpacaBridge advertises Platform 7 versions: Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2 (see `AGENTS.md`).
+- **Interface version** must match the current ASCOM spec version for the device type — AlpacaBridge advertises Platform 7 versions: Camera 4, Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, ObservingConditions 2 (see `.github/instructions/ascom-contract.instructions.md`, "Platform 7 InterfaceVersion + DeviceState").
 - **Common methods** (`Action`, `CommandBlind`, `CommandBool`, `CommandString`, `SupportedActions`) must be implemented on every device.
 - **DeviceState** must return a well-formed property bag with device-type-appropriate operational telemetry.
 
@@ -437,7 +437,7 @@ setup and UI as the existing ones — use the **ZWO EFW** (`zwo_filterwheel_driv
 One Phoenix Wheel** drivers as the canonical templates. Specifically match:
 - the slot-count handling and the default/standard filter name set,
 - `Names` and `FocusOffsets` semantics (array length tied to slot count, defaults, persistence),
-- the web UI slot lineup built with `createFilterwheelSlotUI({...})` (see Step 6 and AGENTS.md).
+- the web UI slot lineup built with `createFilterwheelSlotUI({...})` (see Step 6 and `.github/instructions/http-integration.instructions.md`).
 
 A new filter wheel should differ from ZWO/Player One only where the hardware genuinely differs
 (slot counts offered, enumeration/SDK details) — never in how filters are named, stored, or
@@ -571,7 +571,7 @@ All 9 steps required for end-to-end functionality:
    per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
    of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
    device number, which auto-assigns per type already.) See "Enumeration index fields" in
-   AGENTS.md.
+   `.github/instructions/http-integration.instructions.md`.
 7. Frontend validation logic.
 8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
 9. Routing/config tests in `AlpacaHTTP/tests/`.
@@ -702,7 +702,7 @@ These three test cases catch the bugs that cause ConformU failures. They run wit
      - SVBONY: `CameraState` got stuck after SDK hangs
 
 8. **Unsupported method error codes** `"<Vendor> <Device> Driver - Unsupported methods"` `[<vendor>][<device>][unit]`
-   - Methods the device doesn't support must throw `AlpacaException` with `AlpacaError::MethodNotImplemented` (or `PropertyNotImplemented` for a property, both 0x400), NOT a generic `DriverException`. `InvalidOperation` (0x40B) is for a supported member called in a state where it can't currently run, not for a member the hardware lacks — see AGENTS.md's ASCOM exception vocabulary table. `Action()` called with a name not in `SupportedActions` throws `ActionNotImplemented` (0x40C) instead — a distinct code, not `MethodNotImplemented`.
+   - Methods the device doesn't support must throw `AlpacaException` with `AlpacaError::MethodNotImplemented` (or `PropertyNotImplemented` for a property, both 0x400), NOT a generic `DriverException`. `InvalidOperation` (0x40B) is for a supported member called in a state where it can't currently run, not for a member the hardware lacks — see the ASCOM exception vocabulary table in `.github/instructions/ascom-contract.instructions.md`. `Action()` called with a name not in `SupportedActions` throws `ActionNotImplemented` (0x40C) instead — a distinct code, not `MethodNotImplemented`.
    - ConformU distinguishes between "not implemented" and "driver error" — the wrong error code fails validation.
    - Examples:
      - Telescope without `CanSyncAltAz`: `SyncToAltAz` must throw with correct code
@@ -715,7 +715,7 @@ The unit cases above run without hardware because they never connect. Concurrenc
 
 **1. The seam.** Pick the shape by what the driver talks to:
 
-- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. The one exception today is Player One: `FakePlayerOneSDK` takes its own mutex in every method, so it has no `locked_playerone_sdk.h` and its stress case and contract-sweep host use the fake directly. A new seam gets the decorator; if that internal mutex is ever removed, Player One needs one too. Worked examples: ToupTek (`ToupTekSDK`, `tests/fake_touptek_sdk.h`, `tests/locked_touptek_sdk.h`) shows the seam and `[stress]` registration; QHY has the same seam and a registered connected-camera stress case in `AlpacaCore/tests/qhy_camera_concurrency_stress.cpp`. Read AGENTS.md's QHY fake-SDK constraints before copying its camera worker path. Do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
+- **Vendor SDK** (camera, filter wheel, anything linking a vendor `.so`): the abstract-interface pattern. An abstract `<Vendor>SDK` interface, the production wrapper implementing it, a `<Vendor>SDK&`-taking overload on every `create_<vendor>_*` factory beside the existing one, a scripted fake in `tests/fake_<vendor>_sdk.h`, and a mutex-taking decorator in `tests/locked_<vendor>_sdk.h` that wraps the fake wherever it is injected, so a TSan report points at driver code rather than at the fake. The one exception today is Player One: `FakePlayerOneSDK` takes its own mutex in every method, so it has no `locked_playerone_sdk.h` and its stress case and contract-sweep host use the fake directly. A new seam gets the decorator; if that internal mutex is ever removed, Player One needs one too. Worked examples: ToupTek (`ToupTekSDK`, `tests/fake_touptek_sdk.h`, `tests/locked_touptek_sdk.h`) shows the seam and `[stress]` registration; QHY has the same seam and a registered connected-camera stress case in `AlpacaCore/tests/qhy_camera_concurrency_stress.cpp`. Read the QHY fake-SDK constraints in `.github/instructions/testing.instructions.md` ("Hardware-free driver tests via the SDK seam") before copying its camera worker path. Do not write a mock that subclasses the production wrapper: it is declared `final`, so the subclass will not build. Subclass the abstract `<Vendor>SDK` interface instead.
 - **Serial or network protocol** (mounts, focusers, hubs): a fake device on the other end of the real transport. A pseudo-terminal fake for serial (`tests/fake_gemini_focuser.h`, `tests/fake_skywatcher_serial_board.h`; `PtyPair` in `tests/fake_pty_write.h` owns the pty), a loopback server for TCP/UDP (`tests/fake_mount_server.h`, `tests/fake_skywatcher_mount.h`). The driver connects through its real protocol wrapper, so the wrapper's own threads and timeouts are what get stormed.
 
 A driver whose seam cannot be built yet (no fake is possible without the hardware in hand) still registers: with every connect failing fast at enumeration the storm exercises the `AsyncConnectable` machinery, the failure-path cleanup and the getters racing the lifecycle, which is where this driver family's findings have lived. Say so in the file's header comment, the way `test_zwo_concurrency_stress.cpp` does.
@@ -803,7 +803,7 @@ full hard rule.
 
 After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **Linux arm64**, the only supported target. A driver is NOT complete until it has arm64 ConformU results.
 
-**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.2 (build 56139) on arm64, the current standard (`/conformu` installs it); 4.5.0 has a known arm64 timing defect (see `AGENTS.md`).
+**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.2 (build 56139) on arm64, the current standard (`/conformu` installs it); 4.5.0 has a known arm64 timing defect (see "ConformU version" in `.github/instructions/testing.instructions.md`).
 
 ### Required validation matrix
 
@@ -953,7 +953,7 @@ Every telescope driver in this project has hit most of these:
 
 ## Step 11 — Update repository instructions with lessons learned (MANDATORY)
 
-After the driver is implemented, tested, and validated, update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific knowledge and `AGENTS.md` with shared knowledge discovered during the session. **This step is non-negotiable** — these files are the project's living knowledge base.
+After the driver is implemented, tested, and validated, update the applicable `.github/instructions/<vendor>.instructions.md` with vendor-specific knowledge and the matching shared topic file under `.github/instructions/` (listed in `docs/agent-instructions.md`) with shared knowledge discovered during the session; `AGENTS.md` gets a one-line pointer at most. **This step is non-negotiable** — these files are the project's living knowledge base.
 
 ### What to add
 
@@ -983,7 +983,7 @@ After the driver is implemented, tested, and validated, update the applicable `.
 
 ### How to update
 
-Read `AGENTS.md` and the applicable vendor instruction file, then add the notes in the right place. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY instruction files for examples of vendor notes.
+Read `AGENTS.md`, the matching shared topic file and the applicable vendor instruction file, then add the notes in the right place. Follow the existing format — look at the SynScan, iOptron, Celestron, or SVBONY instruction files for examples of vendor notes.
 
 If in doubt about whether something is worth documenting, document it. A note that saves 30 minutes of debugging next time is always worth the two lines it takes to write.
 

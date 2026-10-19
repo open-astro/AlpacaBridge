@@ -143,9 +143,10 @@ jobs:
               from the changed lines.
             - Blocking device I/O, a lock wait, or a serial round trip added
               to a property getter, a DeviceState read, or an asynchronous
-              initiator that AGENTS.md documents as cheap or non-blocking.
+              initiator that AGENTS.md or a shared topic file under
+              .github/instructions/ documents as cheap or non-blocking.
             - A PR description that does not describe the diff.
-            - A vendor driver that reimplements a mechanism AGENTS.md says
+            - A vendor driver that reimplements a mechanism the instructions say
               lives in one place (connection-thread lifecycle: inherit
               AsyncConnectable, never a driver-local connection_thread_).
             Each defect names the file, the line, and the input or scenario
