@@ -353,7 +353,12 @@ TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live rea
     REQUIRE(rig.poll());
     REQUIRE(rig.driver->get_tracking());
     rig.mount.tracking = false;  // the poll has not run since
-    CHECK_THROWS(rig.driver->slew_to_coordinates_async(12.0, 10.0));
+    try {
+        rig.driver->slew_to_coordinates_async(12.0, 10.0);
+        FAIL("a slew with Tracking off must be refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
     // The refused slew read Tracking live; the getter agrees without a poll.
     CHECK_FALSE(rig.driver->get_tracking());
 }

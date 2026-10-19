@@ -38,7 +38,7 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 
 ### Bisque telescope adoption (#1367)
 
-- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, alt-az, side of pier and Tracking. Served from the frame: RightAscension, Declination, Altitude, Azimuth, SideOfPier, Tracking, DeviceState (`TimeStamp` is `measured_at`). The 5 s position cache and its stamps are gone.
+- One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, alt-az, side of pier and Tracking. Served from the frame: RightAscension, Declination, Altitude, Azimuth, SideOfPier, Tracking, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache (`kPositionCacheTtl`) and its stamps are gone.
 - Slewing stays control-path state (`slewing_cached_`): the poll asks `IsSlewComplete` only for an async slew past its 8 s force window with no `SlewToCoordinates` wait running, and clears Slewing in the same step as the landed frame.
 - Control-path ends that move the mount (sync, slew complete, FindHome, Park, pulse-guide end) measure the position at once and publish it, so a read right after sees where the mount is. A slew start, an abort and a move only drop the tick in flight.
 - The slew Tracking gate reads TheSkyX live, writes the result through, and falls back to the frame's value when that read fails, as the Tracking getter does.
