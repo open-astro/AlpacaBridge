@@ -46,4 +46,9 @@ IoptronSwitchConfig default_imate_powerbox_config();
 
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config);
 
+// Test seam: the same driver over a caller-owned GPIO backend instead of libgpiod.
+// @p backend must outlive the driver.
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
+                                                    IoptronGpioBackend& backend);
+
 }  // namespace alpacacore::vendor::ioptron
