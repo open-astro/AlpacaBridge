@@ -82,7 +82,7 @@ TEST_CASE("GPhoto Camera Driver - Not connected throws", "[gphoto][camera][unit]
 TEST_CASE("GPhoto Camera Driver - Disconnected state", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_camera_x_size() == 0);
@@ -169,12 +169,10 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
 TEST_CASE("GPhoto Camera Driver - State machine contracts", "[gphoto][camera][unit]") {
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
-    // Percent completed is 0 (not ready) rather than throwing while idle and
-    // disconnected -- matches the sibling camera drivers' convention.
-    CHECK(driver->get_percent_completed() == 0.0);
+    require_alpaca_error([&]() { (void)driver->get_percent_completed(); }, alpacacore::AlpacaError::NotConnected);
 }
