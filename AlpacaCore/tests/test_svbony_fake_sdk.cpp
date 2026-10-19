@@ -58,6 +58,23 @@ void wait_for_driver_exception(alpacacore::CameraDriver& camera, std::string_vie
     FAIL("SVBONY exposure failure was not published");
 }
 
+// The worker retries the capture stop only after its held read returns, and
+// clears the unconfirmed-stop refusal after that; the fake's read counter moves
+// before either, so a check right after it can still see the refusal.
+void wait_until_stop_confirmed(alpacacore::CameraDriver& camera) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        try {
+            static_cast<void>(camera.get_image_ready());
+            return;
+        } catch (const alpacacore::AlpacaException& ex) {
+            if (std::string(ex.what()).find("capture stop was not confirmed") == std::string::npos) return;
+        }
+        std::this_thread::sleep_for(1ms);
+    }
+    FAIL("SVBONY capture stop was never confirmed");
+}
+
 void require_array_failure(alpacacore::CameraDriver& camera) {
     try {
         static_cast<void>(camera.get_image_array());
@@ -556,6 +573,7 @@ TEST_CASE("SVBONY Camera - abort reports stop failure and later recovers", "[svb
     const int reads = sdk.completed_video_data_reads();
     sdk.release_video_data();
     REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
+    wait_until_stop_confirmed(*camera);
     CHECK_FALSE(camera->get_image_ready());
 
     camera->start_exposure(0.001, true);
