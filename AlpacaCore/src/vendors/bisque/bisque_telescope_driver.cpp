@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
@@ -28,7 +29,6 @@
 #include <mutex>
 #include <numbers>
 #include <optional>
-#include <thread>
 #include <utility>
 
 namespace alpacacore::vendor::bisque {
@@ -147,14 +147,7 @@ public:
             } catch (...) {
             }
         }
-        std::thread pulse_thread;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            pulse_thread = std::move(pulse_guide_thread_);
-        }
-        if (pulse_thread.joinable()) {
-            pulse_thread.join();
-        }
+        pulse_guide_op_.cancel_all_and_join();
     }
 
     // ── AlpacaDriver base methods ──
@@ -252,8 +245,8 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             pulse_guiding_ = false;
-            pulse_guide_error_.clear();
-            ++pulse_guide_generation_;
+            pulse_guide_op_.clear_failure();
+            pulse_generation_.bump();
 
             // Check initial park/tracking state.
             try {
@@ -282,7 +275,7 @@ public:
             ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
                             std::string(parked_ ? "true" : "false"));
         } else {
-            ++pulse_guide_generation_;
+            pulse_generation_.bump();
             try {
                 protocol.disconnect();
             } catch (...) {
@@ -297,12 +290,9 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             pulse_guiding_ = false;
-            pulse_guide_error_.clear();
-            std::thread pulse_thread = std::move(pulse_guide_thread_);
             lock.unlock();
-            if (pulse_thread.joinable()) {
-                pulse_thread.join();
-            }
+            pulse_guide_op_.cancel_all_and_join();
+            pulse_guide_op_.clear_failure();
         }
     }
 
@@ -386,8 +376,8 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!pulse_guide_error_.empty()) {
-            throw AlpacaException(pulse_guide_error_, AlpacaError::DriverException);
+        if (auto failure = pulse_guide_op_.last_failure()) {
+            throw AlpacaException(*failure, AlpacaError::DriverException);
         }
         return pulse_guiding_;
     }
@@ -689,7 +679,7 @@ public:
         if (duration > kMaxPulseGuideMs) {
             throw AlpacaException("PulseGuide duration must be at most 30000 ms", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("PulseGuide");
         if (duration == 0) {
@@ -698,12 +688,6 @@ public:
         if (pulse_guiding_) {
             throw AlpacaException("TheSkyX DirectGuide is already guiding; wait for IsPulseGuiding=false",
                                   AlpacaError::InvalidOperation);
-        }
-        if (pulse_guide_thread_.joinable()) {
-            // pulse_guiding_ is cleared by the worker as its final access to
-            // this object, so joining the completed worker under mutex_ cannot
-            // wait for a thread that still needs the driver lock.
-            pulse_guide_thread_.join();
         }
 
         // Convert direction + duration to arcsecond displacement.
@@ -733,15 +717,17 @@ public:
         }
 
         pulse_guiding_ = true;
-        pulse_guide_error_.clear();
-        const std::uint64_t generation = ++pulse_guide_generation_;
         // MoveTelescope runs at TheSkyX's fixed speed, so its run time only
         // roughly tracks `duration`; never wait less than the configured bound.
         constexpr int kResponseMarginMs = 1000;
         const int duration_bound_ms = duration + kResponseMarginMs;  // no overflow: duration <= kMaxPulseGuideMs
         const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms, duration_bound_ms);
+        // The slot's start() runs without the driver mutex (a stale body needs
+        // it to return). A body superseded or cancelled meanwhile (AbortSlew,
+        // disconnect) leaves pulse_guiding_ and the kept failure to that path.
+        lock.unlock();
         try {
-            pulse_guide_thread_ = std::thread([this, generation, ra_arcsec, dec_arcsec, guide_timeout_ms] {
+            pulse_guide_op_.start([this, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
                 std::string error;
                 try {
                     BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec, guide_timeout_ms);
@@ -750,17 +736,23 @@ public:
                 } catch (...) {
                     error = "PulseGuide failed with an unknown TheSkyX error";
                 }
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (generation != pulse_guide_generation_) {
-                    return;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (ctx.stop_reason() != util::StopReason::None) {
+                        return;
+                    }
+                    pulse_guiding_ = false;
+                    if (error.empty()) {
+                        equatorial_cache_valid_ = false;
+                    }
                 }
-                pulse_guiding_ = false;
-                pulse_guide_error_ = std::move(error);
-                if (pulse_guide_error_.empty()) {
-                    equatorial_cache_valid_ = false;
+                if (!error.empty()) {
+                    // The slot keeps the text; IsPulseGuiding reports it.
+                    throw AlpacaException(error, AlpacaError::DriverException);
                 }
             });
         } catch (...) {
+            std::lock_guard<std::mutex> relock(mutex_);
             pulse_guiding_ = false;
             throw;
         }
@@ -944,14 +936,16 @@ public:
     void abort_slew() override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        ++pulse_guide_generation_;
+        // Bumping supersedes a running guide body: it returns without touching
+        // the driver. It is not cancelled or joined here, because a PulseGuide
+        // started while the abort waits on the wrapper owns the slot by then.
+        pulse_generation_.bump();
+        pulse_guide_op_.clear_failure();
         pulse_guiding_ = false;
-        pulse_guide_error_.clear();
         slewing_cached_ = false;
         slew_force_until_ = util::TaskClock::clock::time_point::min();
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
-        std::thread pulse_thread = std::move(pulse_guide_thread_);
         // Release the driver mutex before the abort: protocol.abort() waits on
         // the wrapper mutex, which a pending pulse guide holds until TheSkyX
         // replies, and getters must not stall behind that wait. The abort is
@@ -962,9 +956,6 @@ public:
             BisqueProtocolWrapper::instance().abort();
         } catch (...) {
             error = std::current_exception();
-        }
-        if (pulse_thread.joinable()) {
-            pulse_thread.join();
         }
         if (error) {
             std::rethrow_exception(error);
@@ -1189,9 +1180,8 @@ private:
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
-    mutable std::string pulse_guide_error_;
-    std::uint64_t pulse_guide_generation_ = 0;
-    std::thread pulse_guide_thread_;
+    util::OperationGeneration pulse_generation_;
+    util::AsyncOperation pulse_guide_op_{"Bisque pulse guide", pulse_generation_, clock_};
 
     bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
