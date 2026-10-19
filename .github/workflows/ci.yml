@@ -912,6 +912,11 @@ jobs:
         # it is tested by the PR that makes it.
         run: python3 scripts/nightly_version.py --self-test
 
+      - name: Self-test the cache pruning rule
+        # cache-prune.yml runs it only after a run on main; here a change to
+        # which caches it deletes fails the PR that makes it.
+        run: python3 scripts/prune_actions_caches.py --self-test
+
       - name: Self-test the merge-down exemption
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.

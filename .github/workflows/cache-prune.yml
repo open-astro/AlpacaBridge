@@ -1,0 +1,50 @@
+# Delete the Actions caches a newer cache with the same key prefix has
+# superseded (issue #1350). The ccache steps save under a key ending in the
+# commit SHA and restore by prefix, so only the newest cache per prefix is ever
+# restored; the older ones pushed the repository past GitHub's 10 GB limit,
+# and GitHub then evicted caches still in use. The rule is in
+# scripts/prune_actions_caches.py.
+#
+# workflow_run: the prune must follow the runs that save caches, not race
+# them. The job checks out the default branch (never a run's head), reads no
+# artifact and takes no input from the triggering run; the `if:` skips runs
+# whose head is in another repository (a fork PR's CodeQL run).
+
+name: Prune Actions caches
+
+on:
+  workflow_run:  # zizmor: ignore[dangerous-triggers] -- no checkout of the run's head, no artifacts, no input from the run
+    workflows: ["CI", "Nightly Build", "CodeQL"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Prune superseded caches
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write   # delete caches
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete superseded caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # pipefail: the default `bash -e` would let tee hide a failed delete.
+        run: |
+          set -o pipefail
+          python3 scripts/prune_actions_caches.py | tee -a "${GITHUB_STEP_SUMMARY}"
