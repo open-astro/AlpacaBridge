@@ -81,6 +81,10 @@ struct PolledFrame {
 };
 constexpr int kLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
+// The poll's own retry of an unread site. A failed read ends the tick without a sample (one exchange timeout at
+// most), and a full tick comes every 4 s, so a 2 s retry would skip the sample of every full tick on a link whose
+// location never reads; 30 s leaves one tick in about eight.
+constexpr auto kSitePollRetryDelay = std::chrono::seconds(30);
 constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
@@ -2365,20 +2369,22 @@ private:
         return true;
     }
 
-    // True when the unread site (a connect that could not reach it) is due another attempt. Like the sample, its
+    // True when the unread site (a connect that could not reach it) is due another attempt of the poll (kSitePollRetryDelay). Like the sample, its
     // exchange runs without mutex_.
     bool site_read_due_locked() {
         const auto now = clock_.now();
         if (last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
-            (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
+            (now - last_site_info_attempt_) < kSitePollRetryDelay) {
             return false;
         }
         last_site_info_attempt_ = now;
         return true;
     }
 
-    // One poll tick. The exchanges run WITHOUT mutex_, so a getter never waits behind a slow link and the snapshot
-    // mutex is never held across I/O; the frame is decoded and published under mutex_. Returns false when the
+    // One poll tick. The site read and the sample exchanges run WITHOUT mutex_, so a getter never waits behind a
+    // slow link and the snapshot mutex is never held across I/O; the frame is decoded and published under mutex_.
+    // The exception is a FindHome in flight: its completion check (check_homing_complete_locked) runs under mutex_,
+    // so on a dead link during FindHome each tick holds mutex_ for one exchange timeout and the getters wait. Returns false when the
     // connection is gone or lost and the poll body should end. `ctx` is null for the test seam's direct tick,
     // which also ignores the pause.
     bool poll_status_once(util::OperationContext* ctx, int tick) {
@@ -2493,7 +2499,8 @@ private:
 
 public:
     // Returns once no poll-body tick is in flight, so a case that pauses the poll then counts mount transactions
-    // without a tick started before the pause adding to them.
+    // without a tick started before the pause adding to them. The pause survives a relink: set_connected(true) does
+    // not clear it, so a case that reconnects unpauses before it expects the body to tick.
     void set_status_poll_paused_for_testing(bool paused) {
         status_poll_paused_for_testing_ = paused;
         std::lock_guard<std::mutex> drain(status_poll_tick_mutex_);

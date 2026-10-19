@@ -1009,7 +1009,7 @@ TEST_CASE("Celestron snapshot - a site written during the poll's location read i
 
     st->w_fail = false;
     st->w_delay_ms = 200;
-    clock.advance(std::chrono::seconds(10));  // the site retry delay has passed
+    clock.advance(std::chrono::seconds(31));  // the poll's site retry delay has passed
     const int w_before = st->w_count.load();
     std::thread poll([&] { (void)cel::poll_status_now_for_testing(*driver); });
     // The write must land while the poll's location read is in flight: wait for the mount to receive it.
@@ -1082,11 +1082,38 @@ TEST_CASE("Celestron snapshot - a failed location read ends the tick", "[celestr
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     cel::set_status_poll_paused_for_testing(*driver, true);
-    clock.advance(std::chrono::seconds(10));  // the site retry delay has passed
+    clock.advance(std::chrono::seconds(31));  // the poll's site retry delay has passed
     const int before = st->transactions.load();
     (void)cel::poll_status_now_for_testing(*driver);  // tick 0 is a full tick, so the site read is due
     // A dead link would otherwise cost the location timeout and then the sample's own timeout, past one exchange.
     CHECK(st->transactions.load() - before == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a link whose location never reads still samples on the next full tick",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 200;
+    st->w_fail = true;  // the location never reads
+    auto driver = cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(std::chrono::seconds(31));
+    (void)cel::poll_status_now_for_testing(*driver);  // the site read fails and ends this tick
+    clock.advance(std::chrono::seconds(4));           // the next full tick
+    const int before = st->transactions.load();
+    (void)cel::poll_status_now_for_testing(*driver);
+    // The site is not retried yet, so this tick samples instead of paying another location timeout.
+    CHECK(st->transactions.load() - before > 1);
     driver->set_connected(false);
 }
 
