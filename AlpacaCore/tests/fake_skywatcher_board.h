@@ -15,10 +15,9 @@
 // continuous axis model (counts advance with the clock per the commanded
 // mode/rate, gotos ramp to their target and stop, the home-index registers
 // latch when an axis sweeps past the simulated sensor), the failure and motion
-// knobs and the ":" command handler. FakeSkyWatcherMount (loopback UDP) is the
-// transport over it; handle() takes one frame and returns the reply without the
-// trailing CR. Moved out of fake_skywatcher_mount.h with no logic change
-// (open-astro#604, slice A).
+// knobs and the ":" command handler. FakeSkyWatcherMount (loopback UDP) and
+// FakeSkyWatcherSerialBoard (pty) are the transports over it; handle() takes one frame and returns the reply without
+// the trailing CR. Moved out of fake_skywatcher_mount.h with no logic change (open-astro#604, slice A).
 //
 // The clock is injected (open-astro#715, decision 0005): by default the real
 // one, so motion runs in real time; a test that passes a FakeTaskClock moves

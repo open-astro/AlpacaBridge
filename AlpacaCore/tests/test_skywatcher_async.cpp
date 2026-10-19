@@ -12,8 +12,9 @@
 
 // Hardware-free coverage of the SkyWatcher driver's async state machines
 // (issue #213): the driver connects through its REAL protocol wrapper and UDP
-// transport to FakeSkyWatcherMount, a loopback motor-controller simulator
-// with a continuous axis model, so slew dispatch + landing refinement, the
+// transport to FakeSkyWatcherMount (the `[eqm35]` cases: through the pty
+// transport to FakeSkyWatcherSerialBoard at 115200, open-astro#604), a
+// motor-controller simulator with a continuous axis model, so slew dispatch + landing refinement, the
 // Park/FindHome tasks, pulse-guide timers, and MoveAxis stop tasks all run
 // end-to-end exactly as they do against the Wave 100i.
 
@@ -39,6 +40,7 @@
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
+#include "fake_skywatcher_serial_board.h"
 #include "fake_task_clock.h"
 #include "skywatcher_fake_clock.h"
 
@@ -119,6 +121,7 @@ private:
 namespace sw = alpacacore::vendor::skywatcher;
 using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
+using alpacacore::test::FakeSkyWatcherSerialBoard;
 using alpacacore::test::FakeTaskClock;
 using alpacacore::test::skywatcher_clock::follow_until;
 using alpacacore::test::skywatcher_clock::follow_wall_clock;
@@ -133,6 +136,25 @@ sw::ConnectionInfo endpoint(const FakeSkyWatcherMount& mount) {
     info.udp_port = mount.port();
     info.response_timeout_ms = 250;
     return info;
+}
+
+// The EQM-35 Pro's PL2303 runs at 115200. answer_only_at_baud() makes the fake
+// deaf at any other rate, so the driver's configured rate is what the cases
+// pin (open-astro#604).
+sw::ConnectionInfo endpoint(FakeSkyWatcherSerialBoard& board) {
+    board.answer_only_at_baud(115200);
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Serial;
+    info.port_path = board.slave_path();
+    info.baud_rate = 115200;
+    info.response_timeout_ms = 250;
+    return info;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board) {
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), 39.7392, -104.9903, 1609.0);
+    driver->set_connected(true);
+    return driver;
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount) {
@@ -180,6 +202,16 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
                                                               double site_longitude_deg = -104.9903,
                                                               double site_elevation_m = 1609.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site_latitude_deg, site_longitude_deg,
+                                                  site_elevation_m, {}, {}, clock);
+    driver->set_connected(true);
+    return driver;
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board, FakeTaskClock& clock,
+                                                              double site_latitude_deg = 39.7392,
+                                                              double site_longitude_deg = -104.9903,
+                                                              double site_elevation_m = 1609.0) {
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), site_latitude_deg, site_longitude_deg,
                                                   site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
     return driver;
@@ -2204,8 +2236,7 @@ TEST_CASE("SkyWatcher async - rate offset entry keeps the reported RA continuous
 // EQM-35 Pro hardware (see FakeMountProfile::eqm35_pro).
 
 TEST_CASE("SkyWatcher EQM-35 - identity from the mount code byte", "[skywatcher][telescope][eqm35]") {
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     auto driver = connected_driver(mount);
 
     // ":e" -> "=032732": firmware 3.39, mount code 0x32. The third byte is an
@@ -2241,8 +2272,7 @@ TEST_CASE("SkyWatcher EQM-35 - the connect log names the mount code in hex (#458
             ++hits;
         }
     });
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     auto driver = connected_driver(mount);
     CHECK(hits.load() == 1);
     driver->set_connected(false);
@@ -2255,8 +2285,7 @@ TEST_CASE("SkyWatcher EQM-35 - FindHome uses the count-frame fallback", "[skywat
     // take the count-frame branch. This is the safety-relevant case: running
     // the AutoHome sensor hunt on a mount with no index sensors would drive
     // the axes looking for an edge that never arrives.
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     auto driver = connected_driver(mount);
 
     // CanFindHome is unconditionally true by design
@@ -2299,8 +2328,7 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "
     // Agreement to ~1e-5 is what makes the Wave-derived rate math correct on
     // this mount unchanged, so assert the driver actually tracks at that rate.
     FakeTaskClock clock;
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     auto driver = connected_driver(mount, clock);
 
     const double before = mount.physical_degrees(1);
@@ -2314,12 +2342,42 @@ TEST_CASE("SkyWatcher EQM-35 - tracking uses the board's own sidereal period", "
     // axis moved in the tracking direction at roughly the sidereal rate rather
     // than pinning an exact figure (the loopback clock is not real-time).
     const double moved = std::fabs(after - before);
-    const double expected = FakeSkyWatcherMount::kSiderealDegPerSec * 0.6;
+    const double expected = FakeSkyWatcherSerialBoard::kSiderealDegPerSec * 0.6;
     CHECK(moved > expected * 0.3);
     CHECK(moved < expected * 3.0);
 
     driver->set_tracking(false);
     driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher EQM-35 - a serial link severed mid-goto is a lost connection (#604, #445)",
+          "[skywatcher][telescope][eqm35][serial][linkloss]") {
+    // The adapter leaves the bus while a goto runs (the Sky-Watcher direct
+    // driver's documented outcome, skywatcher.instructions.md): Connected
+    // goes false, every operation answers NotConnected, and the goto body
+    // that was talking to the dead fd neither hangs the disconnect nor
+    // leaves Slewing true. The board is on a FakeTaskClock nobody advances,
+    // so the goto is still in flight when the cable is pulled.
+    FakeTaskClock clock;
+    FakeSkyWatcherSerialBoard mount(FakeMountProfile::eqm35_pro(), clock);
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    const double target_ra = std::fmod(driver->get_sidereal_time() - 3.0 + 24.0, 24.0);
+    driver->slew_to_coordinates_async(target_ra, -20.0);
+    REQUIRE(driver->get_slewing());
+    // The goto is dispatched from the slot's body, not from the call.
+    REQUIRE(wait_until([&] { return mount.axis_in_goto(1) || mount.axis_in_goto(2); }, 5000));
+
+    mount.sever_link();
+
+    // Detected on the next transaction (the status poll), not by a timeout.
+    REQUIRE(wait_until([&] { return !driver->get_connected(); }, 6000));
+    expect_alpaca_error([&] { driver->get_slewing(); }, alpacacore::AlpacaError::NotConnected);
+    expect_alpaca_error([&] { driver->get_right_ascension(); }, alpacacore::AlpacaError::NotConnected);
+    expect_alpaca_error([&] { driver->slew_to_coordinates_async(target_ra, -20.0); },
+                        alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(false);  // returns: the goto body did not wedge the teardown
+    CHECK_FALSE(driver->get_connected());
 }
 
 // ── Southern hemisphere tracking direction ──────────────────────────────────
@@ -2342,8 +2400,7 @@ TEST_CASE("SkyWatcher southern hemisphere - tracking turns RA the right way",
     // test_skywatcher_pointing.cpp, which checks the same tracking sense
     // against the measured rows rather than against the driver's report.
     FakeTaskClock clock;
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0, {}, {}, clock);
     driver->set_connected(true);
 
@@ -2434,8 +2491,7 @@ TEST_CASE("SkyWatcher southern hemisphere - a positive RightAscensionRate still 
     // the axis rate is negative, so "slower" is a SMALLER magnitude, not a
     // smaller signed value. Only the plain tracking case covered this sign.
     FakeTaskClock clock;
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0, {}, {}, clock);
     driver->set_connected(true);
     driver->set_tracking(true);
@@ -2791,8 +2847,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 
 TEST_CASE("SkyWatcher southern hemisphere - DeclinationRate drives Dec the right way",
           "[skywatcher][telescope][eqm35][hemisphere]") {
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
     driver->set_connected(true);
     driver->set_tracking(true);
@@ -2828,8 +2883,7 @@ TEST_CASE("SkyWatcher southern hemisphere - DeclinationRate drives Dec the right
 
 TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the right way",
           "[skywatcher][telescope][eqm35][hemisphere]") {
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro());
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro());
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
     driver->set_connected(true);
     driver->set_tracking(true);
@@ -2876,8 +2930,7 @@ TEST_CASE("SkyWatcher southern hemisphere - pulse guide north moves Dec the righ
 TEST_CASE("SkyWatcher southern hemisphere - SideOfPier flips with hour angle and agrees with destination",
           "[skywatcher][telescope][eqm35][hemisphere]") {
     FakeTaskClock clock;  // the mount runs on it; the driver stays on the wall clock
-    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
-    REQUIRE(mount.ok());
+    FakeSkyWatcherSerialBoard mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -35.0000, 150.0000, 80.0);
     driver->set_connected(true);
     driver->set_tracking(true);
