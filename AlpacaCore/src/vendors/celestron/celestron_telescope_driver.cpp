@@ -75,9 +75,9 @@ struct PolledFrame {
     bool altaz_known = false;
     bool slewing = false;
     bool slewing_known = false;  // false until a query (or a control-path write) has answered
-    int side_of_pier = -1;    // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
-    bool pier_known = false;  // the handset has answered the pier query at least once
-    int tracking_mode = -1;   // handset tracking mode, -1 unknown
+    int side_of_pier = -1;       // ASCOM value, -1 (pierUnknown) when the handset's state maps to neither side
+    bool pier_known = false;     // the handset has answered the pier query at least once
+    int tracking_mode = -1;      // handset tracking mode, -1 unknown
 };
 constexpr int kLinkFailureThreshold = 3;
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
