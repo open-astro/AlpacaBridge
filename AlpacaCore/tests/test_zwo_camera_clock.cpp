@@ -178,13 +178,25 @@ TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous down
     CHECK(rig.sdk.call_count("start_exposure") == 2);
 }
 
+namespace {
+
+// Starts exposure 2 on a thread and reports whether it parked on the clock. A start that wrongly waits is
+// released after the check, so a broken driver fails the case instead of hanging it.
+bool start_parks_on_clock(SettleRig& rig) {
+    std::thread starter([&] { rig.camera->start_exposure(0.001, true); });
+    const bool waited = rig.clock.wait_for_waiters(1, milliseconds(200));
+    if (waited) rig.clock.advance(milliseconds(600));
+    starter.join();
+    return waited;
+}
+
+}  // namespace
+
 TEST_CASE("ZWO camera clock - USB 3.0 start does not wait after a download", "[zwo][camera][unit][clock]") {
     SettleRig rig(true);
-    const auto waits = rig.clock.wait_count();
 
-    rig.camera->start_exposure(0.001, true);
+    CHECK_FALSE(start_parks_on_clock(rig));
 
-    CHECK(rig.clock.wait_count() == waits);
     CHECK(rig.sdk.call_count("start_exposure") == 2);
     CHECK(rig.camera->get_image_ready());
     CHECK(rig.sdk.call_count("start_exposure") == 2);
@@ -194,25 +206,20 @@ TEST_CASE("ZWO camera clock - USB 2.0 start after the settle time has passed doe
           "[zwo][camera][unit][clock]") {
     SettleRig rig(false);
     rig.clock.advance(milliseconds(600));
-    const auto waits = rig.clock.wait_count();
 
-    rig.camera->start_exposure(0.001, true);
+    CHECK_FALSE(start_parks_on_clock(rig));
 
-    CHECK(rig.clock.wait_count() == waits);
     CHECK(rig.sdk.call_count("start_exposure") == 2);
     CHECK(rig.camera->get_image_ready());
 }
 
-TEST_CASE("ZWO camera clock - USB 2.0 first start after connect does not wait", "[zwo][camera][unit][clock]") {
-    FakeZWOSDK sdk;
-    FakeTaskClock clock;
-    sdk.camera.is_usb3 = false;
-    sdk.usb2_settle_clock = &clock;
-    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
-    camera->set_connected(true);
+TEST_CASE("ZWO camera clock - USB 2.0 first start after a reconnect does not wait", "[zwo][camera][unit][clock]") {
+    SettleRig rig(false);  // downloaded one exposure on the first connection
+    rig.camera->set_connected(false);
+    rig.camera->set_connected(true);
 
-    camera->start_exposure(0.001, true);
+    CHECK_FALSE(start_parks_on_clock(rig));
 
-    CHECK(clock.wait_count() == 0);
-    CHECK(sdk.call_count("start_exposure") == 1);
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    CHECK(rig.camera->get_image_ready());
 }

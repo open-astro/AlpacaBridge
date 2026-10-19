@@ -183,6 +183,7 @@ public:
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         std::lock_guard lock(mutex_);
         ++open_count_;
+        last_download_time_.reset();  // a reopened camera has no download behind it
         temperature_reads_since_open_ = 0;
     }
 
