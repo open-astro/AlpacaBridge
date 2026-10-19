@@ -245,7 +245,8 @@ public:
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             pulse_guiding_ = false;
-            pulse_guide_op_.clear_failure();
+            pulse_guide_error_.clear();
+            ++pulse_request_;
             pulse_generation_.bump();
 
             // Check initial park/tracking state.
@@ -275,6 +276,7 @@ public:
             ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
                             std::string(parked_ ? "true" : "false"));
         } else {
+            ++pulse_request_;
             pulse_generation_.bump();
             try {
                 protocol.disconnect();
@@ -292,7 +294,6 @@ public:
             pulse_guiding_ = false;
             lock.unlock();
             pulse_guide_op_.cancel_all_and_join();
-            pulse_guide_op_.clear_failure();
         }
     }
 
@@ -376,8 +377,8 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (auto failure = pulse_guide_op_.last_failure()) {
-            throw AlpacaException(*failure, AlpacaError::DriverException);
+        if (!pulse_guide_error_.empty()) {
+            throw AlpacaException(pulse_guide_error_, AlpacaError::DriverException);
         }
         return pulse_guiding_;
     }
@@ -685,7 +686,7 @@ public:
         if (duration == 0) {
             return;
         }
-        if (pulse_guiding_ && !pulse_guide_op_.last_failure()) {
+        if (pulse_guiding_ && pulse_guide_error_.empty()) {
             throw AlpacaException("TheSkyX DirectGuide is already guiding; wait for IsPulseGuiding=false",
                                   AlpacaError::InvalidOperation);
         }
@@ -717,22 +718,26 @@ public:
         }
 
         pulse_guiding_ = true;
+        pulse_guide_error_.clear();
+        // The request id is taken under mutex_ with the state it guards; abort,
+        // connect and disconnect bump it, so the body compares it under mutex_
+        // and a guide they retired neither sends nor records anything.
+        const uint64_t request = ++pulse_request_;
         // MoveTelescope runs at TheSkyX's fixed speed, so its run time only
         // roughly tracks `duration`; never wait less than the configured bound.
         constexpr int kResponseMarginMs = 1000;
         const int duration_bound_ms = duration + kResponseMarginMs;  // no overflow: duration <= kMaxPulseGuideMs
         const int guide_timeout_ms = std::max(connection_info_.response_timeout_ms, duration_bound_ms);
         // The slot's start() runs without the driver mutex (a stale body needs
-        // it to return). A body superseded or cancelled meanwhile (AbortSlew,
-        // disconnect) leaves pulse_guiding_ and the kept failure to that path.
+        // it to return). A guide retired meanwhile (AbortSlew, disconnect) is
+        // told apart by `request`, not by the slot's generation, which start()
+        // bumps again after the retiring call.
         lock.unlock();
         try {
-            pulse_guide_op_.start([this, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
+            pulse_guide_op_.start([this, request, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext&) {
                 {
-                    // A disconnect or abort that landed between the unlock and
-                    // start() cleared the state; send nothing on that link.
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                    if (!connected_ || request != pulse_request_) {
                         return;
                     }
                 }
@@ -744,27 +749,25 @@ public:
                 } catch (...) {
                     error = "PulseGuide failed with an unknown TheSkyX error";
                 }
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (ctx.stop_reason() != util::StopReason::None) {
-                        return;
-                    }
-                    // On failure pulse_guiding_ stays true until the slot has kept
-                    // the throw: IsPulseGuiding reports the failure first, so a
-                    // poller never sees false with no error in between.
-                    if (error.empty()) {
-                        pulse_guiding_ = false;
-                        equatorial_cache_valid_ = false;
-                    }
+                // The request check and the state write share one mutex_ hold.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (request != pulse_request_) {
+                    return;
                 }
-                if (!error.empty()) {
-                    // The slot keeps the text; IsPulseGuiding reports it.
-                    throw AlpacaException(error, AlpacaError::DriverException);
+                if (error.empty()) {
+                    pulse_guiding_ = false;
+                    equatorial_cache_valid_ = false;
+                } else {
+                    // pulse_guiding_ stays true; IsPulseGuiding reports the
+                    // error until the next PulseGuide, abort or connect.
+                    pulse_guide_error_ = std::move(error);
                 }
             });
         } catch (...) {
             std::lock_guard<std::mutex> relock(mutex_);
-            pulse_guiding_ = false;
+            if (request == pulse_request_) {
+                pulse_guiding_ = false;
+            }
             throw;
         }
     }
@@ -947,11 +950,12 @@ public:
     void abort_slew() override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
-        // Bumping supersedes a running guide body: it returns without touching
-        // the driver. It is not cancelled or joined here, because a PulseGuide
+        // Bumping the request id retires a running guide body: under mutex_ it
+        // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
+        ++pulse_request_;
         pulse_generation_.bump();
-        pulse_guide_op_.clear_failure();
+        pulse_guide_error_.clear();
         pulse_guiding_ = false;
         slewing_cached_ = false;
         slew_force_until_ = util::TaskClock::clock::time_point::min();
@@ -1191,6 +1195,8 @@ private:
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
+    std::string pulse_guide_error_;
+    uint64_t pulse_request_ = 0;
     util::OperationGeneration pulse_generation_;
     util::AsyncOperation pulse_guide_op_{"Bisque pulse guide", pulse_generation_, clock_};
 

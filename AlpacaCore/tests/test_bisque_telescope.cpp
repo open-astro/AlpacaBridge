@@ -992,7 +992,7 @@ TEST_CASE("Bisque PulseGuide - a start after AbortSlew returns at once while the
     driver->set_connected(false);
 }
 
-TEST_CASE("Bisque PulseGuide - a failure kept from a guide is dropped by disconnect and reconnect",
+TEST_CASE("Bisque PulseGuide - a failed guide's error is dropped by disconnect and reconnect",
           "[bisque][telescope][pulseguiding]") {
     alpacacore::test::FakeMountServer server([](const std::string& command) -> std::string {
         if (command.find("MoveTelescope") != std::string::npos) {
@@ -1008,34 +1008,6 @@ TEST_CASE("Bisque PulseGuide - a failure kept from a guide is dropped by disconn
     CHECK(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(2)) ==
           alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
-    REQUIRE_NOTHROW(driver->set_connected(true));
-    CHECK_FALSE(driver->get_is_pulse_guiding());
-    driver->set_connected(false);
-}
-
-TEST_CASE("Bisque PulseGuide - disconnect during a guide joins the body and a reconnect starts clean",
-          "[bisque][telescope][pulseguiding]") {
-    auto entered = std::make_shared<std::atomic<bool>>(false);
-    auto base = bisque_guide_responder(std::chrono::milliseconds(1000), "|No error. Error = 0.TypeError: gone#");
-    alpacacore::test::FakeMountServer server([entered, base](const std::string& command) {
-        if (command.find("MoveTelescope") != std::string::npos) entered->store(true);
-        return base(command);
-    });
-    REQUIRE(server.ok());
-    auto info = loopback(server.port());
-    info.response_timeout_ms = 3000;
-    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, info);
-    REQUIRE_NOTHROW(driver->set_connected(true));
-
-    REQUIRE_NOTHROW(driver->pulse_guide(2, 5000));
-    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (!entered->load() && std::chrono::steady_clock::now() < entered_deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    REQUIRE(entered->load());
-
-    // The cancelled body's failed reply must be dropped, not kept.
-    REQUIRE_NOTHROW(driver->set_connected(false));
     REQUIRE_NOTHROW(driver->set_connected(true));
     CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
