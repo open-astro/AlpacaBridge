@@ -2541,7 +2541,7 @@ public:
                         // Transient poll failure; keep trying until the deadline.
                     }
                     if (!ctx.wait_for(std::chrono::milliseconds(50))) {
-                        return;  // cancelled by disconnect, or superseded by a newer command on this axis
+                        return;  // cancelled by disconnect or AbortSlew, or superseded by a newer command on this axis
                     }
                 }
                 std::unique_lock<std::mutex> lock(mutex_);
@@ -2648,6 +2648,12 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_writable_locked();
         check_not_fully_parked_locked("AbortSlew");
+        // open-astro#1341: a MoveAxis(axis, 0) stop body still polling would
+        // restore tracking a second time after the restore below. cancel() never
+        // joins or blocks, so it is safe under mutex_; the body checks its stop
+        // reason under mutex_ before its tail and returns without restoring.
+        stop_ops_[0].cancel();
+        stop_ops_[1].cancel();
         // ITelescopeV4: aborting a MoveAxis returns Tracking to the state it
         // had before the move. A jog leaves tracking_ as it found it, so that
         // state is still tracking_ here.
