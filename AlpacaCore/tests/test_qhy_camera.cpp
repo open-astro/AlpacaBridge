@@ -1143,10 +1143,11 @@ struct QhyLogCapture {
 // Advances virtual time 20 ms at a time, in lock step with the woken threads,
 // until `done` holds; returns the virtual time spent. This is what lets a
 // reap loop (which sleeps 20 ms per pass on the clock) make progress. Each
-// step also yields 200 us of real time: a worker that is about to finish needs
+// step also yields `pace` of real time: a worker that is about to finish needs
 // real time to do so, and without it the loop would run 2 s of virtual reap
 // bound out in microseconds and detach a worker that was seconds from done.
-milliseconds step_until(FakeTaskClock& clock, const std::function<bool()>& done, int max_steps = 400) {
+milliseconds step_until(FakeTaskClock& clock, const std::function<bool()>& done,
+                        std::chrono::microseconds pace = std::chrono::milliseconds(2), int max_steps = 400) {
     milliseconds spent{0};
     for (int i = 0; i < max_steps && !done(); ++i) {
         clock.advance(milliseconds(20));
@@ -1154,21 +1155,79 @@ milliseconds step_until(FakeTaskClock& clock, const std::function<bool()>& done,
         // Short bound: a poller woken by this step can block on the SDK lock a
         // wedged call holds, and would otherwise stall every step for the bound.
         clock.wait_for_woken_settled(milliseconds(2));
-        std::this_thread::sleep_for(std::chrono::microseconds(200));
+        std::this_thread::sleep_for(pace);
     }
     return spent;
 }
 
-// Disconnects on a helper thread and steps virtual time until it returns.
+// Steps virtual time in the background while it lives. Teardown on a failure
+// path needs it: a failed REQUIRE unwinds into a driver destructor whose reap
+// loops park on the fake clock, and nobody else would advance it.
+class ClockPump {
+public:
+    explicit ClockPump(FakeTaskClock& clock)
+        : thread_([this, &clock] {
+              while (!stop_.load()) {
+                  clock.advance(milliseconds(20));
+                  std::this_thread::sleep_for(milliseconds(2));
+              }
+          }) {}
+    ClockPump(const ClockPump&) = delete;
+    ClockPump& operator=(const ClockPump&) = delete;
+    ~ClockPump() {
+        stop_ = true;
+        thread_.join();
+    }
+
+private:
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
+
+// Declared after the driver (and any gate): on every exit path it opens the
+// gate and destroys the driver while a ClockPump keeps virtual time moving.
+struct TeardownGuard {
+    FakeTaskClock& clock;
+    std::unique_ptr<alpacacore::CameraDriver>& driver;
+    SdkGate* gate = nullptr;
+    ~TeardownGuard() {
+        if (gate != nullptr) {
+            gate->release = true;
+        }
+        ClockPump pump(clock);
+        driver.reset();
+    }
+};
+
+// Joins a helper thread on every exit path, opening the gate and pumping the
+// clock first so the join cannot wait on a wedged call or a parked reap loop.
+struct JoinPumped {
+    FakeTaskClock& clock;
+    std::thread& thread;
+    SdkGate* gate = nullptr;
+    ~JoinPumped() {
+        if (gate != nullptr) {
+            gate->release = true;
+        }
+        ClockPump pump(clock);
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+};
+
+// Disconnects on a helper thread and steps virtual time until it returns. A
+// clean disconnect needs one or two steps; the 10 ms of real time per step
+// gives a worker that is still finishing about a second before the 2 s reap
+// bound can detach it.
 milliseconds disconnect_stepping(FakeTaskClock& clock, alpacacore::CameraDriver& driver) {
     std::atomic<bool> done{false};
     std::thread t([&] {
         driver.set_connected(false);
         done = true;
     });
-    const auto spent = step_until(clock, [&] { return done.load(); });
-    t.join();
-    return spent;
+    JoinPumped joiner{clock, t};
+    return step_until(clock, [&] { return done.load(); }, milliseconds(10));
 }
 
 // Disconnects a driver with a wedged worker: steps virtual time until the
@@ -1183,13 +1242,13 @@ milliseconds disconnect_reaping(FakeTaskClock& clock, alpacacore::CameraDriver& 
         driver.set_connected(false);
         done = true;
     });
+    JoinPumped joiner{clock, t, &gate};
     // The reap loop registers a new wait on the clock; the pollers being
     // stopped only exit. A loop on the real clock registers none.
     REQUIRE(clock.wait_for_wait_count(waits_before + 1, seconds(2)));
     const auto spent = step_until(clock, [&] { return !logs.find(reaped).empty(); });
     gate.release = true;
     step_until(clock, [&] { return done.load(); });
-    t.join();
     return spent;
 }
 
@@ -1212,6 +1271,7 @@ TEST_CASE("QHY Camera Driver - the exposure watchdog expires on the injected clo
     gate.arm(fake, "get_single_frame");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(2.0, true);
     REQUIRE(eventually([&] { return gate.entered.load(); }));
@@ -1239,6 +1299,7 @@ TEST_CASE("QHY Camera Driver - a download in a slow readout mode extends the wat
     gate.arm(fake, "get_single_frame");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(1), clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->set_readout_mode(1);
     driver->start_exposure(1.0, true);
@@ -1262,6 +1323,7 @@ TEST_CASE("QHY Camera Driver - the pre-download settle sleep waits on the inject
     auto fake = make_fake();  // read_directly false: the worker settles for 1 s first
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(60), clock);
+    TeardownGuard guard{clock, driver};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));
@@ -1287,6 +1349,7 @@ TEST_CASE("QHY Camera Driver - a pulse guide ends on the injected clock", "[qhy]
     gate.arm(fake, "guide");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     REQUIRE(driver->get_can_pulse_guide());
 
@@ -1315,6 +1378,7 @@ TEST_CASE("QHY Camera Driver - a wedged download is reaped after 2 s of injected
     gate.arm(fake, "get_single_frame");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     driver->start_exposure(0.05, true);
     REQUIRE(eventually([&] { return gate.entered.load(); }));
@@ -1324,6 +1388,7 @@ TEST_CASE("QHY Camera Driver - a wedged download is reaped after 2 s of injected
         driver->set_connected(false);
         done = true;
     });
+    JoinPumped joiner{clock, t, &gate};
     REQUIRE(clock.wait_for_waiters(1, seconds(2)));
     clock.advance(milliseconds(1980));
     clock.wait_for_woken_settled(milliseconds(500));
@@ -1332,7 +1397,6 @@ TEST_CASE("QHY Camera Driver - a wedged download is reaped after 2 s of injected
     CHECK(spent <= milliseconds(40));
     gate.release = true;  // the wedged call holds the SDK lock the rest of the disconnect needs
     step_until(clock, [&] { return done.load(); });
-    t.join();
 }
 
 TEST_CASE("QHY Camera Driver - a wedged cooler-off worker is reaped after 2 s of injected time and timed on it",
@@ -1348,6 +1412,7 @@ TEST_CASE("QHY Camera Driver - a wedged cooler-off worker is reaped after 2 s of
     gate.armed = false;  // the connect also calls set_param; only the worker's call is held
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     gate.armed = true;
     driver->set_cooler_on(false);
@@ -1376,6 +1441,7 @@ TEST_CASE("QHY Camera Driver - a wedged temperature worker is reaped after 2 s o
     gate.arm(fake, "control_temp");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     REQUIRE(eventually([&] { return gate.entered.load(); }));
 
@@ -1393,6 +1459,7 @@ TEST_CASE("QHY Camera Driver - the polling workers wait a second on the injected
     auto fake = FakeQHYSDK::with_one_cooled_camera();
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver};
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));  // temperature + telemetry
     const int temp_polls = fake.call_count("control_temp");
@@ -1421,6 +1488,7 @@ TEST_CASE("QHY Camera Driver - the polling workers skip a cycle during an exposu
     gate.arm(fake, "get_single_frame");
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, {}, seconds(600), clock);
+    TeardownGuard guard{clock, driver, &gate};
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(2, seconds(2)));
     driver->start_exposure(5.0, true);
