@@ -216,6 +216,7 @@ if(TARGET alpacacore_celestron)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
+    list(APPEND TEST_SOURCES test_bisque_telescope_snapshot.cpp)
     # Covers the mutex-guarded get_connected() driver shape in the [stress]
     # pool (PR #115 round-2 ABBA regression coverage).
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)

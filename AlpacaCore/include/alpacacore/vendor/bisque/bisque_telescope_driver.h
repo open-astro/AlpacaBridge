@@ -41,4 +41,10 @@ std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_nu
                                                                    std::optional<double> site_elevation_m,
                                                                    util::TaskClock& clock = util::default_task_clock());
 
+/// Test seams of the status poll (decision 0010): stop or resume its ticks, and run one tick on the calling thread
+/// (paused or not; false when the connection is gone). `driver` must come from the factories above; anything else is
+/// ignored.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+bool poll_status_now_for_testing(TelescopeDriver& driver);
+
 } // namespace alpacacore::vendor::bisque
