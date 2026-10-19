@@ -1370,18 +1370,18 @@ Tier2Host tier2_host_touptek_switch() {
                 true,
                 {},
                 ""};
-    h.connectable = [](bool hold) {
-        auto s = std::make_shared<StellaVitaHold>();
-        if (hold) s->fake.open_delay = kHold;
-        return host_over(s, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+    h.connectable = [](bool hold_open) {
+        auto hold = std::make_shared<StellaVitaHold>();
+        if (hold_open) hold->fake.open_delay = kHold;
+        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::touptek::create_touptek_switch(
                 0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
         });
     };
     h.failing = []() {
-        auto s = std::make_shared<StellaVitaHold>();
-        s->fake.fail_open = true;
-        return host_over(s, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+        auto hold = std::make_shared<StellaVitaHold>();
+        hold->fake.fail_open = true;
+        return host_over(hold, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
             return alpacacore::vendor::touptek::create_touptek_switch(
                 0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
         });
