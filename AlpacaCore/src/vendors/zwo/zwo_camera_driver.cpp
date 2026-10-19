@@ -599,6 +599,9 @@ public:
             latch_image_failure_locked(e.what());
             throw_image_failure_locked();
         }
+        // Recorded before the image lock is released (mutex_ must not be taken under it), so a
+        // start_exposure that wins the lock next sees this download.
+        last_download_ns_.store(clock_.now().time_since_epoch().count());
         image_lock.unlock();
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -961,6 +964,8 @@ public:
         }
         const long exposure_us = static_cast<long>(std::lround(exposure_us_value));
 
+        wait_for_usb2_download_settle();
+
         int active_camera_id = -1;
         std::uint64_t start_seq = 0;
         bool prior_exposure_needs_check = false;
@@ -1043,6 +1048,28 @@ public:
     void stop_exposure() override { stop_exposure_impl(false); }
 
 private:
+    // Issue #1349. A USB 2.0 camera (ASI120MM) needs time after ASIGetDataAfterExp before the next
+    // ASIStartExposure: a start inside the window joins a frame already in progress (the exposure
+    // reports ready early) or collides with it and ends in ASI_EXP_FAILED, which the retry then
+    // repairs at the cost of a second full exposure. Rig-measured on an ASI120MM Mini with a 10 s
+    // exposure: fails at 0.25-0.35 s after the download, reports ready 0.5 s early below 0.15 s,
+    // clean from 0.4 s. 600 ms keeps a margin over the 0.4 s edge. USB 3.0 cameras show nothing.
+    // Called with exposure_trigger_mutex_ held and neither mutex_ nor the image lock held, so
+    // status reads stay live during the wait. stop_exposure queues behind the trigger mutex for at
+    // most this long. A disconnect during the wait is caught by start_exposure's connected_ check
+    // before any SDK call, so no exposure is started.
+    void wait_for_usb2_download_settle() {
+        const auto downloaded_ns = last_download_ns_.load();
+        if (downloaded_ns == kNoDownload) return;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!camera_info_valid_ || camera_info_.is_usb3) return;
+        }
+        const util::TaskClock::clock::time_point downloaded_at{util::TaskClock::clock::duration(downloaded_ns)};
+        const auto remaining = kUsb2PostDownloadSettle - (clock_.now() - downloaded_at);
+        if (remaining > util::TaskClock::clock::duration::zero()) clock_.sleep_for(remaining);
+    }
+
     void stop_exposure_impl(bool abort) {
         ensure_connected();
         // Serialize against start_exposure and an in-flight retry burst, so
@@ -1155,6 +1182,13 @@ private:
     // Transient-failure recovery (see poll_exposure_status): mutable
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
+    // See wait_for_usb2_download_settle().
+    static constexpr std::chrono::milliseconds kUsb2PostDownloadSettle{600};
+    static constexpr std::int64_t kNoDownload = std::numeric_limits<std::int64_t>::min();
+    // TaskClock time (ns since its epoch) of the last successful ASIGetDataAfterExp on this
+    // connection, or kNoDownload. Atomic: written under image_operation_mutex_, read under the
+    // trigger mutex, and mutex_ cannot be taken under the image lock.
+    mutable std::atomic<std::int64_t> last_download_ns_{kNoDownload};
     static constexpr std::chrono::milliseconds kExposureRetryInterval{250};
     // Serializes the SDK exposure-lifecycle triggers (user start_exposure,
     // user stop_exposure, and the retry's stop/re-apply/re-trigger burst) so
@@ -1240,6 +1274,7 @@ private:
     }
 
     void reset_exposure_state_locked() {
+        last_download_ns_.store(kNoDownload);
         image_ready_ = false;
         image_cached_ = false;
         exposure_starting_ = false;
