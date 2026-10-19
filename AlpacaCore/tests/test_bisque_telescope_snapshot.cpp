@@ -346,6 +346,32 @@ TEST_CASE("Bisque snapshot - the position after a pulse guide is measured at pul
     CHECK(rig.driver->get_right_ascension() == 5.75);
 }
 
+// Falsified by: bisque_telescope_driver.cpp, the pulse-guide body: call measure_frame() with mutex_ held, so the
+// four sample exchanges block every getter.
+TEST_CASE("Bisque snapshot - a getter is not blocked by the position measurement at pulse end",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = static_cast<int>(kLatency.count());
+    rig.mount.guide_ra_step_hours = 0.25;
+    const int before = rig.mount.transactions.load();
+    rig.driver->pulse_guide(2, 100);
+    // The guide is one transaction; the next one is the first exchange of the measurement.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 2);
+    CHECK(timed([&] { (void)rig.driver->get_is_pulse_guiding(); }) < kGetterBudget);
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < kGetterBudget);
+    const auto done = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < done) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE_FALSE(rig.driver->get_is_pulse_guiding());
+    CHECK(rig.driver->get_right_ascension() == 5.75);
+}
+
 // Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the snapshot_.write on the success branch.
 TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live read through to the frame",
           "[bisque][telescope][snapshot]") {

@@ -811,21 +811,34 @@ public:
                         error = "PulseGuide failed with an unknown TheSkyX error";
                     }
                     // The request check and the state write share one mutex_ hold.
-                    std::lock_guard<std::mutex> lock(mutex_);
+                    std::unique_lock<std::mutex> lock(mutex_);
                     if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
                         if (request == pulse_request_) {
                             pulse_guiding_ = false;
                         }
                         return;
                     }
-                    if (error.empty()) {
-                        pulse_guiding_ = false;
-                        publish_measurement_locked();  // the pulse moved the mount: read where it ended up now
-                    } else {
+                    if (!error.empty()) {
                         // pulse_guiding_ stays true; IsPulseGuiding reports the
                         // error until the next PulseGuide, abort or connect.
                         pulse_guide_error_ = std::move(error);
+                        return;
                     }
+                    // The pulse moved the mount: read where it ended up. The sample is four TheSkyX exchanges,
+                    // so it runs without mutex_ (every getter takes it). A write that lands meanwhile (an
+                    // abort, a slew) is newer than the token and drops the publish.
+                    const auto token = snapshot_.begin_poll();
+                    lock.unlock();
+                    const auto measured = measure_frame();
+                    lock.lock();
+                    if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
+                        if (request == pulse_request_) {
+                            pulse_guiding_ = false;
+                        }
+                        return;
+                    }
+                    pulse_guiding_ = false;
+                    publish_measured_locked(token, measured);
                 });
         } catch (...) {
             std::lock_guard<std::mutex> relock(mutex_);
@@ -1204,11 +1217,26 @@ private:
     // read leaves the position unknown, which the getters refuse until the next poll answers.
     void publish_measurement_locked() const {
         const auto token = snapshot_.begin_poll();
+        publish_measured_locked(token, measure_frame());
+    }
+
+    // The sample half of publish_measurement_locked(), callable without mutex_. nullopt: the position read failed.
+    std::optional<PolledFrame> measure_frame() const {
         try {
             const auto previous = snapshot_.read();
-            snapshot_.publish(token, sample_frame(previous ? previous->value : PolledFrame{}));
-            drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
+            return sample_frame(previous ? previous->value : PolledFrame{});
         } catch (const std::exception&) {
+            return std::nullopt;
+        }
+    }
+
+    // The publish half: `token` was taken before the sample, so a write since drops it.
+    void publish_measured_locked(const util::StateSnapshot<PolledFrame>::Token& token,
+                                 const std::optional<PolledFrame>& measured) const {
+        if (measured) {
+            snapshot_.publish(token, *measured);
+            drop_poll_in_flight_locked();  // a poll that sampled before this read must not replace it
+        } else {
             snapshot_.write([](PolledFrame& frame) {
                 frame.equatorial_known = false;
                 frame.altaz_known = false;
