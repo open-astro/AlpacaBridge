@@ -1,0 +1,3 @@
+### Changed
+
+- **QHY camera waits and deadlines on the task clock**, QHY driver, issue #1386. The camera driver now takes a `util::TaskClock` (real by default) for the exposure watchdog and its slow-readout extension, the pulse-guide end time, the 1 s pre-download settle, the 2 s reap of a wedged exposure, cooler-off or polling worker, and the 1 s polling-worker waits. The filter wheel's `SettleClock` function seam is replaced by the same `util::TaskClock`. Production behaviour is unchanged. Covered by the `[taskclock]` cases in `AlpacaCore/tests/test_qhy_camera.cpp` and the settle case in `AlpacaCore/tests/test_qhy_filterwheel.cpp`.

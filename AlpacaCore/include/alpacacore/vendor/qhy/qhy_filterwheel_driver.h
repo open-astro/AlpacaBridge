@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 #include <chrono>
@@ -60,12 +61,11 @@ std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_nu
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk);
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk);
 
-/// Clock the driver uses to time a wheel at rest on a non-target slot.
-using SettleClock = std::function<std::chrono::steady_clock::time_point()>;
-
-/// As the by-id test overload, with an injected clock so a test can span the
-/// settle time without sleeping.
+/// As the by-id test overload, with an injected util::TaskClock (decision
+/// 0005) that times a wheel at rest on a non-target slot, so a test can span
+/// the settle time with FakeTaskClock::advance() instead of sleeping. The
+/// clock MUST outlive the returned driver.
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk,
-                                                          SettleClock clock);
+                                                          util::TaskClock& clock);
 
 }  // namespace alpacacore::vendor::qhy
