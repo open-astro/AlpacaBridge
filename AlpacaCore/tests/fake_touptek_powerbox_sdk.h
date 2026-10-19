@@ -51,7 +51,7 @@ public:
         for (const auto& p : ports_) values_.push_back(p.pwm_enabled ? 100 : 1);
     }
 
-    // The next open() throws (a connect that must fail).
+    // While true every open() throws (a connect that must fail); the flag is never cleared.
     bool fail_open{false};
     // open() sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};

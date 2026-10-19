@@ -377,8 +377,8 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
 #ifdef ALPACACORE_TOUPTEK_STELLAVITA
 // The StellaVita switch, connected: the fake power box opens, so the storm reaches get/set on live
 // ports instead of stopping at the connect-failure path. Wrapped in LockedTouptekPowerboxSDK so a
-// TSan report names the driver. (A ToupTek switch registration already exists for the thermal
-// switch; the gate keys on vendor and type, so this one is covered by this case alone.)
+// TSan report names the driver. (The thermal-switch registration already satisfies the gate, which
+// keys on vendor and type; this case adds TSan coverage of the StellaVita driver itself.)
 TEST_CASE("ToupTek StellaVita switch - concurrent connect/disconnect/operate stress", "[touptek][switch][stress]") {
     alpacacore::test::FakeTouptekPowerboxSDK fake;
     alpacacore::test::LockedTouptekPowerboxSDK box(fake);
