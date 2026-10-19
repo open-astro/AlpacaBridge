@@ -196,10 +196,20 @@ public:
 
     int get_interface_version() const override { return 4; }
 
+    // Lock-free on purpose (open-astro#910): set_connected(true) holds mutex_
+    // for the whole connect (port open, handshake, site and time sync, cache
+    // warm-up, and an auto-detect scan when the port is not explicit). The
+    // router checks Connecting before most Connected reads, but DeviceState
+    // calls this with no such check, and a read that lands just before the
+    // connect task shows as running gets past it; with mutex_ taken here those
+    // waited for the whole connect. link_alive() takes no lock a connect holds: the wrapper mutex_
+    // only by try_lock, otherwise only short leaf mutexes (a stat(), a few fields).
+    // It reads published_connected_, raised only at the end of a connect, so
+    // Connected stays false while Connecting is true. Same rule as SynScan
+    // (#130); the blocking-driver list lives in async_connectable.h.
     bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
         // A removed or re-enumerated adapter reads as not connected (#1241).
-        return connected_ && OnStepProtocolWrapper::instance().link_alive();
+        return published_connected_.load() && OnStepProtocolWrapper::instance().link_alive();
     }
 
     // Why the serial link was lost, kept until the next Connect or Disconnect
@@ -227,6 +237,7 @@ public:
         // already connected (decision 0009 point 4, #1241).
         if (connected && connected_ && !protocol.link_alive()) {
             ALPACA_LOG_WARN("OnStep", "Connect requested on a lost link; reconnecting");
+            published_connected_ = false;
             protocol.disconnect();
             connected_ = false;
             reset_session_state_locked();
@@ -390,7 +401,9 @@ public:
                 refresh_status_cache_locked(true);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
+            published_connected_ = true;  // the connect is complete (#910)
         } else {
+            published_connected_ = false;
             protocol.disconnect();
             connected_ = false;
             reset_session_state_locked();
@@ -1489,6 +1502,10 @@ private:
     bool connection_resolved_ = false;
     mutable std::mutex mutex_;
     bool connected_;
+    // What get_connected() reports, read lock-free (#910). Raised only once a
+    // connect has finished, so Connected never reads true while Connecting
+    // does; dropped before any disconnect. Written under mutex_.
+    std::atomic<bool> published_connected_{false};
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     double target_ra_hours_ = 0.0;

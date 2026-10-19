@@ -13,6 +13,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -22,13 +23,18 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -38,6 +44,7 @@
 #include "concurrency_stress.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -466,6 +473,17 @@ private:
     std::vector<std::string> commands_;
 };
 
+// The status poll asks the mount whether it is slewing: the goto flag (L) on a hand controller, the slew-done
+// query (MC_SLEW_DONE, 0x13) on the pass-through path this canned mount takes. The canned position pair is no
+// answer to either, so these two get the "not slewing" replies.
+std::optional<std::string> pulse_mount_idle_reply(const std::string& command) {
+    if (!command.empty() && command[0] == 'L') return std::string("0#");
+    if (command.size() > 3 && command[0] == 'P' && static_cast<unsigned char>(command[3]) == 0x13) {
+        return std::string("\xFF#");
+    }
+    return std::nullopt;
+}
+
 std::unique_ptr<alpacacore::TelescopeDriver> connect_pulse_guide_mount(alpacacore::test::FakeMountServer& server) {
     alpacacore::vendor::celestron::ConnectionInfo conn;
     conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
@@ -486,6 +504,7 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
     auto log = std::make_shared<AuxGuideLog>();
     alpacacore::test::FakeMountServer server([log](const std::string& command) {
         log->add(command);
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
         return std::string("00000000,00000000#");
     });
     REQUIRE(server.ok());
@@ -506,7 +525,10 @@ TEST_CASE("Celestron Telescope Driver - a Dec pulse does not cut the chunk chain
 
 TEST_CASE("Celestron Telescope Driver - a short Dec pulse does not end IsPulseGuiding of a running RA pulse",
           "[celestron][telescope][unit][pulseguide]") {
-    alpacacore::test::FakeMountServer server([](const std::string&) { return std::string("00000000,00000000#"); });
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
     REQUIRE(server.ok());
     auto driver = connect_pulse_guide_mount(server);
 
@@ -711,3 +733,436 @@ TEST_CASE("Celestron Telescope Driver - SiderealTime follows the clock to under 
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
 }
+
+#ifndef _WIN32
+
+// Getters and DeviceState served from the polled snapshot (decision 0010, Celestron adoption; link-loss policy of
+// decision 0009). The driver runs on a FakeTaskClock, so its status poll runs only when a case advances the clock,
+// and the fake mount answers on the wall clock after an injected latency per transaction: a getter that asked the
+// mount would pay it and show in the transaction count.
+namespace {
+
+using alpacacore::test::FakeTaskClock;
+namespace cel = alpacacore::vendor::celestron;
+
+constexpr auto kSnapshotLatency = std::chrono::milliseconds(100);
+// A getter that reached the mount would pay kSnapshotLatency, so the budget only has to sit below it. Sanitized
+// builds run several times slower on a loaded runner and get more room; the transaction count is the strict check.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define ALPACACORE_CELESTRON_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(undefined_behavior_sanitizer)
+#define ALPACACORE_CELESTRON_SANITIZED 1
+#endif
+#endif
+#if defined(ALPACACORE_CELESTRON_SANITIZED)
+constexpr auto kSnapshotGetterBudget = std::chrono::milliseconds(60);
+#else
+constexpr auto kSnapshotGetterBudget = std::chrono::milliseconds(20);
+#endif
+
+struct SnapshotMount {
+    std::atomic<int> transactions{0};
+    std::atomic<int> latency_ms{0};
+    std::atomic<bool> mute{false};
+    std::atomic<bool> slewing{false};
+    std::atomic<bool> tracking{true};
+    std::atomic<char> pier{'W'};
+    std::atomic<bool> shifted{false};
+    std::atomic<bool> w_fail{false};  // the location query goes unanswered
+    std::atomic<int> w_delay_ms{0};   // the location query answers after this long
+    std::atomic<int> w_count{0};      // location queries received
+    std::atomic<bool> l_fail{false};  // the slewing query goes unanswered
+    std::atomic<bool> z_fail{false};  // the alt-az query goes unanswered
+    std::atomic<int> slow_count{0};   // pier-side and tracking-mode queries received
+};
+
+std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
+    st.transactions.fetch_add(1);
+    if (chunk.empty()) return "0#";
+    if (st.mute.load()) return "";
+    if (st.latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.latency_ms.load()));
+    switch (chunk[0]) {
+        case 'm':  // CGX-L: German equatorial
+            return std::string(1, static_cast<char>(24)) + "#";
+        case 'V':
+            return std::string("\x05\x23#", 3);
+        case 'w':
+            st.w_count.fetch_add(1);
+            if (st.w_fail.load()) return "";
+            if (st.w_delay_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(st.w_delay_ms.load()));
+            }
+            return std::string(8, '\0') + "#";
+        case 'e':
+        case 'E':
+            return st.shifted.load() ? "13AB0500,21000500#" : "12AB0500,20000500#";
+        case 'z':
+        case 'Z':
+            if (st.z_fail.load()) return "";
+            return "20AB0500,10000500#";
+        case 'L':
+            if (st.l_fail.load()) return "";
+            return st.slewing.load() ? "1#" : "0#";
+        case 'J':
+            return "1#";
+        case 'p':
+            st.slow_count.fetch_add(1);
+            return std::string(1, st.pier.load()) + "#";
+        case 't':
+            st.slow_count.fetch_add(1);
+            return st.tracking.load() ? std::string("\x02#") : std::string("\x00#", 2);
+        case 'T':
+            st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
+            return "#";
+        case 'W':
+        case 'M':
+        case 's':
+        case 'S':
+            return "#";
+        case 'P': {  // AUX passthrough: P len dev op ...
+            const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+            const unsigned char device = chunk.size() > 2 ? static_cast<unsigned char>(chunk[2]) : 0;
+            if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
+            if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
+            if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
+            return std::string("\xFF#");
+        }
+        default:
+            return "0#";
+    }
+}
+
+std::unique_ptr<alpacacore::TelescopeDriver> snapshot_driver(alpacacore::test::FakeMountServer& server,
+                                                             FakeTaskClock& clock) {
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    return driver;
+}
+
+template <typename Fn>
+std::chrono::microseconds snapshot_timed(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    fn();
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start);
+}
+
+bool snapshot_has_entry(const alpacacore::TelescopeDriver& driver, const std::string& name) {
+    for (const auto& entry : driver.get_device_state()) {
+        if (entry.name == name) return true;
+    }
+    return false;
+}
+
+std::chrono::system_clock::time_point snapshot_time_stamp(const alpacacore::TelescopeDriver& driver) {
+    for (const auto& entry : driver.get_device_state()) {
+        if (entry.name != "TimeStamp") continue;
+        int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+        const auto& text = std::get<std::string>(entry.value);
+        REQUIRE(std::sscanf(text.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi, &s, &ms) == 7);
+        std::tm tm{};
+        tm.tm_year = y - 1900;
+        tm.tm_mon = mo - 1;
+        tm.tm_mday = d;
+        tm.tm_hour = h;
+        tm.tm_min = mi;
+        tm.tm_sec = s;
+        return std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+    }
+    FAIL("DeviceState has no TimeStamp");
+    return {};
+}
+
+}  // namespace
+
+TEST_CASE("Celestron snapshot - getters and DeviceState make no mount transaction at 100 ms per transaction",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    // The poll is parked on the clock once its first tick (the connect's reads) is over. The old driver has no
+    // poll, so this wait only times out there.
+    (void)clock.wait_for_waiters(1, std::chrono::milliseconds(1000));
+    // Past the old 2 s position cache: a getter that still ran its own TTL would ask the mount from here on.
+    clock.advance(std::chrono::seconds(3));
+    (void)clock.wait_for_woken_settled(std::chrono::milliseconds(2000));
+
+    st->latency_ms = static_cast<int>(kSnapshotLatency.count());
+    const int before = st->transactions.load();
+
+    const std::vector<std::pair<const char*, std::function<void()>>> reads = {
+        {"RightAscension", [&] { (void)driver->get_right_ascension(); }},
+        {"Declination", [&] { (void)driver->get_declination(); }},
+        {"Azimuth", [&] { (void)driver->get_azimuth(); }},
+        {"Altitude", [&] { (void)driver->get_altitude(); }},
+        {"Slewing", [&] { (void)driver->get_slewing(); }},
+        {"Tracking", [&] { (void)driver->get_tracking(); }},
+        {"SideOfPier", [&] { (void)driver->get_side_of_pier(); }},
+        {"UTCDate", [&] { (void)driver->get_utc_date(); }},
+        {"SiderealTime", [&] { (void)driver->get_sidereal_time(); }},
+        {"AtPark", [&] { (void)driver->get_at_park(); }},
+        {"AtHome", [&] { (void)driver->get_at_home(); }},
+        {"IsPulseGuiding", [&] { (void)driver->get_is_pulse_guiding(); }},
+        {"DeviceState", [&] { (void)driver->get_device_state(); }},
+    };
+    for (const auto& [name, read] : reads) {
+        CAPTURE(name);
+        const int transactions = st->transactions.load();
+        CHECK(snapshot_timed(read) < kSnapshotGetterBudget);
+        CHECK(st->transactions.load() == transactions);
+    }
+    CHECK(st->transactions.load() == before);
+    // DeviceState drops a getter that throws, so a read that quietly failed would still be fast: name what must be in
+    // it.
+    for (const char* name :
+         {"RightAscension", "Declination", "Altitude", "Azimuth", "Slewing", "Tracking", "SideOfPier", "TimeStamp"}) {
+        CAPTURE(name);
+        CHECK(snapshot_has_entry(*driver, name));
+    }
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a setter's value is read back at once and a stale poll does not undo it",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE(driver->get_tracking());
+
+    driver->set_tracking(false);
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_tracking(true);
+    CHECK(driver->get_tracking());
+
+    // A sync reads back at once, with no poll in between.
+    driver->sync_to_coordinates(3.25, 41.5);
+    CHECK(std::abs(driver->get_right_ascension() - 3.25) < 1e-3);
+    CHECK(std::abs(driver->get_declination() - 41.5) < 1e-3);
+
+    // A poll that sampled the mount before the write must not publish over it: the write lands between that
+    // poll's sample and its publish.
+    cel::set_status_poll_after_sample_hook_for_testing(*driver, [&driver] { driver->set_tracking(false); });
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    cel::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
+    CHECK_FALSE(driver->get_tracking());
+    // The next poll measures the mount, which the write reached.
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a position the mount moved is served after the next poll, stamped when measured",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+
+    const double ra_before = driver->get_right_ascension();
+    st->shifted = true;
+    CHECK(std::abs(driver->get_right_ascension() - ra_before) < 1e-9);  // served from memory until the poll
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(std::abs(driver->get_right_ascension() - ra_before) > 1e-3);
+
+    // The TimeStamp names when the poll measured, not when DeviceState was asked.
+    clock.advance(std::chrono::seconds(2));
+    const auto age = std::chrono::system_clock::now() - snapshot_time_stamp(*driver);
+    CHECK(age > std::chrono::milliseconds(1500));
+    CHECK(age < std::chrono::milliseconds(4000));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a site written during the poll's location read is not overwritten",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    st->w_fail = true;  // the connect-time location read fails: the site is not valid yet
+    auto driver = cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK_THROWS_AS(driver->get_site_latitude(), alpacacore::AlpacaException);
+
+    st->w_fail = false;
+    st->w_delay_ms = 200;
+    clock.advance(std::chrono::seconds(31));  // the poll's site retry delay has passed
+    const int w_before = st->w_count.load();
+    std::thread poll([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    // The write must land while the poll's location read is in flight: wait for the mount to receive it.
+    for (int i = 0; i < 500 && st->w_count.load() == w_before; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(st->w_count.load() > w_before);
+    driver->set_site_latitude(-33.856784);
+    poll.join();
+    CHECK(std::abs(driver->get_site_latitude() - (-33.856784)) < 1e-6);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - Slewing is unknown, not false, until a query has answered",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    st->l_fail = true;  // the connect-time slewing query goes unanswered
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK_NOTHROW(driver->get_right_ascension());  // the position is known
+    try {
+        (void)driver->get_slewing();
+        FAIL("an unanswered slewing query must not be served as false");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(e.what()).find("not available yet") != std::string::npos);
+    }
+    st->l_fail = false;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - the slow fields of a tick stop at the first failure",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    st->z_fail = true;  // alt-az times out; pier side and tracking mode would each wait out their own timeout
+    st->slow_count = 0;
+    (void)cel::poll_status_now_for_testing(*driver);  // tick 0 is a full tick
+    CHECK(st->slow_count.load() == 0);
+    st->z_fail = false;
+    (void)cel::poll_status_now_for_testing(*driver);
+    CHECK(st->slow_count.load() > 0);  // the same tick asks for them when alt-az answers
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a failed location read ends the tick", "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 200;
+    st->w_fail = true;  // the location read fails at connect and again in the poll
+    auto driver = cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(std::chrono::seconds(31));  // the poll's site retry delay has passed
+    const int before = st->transactions.load();
+    (void)cel::poll_status_now_for_testing(*driver);  // tick 0 is a full tick, so the site read is due
+    // A dead link would otherwise cost the location timeout and then the sample's own timeout, past one exchange.
+    CHECK(st->transactions.load() - before == 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - a link whose location never reads still samples on the next full tick",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 200;
+    st->w_fail = true;  // the location never reads
+    auto driver = cel::create_celestron_telescope_with_site(0, info, std::nullopt, std::nullopt, std::nullopt, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    clock.advance(std::chrono::seconds(31));
+    (void)cel::poll_status_now_for_testing(*driver);  // the site read fails and ends this tick
+    clock.advance(std::chrono::seconds(4));           // the next full tick
+    const int before = st->transactions.load();
+    (void)cel::poll_status_now_for_testing(*driver);
+    // The site is not retried yet, so this tick samples instead of paying another location timeout.
+    CHECK(st->transactions.load() - before > 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - past the staleness bound DeviceState is empty with no TimeStamp",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(snapshot_has_entry(*driver, "TimeStamp"));
+    const double ra_at_connect = driver->get_right_ascension();
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    CHECK_FALSE(driver->get_link_fault().empty());
+    CHECK(driver->get_connected());  // a young fault keeps Connected
+
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(driver->get_device_state().empty());
+    CHECK_FALSE(snapshot_has_entry(*driver, "TimeStamp"));
+    try {
+        (void)driver->get_right_ascension();
+        FAIL("a lost link must refuse the read");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    st->mute = false;
+
+    // Decision 0009 point 4: Connected=true against a lost link relinks, on both entry points.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(std::abs(driver->get_right_ascension() - ra_at_connect) < 1e-9);
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_connected());
+    st->mute = false;
+    driver->connect();  // the async route
+    CHECK(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_connected());
+    CHECK(std::abs(driver->get_right_ascension() - ra_at_connect) < 1e-9);
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32

@@ -652,8 +652,8 @@ Hosted connected_host(const Tier2Host& h) {
             CHECK(o.first_sample_connecting);
             CHECK(o.saw_connecting);
             // On rows whose get_connected() blocks behind the connect (async_connectable.h) this check cannot fail:
-            // that read only returns after the hold. It is load-bearing on 9 of the 19 rows (red with the holds
-            // set to 0); the PR body lists them.
+            // that read only returns after the hold. It is load-bearing on the rows whose get_connected() does
+            // not block (red with the holds set to 0), OnStep among them since #910.
             CHECK_FALSE(o.connected_early);
         }
         CHECK(Clock::now() - t0 < std::chrono::seconds(30));
