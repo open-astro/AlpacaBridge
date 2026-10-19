@@ -63,6 +63,7 @@ struct FakeCelestronState {
     std::atomic<int> home_status_polls{0};
     std::atomic<int> cancel_goto_count{0};
     std::atomic<int> t_count{0};
+    std::atomic<int> transactions{0};  // every request the handset received
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -73,6 +74,7 @@ struct FakeCelestronState {
 
 alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr<FakeCelestronState> st) {
     return [st](const std::string& chunk) -> std::string {
+        st->transactions.fetch_add(1);
         if (st->silent.load()) return "";
         if (chunk.empty()) return "0#";
         switch (chunk[0]) {
@@ -499,6 +501,23 @@ TEST_CASE("Celestron FindHome - a transient home-status failure recovers", "[cel
     CHECK(st->home_status_polls.load() == 3);
     CHECK(st->cancel_goto_count.load() == 0);
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron FindHome - a failed home-status check ends the tick", "[celestron][telescope][async][home]") {
+    auto st = std::make_shared<FakeCelestronState>();
+    st->invalid_next_home_status.store(true);
+    alpacacore::test::FakeMountServer server(celestron_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
+    REQUIRE_NOTHROW(driver->find_home());
+    const int before = st->transactions.load();
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    // On a dead link the sample's own exchanges would add timeouts past the one the failed check already paid.
+    CHECK(st->transactions.load() - before == 1);
     driver->set_connected(false);
 }
 

@@ -34,7 +34,7 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - Served from the frame: RightAscension, Declination, Altitude, Azimuth, Slewing, SideOfPier, Tracking, AtHome while homing, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache and its stamps are gone. Control-path reads (SetPark, Park, the slew loops) measure directly and write through.
 - Slewing carries a `slewing_known` flag: a connect whose slewing query failed serves "not available yet" until a poll answers, not a guessed `false`.
 - The site read the poll does for a mount whose connect-time read failed stores its result only while no client write has made the site valid.
-- Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; a tick ends at its first failed exchange (the FindHome completion check, the location read, the Slewing and RA/Dec exchange, then each slow field), so a Disconnect waits for one exchange timeout at most.
+- Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; a tick ends at its first failed exchange (the FindHome completion check, the location read, the Slewing and RA/Dec exchange, then each slow field), so a Disconnect waits for one exchange timeout. The one exception is the tick on which the third FindHome check fails: it stops the mount first (up to three stop exchanges under `mutex_`, kept for safety), so on a dead link that tick can wait longer.
 
 ## Alternatives rejected
 
