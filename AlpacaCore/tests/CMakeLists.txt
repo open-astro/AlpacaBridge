@@ -68,6 +68,7 @@ if(TARGET alpacacore_zwo)
 endif()
 
 if(TARGET alpacacore_qhy)
+    list(APPEND TEST_SOURCES test_qhy_enumeration.cpp)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
     list(APPEND TEST_SOURCES qhy_camera_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
@@ -335,6 +336,12 @@ if(UNIX AND TARGET alpacacore_qhy AND TARGET alpacacore_zwo)
     target_link_options(alpacacore_tests PRIVATE "LINKER:--allow-multiple-definition")
 endif()
 include(CTest)
+if(TARGET alpacacore_svbony)
+    add_test(NAME svbony_sdk_symbol_isolation
+        COMMAND "${CMAKE_NM}" -D --defined-only "$<TARGET_FILE:alpacacore_tests>")
+    set_tests_properties(svbony_sdk_symbol_isolation PROPERTIES
+        FAIL_REGULAR_EXPRESSION "[ \t]libusb_")
+endif()
 # Include Catch2's test discovery module
 include(${Catch2_DIR}/Catch.cmake)
 catch_discover_tests(alpacacore_tests)

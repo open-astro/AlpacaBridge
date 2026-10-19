@@ -43,6 +43,8 @@ if(ALPACACORE_ENABLE_SVBONY)
     target_link_libraries(alpacacore_svbony PRIVATE alpacacore)
 
     target_link_libraries(alpacacore_svbony PRIVATE ${SVB_LIB_PATH})
+    # Keep the SDK's bundled libusb from interposing on other vendors' shared libraries (#1211).
+    target_link_options(alpacacore_svbony INTERFACE "LINKER:--exclude-libs,libSVBCameraSDK.a")
 
     if(UNIX)
         find_package(PkgConfig)

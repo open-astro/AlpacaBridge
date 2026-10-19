@@ -357,6 +357,12 @@ target_compile_definitions(alpacahttp_server PRIVATE ALPACACORE_VERSION="${ALPAC
 # Tests
 if(ALPACAHTTP_BUILD_TESTS)
     enable_testing()
+    if(TARGET alpacacore_svbony)
+        add_test(NAME svbony_server_symbol_isolation
+            COMMAND "${CMAKE_NM}" -D --defined-only "$<TARGET_FILE:alpacahttp_server>")
+        set_tests_properties(svbony_server_symbol_isolation PROPERTIES
+            FAIL_REGULAR_EXPRESSION "[ \t]libusb_")
+    endif()
     
     # Test executables
     add_executable(test_routing tests/test_routing.cpp)

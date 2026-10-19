@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/vendor/qhy/detail/qhy_enumeration.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 
 // QHY SDK headers — only included in this translation unit
@@ -167,8 +168,14 @@ public:
             // library may spawn its listener thread — see the ctor comment).
             EnableQHYCCDMessage(false);
             EnableQHYCCDLogFile(false);
-            if (InitQHYCCDResource() == QHYCCD_SUCCESS) {
-                resource_initialized = true;
+            const auto started = std::chrono::steady_clock::now();
+            const uint32_t result = InitQHYCCDResource();
+            resource_initialized = (result == QHYCCD_SUCCESS);
+            const auto elapsed =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+            ALPACA_LOG_DEBUG("QHY", "InitQHYCCDResource returned " + detail::sdk_result(result) + " in " +
+                                        std::to_string(elapsed.count()) + " ms");
+            if (resource_initialized) {
                 uint32_t year = 0, month = 0, day = 0, subday = 0;
                 if (GetQHYCCDSDKVersion(&year, &month, &day, &subday) == QHYCCD_SUCCESS) {
                     std::ostringstream oss;
@@ -176,6 +183,8 @@ public:
                         << std::setfill('0') << day << "." << subday;
                     sdk_version_cache = oss.str();
                 }
+            } else {
+                ALPACA_LOG_WARN("QHY", "InitQHYCCDResource failed: " + detail::sdk_result(result));
             }
         }
         if (!resource_initialized) {
@@ -206,34 +215,9 @@ std::vector<QHYCameraInfo> QHYSDKWrapper::enumerate_cameras() {
     std::lock_guard<std::mutex> lock(pimpl_->mutex);
     pimpl_->ensure_resource();
 
-    uint32_t count = ScanQHYCCD();
-    // ScanQHYCCD returns QHYCCD_ERROR (0xFFFFFFFF) on failure — treat as 0 cameras.
-    if (count == QHYCCD_ERROR || count > 64) {
-        return {};
-    }
-    std::vector<QHYCameraInfo> cameras;
-    cameras.reserve(count);
-
-    for (uint32_t i = 0; i < count; ++i) {
-        char id_buf[64] = {};
-        if (GetQHYCCDId(i, id_buf) != QHYCCD_SUCCESS) {
-            continue;
-        }
-
-        QHYCameraInfo info;
-        info.camera_id = std::string(id_buf);
-
-        char model_buf[64] = {};
-        if (GetQHYCCDModel(id_buf, model_buf) == QHYCCD_SUCCESS) {
-            info.model = std::string(model_buf);
-        } else {
-            info.model = info.camera_id;
-        }
-
-        cameras.push_back(std::move(info));
-    }
-
-    return cameras;
+    static_assert(QHYCCD_SUCCESS == 0);
+    static_assert(QHYCCD_ERROR == 0xffffffffU);
+    return detail::enumerate_cameras(ScanQHYCCD, GetQHYCCDId, GetQHYCCDModel, pimpl_->handles.size());
 }
 
 bool QHYSDKWrapper::get_camera_model(const std::string& camera_id, std::string& model) {
