@@ -20,10 +20,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -426,9 +429,27 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     CHECK(driver->get_max_step() == 50000);  // static metadata keeps answering
     CHECK_FALSE(driver->get_link_fault().empty());
 
+    // The device answers again but no poll has run: Move is refused by the
+    // latch (nothing reaches the device), Halt is never refused.
+    int moves_before = 0;
+    int halts_before = 0;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         state->dead = false;
+        moves_before = state->moves;
+        halts_before = state->halts;
+    }
+    try {
+        driver->move(2000);
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK_NOTHROW(driver->halt());
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        CHECK(state->moves == moves_before);
+        CHECK(state->halts == halts_before + 1);
     }
     tick(clock);
     CHECK(driver->get_position() == 9999);  // recovers with no reconnect
@@ -485,6 +506,36 @@ TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound dro
     CHECK(driver->get_connected());
     CHECK(driver->get_position() == 777);
     CHECK(driver->get_link_fault().empty());
+
+    driver->set_connected(false);
+}
+
+// Falsified by: astroasis_focuser_driver.cpp:device_state_age() delete the override (the stamp is the request time).
+TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame was measured",
+          "[astroasis][focuser][snapshot][unit]") {
+    auto state = std::make_shared<FakeHidState>();
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = connected_focuser(state, clock);
+
+    clock.advance(std::chrono::milliseconds(90));  // under the 100 ms period: no poll, the frame ages
+    std::string stamp;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "TimeStamp") stamp = std::get<std::string>(entry.value);
+    }
+    const auto taken = std::chrono::system_clock::now();
+    REQUIRE_FALSE(stamp.empty());
+
+    std::tm tm{};
+    int ms = 0;
+    REQUIRE(std::sscanf(stamp.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour,
+                        &tm.tm_min, &tm.tm_sec, &ms) == 7);
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    const auto stamped = std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+    const auto behind = std::chrono::duration_cast<std::chrono::milliseconds>(taken - stamped);
+    INFO("TimeStamp is " << behind.count() << " ms behind now");
+    CHECK(behind >= std::chrono::milliseconds(60));  // the 90 ms frame age; a request-time stamp is ~0
+    CHECK(behind < std::chrono::milliseconds(5000));
 
     driver->set_connected(false);
 }
