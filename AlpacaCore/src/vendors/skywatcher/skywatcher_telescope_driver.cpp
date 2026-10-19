@@ -2541,7 +2541,7 @@ public:
                         // Transient poll failure; keep trying until the deadline.
                     }
                     if (!ctx.wait_for(std::chrono::milliseconds(50))) {
-                        return;  // cancelled by disconnect, or superseded by a newer command on this axis
+                        return;  // cancelled by disconnect or AbortSlew, or superseded by a newer command on this axis
                     }
                 }
                 std::unique_lock<std::mutex> lock(mutex_);

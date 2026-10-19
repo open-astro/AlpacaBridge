@@ -1119,8 +1119,8 @@ TEST_CASE("SkyWatcher async - AbortSlew during a Dec MoveAxis returns tracking t
 }
 
 // open-astro#1341 item 1: a MoveAxis(RA, 0) stop body still polling when
-// AbortSlew lands. AbortSlew restores tracking itself; the stop body, which
-// AbortSlew leaves running, then restores it a second time (another RA stop
+// AbortSlew lands. AbortSlew restores tracking itself and cancels the stop
+// body; before that, the body restored it a second time (another RA stop
 // ahead of the restart). The restore must happen exactly once: AbortSlew's
 // own instant stop plus the restore's one stop make two ':L'/':K' on RA.
 TEST_CASE("SkyWatcher async - AbortSlew with a MoveAxis stop pending restarts tracking once", "[skywatcher][async]") {
@@ -1140,8 +1140,8 @@ TEST_CASE("SkyWatcher async - AbortSlew with a MoveAxis stop pending restarts tr
     const int stops_before = mount.stop_count(1);
     driver->abort_slew();
 
-    // AbortSlew restarted RA, so the stop body keeps seeing it running until
-    // its 5 s timeout and then runs its tail; let all of that pass in virtual time.
+    // The cancelled stop body must not restore again; let the time its 5 s
+    // timeout would have run to pass in virtual time to show it does not.
     run_clock_until(clock, [] { return false; }, std::chrono::milliseconds(9000));
     REQUIRE_FALSE(driver->get_slewing());
     CHECK(driver->get_tracking());
