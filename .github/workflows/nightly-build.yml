@@ -198,7 +198,7 @@ jobs:
       attestations: write   # store the provenance and SBOM attestations
     runs-on: ubuntu-24.04-arm
     # Built on the target distribution so dpkg-shlibdeps derives trixie
-    # package names, as release.yml's beta-deb job does.
+    # package names, as release.yml's deb job does.
     container: debian:trixie
     timeout-minutes: 40
     env:

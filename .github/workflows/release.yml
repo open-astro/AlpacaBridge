@@ -1,14 +1,17 @@
 # Publish a GitHub Release for every version tag.
 #
-# Stable releases attach NO binaries. The install channel is the OpenAstro APT
-# repository (https://apt.openastro.net); a Release exists so a shipped build
-# has a name, a source archive (GitHub attaches the zip/tarball itself), and
-# its release notes. The release job compiles nothing, so it runs in seconds.
-# Beta pre-releases are the exception: the beta-deb job builds the arm64 .deb
-# in a Debian trixie container and attaches it with a .sha256, so a tester can
-# install a named beta without building it. That .deb also gets a signed build
-# provenance attestation and an SPDX SBOM attestation (Actions > Attestations),
-# so `gh attestation verify` proves this workflow built it from the tag.
+# Every tag, stable and beta, gets the arm64 .deb: the deb job builds it in a
+# Debian trixie container and attaches it with a .sha256, plus the
+# alpacabridge-dbgsym debug-symbols package with its own .sha256. The OpenAstro
+# APT repository (https://apt.openastro.net) re-hosts these assets by name, so
+# their names are a contract: alpacabridge_<tag without v>_arm64.deb and
+# alpacabridge-dbgsym_<tag without v>_arm64.deb, each with a .sha256 that holds
+# the sha256sum line for that file name. A tester can also install a named
+# beta, or any release, without apt. The .deb gets a signed build provenance
+# attestation (the dbgsym is a subject of it too) and an SPDX SBOM attestation
+# (Actions > Attestations), so `gh attestation verify` proves this workflow
+# built it from the tag. A Release also has a name, a source archive (GitHub
+# attaches the zip/tarball itself) and its release notes.
 #
 # Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
 # dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
@@ -23,10 +26,10 @@
 # GitHub Release is marked a pre-release.
 #
 # Dry run: `gh workflow run release.yml --ref <branch> -f tag=vX.Y.Z-beta.N`
-# runs the mapping, the VERSION check and the notes build for that tag against
-# the branch's checkout (for a beta tag also the .deb build) and stops before
-# anything is published. /bump-release
-# does this before the first beta tag of a stable branch.
+# runs the mapping, the VERSION check, the notes build and the .deb build for
+# that tag against the branch's checkout and stops before anything is
+# published. /bump-release does this before the first beta tag of a stable
+# branch.
 
 name: Release
 
@@ -211,17 +214,16 @@ jobs:
               --title "${RELEASE_TAG}" --notes-file release-notes.md --verify-tag --prerelease="${PRERELEASE}"
           fi
 
-  beta-deb:
-    # Betas only: the apt `beta` component carries betas, and the .deb on the
-    # pre-release is the manual alternative to apt for a tester. Stable
-    # releases stay notes-only; their .deb ships through apt.openastro.net alone.
-    name: Attach the .deb to a beta pre-release
+  deb:
+    # Every tag, stable and beta: apt.openastro.net re-hosts the .deb attached
+    # here (the asset names in the header are its contract), and the .deb on
+    # the Release is also the manual alternative to apt for a tester.
+    name: Attach the .deb to the release
     permissions:
       contents: write       # gh release upload
       id-token: write       # OIDC token Sigstore signs the attestations with
       attestations: write   # store the provenance and SBOM attestations
     needs: release
-    if: needs.release.outputs.prerelease == 'true'
     runs-on: ubuntu-24.04-arm
     # Built on the target distribution so dpkg-shlibdeps derives trixie
     # package names (libgpiod3 and friends), not the runner's Ubuntu ones.
@@ -254,13 +256,22 @@ jobs:
           set -euo pipefail
           scripts/build_deb.sh
           version="$(tr -d '[:space:]' < VERSION)"
-          deb="../alpacabridge_${version}_arm64.deb"
-          # The asset takes the tag spelling: the Debian `~` in the file name
-          # is not one GitHub keeps. dpkg reads the version from the package,
-          # not the file name, so `apt install ./<file>` is unaffected.
+          # The assets take the tag spelling: the Debian `~` in a beta's file
+          # name is not one GitHub keeps. dpkg reads the version from the
+          # package, not the file name, so `apt install ./<file>` is unaffected.
+          # dh_strip (debhelper compat 13) always builds the dbgsym package, and
+          # the apt repository serves it, so a missing one fails the build.
           mkdir -p dist
-          cp "${deb}" "dist/alpacabridge_${NOTES_NAME}_arm64.deb"
-          (cd dist && sha256sum "alpacabridge_${NOTES_NAME}_arm64.deb" > "alpacabridge_${NOTES_NAME}_arm64.deb.sha256")
+          for pkg in alpacabridge alpacabridge-dbgsym; do
+            src="../${pkg}_${version}_arm64.deb"
+            if [ ! -f "${src}" ]; then
+              echo "ERROR: ${src} was not built." >&2
+              exit 1
+            fi
+            asset="${pkg}_${NOTES_NAME}_arm64.deb"
+            cp "${src}" "dist/${asset}"
+            (cd dist && sha256sum "${asset}" > "${asset}.sha256")
+          done
           dpkg-deb --info "dist/alpacabridge_${NOTES_NAME}_arm64.deb" | sed -n '/Package:/,/Depends:/p'
           ls -l dist
 
@@ -275,7 +286,9 @@ jobs:
         if: github.event_name == 'push'
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2 pinned (immutable ref)
         with:
-          subject-path: dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
+          subject-path: |
+            dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
+            dist/alpacabridge-dbgsym_${{ env.NOTES_NAME }}_arm64.deb
 
       - name: Attest the SBOM
         if: github.event_name == 'push'
@@ -284,7 +297,7 @@ jobs:
           subject-path: dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
           sbom-path: dist/sbom.spdx.json
 
-      - name: Attach to the pre-release
+      - name: Attach to the release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -293,4 +306,6 @@ jobs:
           # --clobber: a re-run of the tag replaces the assets instead of failing.
           gh release upload "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --clobber \
             "dist/alpacabridge_${NOTES_NAME}_arm64.deb" \
-            "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256"
+            "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256" \
+            "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb" \
+            "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb.sha256"

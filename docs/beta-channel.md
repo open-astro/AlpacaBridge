@@ -44,7 +44,8 @@ build installed this way; repeat the download for each beta, or opt in as above.
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
 `gh attestation verify alpacabridge_X.Y.Z-beta.N_arm64.deb --repo open-astro/AlpacaBridge`.
-The same works for a nightly `.deb`. Each attestation, and the SBOM attached to it, is also
+The same works for a nightly `.deb` and for the `alpacabridge_X.Y.Z_arm64.deb` that every stable
+Release carries too. Each attestation, and the SBOM attached to it, is also
 listed under the repository's Actions > Attestations.
 
 **Opt out** by choosing **Stable** in the card, or on a headless install by removing `beta` from
@@ -94,7 +95,8 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
    `## [A.B.C] - UNRELEASED` heading in `CHANGELOG.md` is renamed to `X.Y.0` (heading only), so
    the `.deb` build does not warn that it disagrees with `VERSION`.
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
-   `.deb` in a Debian trixie container and attaches it with a `.sha256` (job `beta-deb`). The `.deb`
+   `.deb` in a Debian trixie container and attaches it and its `alpacabridge-dbgsym` debug-symbols
+   package, each with a `.sha256` (job `deb`, which runs for every tag, stable or beta). The `.deb`
    is also published to the apt `beta` component (outside this repository).
 3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
    against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
@@ -112,7 +114,9 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
    now the newest, so its `VERSION` and badge come across. `docs/releases/` notes and code come
    across as they are. `/submit-pr --merge-down` resolves this in the head before the PR opens.
 5. **Promote.** `/bump-release` runs on `stable/X.Y`: `VERSION` becomes `X.Y.0`, the fragments are
-   assembled into the dated section, tag `vX.Y.0`. The package goes to both apt components.
+   assembled into the dated section, tag `vX.Y.0`. `release.yml` attaches the `.deb` to the stable
+   Release as it does for a beta (`alpacabridge_X.Y.0_arm64.deb`). The package goes to both apt
+   components.
 6. **Final merge down.** Merge `stable/X.Y` into `main` once more. It carries the dated CHANGELOG
    section, the `VERSION` and badge bump (the exception above), and the deletion of the consumed
    fragments. If `main` touched the same lines as a branch fix since the last merge down, the

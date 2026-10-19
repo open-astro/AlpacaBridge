@@ -238,7 +238,7 @@ git push origin vX.Y.0-beta.N
 ```
 
 Before the first beta tag of a branch, dry-run the workflow against the merged branch and read
-its "Build release notes" step and the `beta-deb` job's "Build the .deb" step (an all-vendors
+its "Build release notes" step and the `deb` job's "Build the .deb" step (an all-vendors
 build in a `debian:trixie` container, several minutes); it stops before publishing anything. Dispatch it with
 `--ref stable/X.Y` and no other ref: a dry run has no tag, so the branch check tests the tip of the
 dispatched branch, and from any other branch it fails even when the eventual tag would pass:
@@ -249,9 +249,9 @@ sleep 10   # the new run is not listed at once; the filters keep an older tag ru
 gh run watch "$(gh run list --workflow=release.yml --event workflow_dispatch --branch stable/X.Y --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
-Then wait for the `Release` workflow. A stable tag runs only the text-only `release` job and
-finishes in under a minute. A beta tag also runs `beta-deb`, which builds the `.deb` and attaches
-it with its `.sha256` after the pre-release is already published; that takes several minutes, and
+Then wait for the `Release` workflow. Every tag, stable or beta, runs the text-only `release` job
+and then `deb`, which builds the `.deb` and attaches it and the `alpacabridge-dbgsym` package, each
+with its `.sha256`, after the Release is already published; that takes several minutes, and
 `gh run watch` waits for it:
 
 ```bash
@@ -262,16 +262,19 @@ gh release view vX.Y.Z --json name,body --jq '.name, (.body | .[0:400])'
 
 The body must start with the plain-language notes, not the CHANGELOG bullets.
 
-Beta mode: also confirm the assets before announcing the beta, because its notes tell testers to
-download them:
+Also confirm the assets before announcing the release: a beta's notes tell testers to download
+them, and the apt repository re-hosts them by these exact names (a stable tag has the same four
+with `X.Y.Z` in place of `X.Y.0-beta.N`):
 
 ```bash
 gh release view vX.Y.0-beta.N --json assets --jq '.assets[].name'
+# alpacabridge-dbgsym_X.Y.0-beta.N_arm64.deb
+# alpacabridge-dbgsym_X.Y.0-beta.N_arm64.deb.sha256
 # alpacabridge_X.Y.0-beta.N_arm64.deb
 # alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
 ```
 
-If `beta-deb` failed, the pre-release stands with notes and no `.deb`: fix the cause, then re-run
+If `deb` failed, the Release stands with notes and no `.deb`: fix the cause, then re-run
 the failed job (`gh run rerun <run-id> --failed`; the upload uses `--clobber`).
 
 If the workflow
@@ -281,14 +284,18 @@ again. If the workflow never ran, the tag landed on a commit without `release.ym
 Release by hand with `gh release create vX.Y.Z --notes-file docs/releases/X.Y.Z.md --verify-tag`
 (beta: `gh release create vX.Y.0-beta.N --prerelease --notes-file docs/releases/X.Y.0-beta.N.md
 --verify-tag`; without `--prerelease` the beta would become the Latest release above the current
-stable). A beta Release created by hand carries no `.deb`, and its notes point testers at one:
-build it on a Debian trixie arm64 host and attach it under the tag spelling:
+stable). A Release created by hand carries no `.deb`, and the apt repository and a beta's notes
+both need one: build it on a Debian trixie arm64 host and attach both packages under the tag
+spelling (beta shown; for a stable tag `version` and `name` are both `X.Y.Z`):
 
 ```bash
 scripts/build_deb.sh
-cp ../alpacabridge_X.Y.0~betaN_arm64.deb alpacabridge_X.Y.0-beta.N_arm64.deb
-sha256sum alpacabridge_X.Y.0-beta.N_arm64.deb > alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
-gh release upload vX.Y.0-beta.N alpacabridge_X.Y.0-beta.N_arm64.deb alpacabridge_X.Y.0-beta.N_arm64.deb.sha256
+version=X.Y.0~betaN; name=X.Y.0-beta.N
+for pkg in alpacabridge alpacabridge-dbgsym; do
+  cp "../${pkg}_${version}_arm64.deb" "${pkg}_${name}_arm64.deb"
+  sha256sum "${pkg}_${name}_arm64.deb" > "${pkg}_${name}_arm64.deb.sha256"
+  gh release upload "v${name}" "${pkg}_${name}_arm64.deb" "${pkg}_${name}_arm64.deb.sha256"
+done
 ```
 
 ## Step 7 — Wrap up
