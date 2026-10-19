@@ -14,6 +14,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
@@ -33,8 +34,10 @@ public:
 
     AstroasisFocuserDriver(int device_number, std::string hid_path,
                            util::ConnectionResolver<std::string> connection_resolver = {},
-                           std::unique_ptr<AstroasisHidTransport> transport = nullptr)
+                           std::unique_ptr<AstroasisHidTransport> transport = nullptr,
+                           util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Astroasis"),
+          clock_(clock),
           device_number_(device_number),
           hid_path_(std::move(hid_path)),
           connection_resolver_(std::move(connection_resolver)),
@@ -288,6 +291,7 @@ private:
         return status_cache_.get([this] { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status(); });
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     std::string hid_path_;
     // Set by the by-index factory; empty for an explicit path. connection_resolved_
@@ -310,6 +314,13 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
                                                         std::unique_ptr<AstroasisHidTransport> transport) {
     return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path, util::ConnectionResolver<std::string>{},
                                                     std::move(transport));
+}
+
+std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
+                                                        std::unique_ptr<AstroasisHidTransport> transport,
+                                                        util::TaskClock& clock) {
+    return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path, util::ConnectionResolver<std::string>{},
+                                                    std::move(transport), clock);
 }
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_deferred(int device_number,
