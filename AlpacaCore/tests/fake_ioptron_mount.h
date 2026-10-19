@@ -65,7 +65,18 @@ public:
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
-    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+    void hold_next_reply(std::chrono::milliseconds delay) {
+        holding_.store(false);
+        hold_ms_.store(static_cast<int>(delay.count()));
+    }
+    // True once a held reply has begun waiting, before its command is recorded: a test uses it to act while the
+    // transaction is in flight. Latched until hold_next_reply() is called again.
+    bool wait_until_holding(std::chrono::milliseconds timeout) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!holding_.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return holding_.load();
+    }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -96,8 +107,10 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
-        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
+            holding_.store(true);
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        }
         std::string out;
         std::string cmd;
         for (char ch : chunk) {
@@ -180,6 +193,7 @@ private:
     std::string model_code_;
     double landing_error_arcsec_;
     std::atomic<int> hold_ms_{0};
+    std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;

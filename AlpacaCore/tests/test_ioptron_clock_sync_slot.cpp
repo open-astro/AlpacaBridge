@@ -10,9 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// open-astro#575, iOptron: the async slew dispatch runs on the slew slot body
-// (a non-null async_ctx), so a mount that answers ":MS1"/":MS2" with "0" (target
-
 // open-astro#1368, iOptron: the connect-time clock-sync body runs on an operation slot. A disconnect and the
 // destructor cancel and join it, and a body that throws is kept by the slot until the next start.
 
@@ -152,11 +149,7 @@ TEST_CASE("iOptron Telescope Driver - a disconnect during a clock-sync command s
     // The first site command is in flight (reply held) when the disconnect lands.
     mount.hold_next_reply(std::chrono::milliseconds(800));
     clock.advance(std::chrono::milliseconds(250));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (mount.count(":SLA") < 1 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    REQUIRE(mount.count(":SLA") == 1);
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
     driver->set_connected(false);
     CHECK(mount.count(":SLO") == 0);
     CHECK(mount.count(":SUT") == 0);
@@ -191,18 +184,15 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
+    // The first body blocks in the hook, before it sends any command; once released the hook returns at once.
+    Gate gate;
+    ioptron::set_clock_sync_hook_for_testing(*driver, [&gate] { gate.block(); });
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    // The first body's first site command is in flight (reply held) when the second start lands.
-    mount.hold_next_reply(std::chrono::milliseconds(2500));
     clock.advance(std::chrono::milliseconds(250));
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (mount.count(":SLA") < 1 && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-    REQUIRE(mount.count(":SLA") == 1);
+    REQUIRE(gate.wait_entered());
 
-    // The second start must return while the first body is still in its held transaction (no join).
+    // The second start must return while the first body is still blocked (a start that joins would wait for it).
     std::promise<void> started;
     auto started_future = started.get_future();
     std::thread starter([&] {
@@ -210,19 +200,21 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
         started.set_value();
     });
     const bool returned = started_future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+    if (!returned) gate.release();  // let a start that joined finish, so the case fails instead of hanging
     starter.join();
     REQUIRE(returned);
+    CHECK_FALSE(gate.finished());
 
-    // The second body runs its start delay and sends its commands; the first, once its reply lands,
-    // sees it was superseded and sends nothing more.
+    // Released, the first body sees it was superseded and sends nothing; the second runs its commands.
+    gate.release();
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
-    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     driver->set_connected(false);  // joins both bodies
-    CHECK(mount.count(":SLA") == 2);
+    CHECK(mount.count(":SLA") == 1);
     CHECK(mount.count(":SLO") == 1);
     CHECK(mount.count(":SUT") == 1);
 }
