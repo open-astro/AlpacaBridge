@@ -221,7 +221,8 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:set_connected() delete the first poll_state_once() at connect.
-TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all", "[astroasis][focuser][snapshot][unit]") {
+TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all",
+          "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
     auto driver = connected_focuser(state, clock);
@@ -372,7 +373,8 @@ TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its fra
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete protocol_.disconnect() in the MaxStep catch at connect.
+// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete protocol_.disconnect() in the MaxStep catch at
+// connect.
 TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the handle", "[astroasis][focuser][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
