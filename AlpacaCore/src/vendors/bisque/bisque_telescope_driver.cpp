@@ -734,35 +734,36 @@ public:
         // bumps again after the retiring call.
         lock.unlock();
         try {
-            pulse_guide_op_.start([this, request, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
-                {
+            pulse_guide_op_.start(
+                [this, request, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
+                    {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        if (!connected_ || ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
+                            return;
+                        }
+                    }
+                    std::string error;
+                    try {
+                        BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec, guide_timeout_ms);
+                    } catch (const std::exception& e) {
+                        error = std::string("PulseGuide failed: ") + e.what();
+                    } catch (...) {
+                        error = "PulseGuide failed with an unknown TheSkyX error";
+                    }
+                    // The request check and the state write share one mutex_ hold.
                     std::lock_guard<std::mutex> lock(mutex_);
-                    if (!connected_ || ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
+                    if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
                         return;
                     }
-                }
-                std::string error;
-                try {
-                    BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec, guide_timeout_ms);
-                } catch (const std::exception& e) {
-                    error = std::string("PulseGuide failed: ") + e.what();
-                } catch (...) {
-                    error = "PulseGuide failed with an unknown TheSkyX error";
-                }
-                // The request check and the state write share one mutex_ hold.
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
-                    return;
-                }
-                if (error.empty()) {
-                    pulse_guiding_ = false;
-                    equatorial_cache_valid_ = false;
-                } else {
-                    // pulse_guiding_ stays true; IsPulseGuiding reports the
-                    // error until the next PulseGuide, abort or connect.
-                    pulse_guide_error_ = std::move(error);
-                }
-            });
+                    if (error.empty()) {
+                        pulse_guiding_ = false;
+                        equatorial_cache_valid_ = false;
+                    } else {
+                        // pulse_guiding_ stays true; IsPulseGuiding reports the
+                        // error until the next PulseGuide, abort or connect.
+                        pulse_guide_error_ = std::move(error);
+                    }
+                });
         } catch (...) {
             std::lock_guard<std::mutex> relock(mutex_);
             if (request == pulse_request_) {
