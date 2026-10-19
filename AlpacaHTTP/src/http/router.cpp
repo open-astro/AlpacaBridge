@@ -1126,9 +1126,16 @@ bool is_expected_validation_error(const alpacacore::AlpacaException& e) {
         error_code == alpacacore::AlpacaError::ValueNotSet;
 }
 
+// A client reading a disconnected device gets NotConnected (1031) on every poll;
+// the reply is correct, so the line is client input, not a server fault.
+bool is_expected_not_connected(const alpacacore::AlpacaException& e) {
+    return e.error_code() == alpacacore::AlpacaError::NotConnected;
+}
+
 void log_alpaca_exception(const std::string& context, const alpacacore::AlpacaException& e) {
     std::string message = context + ": " + alpacahttp::util::escape_for_log(e.what(), 4096);
-    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || e.is_asked_too_early()) {
+    if (is_expected_not_implemented(e) || is_expected_validation_error(e) || is_expected_not_connected(e) ||
+        e.is_asked_too_early()) {
         alpacahttp::util::log_debug(message);
     } else {
         alpacahttp::util::log_error(message);
