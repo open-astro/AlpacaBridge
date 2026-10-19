@@ -26,3 +26,4 @@ A record is referred to by its slug until it is written, and numbered then.
 - [Snapshot-served state](0010-snapshot-served-state.md)
 - [CGX logical-disconnect reference continuity](0011-cgx-logical-reference-continuity.md)
 - [Bundled libgphoto2](0012-bundled-libgphoto2.md)
+- [Designs to avoid](0013-designs-to-avoid.md)
