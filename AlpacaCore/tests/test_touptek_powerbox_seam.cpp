@@ -100,7 +100,7 @@ TEST_CASE("FakeTouptekPowerboxSDK - fail_open refuses the connect and counts the
 
 // Falsified by: locked_touptek_powerbox_sdk.h set_value() forwarding index and value swapped (the
 // inner object sees the wrong call). The same check breaks each other forward one at a time.
-TEST_CASE("LockedTouptekPowerboxSDK - forwards all 9 entry points to the inner object",
+TEST_CASE("FakeTouptekPowerboxSDK behind LockedTouptekPowerboxSDK - forwards every call",
           "[touptek][switch][unit][fake-sdk]") {
     const auto cfg = mixed_config();
     FakeTouptekPowerboxSDK fake(cfg.ports, "/dev/gpiochip7", 250);
