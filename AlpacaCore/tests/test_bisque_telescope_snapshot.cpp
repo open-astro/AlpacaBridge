@@ -31,6 +31,7 @@
 #include <variant>
 
 #include "catch2_compat.h"
+#include "concurrency_stress.h"
 #include "fake_bisque_mount.h"
 #include "fake_mount_server.h"
 #include "fake_task_clock.h"
@@ -177,11 +178,29 @@ TEST_CASE("Bisque snapshot - a setter's value is read back at once and a stale p
     CHECK(rig.poll());
     CHECK(rig.driver->get_tracking());
 
-    // Targets and guide rate are driver state: read back at once, as before.
+    // The other values ConformU writes and reads back are driver state, served without TheSkyX: read back at once.
     rig.driver->set_target_right_ascension(7.25);
     rig.driver->set_target_declination(-12.5);
     CHECK(rig.driver->get_target_right_ascension() == 7.25);
     CHECK(rig.driver->get_target_declination() == -12.5);
+    alpacacore::GuideRate rate{};
+    rate.ra = 0.002;
+    rate.dec = 0.001;
+    rig.driver->set_guide_rate(rate);
+    CHECK(rig.driver->get_guide_rate().ra == 0.002);
+    CHECK(rig.driver->get_guide_rate().dec == 0.001);
+    rig.driver->set_slew_settle_time(3);
+    CHECK(rig.driver->get_slew_settle_time() == 3);
+    rig.driver->set_does_refraction(true);
+    CHECK(rig.driver->get_does_refraction());
+    rig.driver->set_tracking_rate(0);
+    CHECK(rig.driver->get_tracking_rate() == 0);
+    rig.driver->set_site_latitude(-33.856784);
+    rig.driver->set_site_longitude(151.215297);
+    rig.driver->set_site_elevation(42.0);
+    CHECK(rig.driver->get_site_latitude() == -33.856784);
+    CHECK(rig.driver->get_site_longitude() == 151.215297);
+    CHECK(rig.driver->get_site_elevation() == 42.0);
 }
 
 TEST_CASE("Bisque snapshot - a sync, a slew start and an abort are read back at once",
@@ -252,6 +271,8 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     rig.clock.advance(alpacacore::util::kLinkStalenessBound + seconds(1));
     CHECK_FALSE(rig.poll());  // the poll body ends: the link is lost
     CHECK_FALSE(rig.driver->get_connected());
+    CHECK_FALSE(
+        rig.driver->get_link_fault().empty());  // decision 0009 point 5: the text stays until Connect/Disconnect
     CHECK(rig.driver->get_device_state().empty());
     CHECK_FALSE(has_entry(*rig.driver, "TimeStamp"));
     try {
@@ -267,6 +288,19 @@ TEST_CASE("Bisque snapshot - past the staleness bound DeviceState is empty with 
     CHECK(rig.driver->get_connected());
     CHECK(rig.driver->get_right_ascension() == 5.5);
     CHECK(rig.driver->get_link_fault().empty());
+    bq::set_status_poll_paused_for_testing(*rig.driver, true);
+
+    // The async route relinks too: it is not the idempotent no-op either.
+    rig.mount.mute = true;
+    for (int i = 0; i < 3; ++i) rig.poll();
+    rig.clock.advance(alpacacore::util::kLinkStalenessBound + seconds(1));
+    rig.poll();
+    REQUIRE_FALSE(rig.driver->get_connected());
+    rig.mount.mute = false;
+    rig.driver->connect();
+    CHECK(alpacacore::test::settle_connected(*rig.driver, true, seconds(10)));
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_right_ascension() == 5.5);
     bq::set_status_poll_paused_for_testing(*rig.driver, true);
 }
 

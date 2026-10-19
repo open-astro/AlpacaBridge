@@ -1398,7 +1398,9 @@ private:
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). Read as the Tracking getter does: a failed query is off.
+    // (open-astro#1274). The gate asks TheSkyX itself (a failed query is off) and writes the answer through to the
+    // snapshot, so the Tracking getter agrees with it at once; it does not read the frame, which can be a poll
+    // period old and would refuse a slew right after the client switched Tracking on.
     // A retarget of this driver's own slew still in flight is not refused: the
     // TheSkyX docs do not say what IsTracking reads during a GOTO.
     void check_tracking_for_slew_locked(const char* who) const {
@@ -1410,8 +1412,8 @@ private:
         }
     }
 
-    // slewing_cached_ alone is not enough: it stays set until a Slewing read
-    // sees the slew complete, so ask TheSkyX past the force window. A failed
+    // slewing_cached_ alone is not enough: it stays set until a poll tick or a wait loop sees the slew complete,
+    // so ask TheSkyX past the force window. A failed
     // poll proves nothing either way; the IsTracking read then decides.
     bool own_slew_in_flight_locked() const {
         if (!slewing_cached_) {
