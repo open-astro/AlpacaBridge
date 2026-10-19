@@ -460,9 +460,14 @@ TEST_CASE("Celestron FindHome - invalid home-status replies persist through Slew
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    // The status poll completes a FindHome (getters only serve its result): pause its own ticks and drive it.
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
     REQUIRE_NOTHROW(driver->find_home());
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     CHECK_FALSE(driver->get_at_home());  // first failed reply is treated as a transient
-    CHECK(driver->get_slewing());        // the second consecutive failure still keeps homing in progress
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
+    CHECK(driver->get_slewing());  // the second consecutive failure still keeps homing in progress
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     try {
         static_cast<void>(driver->get_at_home());
         FAIL("AtHome returned normally after three consecutive completion polls failed");
@@ -484,9 +489,12 @@ TEST_CASE("Celestron FindHome - a transient home-status failure recovers", "[cel
     auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, endpoint(server.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);
     REQUIRE_NOTHROW(driver->find_home());
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     CHECK_FALSE(driver->get_at_home());
     CHECK(st->cancel_goto_count.load() == 0);
+    alpacacore::vendor::celestron::poll_status_now_for_testing(*driver);
     CHECK(driver->get_at_home());  // a valid reply clears the consecutive failure count
     CHECK(st->home_status_polls.load() == 3);
     CHECK(st->cancel_goto_count.load() == 0);
