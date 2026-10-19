@@ -14,7 +14,7 @@ Do not build any of the six designs below. Each section says what it is, why it 
 
 What it is: one interface that every vendor implements (connect, enumerate, read, write) so that the HTTP layer and the drivers talk to vendors in one shape.
 
-Why rejected: vendors differ in what they are: an SDK handle (ZWO, QHY), a serial protocol, a TCP or UDP link, a web API (Bisque). An interface wide enough to cover them is either lowest-common-denominator or a bag of optional calls, and each ASCOM device type already has its own interface in `AlpacaCore/include/alpacacore/*_driver.h`. The vendor wrapper layer in `AGENTS.md` ("3-layer driver pattern") is already the adapter, written per vendor where the differences are.
+Why rejected: vendors differ in what they are: an SDK handle (ZWO, QHY), a serial protocol, a TCP or UDP link, a scripting server over TCP (Bisque, TheSkyX). An interface wide enough to cover them is either lowest-common-denominator or a bag of optional calls, and each ASCOM device type already has its own interface in `AlpacaCore/include/alpacacore/*_driver.h`. The vendor wrapper layer in `AGENTS.md` ("3-layer driver pattern") is already the adapter, written per vendor where the differences are.
 
 Instead: keep the Alpaca interface, vendor wrapper, vendor implementation layers. Put what is truly shared in small modules with a narrow job: `AsyncConnectable` and `util::AsyncOperation` ([decision 0006](0006-async-operation-ownership.md)), `TaskClock` ([decision 0005](0005-task-clock.md)), `StateSnapshot` ([decision 0010](0010-snapshot-served-state.md)). Describe configuration per (vendor, device) with a catalog descriptor ([decision 0004](0004-device-catalog.md)), not with a shared class.
 
@@ -22,7 +22,7 @@ Instead: keep the Alpaca interface, vendor wrapper, vendor implementation layers
 
 What it is: one telescope driver parameterised by a protocol, so SynScan, Sky-Watcher, Celestron, OnStep, iOptron and Bisque share one set of slew, sync, park and tracking code.
 
-Why rejected: the mounts disagree on what the controller does and what the driver must do. Sky-Watcher dead-reckons position from axis angles ([decision 0001](0001-skywatcher-pointing-clock.md)); Celestron and Bisque serve a polled frame with different slow fields; link-loss behaviour is per transport ([decision 0009](0009-link-loss-and-relink-policy.md)). A common driver would carry each mount's special cases behind flags, and a change for one mount could change another's ConformU result. Telescope ConformU runs need a bare mount, so a regression is costly to find.
+Why rejected: the mounts disagree on what the controller does and what the driver must do. Sky-Watcher dead-reckons position from axis angles ([decision 0010](0010-snapshot-served-state.md), point 2); Celestron and Bisque serve a polled frame with different slow fields; link-loss behaviour is per transport ([decision 0009](0009-link-loss-and-relink-policy.md)). A common driver would carry each mount's special cases behind flags, and a change for one mount could change another's ConformU result. Telescope ConformU runs need a bare mount, so a regression is costly to find.
 
 Instead: one `TelescopeDriver` per vendor over the shared Alpaca interface (`AlpacaCore/include/alpacacore/telescope_driver.h`). Share through helpers a driver composes: `util/park_slew.h`, `util/motion_policy.h`, `util/link_health.h`, `util/state_snapshot.h`. Add a helper when a second driver needs the same behaviour, not before.
 
