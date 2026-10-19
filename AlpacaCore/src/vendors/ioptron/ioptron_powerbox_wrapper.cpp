@@ -36,16 +36,114 @@ constexpr const char* kGpioConsumer = "alpacabridge-imate-powerbox";
 
 gpiod_line_value to_line_value(int v) { return v != 0 ? GPIOD_LINE_VALUE_ACTIVE : GPIOD_LINE_VALUE_INACTIVE; }
 
+// Production GPIO side: libgpiod v2, one request owning every claimed line.
+class LibgpiodBackend final : public IoptronGpioBackend {
+public:
+    LibgpiodBackend() = default;
+    ~LibgpiodBackend() { drop(); }
+
+    void request(const std::string& chip_path, const std::vector<unsigned int>& offsets,
+                 const std::vector<int>& initial_values) override {
+        std::vector<gpiod_line_value> values;
+        values.reserve(initial_values.size());
+        for (int v : initial_values) {
+            values.push_back(to_line_value(v));
+        }
+        chip_ = ::gpiod_chip_open(chip_path.c_str());
+        if (chip_ == nullptr) {
+            int err = errno;
+            throw AlpacaException("Failed to open GPIO chip '" + chip_path + "': " + util::errno_string(err),
+                                  AlpacaError::NotConnected);
+        }
+
+        gpiod_line_settings* settings = nullptr;
+        gpiod_line_config* line_cfg = nullptr;
+        gpiod_request_config* req_cfg = nullptr;
+
+        try {
+            settings = ::gpiod_line_settings_new();
+            if (settings == nullptr) {
+                throw AlpacaException("gpiod_line_settings_new failed", AlpacaError::DriverException);
+            }
+            if (::gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT) != 0) {
+                int err = errno;
+                throw AlpacaException("gpiod_line_settings_set_direction failed: " + util::errno_string(err),
+                                      AlpacaError::DriverException);
+            }
+
+            line_cfg = ::gpiod_line_config_new();
+            if (line_cfg == nullptr) {
+                throw AlpacaException("gpiod_line_config_new failed", AlpacaError::DriverException);
+            }
+            if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
+                int err = errno;
+                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + util::errno_string(err),
+                                      AlpacaError::DriverException);
+            }
+            if (::gpiod_line_config_set_output_values(line_cfg, values.data(), values.size()) != 0) {
+                int err = errno;
+                throw AlpacaException("gpiod_line_config_set_output_values failed: " + util::errno_string(err),
+                                      AlpacaError::DriverException);
+            }
+
+            req_cfg = ::gpiod_request_config_new();
+            if (req_cfg == nullptr) {
+                throw AlpacaException("gpiod_request_config_new failed", AlpacaError::DriverException);
+            }
+            ::gpiod_request_config_set_consumer(req_cfg, kGpioConsumer);
+
+            request_ = ::gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
+            if (request_ == nullptr) {
+                int err = errno;
+                throw AlpacaException("gpiod_chip_request_lines failed: " + util::errno_string(err),
+                                      AlpacaError::NotConnected);
+            }
+        } catch (...) {
+            if (req_cfg) ::gpiod_request_config_free(req_cfg);
+            if (line_cfg) ::gpiod_line_config_free(line_cfg);
+            if (settings) ::gpiod_line_settings_free(settings);
+            ::gpiod_chip_close(chip_);
+            chip_ = nullptr;
+            throw;
+        }
+
+        ::gpiod_request_config_free(req_cfg);
+        ::gpiod_line_config_free(line_cfg);
+        ::gpiod_line_settings_free(settings);
+    }
+
+    int set_value(unsigned int offset, int value) override {
+        return ::gpiod_line_request_set_value(request_, offset, to_line_value(value));
+    }
+
+    void release() override { drop(); }
+
+private:
+    void drop() {
+        if (request_ != nullptr) {
+            ::gpiod_line_request_release(request_);
+            request_ = nullptr;
+        }
+        if (chip_ != nullptr) {
+            ::gpiod_chip_close(chip_);
+            chip_ = nullptr;
+        }
+    }
+
+    gpiod_chip* chip_ = nullptr;
+    gpiod_line_request* request_ = nullptr;
+};
+
 }  // namespace
 
 class IoptronPowerboxWrapper::Impl {
 public:
-    Impl(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports, std::uint32_t pwm_frequency_hz)
+    Impl(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports, std::uint32_t pwm_frequency_hz,
+         IoptronGpioBackend* backend)
         : gpio_chip_path_(std::move(gpio_chip_path)),
           ports_(std::move(ports)),
           pwm_frequency_hz_(pwm_frequency_hz),
-          chip_(nullptr),
-          request_(nullptr),
+          gpio_(backend != nullptr ? *backend : default_gpio_),
           open_(false) {
         if (ports_.empty()) {
             throw AlpacaException("iMate PowerBox port configuration is empty", AlpacaError::InvalidValue);
@@ -94,7 +192,7 @@ public:
         // a GPIO line. The always-on pass-through is skipped entirely. PWM
         // ports start at full-on (high); the worker takes over once requested.
         std::vector<unsigned int> offsets;
-        std::vector<gpiod_line_value> initial_values;
+        std::vector<int> initial_values;
         offsets.reserve(ports_.size());
         initial_values.reserve(ports_.size());
         for (std::size_t i = 0; i < ports_.size(); ++i) {
@@ -103,7 +201,7 @@ public:
             }
             offsets.push_back(ports_[i].gpio_line);
             const int v = port_states_[i]->value.load();
-            initial_values.push_back(to_line_value(ports_[i].pwm_enabled ? 1 : v));
+            initial_values.push_back(ports_[i].pwm_enabled ? 1 : (v != 0 ? 1 : 0));
         }
 
         if (offsets.empty()) {
@@ -113,67 +211,8 @@ public:
             return;
         }
 
-        chip_ = ::gpiod_chip_open(gpio_chip_path_.c_str());
-        if (chip_ == nullptr) {
-            int err = errno;
-            throw AlpacaException("Failed to open GPIO chip '" + gpio_chip_path_ + "': " + util::errno_string(err),
-                                  AlpacaError::NotConnected);
-        }
-
-        gpiod_line_settings* settings = nullptr;
-        gpiod_line_config* line_cfg = nullptr;
-        gpiod_request_config* req_cfg = nullptr;
-
-        try {
-            settings = ::gpiod_line_settings_new();
-            if (settings == nullptr) {
-                throw AlpacaException("gpiod_line_settings_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_OUTPUT) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_settings_set_direction failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            line_cfg = ::gpiod_line_config_new();
-            if (line_cfg == nullptr) {
-                throw AlpacaException("gpiod_line_config_new failed", AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_add_line_settings(line_cfg, offsets.data(), offsets.size(), settings) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_add_line_settings failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-            if (::gpiod_line_config_set_output_values(line_cfg, initial_values.data(), initial_values.size()) != 0) {
-                int err = errno;
-                throw AlpacaException("gpiod_line_config_set_output_values failed: " + util::errno_string(err),
-                                      AlpacaError::DriverException);
-            }
-
-            req_cfg = ::gpiod_request_config_new();
-            if (req_cfg == nullptr) {
-                throw AlpacaException("gpiod_request_config_new failed", AlpacaError::DriverException);
-            }
-            ::gpiod_request_config_set_consumer(req_cfg, kGpioConsumer);
-
-            request_ = ::gpiod_chip_request_lines(chip_, req_cfg, line_cfg);
-            if (request_ == nullptr) {
-                int err = errno;
-                throw AlpacaException("gpiod_chip_request_lines failed: " + util::errno_string(err),
-                                      AlpacaError::NotConnected);
-            }
-        } catch (...) {
-            if (req_cfg) ::gpiod_request_config_free(req_cfg);
-            if (line_cfg) ::gpiod_line_config_free(line_cfg);
-            if (settings) ::gpiod_line_settings_free(settings);
-            ::gpiod_chip_close(chip_);
-            chip_ = nullptr;
-            throw;
-        }
-
-        ::gpiod_request_config_free(req_cfg);
-        ::gpiod_line_config_free(line_cfg);
-        ::gpiod_line_settings_free(settings);
+        gpio_.request(gpio_chip_path_, offsets, initial_values);
+        lines_claimed_ = true;
 
         open_.store(true, std::memory_order_release);
 
@@ -206,7 +245,7 @@ public:
         for (auto& ps : port_states_) {
             ps->stop.store(false);
         }
-        if (request_ != nullptr) {
+        if (lines_claimed_) {
             // Preserve-power policy: a PWM port left mid-cycle could strand its
             // line low (cutting power on disconnect), so drive each PWM line to
             // a defined steady level matching its duty before releasing — duty
@@ -219,8 +258,7 @@ public:
                     int rc;
                     {
                         std::lock_guard<std::mutex> io(io_mutex_);
-                        rc =
-                            ::gpiod_line_request_set_value(request_, ports_[i].gpio_line, to_line_value(d > 0 ? 1 : 0));
+                        rc = gpio_.set_value(ports_[i].gpio_line, d > 0 ? 1 : 0);
                     }
                     if (rc != 0) {
                         const int err = errno;
@@ -231,12 +269,8 @@ public:
                     }
                 }
             }
-            ::gpiod_line_request_release(request_);
-            request_ = nullptr;
-        }
-        if (chip_ != nullptr) {
-            ::gpiod_chip_close(chip_);
-            chip_ = nullptr;
+            gpio_.release();
+            lines_claimed_ = false;
         }
         open_.store(false, std::memory_order_release);
     }
@@ -298,7 +332,7 @@ public:
         int rc;
         {
             std::lock_guard<std::mutex> io(io_mutex_);
-            rc = ::gpiod_line_request_set_value(request_, cfg.gpio_line, to_line_value(value));
+            rc = gpio_.set_value(cfg.gpio_line, value);
         }
         if (rc != 0) {
             int err = errno;
@@ -328,18 +362,18 @@ private:
         auto& state = *port_states_[index];
         const std::uint32_t period_us = 1000000u / pwm_frequency_hz_;
         const unsigned int offset = ports_[index].gpio_line;
-        gpiod_line_request* request = request_;
+        IoptronGpioBackend* gpio = &gpio_;
         std::atomic<int>* duty = &state.value;
         std::atomic<bool>* stop = &state.stop;
         std::mutex* io_mutex = &io_mutex_;
-        state.worker = std::thread([request, offset, duty, stop, period_us, io_mutex]() {
+        state.worker = std::thread([gpio, offset, duty, stop, period_us, io_mutex]() {
             // Every line write goes through io_mutex (held only around the
             // ioctl, never across a sleep) so PWM workers and the boolean
             // set_value path never write the shared gpiod_line_request
             // concurrently.
             auto locked_set = [&](gpiod_line_value v) -> int {
                 std::lock_guard<std::mutex> io(*io_mutex);
-                return ::gpiod_line_request_set_value(request, offset, v);
+                return gpio->set_value(offset, v == GPIOD_LINE_VALUE_ACTIVE ? 1 : 0);
             };
             // Cache the last value driven onto the line so steady-state 0% /
             // 100% duty cycles skip the kernel ioctl (otherwise we'd write the
@@ -419,15 +453,16 @@ private:
     // issues writes from a worker and a client thread at once. Held only around
     // the ioctl, never across a PWM sleep.
     std::mutex io_mutex_;
-    gpiod_chip* chip_;
-    gpiod_line_request* request_;
+    LibgpiodBackend default_gpio_;
+    IoptronGpioBackend& gpio_;    // default_gpio_ or the caller's; touched only under mutex_/io_mutex_
+    bool lines_claimed_ = false;  // under mutex_
     std::atomic<bool> open_;  // see is_open()
     std::vector<std::unique_ptr<PortState>> port_states_;
 };
 
 IoptronPowerboxWrapper::IoptronPowerboxWrapper(std::string gpio_chip_path, std::vector<IoptronPowerPortConfig> ports,
-                                               std::uint32_t pwm_frequency_hz)
-    : impl_(std::make_unique<Impl>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz)) {}
+                                               std::uint32_t pwm_frequency_hz, IoptronGpioBackend* backend)
+    : impl_(std::make_unique<Impl>(std::move(gpio_chip_path), std::move(ports), pwm_frequency_hz, backend)) {}
 
 IoptronPowerboxWrapper::~IoptronPowerboxWrapper() = default;
 

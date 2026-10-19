@@ -31,10 +31,23 @@
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
+#include <poll.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_ioptron_ieaf.h"
 #include "fake_mount_server.h"
+#include "fake_pty_write.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -147,37 +160,140 @@ TEST_CASE("iOptron telescope - destruction mid-operation (slew/pulse threads liv
     }
 }
 
-// iEFW filter wheel and iEAF focuser stress (#271): these are separate
+// iEFW filter wheel and iEAF focuser stress (#271, #1068): these are separate
 // serial devices from the mount above (each on its own Prolific USB-serial
-// bridge), and neither has a fake seam. On a hardware-free host every
-// connect fails fast at open()/handshake time, which still storms the
-// AsyncConnectable machinery and the failure-path cleanup, same shape as the
-// ZWO EFW/camera cases. With hardware attached the same tests exercise the
-// full connect path.
+// bridge). Both run CONNECTED over a pty fake: the driver opens the pty slave
+// like the device's port, so the connect handshake succeeds and the storm
+// reaches the post-connect paths, not only the failed-connect cleanup. The
+// iEAF uses FakeIoptronIeaf (fake_ioptron_ieaf.h). FakeIefw below answers the
+// iEFW command set; it lives in this file because a new fake_*.h needs a
+// kFakeConnectableRoster row (check_docs_drift.py), which is a tier-2 sweep
+// change of its own.
 //
-// The filter wheel uses create_iefw_filterwheel_by_index: its :DeviceInfo#
-// port scan runs inside the async connect task, so construction is trivial
-// and the fail-fast happens on connect() as expected. Since #659 the
-// focuser's create_ieaf_focuser_by_index has the same shape (the scan runs
-// inside set_connected(true)), so it could be used here too; this file
-// keeps the explicit-port create_ieaf_focuser("/dev/ttyUSB0") on purpose:
-// the by-index connect would run enumerate_ieaf_ports() on every storm
-// iteration, and on a dev box with a Prolific adapter attached that probe
-// opens (and DTR-toggles) real hardware. The explicit port defers to
-// connect() like every other case in this file, and the by-index factory's
-// laziness is pinned by test_ioptron_ieaf_focuser_deferred_connect.cpp.
-TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[ioptron][filterwheel][stress]") {
-    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel_by_index(0, 0);
+// Both use the explicit-port factory: the by-index factories scan
+// enumerate_*_ports() at connect, which on a dev box with a Prolific adapter
+// attached opens (and DTR-toggles) real hardware, and never finds a pty.
+// The by-index laziness is pinned by test_ioptron_ieaf_focuser_deferred_connect.cpp.
+namespace {
 
-    // open-astro#326: one guard per call -- before this the callback stopped at
-    // the first throw, so only the first getter was ever storm-tested.
-    alpacacore::test::StressCallGuard guard;
+using alpacacore::test::pty_write_bounded;
+using alpacacore::test::PtyPair;
+
+class FakeIefw {
+public:
+    FakeIefw() : pty_("FakeIefw") {
+        reader_ = std::thread([this] { run(); });
+    }
+
+    ~FakeIefw() {
+        stop_.store(true);
+        if (reader_.joinable()) reader_.join();
+    }
+
+    FakeIefw(const FakeIefw&) = delete;
+    FakeIefw& operator=(const FakeIefw&) = delete;
+
+    std::string slave_path() const { return pty_.slave_path(); }
+
+    /// Every command received so far, in wire order.
+    std::vector<std::string> commands() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return commands_;
+    }
+
+    int count(const std::string& needle) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int n = 0;
+        for (const auto& c : commands_) {
+            if (c.find(needle) != std::string::npos) ++n;
+        }
+        return n;
+    }
+
+    /// Handshakes that reached the wire: one per connect.
+    int connects() const { return count(":DeviceInfo#"); }
+
+    int slot() const { return slot_.load(); }
+
+private:
+    void run() {
+        std::string pending;
+        char buf[64];
+        while (!stop_.load()) {
+            struct pollfd pfd {};
+            pfd.fd = pty_.master_fd();
+            pfd.events = POLLIN;
+            if (poll(&pfd, 1, 20) <= 0) continue;
+            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
+            if (n <= 0) continue;
+            for (ssize_t i = 0; i < n; ++i) {
+                if (pending.empty() && buf[i] != ':') continue;  // skip stray bytes
+                pending += buf[i];
+                if (buf[i] == '#') {
+                    handle(pending);
+                    pending.clear();
+                }
+            }
+        }
+    }
+
+    void handle(const std::string& cmd) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            commands_.push_back(cmd);
+        }
+        char reply[40] = {};
+        if (cmd == ":DeviceInfo#") {
+            std::snprintf(reply, sizeof(reply), "%06d%02d%04d#", slot_.load(), 99, 100);
+        } else if (cmd == ":FW1#") {
+            std::snprintf(reply, sizeof(reply), "IEFW-FAKE-01#");
+        } else if (cmd == ":WP#") {
+            std::snprintf(reply, sizeof(reply), "%02d#", slot_.load());
+        } else if (cmd.rfind(":WM", 0) == 0) {
+            slot_.store(std::atoi(cmd.c_str() + 3));
+            std::snprintf(reply, sizeof(reply), "1");
+        } else if (cmd.rfind(":WF", 0) == 0) {
+            std::snprintf(reply, sizeof(reply), "+00000#");
+        } else if (cmd.rfind(":WO", 0) == 0) {
+            std::snprintf(reply, sizeof(reply), "1");
+        } else {
+            return;  // unknown command: the firmware stays silent
+        }
+        pty_write_bounded(pty_.master_fd(), std::string(reply), stop_);
+    }
+
+    PtyPair pty_;
+    std::thread reader_;
+    std::atomic<bool> stop_{false};
+
+    mutable std::mutex mutex_;
+    std::vector<std::string> commands_;
+
+    std::atomic<int> slot_{0};
+};
+
+}  // namespace
+
+TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[ioptron][filterwheel][stress]") {
+    FakeIefw fake;
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+
+    // The connect really succeeds before the storm (#1068): without this a fake
+    // that cannot connect would leave the storm on the failed-connect path again.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(fake.connects() >= 1);
+
+    // open-astro#326: one guard per call. Only the default {NotConnected} is
+    // expected: against the fake a storm saw no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
         guard([&] { static_cast<void>(wheel.get_position()); });
         guard([&] { wheel.set_position(1); });
         guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { wheel.set_names({"L", "R", "G", "B", "Ha"}); });
         guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+        guard([&] { wheel.set_focus_offsets({0, 0, 0, 0, 0}); });
     });
 
     // open-astro#326: settle_connected() rather than a bare set_connected().
@@ -188,20 +304,41 @@ TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[
     CHECK(guard.total_calls() > 0);
 }
 
+TEST_CASE("iEFW filter wheel - a racing disconnect is never dropped", "[ioptron][filterwheel][stress]") {
+    FakeIefw fake;
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+}
+
 TEST_CASE("iEFW filter wheel - destruction races an in-flight connect", "[ioptron][filterwheel][stress]") {
-    alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::ioptron::create_iefw_filterwheel_by_index(0, 0); });
+    // One fresh fake per iteration: a shared pty keeps the replies written to a
+    // driver destroyed mid-connect queued for the next one.
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeIefw>(); },
+        [](FakeIefw& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+        },
+        25);
 }
 
 TEST_CASE("iEAF focuser - concurrent connect/disconnect/operate stress", "[ioptron][focuser][stress]") {
-    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
 
-    // open-astro#326: one guard per call -- before this the callback stopped at
-    // the first throw, so only the first getter was ever storm-tested.
-    alpacacore::test::StressCallGuard guard;
+    // The connect really succeeds before the storm (#1068).
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(fake.connects() >= 1);
+
+    // open-astro#326: one guard per call. Only the default {NotConnected} is
+    // expected: against the fake a storm saw no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
         guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_is_moving()); });
         guard([&] { static_cast<void>(focuser.get_temperature()); });
         guard([&] { focuser.move(100); });
         guard([&] { focuser.halt(); });
@@ -215,9 +352,22 @@ TEST_CASE("iEAF focuser - concurrent connect/disconnect/operate stress", "[ioptr
     CHECK(guard.total_calls() > 0);
 }
 
+TEST_CASE("iEAF focuser - a racing disconnect is never dropped", "[ioptron][focuser][stress]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+}
+
 TEST_CASE("iEAF focuser - destruction races an in-flight connect", "[ioptron][focuser][stress]") {
-    alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0"); });
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<alpacacore::test::FakeIoptronIeaf>(); },
+        [](alpacacore::test::FakeIoptronIeaf& fake) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path());
+        },
+        25);
 }
 
 #endif  // !_WIN32

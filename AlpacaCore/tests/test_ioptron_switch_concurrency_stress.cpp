@@ -11,13 +11,16 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the iOptron iMate
-// PowerBox Switch (#271). No fake seam exists for the libgpiod chip this
-// driver opens, so on a hardware-free host every connect fails fast (the
-// configured gpio_chip_path either doesn't exist or has no matching lines),
-// which still storms the AsyncConnectable machinery and the failure-path
-// cleanup -- same shape as the ZWO dew-heater-switch case. With the iMate
-// PowerBox's GPIO bank present the same test exercises the full connect
-// path.
+// PowerBox Switch (#271, #1068). The driver drives a libgpiod chip, so a
+// connect can only succeed on a host with the iMate's GPIO bank. These cases
+// hand the driver a FakeGpio through the create_ioptron_switch(...,
+// IoptronGpioBackend&) test seam instead: the connect really succeeds, the
+// storm reaches the post-connect paths (boolean writes, the racing disconnect)
+// and nothing needs hardware. The iMate has no serial side (the switch driver
+// opens no serial port), so there is no pty here.
+//
+// FakeGpio is harsher than the chip: it refuses a second claim and a write to
+// lines nobody holds, so a double-open or a write after release fails the case.
 //
 // This is a SEPARATE file from test_ioptron_concurrency_stress.cpp because
 // the PowerBox Switch driver, unlike the mount/filter-wheel/focuser above,
@@ -30,18 +33,104 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 
+#include <cerrno>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 
 using alpacacore::AlpacaDriver;
 
+namespace {
+
+class FakeGpio final : public alpacacore::vendor::ioptron::IoptronGpioBackend {
+public:
+    void request(const std::string& chip_path, const std::vector<unsigned int>& offsets,
+                 const std::vector<int>& initial_values) override {
+        std::lock_guard<std::mutex> lock(m_);
+        if (claimed_) {
+            throw alpacacore::AlpacaException("FakeGpio: lines already claimed",
+                                              alpacacore::AlpacaError::DriverException);
+        }
+        chip_path_ = chip_path;
+        levels_.clear();
+        for (std::size_t i = 0; i < offsets.size(); ++i) {
+            levels_[offsets[i]] = initial_values[i];
+        }
+        claimed_ = true;
+        ++requests_;
+    }
+
+    int set_value(unsigned int offset, int value) override {
+        std::lock_guard<std::mutex> lock(m_);
+        const auto it = levels_.find(offset);
+        if (!claimed_ || it == levels_.end()) {
+            errno = EBADF;
+            return -1;
+        }
+        it->second = value;
+        ++writes_;
+        return 0;
+    }
+
+    void release() override {
+        std::lock_guard<std::mutex> lock(m_);
+        if (claimed_) ++releases_;
+        claimed_ = false;
+    }
+
+    int requests() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return requests_;
+    }
+    int releases() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return releases_;
+    }
+    int writes() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return writes_;
+    }
+    bool claimed() const {
+        std::lock_guard<std::mutex> lock(m_);
+        return claimed_;
+    }
+
+private:
+    mutable std::mutex m_;
+    std::string chip_path_;
+    std::map<unsigned int, int> levels_;
+    bool claimed_ = false;
+    int requests_ = 0;
+    int releases_ = 0;
+    int writes_ = 0;
+};
+
+std::unique_ptr<alpacacore::SwitchDriver> make_switch(FakeGpio& gpio) {
+    return alpacacore::vendor::ioptron::create_ioptron_switch(
+        0, alpacacore::vendor::ioptron::default_imate_powerbox_config(), gpio);
+}
+
+}  // namespace
+
 TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress", "[ioptron][switch][stress]") {
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_switch(
-        0, alpacacore::vendor::ioptron::default_imate_powerbox_config());
+    FakeGpio gpio;
+    auto driver = make_switch(gpio);
+
+    // The connect really succeeds before the storm (#1068).
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(gpio.requests() >= 1);
 
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only get_max_switch() was ever storm-tested.
-    alpacacore::test::StressCallGuard guard;
+    //
+    // Only the default {NotConnected} is expected: against FakeGpio a storm saw
+    // no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
         guard([&] { static_cast<void>(sw.get_max_switch()); });
@@ -49,6 +138,7 @@ TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress"
         // switch 1 ("DC1"); switch 0 is read-only pass-through
         guard([&] { sw.set_switch(1, true); });
         guard([&] { static_cast<void>(sw.get_switch_value(1)); });
+        guard([&] { sw.set_switch_value(1, 1.0); });
     });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():
@@ -60,11 +150,24 @@ TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress"
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+    // Every claim the storm made was released: nothing is left holding the lines.
+    CHECK_FALSE(gpio.claimed());
+    CHECK(gpio.releases() == gpio.requests());
+}
+
+TEST_CASE("iMate PowerBox Switch - a racing disconnect is never dropped", "[ioptron][switch][stress]") {
+    FakeGpio gpio;
+    auto driver = make_switch(gpio);
+
+    CHECK_FALSE(alpacacore::test::connect_then_disconnect_settles_disconnected(*driver));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, false));
+    CHECK_FALSE(alpacacore::test::connected_then_connect_disconnect_settles_disconnected(*driver, true));
+    CHECK_FALSE(gpio.claimed());
 }
 
 TEST_CASE("iMate PowerBox Switch - destruction races an in-flight connect", "[ioptron][switch][stress]") {
-    alpacacore::test::run_destruction_during_connect_stress([]() {
-        return alpacacore::vendor::ioptron::create_ioptron_switch(
-            0, alpacacore::vendor::ioptron::default_imate_powerbox_config());
-    });
+    FakeGpio gpio;
+    alpacacore::test::run_destruction_during_connect_stress([&gpio]() { return make_switch(gpio); });
+    // Whatever the destroyed drivers claimed was released with them.
+    CHECK_FALSE(gpio.claimed());
 }
