@@ -371,3 +371,18 @@ explicit port in the UI; (4) a device with a hardware control-mode switch
 (the CFW3's USB vs 4-pin button) can boot, home and emit its status on USB
 while ignoring every USB command, so put the switch in the connect refusal
 message and check it before debugging the parser.
+
+### Joinable thread members on failure paths
+
+- **A `std::thread` member that a failure path leaves joinable is a
+  `std::terminate()` waiting for the destructor** (`Server`, issue #402). The
+  shape: `start_async()` creates the thread, the thread's entry point fails
+  early and sets `running_ = false`, and `stop()` early-returns on
+  `if (!running_)` without joining. Nothing is wrong until `~Server()` destroys
+  a joinable thread, or until a retry assigns over it — both call
+  `std::terminate()`, so a recoverable failure (a port already in use) became
+  an abort at a point far from its cause, and the caller's own `is_running()`
+  check correctly said false and did not help. **Join on every path out,
+  including the one that thinks there is nothing running**, and join before
+  re-assigning. Audit any `if (!flag) return;` at the top of a teardown method
+  for the same shape.

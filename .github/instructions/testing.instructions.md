@@ -2,11 +2,12 @@
 applyTo: "AlpacaCore/tests/**,AlpacaHTTP/tests/**,AlpacaCore/conformu/**"
 ---
 
-## Testing requirements
+## Tests, fakes and ConformU
 
-Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
-core rules and routes here. A rule that applies to a second vendor belongs in
-the matching shared file, not in a vendor file.
+Shared rules for every vendor, moved from `AGENTS.md` (which keeps the core rules
+and routes here) and, for the QHY `before_call` exception, from the ci-gates rules.
+A rule that applies to a second vendor belongs in the matching shared file, not in a
+vendor file.
 
 ## Testing Requirements
 
@@ -123,6 +124,12 @@ unit-testable without hardware (`test_touptek_fake_sdk.cpp`). Rules:
   the SDK via `sdk_` would instead touch the driver at the moment each call
   returns, on top of the post-call touches. Treat detached workers as unsafe
   and bound their lifetime; do not read this rule as making them safe.
+  Rule (a) has one sanctioned escape hatch: `FakeQHYSDK::before_call`, a hook that
+  is null in every ordinary test and that a case sets deliberately to make one
+  named fake method block (the three #339 cases use it to prove the
+  slowest-forward watchdog, the cancel forward's own timing and the cancel
+  overtake); a case that sets it owns the consequences and must release the
+  block before its driver is destroyed.
 - **When a fake and the real SDK disagree, the fake must be the HARSHER of the
   two** (`fake_qhy_sdk.h`, issues #373/#365/#390). A fake that answers a
   plausible value where hardware answers a sentinel, or that settles instantly

@@ -19,7 +19,10 @@ Five rule families, not one:
    in a conditionally-compiled file; this is the other half of that assumption
    (issue #396), and without it appending a correctly-named, correctly-tagged
    registration to the unconditional `TEST_SOURCES` list passes every other
-   rule while making the TSan zero-test grep vacuous again.
+   rule while making the TSan zero-test grep vacuous again. The block must be
+   an `if(TARGET alpacacore_...)` condition: `if(NOT TARGET ...)` and a
+   condition naming a non-`alpacacore_` target do not gate (see the comment
+   above `_TARGET_GATE_RE`). Which vendor's target it names is not checked.
 5. A registration file must use `StressCallGuard` the way the ci-gates instructions document
    it (issues #379, #334), or be named in `GUARD_ALLOWLIST` with a reason:
    the guard present, `CHECK(...unexpected_count())`, `INFO(...report())`,
@@ -108,12 +111,12 @@ TESTS_CMAKELISTS = "AlpacaCore/tests/CMakeLists.txt"
 # #included by several TUs, so a TEST_CASE added to one would compile in and
 # re-inflate the vendor threshold while slipping past a *.cpp-only scan.
 #
-# The .cpp glob is deliberately *.cpp and not test_*.cpp: the ci-gates instructions state the
-# rule as "a [stress] case anywhere else under AlpacaCore/tests/", and a
-# narrower glob would leave a file not named test_* outside the check while the
-# prose said otherwise. Registration files are excluded by path in
+# The .cpp glob is deliberately *.cpp and not test_*.cpp: rule 3 in this
+# file's docstring states the rule as "a [stress] case anywhere else under
+# AlpacaCore/tests/", and a narrower glob would leave a file not named test_*
+# outside the check while the docstring said otherwise. Registration files are excluded by path in
 # find_stray_stress_cases(), not by failing to match here. The .hpp/.cc/.inc/
-# .ipp entries match nothing today and exist for the same reason: the prose
+# .ipp entries match nothing today and exist for the same reason: rule 3
 # says "anywhere else under AlpacaCore/tests/", so an extension the globs miss
 # would be a silent hole rather than a documented limit.
 TEST_GLOBS = ("AlpacaCore/tests/*.cpp", "AlpacaCore/tests/*.h",
@@ -442,7 +445,8 @@ def check_guard_usage():
                     "GUARD NOT ASSERTED: %s (TEST_CASE %r) constructs a StressCallGuard but never CHECKs "
                     "unexpected_count() IN THAT SAME CASE. Counting without failing is worse than not "
                     "guarding: the file looks like it follows the documented pattern. End the TEST_CASE "
-                    "with the INFO/CHECK pair from .github/instructions/ci-gates.instructions.md." % (path, label)
+                    "with the three closing lines (INFO report, CHECK unexpected_count, CHECK total_calls) from "
+                    ".github/instructions/ci-gates.instructions.md." % (path, label)
                 )
             if not re.search(r"INFO\s*\(\s*[\w.]*report\s*\(\s*\)", seg):
                 failures.append(
