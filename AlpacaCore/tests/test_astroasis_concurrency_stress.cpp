@@ -31,6 +31,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -82,15 +83,21 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
         guard([&] { focuser.halt(); });
     });
 
-    // The storm got past the connect-failure path: the fake opened, and the
-    // handshake and state poll reached the wire.
-    CHECK(state->opens > 0);
-    CHECK(state->transactions() > 0);
     // open-astro#326: settle_connected() rather than a bare set_connected():
     // right after a storm the last async task may still be in flight, so a
     // single sync disconnect can legitimately no-op against the pending-
     // disconnect machinery and a bare CHECK would fail on a correct driver.
     CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    // The storm got past the connect-failure path: the fake opened, and the
+    // handshake and state poll reached the wire. Read under the fake's lock.
+    int opens = 0;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        opens = state->opens;
+    }
+    CHECK(opens > 0);
+    CHECK(state->transactions() > 0);
 
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
