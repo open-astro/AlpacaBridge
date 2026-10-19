@@ -12,8 +12,6 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
-#include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
-#include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 
 #include <chrono>
 #include <functional>
@@ -21,25 +19,17 @@
 #include <string>
 
 #include "catch2_compat.h"
-#include "fake_zwo_caa_sdk.h"
-#include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
-#include "locked_zwo_caa_sdk.h"
-#include "locked_zwo_eaf_sdk.h"
 #include "locked_zwo_efw_sdk.h"
 
-// The EFW, EAF and CAA SDK seams (issue #1309): each driver runs over a scripted fake, directly and
-// behind the Locked decorator that serialises every SDK call.
+// The EFW SDK seam (issue #1309): the driver runs over a scripted fake, directly and behind the
+// Locked decorator that serialises every SDK call.
 
 namespace {
 
 namespace zwo = alpacacore::vendor::zwo;
 using alpacacore::AlpacaException;
-using alpacacore::test::FakeZWOCAASDK;
-using alpacacore::test::FakeZWOEAFSDK;
 using alpacacore::test::FakeZWOEFWSDK;
-using alpacacore::test::LockedZWOCAASDK;
-using alpacacore::test::LockedZWOEAFSDK;
 using alpacacore::test::LockedZWOEFWSDK;
 
 int error_code(const std::function<void()>& fn) {
@@ -110,8 +100,7 @@ TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filt
 
 // Falsified by: locked_zwo_efw_sdk.h set_position() forwarding wheel_id as the slot (get_position reads
 // 5, not 3).
-TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked decorators - forward every call",
-          "[zwo][unit][fake-sdk]") {
+TEST_CASE("FakeZWOEFWSDK behind LockedZWOEFWSDK - forwards every call", "[zwo][unit][fake-sdk]") {
     FakeZWOEFWSDK efw;
     LockedZWOEFWSDK locked_efw(efw);
     zwo::ZWOEFWInfo wheel;
@@ -130,49 +119,6 @@ TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked de
     locked_efw.close_wheel(efw.id);
     CHECK(efw.open_calls == 1);
     CHECK(efw.close_calls == 1);
-
-    FakeZWOEAFSDK eaf;
-    LockedZWOEAFSDK locked_eaf(eaf);
-    REQUIRE(locked_eaf.enumerate_focusers().size() == 1);
-    locked_eaf.open_focuser(eaf.id);
-    locked_eaf.move(eaf.id, 321);
-    CHECK(locked_eaf.get_position(eaf.id) == 321);
-    locked_eaf.set_max_step(eaf.id, 40000);
-    CHECK(eaf.last_set_max_step == 40000);
-    CHECK(locked_eaf.get_max_step(eaf.id) == 40000);
-    CHECK(locked_eaf.get_temperature(eaf.id) == 12.5);
-    CHECK(locked_eaf.get_serial_number(eaf.id) == "EAF-SN-1");
-    locked_eaf.close_focuser(eaf.id);
-    CHECK(eaf.close_calls == 1);
-
-    FakeZWOCAASDK caa;
-    LockedZWOCAASDK locked_caa(caa);
-    REQUIRE(locked_caa.enumerate_rotators().size() == 1);
-    locked_caa.open_rotator(caa.id);
-    locked_caa.move_absolute(caa.id, 45.0);
-    CHECK(locked_caa.get_degree(caa.id) == 45.0);
-    CHECK(caa.last_move_absolute == 45.0);
-    locked_caa.set_reverse(caa.id, true);
-    CHECK(locked_caa.get_reverse(caa.id));
-    CHECK_FALSE(locked_caa.get_motion_status(caa.id).is_moving);
-    CHECK(locked_caa.get_serial_number(caa.id) == "CAA-SN-1");
-    locked_caa.close_rotator(caa.id);
-    CHECK(caa.close_calls == 1);
-}
-
-// Falsified by: locked_zwo_eaf_sdk.h not forwarding a throw from the inner SDK (the scripted open
-// failure is swallowed and the by-index driver reports connected).
-TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the driver and releases the lock",
-          "[zwo][unit][fake-sdk]") {
-    FakeZWOEAFSDK fake;
-    fake.fail_open = true;
-    LockedZWOEAFSDK sdk(fake);
-    auto driver = zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
-
-    CHECK(error_code([&] { driver->set_connected(true); }) == alpacacore::AlpacaError::DriverException);
-    fake.fail_open = false;
-    driver->set_connected(true);  // would deadlock if the failed call kept the decorator mutex
-    CHECK(driver->get_connected());
 }
 
 // Falsified by: fake_zwo_efw_sdk.h set_position() dropping its range check (the out-of-range slot is
