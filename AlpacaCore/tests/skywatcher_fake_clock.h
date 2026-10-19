@@ -12,8 +12,8 @@
 
 #pragma once
 
-// Goto-jump pumping for Sky-Watcher cases whose fake mount runs on a
-// FakeTaskClock (open-astro#715; one home since open-astro#1221).
+// Goto-jump pumping for Sky-Watcher cases whose fake board (the UDP mount or
+// the serial one) runs on a FakeTaskClock (open-astro#715; one home since open-astro#1221).
 //
 // The fake integrates motion against the FakeTaskClock; the driver stays on the
 // wall clock, so nothing here waits on the clock and
@@ -45,7 +45,7 @@
 #include <functional>
 #include <thread>
 
-#include "fake_skywatcher_mount.h"
+#include "fake_skywatcher_board.h"
 #include "fake_task_clock.h"
 
 namespace alpacacore::test::skywatcher_clock {
@@ -58,7 +58,7 @@ inline constexpr auto kFrameRendezvous = std::chrono::milliseconds(50);
 
 // Pumps virtual time (goto jumps, otherwise wall time) until pred() holds;
 // false when `real_bound` of wall time passes first.
-inline bool pump_until(FakeTaskClock& clock, FakeSkyWatcherMount& mount, const std::function<bool()>& pred,
+inline bool pump_until(FakeTaskClock& clock, FakeSkyWatcherBoard& mount, const std::function<bool()>& pred,
                        std::chrono::milliseconds real_bound) {
     const auto deadline = std::chrono::steady_clock::now() + real_bound;
     auto last = std::chrono::steady_clock::now();

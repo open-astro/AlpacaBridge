@@ -430,8 +430,10 @@ them unchanged. What differs is the transport and the identity, and both bit us:
   AutoHome on the 0x04 bit, never on `":q"` failing: an EQM-35 takes the count-frame
   `FindHome` fallback, and running the sensor hunt on a mount with no index sensors
   would drive the axes looking for an edge that never arrives.
-- The three presets live in `FakeSkyWatcherMount` as `FakeMountProfile::wave_100i()` /
-  `eqm35_pro()` / `eq_al55i()`, so loopback tests run against real captured geometry.
+- The three presets are `FakeMountProfile::wave_100i()` / `eqm35_pro()` / `eq_al55i()` (in
+  `fake_skywatcher_board.h`), so fake-board tests run against real captured geometry. The `[eqm35]`
+  cases run the EQM-35 Pro over a pty at 115200 (`FakeSkyWatcherSerialBoard`, which takes the same
+  `FakeTaskClock` as the UDP `FakeSkyWatcherMount`); the Wave and EQ-AL55i cases stay on UDP.
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain): auto-detect found
   it unaided -- `Found Sky-Watcher EQM-35 Pro on /dev/ttyUSB0 (MC firmware 3.39, 115200
@@ -661,7 +663,8 @@ against its checklist, 2026-09-06:
 - [x] Fake mount test double extended with a classic-board profile: `FakeMountProfile::eqm35_pro()`
   in `AlpacaCore/tests/fake_skywatcher_board.h` is a REAL EQM-35 Pro capture (its built-in PL2303
   port answers only at 115200), used by the `[eqm35]`-tagged cases in
-  `AlpacaCore/tests/test_skywatcher_async.cpp`: identity from the mount code, the count-frame
+  `AlpacaCore/tests/test_skywatcher_async.cpp` and `test_skywatcher_pointing.cpp`, which run
+  over the serial fake at 115200 (open-astro#604; one case severs the link mid-goto): identity from the mount code, the count-frame
   FindHome fallback, the board's own sidereal period, and the `[hemisphere]` southern-hemisphere
   regressions that depend on its geometry and feature word (one `[eqm35]` case uses the Wave
   profile as the control). Counts are deliberately not stated here; grep the tag.

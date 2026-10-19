@@ -15,9 +15,11 @@
 // A Sky-Watcher motor controller behind a pseudo-terminal, so the protocol
 // wrapper's SERIAL transport (exchange_serial, settle_serial, the dirty-link
 // bookkeeping and the mis-paired-reply shape check) can be exercised without
-// hardware. FakeSkyWatcherMount covers the driver over UDP; this one covers
-// the serial path only and serves the full ":" command set and axis model of
-// the shared core.
+// hardware. FakeSkyWatcherMount serves the Wave and the other UDP profiles over
+// UDP; this one serves the serial wrapper path and the EQM-35 Pro cases of the
+// driver suites (the `[eqm35]` cases in test_skywatcher_async.cpp and
+// test_skywatcher_pointing.cpp, open-astro#604), with the full ":" command set
+// and axis model of the shared core.
 //
 // The axis model, the profile and the ":" command handler are the shared
 // FakeSkyWatcherBoard core (fake_skywatcher_board.h, open-astro#604), the same
@@ -63,8 +65,12 @@ public:
     // ":q", ":s") and the version of @p profile, the same FakeMountProfile the
     // UDP fake takes, so a serial test of an EQM-35 Pro is not served the
     // Wave 100i's counts or its HOME_INDEXER bit.
-    explicit FakeSkyWatcherSerialBoard(FakeMountProfile profile = FakeMountProfile::wave_100i())
-        : FakeSkyWatcherBoard(std::move(profile)), pty_("FakeSkyWatcherSerialBoard") {
+    /// @param clock the clock the axis model integrates motion against (see
+    /// fake_skywatcher_board.h); a FakeTaskClock makes motion virtual. Must
+    /// outlive the board.
+    explicit FakeSkyWatcherSerialBoard(FakeMountProfile profile = FakeMountProfile::wave_100i(),
+                                       alpacacore::util::TaskClock& clock = alpacacore::util::default_task_clock())
+        : FakeSkyWatcherBoard(std::move(profile), clock), pty_("FakeSkyWatcherSerialBoard") {
         // The pty pair is owned by pty_ (fake_pty_write.h), constructed
         // before this body runs; a setup failure throws from there with
         // nothing left open (issue #387). Its keep-alive slave is what holds

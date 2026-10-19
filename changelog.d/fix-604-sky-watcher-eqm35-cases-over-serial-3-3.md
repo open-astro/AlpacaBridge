@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **Sky-Watcher `[eqm35]` cases run over the serial transport** (AlpacaCore tests, issue #604, slice 3 of 3): the 25 EQM-35 Pro cases in `test_skywatcher_async.cpp` and `test_skywatcher_pointing.cpp` now connect through the real serial wrapper at 115200 to `FakeSkyWatcherSerialBoard` (which takes a `FakeTaskClock`, as the UDP mount does), and the goto pump helpers in `skywatcher_fake_clock.h` take the shared `FakeSkyWatcherBoard`, so they work for both transports. New case "SkyWatcher EQM-35 - a serial link severed mid-goto is a lost connection" asserts Connected goes false, operations answer NotConnected and disconnect returns. No driver source changes.
