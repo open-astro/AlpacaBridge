@@ -22,7 +22,7 @@ Instead: keep the Alpaca interface, vendor wrapper, vendor implementation layers
 
 What it is: one telescope driver parameterised by a protocol, so SynScan, Sky-Watcher, Celestron, OnStep, iOptron and Bisque share one set of slew, sync, park and tracking code.
 
-Why rejected: the mounts disagree on what the controller does and what the driver must do. Sky-Watcher dead-reckons position from axis angles ([decision 0010](0010-snapshot-served-state.md), point 2); Celestron and Bisque serve a polled frame with different slow fields; link-loss behaviour is per transport ([decision 0009](0009-link-loss-and-relink-policy.md)). A common driver would carry each mount's special cases behind flags, and a change for one mount could change another's ConformU result. Telescope ConformU runs need a bare mount, so a regression is costly to find.
+Why rejected: the mounts disagree on what the controller does and what the driver must do. Sky-Watcher dead-reckons position from axis angles ([decision 0010](0010-snapshot-served-state.md), Sky-Watcher adoption, point 2); Celestron and Bisque serve a polled frame with different slow fields; link-loss behaviour is per transport ([decision 0009](0009-link-loss-and-relink-policy.md)). A common driver would carry each mount's special cases behind flags, and a change for one mount could change another's ConformU result. Telescope ConformU runs need a bare mount, so a regression is costly to find.
 
 Instead: one `TelescopeDriver` per vendor over the shared Alpaca interface (`AlpacaCore/include/alpacacore/telescope_driver.h`). Share through helpers a driver composes: `util/park_slew.h`, `util/motion_policy.h`, `util/link_health.h`, `util/state_snapshot.h`. Add a helper when a second driver needs the same behaviour, not before.
 
@@ -38,7 +38,7 @@ Instead: one protocol wrapper per vendor with its own tests and fake. When two w
 
 What it is: using `nlohmann::json` (or any JSON type) in AlpacaCore, for config, the catalog or device state.
 
-Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AlpacaCore/include/alpacacore/alpaca_json.h` states that AlpacaCore holds no JSON, and `AGENTS.md` bars JSON and HTTP code from it. JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
+Why rejected: AlpacaCore is vendor-neutral device logic with no transport. `AlpacaCore/include/alpacacore/alpaca_json.h` states that AlpacaCore holds no JSON, and `AGENTS.md` says "No HTTP/REST/sockets/JSON transport code" in AlpacaCore. JSON in the core would tie device logic to one wire format and make the layering gate (AlpacaHTTP to AlpacaCore to vendor) meaningless.
 
 Instead: describe configs as typed structs with field roles in the catalog descriptors and let AlpacaHTTP bridge JSON to them in one place ([decision 0004](0004-device-catalog.md), which rejected the catalog-with-JSON alternative for this reason).
 
@@ -54,7 +54,7 @@ Instead: compose. A driver holds the helper as a member, constructs it with the 
 
 What it is: writing a shared Dome or SafetyMonitor implementation (or an abstraction layer over shutters, roof sensors and safety inputs) before a real device needs it.
 
-Why rejected: the base interfaces exist (`dome_driver.h`, `safetymonitor_driver.h`, under the ten Alpaca device types) and no vendor implements them. An abstraction written without a device guesses at what dome and roof hardware share and is wrong the first time a real one arrives. It also adds code that no test against hardware can check.
+Why rejected: the base interfaces exist (`dome_driver.h`, `safetymonitor_driver.h`, under the ten Alpaca device types) and no vendor implements them as of this record (the first Dome or SafetyMonitor driver PR must update this section). An abstraction written without a device guesses at what dome and roof hardware share and is wrong the first time a real one arrives. It also adds code that no test against hardware can check.
 
 Instead: write the first Dome or SafetyMonitor driver for a named device, through the usual three layers, with a catalog descriptor and a fake for tests ([testing](../../.github/instructions/testing.instructions.md)). Extract a shared helper only when a second device shows what is common. Shutter control belongs to the Dome interface; do not add a separate device type (`AGENTS.md`, Out of Scope Guardrails).
 
