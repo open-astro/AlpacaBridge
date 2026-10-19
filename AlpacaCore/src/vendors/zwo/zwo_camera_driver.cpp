@@ -325,9 +325,7 @@ public:
     void set_bin_y(int bin_y) override { set_bin_locked(bin_y, bin_y); }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) {
-            return CameraState::Idle;
-        }
+        ensure_connected();
         auto status = poll_exposure_status();
         switch (status) {
             case ZWOExposureStatus::Working:
@@ -775,9 +773,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) {
-            return 0.0;
-        }
+        ensure_connected();
         auto state = get_camera_state();
         if (state != CameraState::Exposing) {
             std::lock_guard<std::mutex> lock(mutex_);
