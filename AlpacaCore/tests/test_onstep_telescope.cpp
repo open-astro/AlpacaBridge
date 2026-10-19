@@ -1092,6 +1092,81 @@ TEST_CASE("OnStep Telescope Driver - an Alt/Az slew does not need Tracking", "[o
     driver->set_connected(false);
 }
 
+// #910: set_connected(true) holds the driver mutex for the whole connect, so a
+// Connected read that took it waited for the whole connect. The router checks
+// Connecting before its own Connected reads; DeviceState does not, and a read
+// that lands just before the connect task shows as running gets past it.
+TEST_CASE("OnStep Telescope Driver - Connected answers while a connect is in flight", "[onstep][telescope][unit]") {
+    std::atomic<bool> in_slow_reply{false};
+    std::atomic<bool> release{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) {
+        if (chunk.rfind(":GVN", 0) == 0) {
+            // The firmware query runs inside set_connected(true), under mutex_.
+            in_slow_reply = true;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!release && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            return std::string("10.23a#");
+        }
+        if (chunk.size() >= 2 && chunk[0] == 'K') {
+            return std::string(1, chunk[1]) + "#";
+        }
+        return std::string("0#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 5000;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+
+    driver->connect();
+    const auto wait_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_slow_reply && std::chrono::steady_clock::now() < wait_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(in_slow_reply);  // the connect is now parked in the firmware query
+    REQUIRE(driver->get_connecting());
+
+    auto start = std::chrono::steady_clock::now();
+    const bool connected_mid_connect = driver->get_connected();
+    const auto connected_elapsed = std::chrono::steady_clock::now() - start;
+    // DeviceState has no Connecting gate in the router: it is the read that stalled.
+    start = std::chrono::steady_clock::now();
+    const auto state_mid_connect = driver->get_device_state();
+    const auto state_elapsed = std::chrono::steady_clock::now() - start;
+    release = true;
+    CHECK(connected_elapsed < std::chrono::milliseconds(500));
+    CHECK_FALSE(connected_mid_connect);  // Connected stays false until the connect has finished
+    CHECK(state_elapsed < std::chrono::milliseconds(500));
+    CHECK(state_mid_connect.empty());
+
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+
+    // A reconnect starts from a cleared flag: the first session's published
+    // Connected must not show through the second connect's warm-up.
+    in_slow_reply = false;
+    release = false;
+    driver->connect();
+    const auto again_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_slow_reply && std::chrono::steady_clock::now() < again_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const bool held_again = in_slow_reply;
+    const bool connected_mid_reconnect = driver->get_connected();
+    release = true;
+    REQUIRE(held_again);
+    CHECK_FALSE(connected_mid_reconnect);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
 
 #ifndef _WIN32
