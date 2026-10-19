@@ -59,8 +59,8 @@ struct FakeHidState {
     bool fail_halt = false;    // the device stops (0x37) but the reply is lost
     int closes = 0;
     bool move_reports_moving = true;  // the device reports "moving" after a Move (0x36)
-    bool gate_move = false;           // hold the Move exchange open until released
-    bool gate_entered = false;        // the Move exchange reached the gate
+    std::uint8_t gate_cmd = 0;        // hold this command's exchange open until released
+    bool gate_entered = false;        // the gated exchange reached the gate
     std::condition_variable cv;
     std::vector<std::uint8_t> pending;
 
@@ -116,17 +116,14 @@ public:
             case 0x36:
                 ++state_->moves;
                 state_->moving = state_->move_reports_moving;
-                if (state_->gate_move) {
-                    state_->gate_entered = true;
-                    state_->cv.notify_all();
-                    state_->cv.wait(lock, [this] { return !state_->gate_move; });
-                }
+                hold_gate(lock, cmd);
                 if (state_->fail_move) break;
                 resp.insert(resp.end(), {1, 0});
                 break;
             case 0x37:
                 ++state_->halts;
                 state_->moving = false;
+                hold_gate(lock, cmd);
                 if (state_->fail_halt) break;
                 resp.insert(resp.end(), {1, 0});
                 break;
@@ -150,6 +147,14 @@ public:
     }
 
 private:
+    // Blocks the exchange of the gated command until the test clears gate_cmd.
+    void hold_gate(std::unique_lock<std::mutex>& lock, std::uint8_t cmd) {
+        if (state_->gate_cmd != cmd) return;
+        state_->gate_entered = true;
+        state_->cv.notify_all();
+        state_->cv.wait(lock, [this] { return state_->gate_cmd == 0; });
+    }
+
     std::shared_ptr<FakeHidState> state_;
 };
 
@@ -274,38 +279,79 @@ TEST_CASE("Astroasis Focuser Driver - Move and Halt write through to the frame",
     driver->set_connected(false);
 }
 
+// Runs `act` (a Move or Halt) with its exchange held open and a poll queued behind it, then releases both.
+// The poll took its token before the write landed, so a frame it publishes would overwrite the write.
+void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::test::FakeTaskClock& clock,
+                     std::uint8_t cmd, const std::function<void()>& act) {
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = cmd;
+        state->gate_entered = false;
+    }
+    std::thread actor(act);
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
+    }
+    clock.advance(kTick);
+    // The woken poll body blocks on the wrapper, not on the clock, so the clock
+    // does not settle until the exchange is released.
+    CHECK_FALSE(clock.wait_for_woken_settled(std::chrono::milliseconds(300)));
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->gate_cmd = 0;
+    }
+    state->cv.notify_all();
+    actor.join();
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+}
+
 // Falsified by: astroasis_focuser_driver.cpp:move() delete the snapshot_.write() in move()'s catch block.
-TEST_CASE("Astroasis Focuser Driver - failed move drops the poll in flight, the next poll shows the move",
+TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
     auto driver = connected_focuser(state, clock);
+    REQUIRE(driver->get_position() == 1234);
 
-    CHECK_FALSE(driver->get_is_moving());
     state->fail_move = true;  // the device moves, the reply is lost
-    CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->position = 5555;
+    }
+    act_during_poll(state, clock, 0x36, [&] { CHECK_THROWS_AS(driver->move(2000), alpacacore::AlpacaException); });
+    CHECK(driver->get_position() == 1234);  // the overlapped poll's frame was dropped
     tick(clock);
-    CHECK(driver->get_is_moving());  // the next poll measured the move
+    CHECK(driver->get_position() == 5555);  // the next poll measured the device
+    CHECK(driver->get_is_moving());
     driver->set_connected(false);
 }
 
 // Falsified by: astroasis_focuser_driver.cpp:halt() delete the snapshot_.write() in halt()'s catch block.
-TEST_CASE("Astroasis Focuser Driver - failed halt drops the poll in flight, the next poll shows the stop",
+TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
     auto driver = connected_focuser(state, clock);
-
     driver->move(2000);
-    CHECK(driver->get_is_moving());
+    REQUIRE(driver->get_is_moving());
+
     state->fail_halt = true;  // the device stops, the reply is lost
-    CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException);
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->position = 5555;
+    }
+    act_during_poll(state, clock, 0x37, [&] { CHECK_THROWS_AS(driver->halt(), alpacacore::AlpacaException); });
+    CHECK(driver->get_position() == 1234);  // the overlapped poll's frame was dropped
     tick(clock);
+    CHECK(driver->get_position() == 5555);
     CHECK_FALSE(driver->get_is_moving());  // the next poll measured the stop
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:poll_state_once() take begin_poll() after the device read instead of before.
+// Falsified by: astroasis_focuser_driver.cpp:poll_state_once() take begin_poll() after the device read instead of
+// before.
 TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its frame",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -314,30 +360,9 @@ TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its fra
     auto driver = connected_focuser(state, clock);
     REQUIRE_FALSE(driver->get_is_moving());
 
-    // Hold the Move exchange open. The poll takes its token, then queues on the
-    // wrapper behind the Move; the Move's write lands before the poll reads the
-    // device, which still answers "not moving".
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->gate_move = true;
-    }
-    std::thread mover([&] { driver->move(2000); });
-    {
-        std::unique_lock<std::mutex> lock(state->mutex);
-        REQUIRE(state->cv.wait_for(lock, kBound, [&] { return state->gate_entered; }));
-    }
-    clock.advance(kTick);
-    // The woken poll body blocks on the wrapper, not on the clock, so the clock
-    // does not settle until the Move is released.
-    CHECK_FALSE(clock.wait_for_woken_settled(std::chrono::milliseconds(300)));
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        state->gate_move = false;
-    }
-    state->cv.notify_all();
-    mover.join();
-    REQUIRE(clock.wait_for_woken_settled(kBound));
-    REQUIRE(clock.wait_for_waiters(1, kBound));
+    // The Move's write lands before the queued poll reads the device, which
+    // still answers "not moving".
+    act_during_poll(state, clock, 0x36, [&] { driver->move(2000); });
 
     // The poll's frame (moving=false) was dropped; the write-through stands.
     CHECK(driver->get_is_moving());
