@@ -270,6 +270,10 @@ public:
             // then wait without holding mutex_ so cached getters stay
             // responsive while the transfer finishes.
             std::lock_guard<std::mutex> image_lock(image_operation_mutex_);
+            // An in-flight download stamps last_download_ns_ before it releases the image lock,
+            // after the reset above; clear it again so the next connection's first start waits
+            // for nothing.
+            last_download_ns_.store(kNoDownload);
             sdk.close_camera(close_id.value());
         }
     }
@@ -1056,8 +1060,8 @@ private:
     // clean from 0.4 s. 600 ms keeps a margin over the 0.4 s edge. USB 3.0 cameras show nothing.
     // Called with exposure_trigger_mutex_ held and neither mutex_ nor the image lock held, so
     // status reads stay live during the wait. stop_exposure queues behind the trigger mutex for at
-    // most this long. A disconnect during the wait is caught by start_exposure's connected_ check
-    // before any SDK call, so no exposure is started.
+    // most this long. set_connected() takes the trigger mutex too, so a disconnect queues behind
+    // the wait (up to this long) and runs after the exposure has started; it then stops it.
     void wait_for_usb2_download_settle() {
         const auto downloaded_ns = last_download_ns_.load();
         if (downloaded_ns == kNoDownload) return;
