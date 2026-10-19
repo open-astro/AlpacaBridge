@@ -685,7 +685,7 @@ public:
         if (duration == 0) {
             return;
         }
-        if (pulse_guiding_) {
+        if (pulse_guiding_ && !pulse_guide_op_.last_failure()) {
             throw AlpacaException("TheSkyX DirectGuide is already guiding; wait for IsPulseGuiding=false",
                                   AlpacaError::InvalidOperation);
         }
@@ -728,6 +728,14 @@ public:
         lock.unlock();
         try {
             pulse_guide_op_.start([this, ra_arcsec, dec_arcsec, guide_timeout_ms](util::OperationContext& ctx) {
+                {
+                    // A disconnect or abort that landed between the unlock and
+                    // start() cleared the state; send nothing on that link.
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                        return;
+                    }
+                }
                 std::string error;
                 try {
                     BisqueProtocolWrapper::instance().guide(ra_arcsec, dec_arcsec, guide_timeout_ms);
@@ -741,8 +749,11 @@ public:
                     if (ctx.stop_reason() != util::StopReason::None) {
                         return;
                     }
-                    pulse_guiding_ = false;
+                    // On failure pulse_guiding_ stays true until the slot has kept
+                    // the throw: IsPulseGuiding reports the failure first, so a
+                    // poller never sees false with no error in between.
                     if (error.empty()) {
+                        pulse_guiding_ = false;
                         equatorial_cache_valid_ = false;
                     }
                 }
