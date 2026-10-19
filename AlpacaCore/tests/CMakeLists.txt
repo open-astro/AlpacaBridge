@@ -133,6 +133,8 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # Clock-sync body runs on an operation slot (issue #1368).
+    list(APPEND TEST_SOURCES test_ioptron_clock_sync_slot.cpp)
     # AbortSlew fences the async dispatch thread (issue #768).
     list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.

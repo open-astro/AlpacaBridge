@@ -107,7 +107,6 @@ public:
           last_utc_valid_(false),
           utc_query_supported_(true),
           fast_cache_until_(std::chrono::steady_clock::time_point{}),
-          clock_sync_cancel_(false),
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
@@ -140,18 +139,14 @@ public:
         }
         // Unconditional, and last: both starts happen AFTER set_connected()
         // releases mutex_, so a connect can lose the race to a concurrent
-        // disconnect and run its start_clock_sync_thread() after that
-        // disconnect's stop_clock_sync_thread() has already returned. The
-        // driver is then left with connected_ == false and a joinable thread
-        // that the `if (connected_)` branch above never reaps -- and
-        // destroying a joinable std::thread is std::terminate(), which is how
-        // this shows up: an abort in ~iOptronTelescopeDriver with no active
-        // exception, under a connect/disconnect storm. Both reapers are
-        // idempotent (the clock-sync reaper joins only a joinable thread and
-        // resets its cancel flag; the slew reaper cancels and joins the slot,
-        // a no-op when it is idle), so running them again here costs nothing
-        // on the normal path.
-        stop_clock_sync_thread();
+        // disconnect and run its start_clock_sync() after that
+        // disconnect's stop_clock_sync() has already returned. The
+        // driver is then left with connected_ == false and a running clock-sync body
+        // that the `if (connected_)` branch above never reaps, which would outlive
+        // the members it touches. Both reapers are idempotent (each cancels and
+        // joins its slot, a no-op when it is idle), so running them again here
+        // costs nothing on the normal path.
+        stop_clock_sync();
         reap_slew_dispatch();
     }
     
@@ -209,7 +204,7 @@ public:
     // no-op task; a disconnect() racing that window is recorded and honored
     // by the task tail rather than spawning immediately.
     //
-    // LATENCY NOTE: this driver's teardown joins the clock-sync thread, which
+    // LATENCY NOTE: this driver's teardown joins the clock-sync body, which
     // can sit in multi-second serial protocol retries. When that teardown runs
     // as the base's DEFERRED disconnect (disconnect-races-connect path only),
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
@@ -413,10 +408,10 @@ public:
         lock.unlock();
 
         if (schedule_clock_sync) {
-            start_clock_sync_thread();
+            start_clock_sync();
         }
         if (disconnect_protocol) {
-            stop_clock_sync_thread();
+            stop_clock_sync();
             // Cancel and join the async slew dispatch (slew slot) before tearing down the
             // protocol connection (runs after lock.unlock() — the thread
             // takes mutex_, so joining under the lock would deadlock).
@@ -2200,21 +2195,25 @@ private:
         bool dst_active = false;
     };
 
-    // `cancellable`: the clock-sync thread's retries stop when it is cancelled; the
-    // synchronous connect-path callers keep the plain delay.
-    bool retry_mount_command(const char* label, const std::function<void()>& fn, bool cancellable = false) {
+    // `ctx`: the clock-sync body's retries stop when it is stopped; the synchronous
+    // connect-path callers pass none and keep the plain delay.
+    bool retry_mount_command(const char* label, const std::function<void()>& fn,
+                             util::OperationContext* ctx = nullptr) {
         constexpr int kMaxAttempts = 3;
         const auto delay = std::chrono::milliseconds(750);
         std::string last_error;
         for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            if (ctx && ctx->stop_reason() != util::StopReason::None) {
+                return false;  // stopped between commands: send nothing more
+            }
             try {
                 fn();
                 return true;
             } catch (const std::exception& e) {
                 last_error = e.what();
                 if (attempt < kMaxAttempts) {
-                    if (cancellable ? clock_sync_wait(delay) : (clock_.sleep_for(delay), false)) {
-                        break;  // the clock-sync thread was cancelled: stop retrying
+                    if (ctx ? !ctx->wait_for(delay) : (clock_.sleep_for(delay), false)) {
+                        break;  // the clock-sync body was stopped: stop retrying
                     }
                 }
             }
@@ -2482,120 +2481,104 @@ private:
         info.dst_active = (local_tm.tm_isdst > 0);
         return info;
     }
-    
-    void start_clock_sync_thread() {
-        // clock_sync_mutex_ serializes start/stop from overlapping
-        // set_connected bodies (sync PUT vs async connect task) — both run
-        // after mutex_ is released, so without this guard two callers can
-        // join and assign clock_sync_thread_ concurrently (UB), or a second
-        // start can overwrite a still-joinable thread (std::terminate).
-        // The clock-sync body never takes clock_sync_mutex_, so joining
-        // under it cannot deadlock. Same idea as reap_slew_dispatch().
-        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
-        stop_clock_sync_thread_locked();
-        clock_sync_cancel_.store(false);
-        clock_sync_thread_ = std::thread([this]() {
-            if (clock_sync_wait(std::chrono::milliseconds(250))) {
-                return;
-            }
 
-            std::optional<double> lat, lon;
-            std::optional<int> elev;
-            bool do_clock_sync = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || clock_sync_cancel_.load()) {
-                    return;
-                }
-                lat = pending_site_latitude_;
-                lon = pending_site_longitude_;
-                elev = pending_site_elevation_;
-                do_clock_sync = sync_time_on_connect_;
-            }
-
-            auto& protocol = iOptronProtocolWrapper::instance();
-
-            if (lat.has_value()) {
-                double latitude = lat.value();
-                retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); }, /*cancellable=*/true);
-                retry_mount_command(
-                    "hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); }, /*cancellable=*/true);
-            }
-            if (lon.has_value()) {
-                double longitude = lon.value();
-                retry_mount_command(
-                    "site longitude", [&]() { protocol.set_longitude(longitude); }, /*cancellable=*/true);
-            }
-
-            if (do_clock_sync) {
-                auto tz_info = compute_local_timezone_info();
-                auto now_utc = std::chrono::system_clock::now();
-                retry_mount_command(
-                    "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); },
-                    /*cancellable=*/true);
-                retry_mount_command(
-                    "DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, /*cancellable=*/true);
-                retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, /*cancellable=*/true);
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || clock_sync_cancel_.load()) {
-                    return;
-                }
-                if (lat.has_value()) {
-                    site_latitude_cached_ = lat.value();
-                    hemisphere_north_ = (lat.value() >= 0.0);
-                    site_info_valid_ = true;
-                    last_site_info_fetch_ = clock_.now();
-                }
-                if (lon.has_value()) {
-                    site_longitude_cached_ = lon.value();
-                    site_info_valid_ = true;
-                    last_site_info_fetch_ = clock_.now();
-                }
-                if (elev.has_value()) {
-                    site_elevation_m_ = elev.value();
-                }
-                if (do_clock_sync) {
-                    auto tz_info = compute_local_timezone_info();
-                    timezone_offset_minutes_ = tz_info.offset_minutes;
-                    timezone_offset_valid_ = true;
-                    dst_observed_ = tz_info.dst_active;
-                    last_utc_set_ = std::chrono::system_clock::now();
-                    last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-                    last_utc_valid_ = true;
-                }
+    // Starts the clock-sync body on the clock-sync slot (decision 0006). start() cancels nothing
+    // itself: it supersedes the previous body, whose waits wake at once, and never waits for it.
+    // Call without mutex_ held (the body takes it). Clock sync is not an ASCOM async operation and
+    // ITelescopeV4 has no completion property for it, so a body that throws is kept by the slot
+    // (clock_sync_failure()) and logged, until the next start().
+    void start_clock_sync() {
+        clock_sync_.start([this](util::OperationContext& ctx) {
+            try {
+                run_clock_sync(ctx);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("iOptron", std::string("Clock sync failed: ") + e.what());
+                throw;
             }
         });
     }
 
-    void stop_clock_sync_thread() {
-        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
-        stop_clock_sync_thread_locked();
-    }
+    void run_clock_sync(util::OperationContext& ctx) {
+        if (!ctx.wait_for(std::chrono::milliseconds(250))) {
+            return;
+        }
+        if (clock_sync_test_hook_) {
+            clock_sync_test_hook_();
+        }
 
-    // Cancellable wait on the task clock for the clock-sync thread and the
-    // mount-command retry delay: returns true when stop_clock_sync_thread_locked()
-    // cancelled it, so a join never waits out the delay (or, on a FakeTaskClock,
-    // a virtual deadline nobody advances). clock_sync_wait_mutex_ is a leaf lock.
-    bool clock_sync_wait(std::chrono::nanoseconds delay) {
-        std::unique_lock<std::mutex> lock(clock_sync_wait_mutex_);
-        return clock_.wait_for(lock, clock_sync_wait_cv_, delay, [this] { return clock_sync_cancel_.load(); });
-    }
-
-    void stop_clock_sync_thread_locked() {
+        std::optional<double> lat, lon;
+        std::optional<int> elev;
+        bool do_clock_sync = false;
         {
-            // Set under the wait mutex so the flag cannot slip between the
-            // waiter's predicate check and its block.
-            std::lock_guard<std::mutex> wait_lock(clock_sync_wait_mutex_);
-            clock_sync_cancel_.store(true);
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                return;
+            }
+            lat = pending_site_latitude_;
+            lon = pending_site_longitude_;
+            elev = pending_site_elevation_;
+            do_clock_sync = sync_time_on_connect_;
         }
-        clock_sync_wait_cv_.notify_all();
-        if (clock_sync_thread_.joinable()) {
-            clock_sync_thread_.join();
+
+        auto& protocol = iOptronProtocolWrapper::instance();
+
+        if (lat.has_value()) {
+            double latitude = lat.value();
+            retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); }, &ctx);
+            retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); }, &ctx);
         }
-        clock_sync_cancel_.store(false);
+        if (lon.has_value()) {
+            double longitude = lon.value();
+            retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); }, &ctx);
+        }
+
+        if (do_clock_sync) {
+            auto tz_info = compute_local_timezone_info();
+            auto now_utc = std::chrono::system_clock::now();
+            retry_mount_command(
+                "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); }, &ctx);
+            retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, &ctx);
+            retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, &ctx);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                return;
+            }
+            if (lat.has_value()) {
+                site_latitude_cached_ = lat.value();
+                hemisphere_north_ = (lat.value() >= 0.0);
+                site_info_valid_ = true;
+                last_site_info_fetch_ = clock_.now();
+            }
+            if (lon.has_value()) {
+                site_longitude_cached_ = lon.value();
+                site_info_valid_ = true;
+                last_site_info_fetch_ = clock_.now();
+            }
+            if (elev.has_value()) {
+                site_elevation_m_ = elev.value();
+            }
+            if (do_clock_sync) {
+                auto tz_info = compute_local_timezone_info();
+                timezone_offset_minutes_ = tz_info.offset_minutes;
+                timezone_offset_valid_ = true;
+                dst_observed_ = tz_info.dst_active;
+                last_utc_set_ = std::chrono::system_clock::now();
+                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                last_utc_valid_ = true;
+            }
+        }
+    }
+
+    // Cancel and join the clock-sync body. Without mutex_ held. clock_sync_reap_mutex_ serializes
+    // reapers across the whole join (docs/failures/0011): a second caller would otherwise see an empty
+    // slot while the first still owns the running body, and disconnect would tear the protocol down
+    // under it. The body never takes it.
+    void stop_clock_sync() {
+        std::lock_guard<std::mutex> reap(clock_sync_reap_mutex_);
+        clock_sync_.cancel_all_and_join();
     }
 
     // Cancel and join the async slew dispatch on the slew slot (decision 0006).
@@ -2670,6 +2653,9 @@ public:
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
     }
+    void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
+    void start_clock_sync_for_testing() { start_clock_sync(); }
+    std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
 private:
     std::chrono::system_clock::time_point current_utc_time_locked() const {
@@ -2932,13 +2918,10 @@ private:
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};
     mutable std::chrono::steady_clock::time_point tracking_rate_override_until_{};
     mutable std::chrono::steady_clock::time_point slew_override_until_{};
-    std::thread clock_sync_thread_;
-    std::atomic<bool> clock_sync_cancel_;
-    std::mutex clock_sync_wait_mutex_;
-    std::condition_variable clock_sync_wait_cv_;
-    // Guards clock_sync_thread_ join/assign across overlapping set_connected
-    // bodies — see start_clock_sync_thread(). Never taken by the body.
-    std::mutex clock_sync_mutex_;
+    // Serializes clock-sync reapers across the join; see stop_clock_sync().
+    std::mutex clock_sync_reap_mutex_;
+    // Test seam, set before connect: runs on the clock-sync body after its start delay.
+    std::function<void()> clock_sync_test_hook_;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
@@ -2953,6 +2936,10 @@ private:
     // it without the handoff lock).
     util::OperationGeneration slew_slot_generation_;
     util::AsyncOperation slew_{"iOptron slew", slew_slot_generation_, clock_};
+    // The connect-time clock-sync body (decision 0006); its own generation, so a slew start never
+    // supersedes it. Declared after everything the body touches.
+    util::OperationGeneration clock_sync_generation_;
+    util::AsyncOperation clock_sync_{"iOptron clock sync", clock_sync_generation_, clock_};
 };
 
 // Factory function implementation
@@ -3077,6 +3064,25 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_slew_spawn_for_testing(std::move(spawn));
     }
+}
+
+void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_hook_for_testing(std::move(hook));
+    }
+}
+
+void start_clock_sync_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->start_clock_sync_for_testing();
+    }
+}
+
+std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver) {
+    if (const auto* ioptron = dynamic_cast<const iOptronTelescopeDriver*>(&driver)) {
+        return ioptron->clock_sync_failure_for_testing();
+    }
+    return std::nullopt;
 }
 
 } // namespace alpacacore::vendor::ioptron
