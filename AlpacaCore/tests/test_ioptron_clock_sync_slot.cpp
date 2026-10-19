@@ -219,4 +219,32 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
     CHECK(mount.count(":SUT") == 1);
 }
 
+TEST_CASE("iOptron Telescope Driver - a superseded clock-sync body sends no further mount command",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // The first body's first site command is in flight (reply held) when the second start lands. The driver
+    // reads for 200 ms only, so the body gives up on that command and meets its stop between commands.
+    mount.hold_next_reply(std::chrono::milliseconds(1500));
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
+    ioptron::start_clock_sync_for_testing(*driver);
+
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    driver->set_connected(false);  // joins both bodies
+    // Only the second body reaches the longitude and the clock commands.
+    CHECK(mount.count(":SLO") == 1);
+    CHECK(mount.count(":SUT") == 1);
+}
+
 #endif  // _WIN32
