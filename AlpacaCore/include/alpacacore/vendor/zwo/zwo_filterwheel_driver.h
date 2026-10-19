@@ -13,6 +13,8 @@
 #pragma once
 
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
+
 #include <memory>
 
 namespace alpacacore::vendor::zwo {
@@ -34,5 +36,20 @@ std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number,
  * @return Unique pointer to filter wheel driver
  */
 std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index);
+
+/**
+ * @brief Test seam: as create_zwo_efw_filterwheel(), over an injected EFW SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number, int wheel_id, ZWOEFWSDK& sdk);
+
+/**
+ * @brief Test seam: as create_zwo_efw_filterwheel_by_index(), over an injected EFW SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index,
+                                                                       ZWOEFWSDK& sdk);
 
 } // namespace alpacacore::vendor::zwo

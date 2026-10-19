@@ -11,8 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the ZWO EFW filter wheel
-// (issue #101). No fake seam exists for the EFW SDK, so on a hardware-free
-// host every connect fails fast at enumeration — which still storms the
+// (issue #101). The cases that build the driver on the real SDK singleton have
+// no wheel attached on a hardware-free host, so every connect fails fast at
+// enumeration — which still storms the
 // AsyncConnectable machinery, the failure-path cleanup, and the property
 // getters racing the lifecycle: the exact surfaces where this driver family's
 // review findings lived. With a wheel attached the same tests exercise the
@@ -36,8 +37,15 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_zwo_caa_sdk.h"
+#include "fake_zwo_eaf_sdk.h"
+#include "fake_zwo_efw_sdk.h"
 #include "fake_zwo_sdk.h"
+#include "locked_zwo_caa_sdk.h"
+#include "locked_zwo_eaf_sdk.h"
+#include "locked_zwo_efw_sdk.h"
 #include "locked_zwo_sdk.h"
+#include "rotator_sync_offset_test_dir.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -158,8 +166,8 @@ TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][
     CHECK(fake.call_count("get_data_after_exposure") > 0);
 }
 
-// Focuser stress (#271): same shape as the EFW/camera cases above — no fake
-// seam exists for the EAF SDK, so on a hardware-free host every connect
+// Focuser stress (#271): same shape as the EFW/camera cases above — on the
+// real SDK singleton a hardware-free host has no focuser, so every connect
 // fails fast at enumeration, which still storms the AsyncConnectable
 // machinery and the failure-path cleanup. With a focuser attached the same
 // test exercises the full connect path.
@@ -190,7 +198,7 @@ TEST_CASE("ZWO EAF focuser - destruction races an in-flight connect", "[zwo][foc
         []() { return alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0); });
 }
 
-// Rotator stress (#271): same shape — no fake seam for the CAA SDK.
+// Rotator stress (#271): same shape — the real CAA SDK has no rotator on a hardware-free host.
 TEST_CASE("ZWO CAA rotator - concurrent connect/disconnect/operate stress", "[zwo][rotator][stress]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
 
@@ -216,6 +224,88 @@ TEST_CASE("ZWO CAA rotator - concurrent connect/disconnect/operate stress", "[zw
 TEST_CASE("ZWO CAA rotator - destruction races an in-flight connect", "[zwo][rotator][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0); });
+}
+
+// Connected lifecycle storms over the EFW, EAF and CAA SDK seams (open-astro#1309): the cases above
+// stop at the connect-failure path on a host with no device, so the poll, the status cache and the
+// disconnect ordering never ran with a connect that succeeds. Each fake sits behind its Locked
+// decorator, so every SDK call is one mutex-guarded forward and the driver owns the interleaving.
+// Connected drivers legitimately answer InvalidValue (a slot or position out of range) and
+// InvalidOperation (a move during a move), so those join NotConnected in the expected set.
+TEST_CASE("ZWO EFW - connected lifecycle stress behind LockedZWOEFWSDK", "[zwo][filterwheel][stress]") {
+    alpacacore::test::FakeZWOEFWSDK fake;
+    alpacacore::test::LockedZWOEFWSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(0, 0, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidValue,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.set_position_calls > 0);
+}
+
+TEST_CASE("ZWO EAF focuser - connected lifecycle stress behind LockedZWOEAFSDK", "[zwo][focuser][stress]") {
+    alpacacore::test::FakeZWOEAFSDK fake;
+    alpacacore::test::LockedZWOEAFSDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser_by_index(0, 0, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidValue,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
+        guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_temperature()); });
+        guard([&] { focuser.move(100); });
+        guard([&] { focuser.halt(); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.position_calls > 0);
+}
+
+TEST_CASE("ZWO CAA rotator - connected lifecycle stress behind LockedZWOCAASDK", "[zwo][rotator][stress]") {
+    alpacacore::test::TempSyncOffsetDir offsets;
+    alpacacore::test::FakeZWOCAASDK fake;
+    alpacacore::test::LockedZWOCAASDK sdk(fake);
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0, sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
+                                            alpacacore::AlpacaError::InvalidValue,
+                                            alpacacore::AlpacaError::InvalidOperation};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& rotator = static_cast<alpacacore::RotatorDriver&>(d);
+        guard([&] { static_cast<void>(rotator.get_position()); });
+        guard([&] { static_cast<void>(rotator.get_reverse()); });
+        guard([&] { rotator.move(10.0); });
+        guard([&] { rotator.halt(); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls == fake.close_calls);
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.degree_calls > 0);
 }
 
 // Dew heater switch stress (#271): same shape — the dew heater switch wraps

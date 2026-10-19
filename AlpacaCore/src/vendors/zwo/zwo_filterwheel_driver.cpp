@@ -31,8 +31,10 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ZWOEFWFilterWheelDriver(int device_number, std::optional<int> wheel_id, std::optional<int> wheel_index)
+    ZWOEFWFilterWheelDriver(int device_number, std::optional<int> wheel_id, std::optional<int> wheel_index,
+                            ZWOEFWSDK& sdk)
         : AsyncConnectable("ZWO"),
+          sdk_(sdk),
           device_number_(device_number),
           wheel_id_(wheel_id),
           wheel_index_(wheel_index),
@@ -96,7 +98,7 @@ public:
     // Vendor SDK (library) version, surfaced in the web UI only (never in
     // DriverInfo). EFWGetSDKVersion() returns "1, 7, 0, 0"; render as "1.7.0.0".
     std::optional<std::string> get_device_sdk_version() const override {
-        auto version = ZWOEFWSDKWrapper::instance().get_sdk_version();
+        auto version = sdk_.get_sdk_version();
         // get_sdk_version() returns the literal "unknown" when EFWGetSDKVersion()
         // yields nullptr — suppress the row rather than show "unknown".
         if (version.empty() || version == "unknown") {
@@ -139,7 +141,7 @@ public:
             return;
         }
 
-        auto& sdk = ZWOEFWSDKWrapper::instance();
+        auto& sdk = sdk_;
         if (connected) {
             int resolved_id = resolve_wheel_id_locked();
             sdk.open_wheel(resolved_id);
@@ -209,7 +211,7 @@ public:
         if (!wheel_id_.has_value()) {
             throw AlpacaException("Filter wheel ID not set", AlpacaError::NotConnected);
         }
-        return ZWOEFWSDKWrapper::instance().get_position(wheel_id_.value());
+        return sdk_.get_position(wheel_id_.value());
     }
 
     void set_position(int position) override {
@@ -235,7 +237,7 @@ public:
         if (position >= wheel_info_.slot_count) {
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
-        ZWOEFWSDKWrapper::instance().set_position(wheel_id_.value(), position);
+        sdk_.set_position(wheel_id_.value(), position);
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -281,7 +283,7 @@ private:
 
     int resolve_wheel_id_locked() {
         if (wheel_index_.has_value()) {
-            auto wheels = ZWOEFWSDKWrapper::instance().enumerate_wheels();
+            auto wheels = sdk_.enumerate_wheels();
             if (wheels.empty()) {
                 ALPACA_LOG_WARN("ZWO", "No ZWO EFW wheels detected by SDK");
                 throw AlpacaException("No ZWO EFW wheels detected", AlpacaError::NotConnected);
@@ -309,7 +311,7 @@ private:
 
     void refresh_wheel_info_locked(int wheel_id) {
         ZWOEFWInfo info;
-        if (ZWOEFWSDKWrapper::instance().get_wheel_info_by_id(wheel_id, info)) {
+        if (sdk_.get_wheel_info_by_id(wheel_id, info)) {
             wheel_info_ = info;
             wheel_info_valid_ = true;
             normalize_slot_data_locked();
@@ -383,6 +385,7 @@ private:
         }
     }
 
+    ZWOEFWSDK& sdk_;
     int device_number_;
     std::optional<int> wheel_id_;
     std::optional<int> wheel_index_;
@@ -395,12 +398,21 @@ private:
     mutable std::mutex mutex_;
 };
 
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number, int wheel_id, ZWOEFWSDK& sdk) {
+    return std::make_unique<ZWOEFWFilterWheelDriver>(device_number, wheel_id, std::nullopt, sdk);
+}
+
+std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index,
+                                                                       ZWOEFWSDK& sdk) {
+    return std::make_unique<ZWOEFWFilterWheelDriver>(device_number, std::nullopt, wheel_index, sdk);
+}
+
 std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel(int device_number, int wheel_id) {
-    return std::make_unique<ZWOEFWFilterWheelDriver>(device_number, wheel_id, std::nullopt);
+    return create_zwo_efw_filterwheel(device_number, wheel_id, ZWOEFWSDKWrapper::instance());
 }
 
 std::unique_ptr<FilterWheelDriver> create_zwo_efw_filterwheel_by_index(int device_number, int wheel_index) {
-    return std::make_unique<ZWOEFWFilterWheelDriver>(device_number, std::nullopt, wheel_index);
+    return create_zwo_efw_filterwheel_by_index(device_number, wheel_index, ZWOEFWSDKWrapper::instance());
 }
 
 } // namespace alpacacore::vendor::zwo
