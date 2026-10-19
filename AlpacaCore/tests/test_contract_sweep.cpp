@@ -103,6 +103,12 @@
 #include "fake_gemini_focuser.h"
 #include "fake_gemini_pdh.h"
 #endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
+
+#include "fake_astroasis_hid.h"
+#include "locked_astroasis_hid_transport.h"
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
@@ -1143,6 +1149,41 @@ Tier2Host tier2_host_ioptron_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+// FakeHidTransport behind the Locked decorator, over the by-path factory's driver. The fake answers every
+// exchange at once, so the handshake cannot be held open.
+Tier2Host tier2_host_astroasis_focuser() {
+    Tier2Host h{"astroasis_focuser",
+                "astroasis",
+                "focuser",
+                "fake_astroasis_hid.h",
+                DeviceType::Focuser,
+                "astroasis_focuser",
+                {},
+                false,
+                {},
+                ""};
+    h.connecting_unobservable =
+        "FakeHidTransport answers the handshake in-process with no delay knob (fake_astroasis_hid.h write(), "
+        "astroasis_protocol_wrapper.cpp connect())";
+    auto make = [](bool dead) {
+        auto state = std::make_shared<alpacacore::test::FakeHidState>();
+        state->dead = dead;
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::astroasis::create_astroasis_focuser(
+            0, "/dev/hidraw-fake",
+            std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+                std::make_unique<alpacacore::test::FakeHidTransport>(state)));
+        hosted.fake = state;
+        return hosted;
+    };
+    h.connectable = [make](bool) { return make(false); };
+    // Reads time out, as a pulled cable does: the handshake gets no reply and connect fails.
+    h.failing = [make]() { return make(true); };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_GEMINI
 // FakeGeminiFocuser over a pty; its handshake delay is the hold knob that makes Connecting
 // deterministic (recipe of test_gemini_focuser.cpp).
@@ -1702,6 +1743,11 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_GEMINI(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#define CS2_ASTROASIS(X) X(astroasis_focuser, NPR)
+#else
+#define CS2_ASTROASIS(X)
+#endif
 #ifdef ALPACACORE_ENABLE_QHY
 #define CS2_QHY(X) X(qhy_camera, CAM) X(qhy_filterwheel, PRB) X(qhy_focuser, NPR)
 #else
@@ -1749,6 +1795,7 @@ Tier2Host tier2_host_wandererastro_switch() {
     CS2_ONSTEP(X) \
     CS2_SKYWATCHER(X) \
     CS2_IOPTRON(X) \
+    CS2_ASTROASIS(X) \
     CS2_GEMINI(X) \
     CS2_QHY(X) \
     CS2_TOUPTEK(X) \
@@ -1856,6 +1903,9 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
     CS2_ENABLED("ioptron")
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+    CS2_ENABLED("astroasis")
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
     CS2_ENABLED("gemini")

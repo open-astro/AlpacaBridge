@@ -11,48 +11,68 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the Astroasis Oasis
-// Focuser (issue #101). This registration does not use the HID transport fake; it runs the
-// hidapi-backed protocol wrapper and connects against the deliberately-nonexistent
-// "/dev/hidraw-alpacabridge-absent" (not the unit tests' "/dev/hidraw0",
-// which can exist on a dev box and would risk hid_open_path matching an
-// unrelated HID device -- hid_open_path does not check VID:PID). Every
-// connect fails fast at that open, which still storms the AsyncConnectable
-// machinery and the failure-path cleanup; this test never exercises the
-// real connect path, regardless of what hardware is attached.
+// Focuser (issue #101). The lifecycle and destruction cases run the real driver and
+// protocol wrapper over FakeHidTransport behind LockedAstroasisHidTransport, so
+// connects succeed and the storm reaches the handshake, the state poll and the
+// operate calls, not just the connect-failure path (issue #606, #1380). The
+// transport is injected, so no case here opens a hidraw node.
 //
-// The file does touch the USB bus, though: the enumeration-vs-connect case at
-// the bottom calls enumerate_astroasis_focusers() for real, which is a
-// read-only udev/libusb scan for VID:PID 338F:A0F0. It opens nothing and
-// commands nothing, on any device.
+// The enumeration-vs-connect case at the bottom stays on the real hidapi-backed
+// wrapper: it connects to the deliberately-nonexistent
+// "/dev/hidraw-alpacabridge-absent" (not the unit tests' "/dev/hidraw0", which
+// can exist on a dev box and would risk hid_open_path matching an unrelated HID
+// device -- hid_open_path does not check VID:PID), and it calls
+// enumerate_astroasis_focusers() for real, which is a read-only udev/libusb scan
+// for VID:PID 338F:A0F0. It opens nothing and commands nothing, on any device.
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
 
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_astroasis_hid.h"
+#include "locked_astroasis_hid_transport.h"
 
 using alpacacore::AlpacaDriver;
 
+namespace {
+
+// The driver over the shared fake, serialised the way hidapi serialises its calls.
+std::unique_ptr<alpacacore::FocuserDriver> make_locked_fake_focuser(
+    const std::shared_ptr<alpacacore::test::FakeHidState>& state) {
+    return alpacacore::vendor::astroasis::create_astroasis_focuser(
+        0, "/dev/hidraw-fake",
+        std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+            std::make_unique<alpacacore::test::FakeHidTransport>(state)));
+}
+
+}  // namespace
+
 TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[astroasis][focuser][stress]") {
-    auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent");
+    auto state = std::make_shared<alpacacore::test::FakeHidState>();
+    auto driver = make_locked_fake_focuser(state);
 
     // open-astro#326: StressCallGuard replaces the local call() lambda. Same
     // per-call isolation, but it now COUNTS what it swallows, so an unexpected
     // throw fails the case instead of being discarded silently.
-    alpacacore::test::StressCallGuard guard;
+    // NotConnected while a lifecycle thread has the driver down; step size and temperature
+    // compensation answer NotImplemented (PropertyNotImplemented == 0x400), the Oasis having neither.
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::NotImplemented});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-        // Every one of these throws NotConnected on this sentinel path,
-        // every time (the storm never actually connects) -- the harness
-        // only swallows the exception from the WHOLE callback per call, so
-        // without individual catches here the first throw (get_is_moving)
-        // would short-circuit the rest and every other locked getter/setter
-        // below would go completely unexercised, not just unconnected.
+        // Any of these throws NotConnected while a lifecycle thread has the
+        // driver disconnected -- the harness only swallows the exception from
+        // the WHOLE callback per call, so without individual catches here the
+        // first throw (get_is_moving) would short-circuit the rest and every
+        // other locked getter/setter below would go unexercised.
         guard([&] { static_cast<void>(focuser.get_is_moving()); });
         guard([&] { static_cast<void>(focuser.get_position()); });
         guard([&] { static_cast<void>(focuser.get_max_step()); });
@@ -60,20 +80,25 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
         guard([&] { static_cast<void>(focuser.get_temperature()); });
         guard([&] { static_cast<void>(focuser.get_step_size()); });
         guard([&] { focuser.set_temp_comp(true); });
-        guard([&] { focuser.move(1234); });
+        guard([&] { focuser.move(2000); });
         guard([&] { focuser.halt(); });
     });
 
-    // Still alive and coherent after the storm. Unlike the SVBONY/ZWO
-    // fail-fast cases, Connected can only be false here: the sentinel path
-    // never resolves to a real HID node, so no connect in the storm ever
-    // succeeds.
-    CHECK(driver->get_connected() == false);
     // open-astro#326: settle_connected() rather than a bare set_connected():
     // right after a storm the last async task may still be in flight, so a
     // single sync disconnect can legitimately no-op against the pending-
     // disconnect machinery and a bare CHECK would fail on a correct driver.
     CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    // The storm got past the connect-failure path: the fake opened, and the
+    // handshake and state poll reached the wire. Read under the fake's lock.
+    int opens = 0;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        opens = state->opens;
+    }
+    CHECK(opens > 0);
+    CHECK(state->transactions() > 0);
 
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
@@ -81,8 +106,9 @@ TEST_CASE("Astroasis focuser - concurrent connect/disconnect/operate stress", "[
 }
 
 TEST_CASE("Astroasis focuser - destruction races an in-flight connect", "[astroasis][focuser][stress]") {
+    // One fresh fake per iteration; the driver's transport owns a reference to it, so it dies with the driver.
     alpacacore::test::run_destruction_during_connect_stress(
-        []() { return alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent"); });
+        []() { return make_locked_fake_focuser(std::make_shared<alpacacore::test::FakeHidState>()); });
 }
 
 // enumerate_astroasis_focusers() (the by-index factory, on an HTTP request
