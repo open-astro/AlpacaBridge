@@ -191,50 +191,40 @@ TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a bod
     alpacacore::test::FakeTaskClock clock;
     auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
                                                               std::nullopt, true, clock);
-    // Only the first body blocks; the second passes the hook at once.
-    Gate gate;
-    std::atomic<int> hook_calls{0};
-    ioptron::set_clock_sync_hook_for_testing(*driver, [&] {
-        if (hook_calls.fetch_add(1) == 0) {
-            gate.block();
-        }
-    });
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // The first body's first site command is in flight (reply held) when the second start lands.
+    mount.hold_next_reply(std::chrono::milliseconds(2500));
     clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(gate.wait_entered());
-    const int sla_before = mount.count(":SLA");
-    const int slo_before = mount.count(":SLO");
-    const int sut_before = mount.count(":SUT");
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (mount.count(":SLA") < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(mount.count(":SLA") == 1);
 
-    // The second start must return while the first body is still blocked (no join).
+    // The second start must return while the first body is still in its held transaction (no join).
     std::promise<void> started;
     auto started_future = started.get_future();
     std::thread starter([&] {
         ioptron::start_clock_sync_for_testing(*driver);
         started.set_value();
     });
-    const bool returned = started_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
-    if (!returned) {
-        gate.release();  // do not hang the suite when the start joins
-    }
-    REQUIRE(returned);
+    const bool returned = started_future.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
     starter.join();
-    CHECK_FALSE(gate.finished());
+    REQUIRE(returned);
 
-    // Release the first body: it sees it was superseded and sends nothing.
-    gate.release();
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the second body's start delay
+    // The second body runs its start delay and sends its commands; the first, once its reply lands,
+    // sees it was superseded and sends nothing more.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     clock.advance(std::chrono::milliseconds(250));
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (mount.count(":SUT") <= sut_before && std::chrono::steady_clock::now() < deadline) {
+    deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (mount.count(":SUT") < 1 && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     driver->set_connected(false);  // joins both bodies
-    CHECK(gate.finished());
-    CHECK(mount.count(":SLA") == sla_before + 1);
-    CHECK(mount.count(":SLO") == slo_before + 1);
-    CHECK(mount.count(":SUT") == sut_before + 1);
+    CHECK(mount.count(":SLA") == 2);
+    CHECK(mount.count(":SLO") == 1);
+    CHECK(mount.count(":SUT") == 1);
 }
 
 #endif  // _WIN32
