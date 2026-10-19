@@ -23,6 +23,7 @@
 #include <variant>
 
 #include "catch2_compat.h"
+#include "fake_zwo_caa_sdk.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {
@@ -36,76 +37,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-// Scripted CAA SDK: one rotator (id 7), single-threaded tests only. `degree` is
-// the logical (reverse-applied) angle CAAGetDegree() reports, as in the driver.
-class FakeCAASDK final : public alpacacore::vendor::zwo::ZWOCAASDK {
-public:
-    using Info = alpacacore::vendor::zwo::ZWOCAARotatorInfo;
-
-    int id{7};
-    std::string serial{"CAA-SN-1"};
-    double degree{0.0};
-    double max_degree{360.0};
-    bool reverse{false};
-    bool fail_info{false};
-    int open_calls{0};
-    int close_calls{0};
-    double last_move_absolute{-1.0};
-    double last_move_mechanical{-1.0};
-    int motion_calls{0};
-    int degree_calls{0};
-    int reverse_calls{0};
-    bool fail_reads{false};
-    bool moving{false};
-
-    std::vector<Info> enumerate_rotators() override { return {Info{id, "CAA", max_degree}}; }
-    bool get_rotator_info_by_id(int rotator_id, Info& info) override {
-        if (fail_info || rotator_id != id) {
-            return false;
-        }
-        info = Info{id, "CAA", max_degree};
-        return true;
-    }
-    bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
-    void open_rotator(int) override { ++open_calls; }
-    void close_rotator(int) override { ++close_calls; }
-    alpacacore::vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override {
-        ++motion_calls;
-        if (fail_reads) {
-            throw std::runtime_error("link down");
-        }
-        return {moving, false};
-    }
-    double get_degree(int) override {
-        ++degree_calls;
-        if (fail_reads) {
-            throw std::runtime_error("link down");
-        }
-        return degree;
-    }
-    void move_relative(int, double angle) override { degree += angle; }
-    void move_absolute(int, double angle) override {
-        last_move_absolute = angle;
-        degree = angle;
-    }
-    void move_mechanical(int, double angle) override {
-        last_move_mechanical = angle;
-        degree = reverse ? 360.0 - angle : angle;
-    }
-    void stop(int) override { moving = false; }
-    void sync_degree(int, double angle) override { degree = angle; }
-    double get_max_degree(int) override { return max_degree; }
-    double get_temperature(int) override { return 20.0; }
-    bool get_reverse(int) override {
-        ++reverse_calls;
-        return reverse;
-    }
-    void set_reverse(int, bool value) override { reverse = value; }
-    std::string get_serial_number(int) override { return serial; }
-    std::string get_firmware_version(int) override { return "1.0"; }
-    std::string get_rotator_type(int) override { return "CAA"; }
-    std::string get_sdk_version() override { return "1, 7, 0, 0"; }
-};
+using FakeCAASDK = alpacacore::test::FakeZWOCAASDK;
 
 } // namespace
 
@@ -188,8 +120,8 @@ TEST_CASE("ZWO CAA Rotator Driver - Unique IDs", "[zwo][rotator][unit]") {
 
 // Falsified by: zwo_rotator_driver.cpp get_step_size() dropping its
 // ensure_connected() call, which would throw PropertyNotImplemented while
-// disconnected instead of NotConnected. (No connected CAA fake exists, so the
-// PropertyNotImplemented-when-connected half is code-reviewed only.)
+// disconnected instead of NotConnected. (Only the disconnected half is pinned
+// here; the PropertyNotImplemented-when-connected half has no case.)
 TEST_CASE("ZWO CAA Rotator Driver - StepSize checks the connection first", "[zwo][rotator][unit]") {
     auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator_by_index(0, 0);
     require_alpaca_error([&]() { (void)driver->get_step_size(); }, alpacacore::AlpacaError::NotConnected);
