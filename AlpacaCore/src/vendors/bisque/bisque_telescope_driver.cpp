@@ -1248,14 +1248,18 @@ private:
             return true;
         }
         bool ask_slew = false;
+        util::StateSnapshot<PolledFrame>::Token token;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost_ || stopped()) {
                 return false;
             }
             ask_slew = slew_poll_due_locked();
+            // Taken under the same mutex_ hold that decided ask_slew: a write (a retarget, an abort) that lands
+            // after this point is newer than the token and drops the publish, and one before it is already in
+            // the state slew_poll_due_locked() read.
+            token = snapshot_.begin_poll();
         }
-        const auto token = snapshot_.begin_poll();
         // The completion flag is read BEFORE the position, so a frame that follows "complete" carries a position
         // measured after the stop.
         bool slew_complete = false;
@@ -1398,7 +1402,7 @@ private:
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
-    // (open-astro#1274). The gate asks TheSkyX itself (a failed query is off) and writes the answer through to the
+    // (open-astro#1274). The gate asks TheSkyX itself (a failed query falls back to the frame's value) and writes the answer through to the
     // snapshot, so the Tracking getter agrees with it at once; it does not read the frame, which can be a poll
     // period old and would refuse a slew right after the client switched Tracking on.
     // A retarget of this driver's own slew still in flight is not refused: the
@@ -1447,7 +1451,9 @@ private:
             });
             return tracking;
         } catch (...) {
-            return false;
+            // A failed read keeps what the Tracking getter would answer: the frame's last value.
+            const auto held = snapshot_.read();
+            return held && held->value.tracking_known && held->value.tracking;
         }
     }
 

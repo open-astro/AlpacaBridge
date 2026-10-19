@@ -50,6 +50,8 @@ public:
     std::atomic<int> park_polls_needed{0};
     std::atomic<int> slew_polls_needed{0};
     std::atomic<int> fail_slew_polls{0};
+    /// While > 0, every IsTracking query answers a TheSkyX error (and the count drops by one).
+    std::atomic<int> fail_tracking_reads{0};
 
     /// What IsTracking answers (TheSkyX reports the tracking rate; 1 is on).
     std::atomic<bool> tracking{true};
@@ -134,6 +136,10 @@ private:
                 }
             }
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
+        }
+        if (has(command, "IsTracking") && fail_tracking_reads.load() > 0) {
+            --fail_tracking_reads;
+            return "|No error. Error = 1.IsTracking unavailable#";
         }
         if (has(command, "IsTracking")) return tracking ? "|No error. Error = 0.1#" : "|No error. Error = 0.0#";
         return "|No error. Error = 0.OK#";

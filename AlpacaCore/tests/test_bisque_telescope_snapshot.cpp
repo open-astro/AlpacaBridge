@@ -315,3 +315,15 @@ TEST_CASE("Bisque snapshot - a reply clears a latched fault without a reconnect"
     CHECK(rig.driver->get_link_fault().empty());
     CHECK(rig.driver->get_right_ascension() == 6.5);
 }
+
+TEST_CASE("Bisque snapshot - the slew Tracking gate falls back to the frame when the live read fails",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    REQUIRE(rig.poll());
+    REQUIRE(rig.driver->get_tracking());
+    rig.mount.fail_tracking_reads = 1;
+    // The live IsTracking read errors; the frame says Tracking is on, as the Tracking getter does, so no refusal.
+    CHECK_NOTHROW(rig.driver->slew_to_coordinates_async(12.0, 10.0));
+    CHECK(rig.mount.fail_tracking_reads.load() == 0);
+    CHECK(rig.mount.slew_commands.load() == 1);
+}
