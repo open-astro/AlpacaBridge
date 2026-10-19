@@ -1191,7 +1191,8 @@ private:
     // Transient-failure recovery (see poll_exposure_status): mutable
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
-    // See wait_for_usb2_download_settle().
+    // See wait_for_usb2_download_settle(). start_exposure blocks for up to this long, and ConformU
+    // times StartExposure against its 1 s initiator target, so keep it well under 1 s.
     static constexpr std::chrono::milliseconds kUsb2PostDownloadSettle{600};
     static constexpr std::chrono::duration<double> kUsb2SettleMinExposure{3.0};
     static constexpr std::int64_t kNoDownload = std::numeric_limits<std::int64_t>::min();

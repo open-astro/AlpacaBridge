@@ -63,9 +63,10 @@ public:
     // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
     // inside ~0.5 s of the previous download (measured: 5 s and 10 s fail at 0.3-0.45 s, clean at
     // 0.5 s; 1-3 s never failed). Set a clock to model it on a camera whose is_usb3 is false: such a
-    // start reports Failed from then on. The fake fails the whole 0-0.5 s window, harsher than the
-    // rig, where a start below 0.3 s joins a frame the camera began itself. USB 3.0 cameras, short
-    // exposures, and any fake without a clock keep the plain behaviour.
+    // start reports Failed at once, where the camera reports it only at the end of the exposure. The
+    // fake also fails the whole 0-0.5 s window, harsher than the rig, where a start below 0.3 s joins
+    // a frame the camera began itself. USB 3.0 cameras, short exposures, and any fake without a clock
+    // keep the plain behaviour.
     const util::TaskClock* usb2_settle_clock{nullptr};
     static constexpr std::chrono::milliseconds kUsb2FailWindow{500};
     static constexpr long kUsb2FailMinExposureUs{3'000'000};
