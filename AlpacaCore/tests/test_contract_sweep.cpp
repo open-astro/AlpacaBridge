@@ -120,6 +120,12 @@
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
 #endif
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
+
+#include "fake_touptek_powerbox_sdk.h"
+#include "locked_touptek_powerbox_sdk.h"
+#endif
 #ifdef ALPACACORE_ENABLE_SVBONY
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 
@@ -1345,6 +1351,45 @@ Tier2Host tier2_host_altair_camera() {
 }
 #endif
 
+#if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
+// The StellaVita power box: open_delay holds the connect open, fail_open fails it. The fake and its
+// Locked decorator live in one holder, because the driver keeps a reference to the box.
+struct StellaVitaHold {
+    alpacacore::test::FakeTouptekPowerboxSDK fake;
+    alpacacore::test::LockedTouptekPowerboxSDK box{fake};
+};
+
+Tier2Host tier2_host_touptek_switch() {
+    Tier2Host h{"touptek_switch",
+                "touptek",
+                "switch",
+                "fake_touptek_powerbox_sdk.h",
+                DeviceType::Switch,
+                "touptek_switch",
+                {},
+                true,
+                {},
+                ""};
+    h.connectable = [](bool hold) {
+        auto s = std::make_shared<StellaVitaHold>();
+        if (hold) s->fake.open_delay = kHold;
+        return host_over(s, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_switch(
+                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
+        });
+    };
+    h.failing = []() {
+        auto s = std::make_shared<StellaVitaHold>();
+        s->fake.fail_open = true;
+        return host_over(s, [](StellaVitaHold& s) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::touptek::create_touptek_switch(
+                0, alpacacore::vendor::touptek::default_stellavita_config(), s.box);
+        });
+    };
+    return h;
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 Tier2Host tier2_host_playerone_camera() {
     Tier2Host h{"playerone_camera",
@@ -1618,8 +1663,13 @@ Tier2Host tier2_host_wandererastro_switch() {
 #else
 #define CS2_QHY(X)
 #endif
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+#define CS2_TOUPTEK_STELLAVITA(X) X(touptek_switch, PRB)
+#else
+#define CS2_TOUPTEK_STELLAVITA(X)
+#endif
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-#define CS2_TOUPTEK(X) X(touptek_camera, CAM)
+#define CS2_TOUPTEK(X) X(touptek_camera, CAM) CS2_TOUPTEK_STELLAVITA(X)
 #else
 #define CS2_TOUPTEK(X)
 #endif
@@ -1794,6 +1844,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
     using Row = std::tuple<std::string, std::string, std::string>;
     std::multiset<Row> from_roster;
     for (const auto& row : kFakeConnectableRoster) {
+#ifndef ALPACACORE_TOUPTEK_STELLAVITA
+        // The StellaVita switch is compiled only with libgpiod, so a ToupTek build without it has no such host.
+        if (std::string(row.fake_header) == "fake_touptek_powerbox_sdk.h") continue;
+#endif
         if (enabled.count(row.vendor) != 0) from_roster.emplace(row.vendor, row.device_type, row.fake_header);
     }
     std::multiset<Row> from_hosts;

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/vendor/touptek/touptek_powerbox_sdk.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -19,25 +21,6 @@
 #include <vector>
 
 namespace alpacacore::vendor::touptek {
-
-// One 12V DC output of the ToupTek StellaVita power box.
-//
-// The StellaVita is a Raspberry Pi CM4 (BCM2711) controller. Four DC barrel
-// jacks are wired to GPIOs on the main 40-pin bank (/dev/gpiochip0,
-// pinctrl-bcm2711) where the libgpiod line offset equals the BCM GPIO number:
-// Port 1 -> 18, Port 2 -> 10, Port 3 -> 17, Port 4 -> 4. The board's
-// config.txt drives all four high at boot (gpio=...=op,dh,pu), so the ports are
-// energised on power-up; the driver preserves that on connect.
-//
-// BCM GPIO 9 and 11 also exist on the header but power the on-board Cypress USB
-// hub — they are deliberately NOT exposed as switch channels, because cutting
-// them would drop every USB device (cameras, focusers) attached to the board.
-struct StellaVitaPortConfig {
-    std::string name;
-    std::uint32_t gpio_line;   // libgpiod offset on gpio_chip_path (== BCM GPIO on BCM2711)
-    bool writable = true;      // false makes a port read-only (always-on)
-    bool pwm_enabled = false;  // soft-PWM dimming (0-100% duty) instead of on/off
-};
 
 // libgpiod-backed controller for the StellaVita DC outputs.
 //
@@ -47,7 +30,7 @@ struct StellaVitaPortConfig {
 // iOptron iMate PowerBox and ZWO ASIAIR switch). Ports default to "on" so
 // connecting preserves the StellaVita's stock boot-high behaviour and never
 // cuts power to attached gear.
-class TouptekPowerboxWrapper {
+class TouptekPowerboxWrapper final : public TouptekPowerboxSDK {
 public:
     TouptekPowerboxWrapper(std::string gpio_chip_path, std::vector<StellaVitaPortConfig> ports,
                            std::uint32_t pwm_frequency_hz = 100);
@@ -58,20 +41,20 @@ public:
     TouptekPowerboxWrapper(TouptekPowerboxWrapper&&) = delete;
     TouptekPowerboxWrapper& operator=(TouptekPowerboxWrapper&&) = delete;
 
-    void open();
-    void close();
-    bool is_open() const;
+    void open() override;
+    void close() override;
+    bool is_open() const override;
 
-    std::size_t port_count() const;
-    const StellaVitaPortConfig& port_config(std::size_t index) const;
+    std::size_t port_count() const override;
+    StellaVitaPortConfig port_config(std::size_t index) const override;
 
     // Boolean port: value is 0 (off / GPIO low) or 1 (on / GPIO high).
     // PWM port: value is the duty-cycle percent in [0, 100].
-    int get_value(std::size_t index) const;
-    void set_value(std::size_t index, int value);
+    int get_value(std::size_t index) const override;
+    void set_value(std::size_t index, int value) override;
 
-    std::string gpio_chip_path() const;
-    std::uint32_t pwm_frequency_hz() const;
+    std::string gpio_chip_path() const override;
+    std::uint32_t pwm_frequency_hz() const override;
 
 private:
     class Impl;

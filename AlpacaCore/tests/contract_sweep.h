@@ -912,6 +912,8 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"playerone", "camera", "fake_playerone_sdk.h"},
     {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
+    // The StellaVita backend; the thermal switch has no fake.
+    {"touptek", "switch", "fake_touptek_powerbox_sdk.h"},
     {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
     {"svbony", "camera", "fake_svbony_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},

@@ -35,6 +35,12 @@
 #include "concurrency_stress.h"
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
+
+#include "fake_touptek_powerbox_sdk.h"
+#include "locked_touptek_powerbox_sdk.h"
+#endif
 
 using alpacacore::AlpacaDriver;
 using alpacacore::test::FakeToupTekSDK;
@@ -367,3 +373,40 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     CHECK(thermal_guard.unexpected_count() == 0);
     CHECK(thermal_guard.total_calls() > 0);
 }
+
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+// The StellaVita switch, connected: the fake power box opens, so the storm reaches get/set on live
+// ports instead of stopping at the connect-failure path. Wrapped in LockedTouptekPowerboxSDK so a
+// TSan report names the driver. (A ToupTek switch registration already exists for the thermal
+// switch; the gate keys on vendor and type, so this one is covered by this case alone.)
+TEST_CASE("ToupTek StellaVita switch - concurrent connect/disconnect/operate stress", "[touptek][switch][stress]") {
+    alpacacore::test::FakeTouptekPowerboxSDK fake;
+    alpacacore::test::LockedTouptekPowerboxSDK box(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
+        0, alpacacore::vendor::touptek::default_stellavita_config(), box);
+
+    // The set REPLACES the default {NotConnected}; a connected driver can only add NotConnected from a
+    // racing disconnect, which is already in it. No InvalidValue is expected: the ids and values are valid.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { sw.set_switch(1, false); });
+        guard([&] { sw.set_switch(1, true); });
+        guard([&] { static_cast<void>(sw.get_switch_value(2)); });
+        guard([&] { static_cast<void>(sw.get_device_state()); });
+    });
+
+    // Read before the settle below opens the device again: a nonzero count here means a connect
+    // really reached the power box during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.open_calls() > 0);
+    CHECK(alpacacore::test::settle_connected(*driver, true));
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls() >= fake.close_calls());
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+#endif

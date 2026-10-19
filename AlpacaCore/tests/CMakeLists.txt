@@ -233,6 +233,7 @@ if(TARGET alpacacore_touptek)
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_TOUPTEK_STELLAVITA)
         list(APPEND TEST_SOURCES test_touptek_switch.cpp)
+        list(APPEND TEST_SOURCES test_touptek_powerbox_seam.cpp)
     endif()
 endif()
 if(TARGET alpacacore_altair)
