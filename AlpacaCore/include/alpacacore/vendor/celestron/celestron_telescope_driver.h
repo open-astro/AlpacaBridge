@@ -45,6 +45,15 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
 /// `driver` must come from the factories above; anything else is ignored.
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seams for the status poll (decision 0010). `driver` must come from the factories above; anything else is
+/// ignored (poll_status_now_for_testing returns false).
+/// Pauses (true) or resumes the poll body's own ticks; a direct tick below still runs.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+/// One poll tick on the calling thread (a full frame). False when the connection is gone or lost.
+bool poll_status_now_for_testing(TelescopeDriver& driver);
+/// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_celestron_telescope_deferred(
