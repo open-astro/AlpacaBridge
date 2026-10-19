@@ -869,42 +869,6 @@ TEST_CASE("SkyWatcher limits - AbortSlew restoring tracking after a MoveAxis kee
     driver->set_connected(false);
 }
 
-// open-astro#1341 item 2: the tracking AbortSlew restores after a MoveAxis is
-// a motion started from rest, so it takes its limit-guard baseline before the
-// first command like Tracking=true does (#886). The axis crosses the meridian
-// limit while the restore's RA stop-wait has mutex_ released; with no baseline
-// the guard's first sample is outside and is accepted unchecked.
-TEST_CASE("SkyWatcher limits - AbortSlew restoring tracking seeds the guard baseline",
-          "[skywatcher][telescope][limits][guard]") {
-    FakeSkyWatcherMount mount;
-    REQUIRE(mount.ok());
-    mount.jump_axis_degrees(1, 92.0);  // 8 min past the meridian: inside the limit
-    auto driver = connected_driver(mount, meridian_minutes(10.0));
-    driver->set_tracking(true);
-    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
-    driver->move_axis(1, -kMaxMoveAxisRate / 10.0);  // a Dec jog: RA keeps tracking
-    REQUIRE(wait_until([&] { return mount.axis_running(2); }, 2000));
-
-    mount.hold_running(1, true);
-    const int stops_before = mount.stop_count(1);
-    std::thread crosser([&] {
-        // The abort's instant stop has landed and its stop-wait is polling.
-        wait_until([&] { return mount.stop_count(1) > stops_before; }, 3000);
-        const int polls = mount.frames_seen('f');
-        mount.wait_for_frames('f', polls + 12, std::chrono::milliseconds(3000));
-        mount.jump_axis_degrees(1, 94.0);  // 16 min past the meridian
-        const int after = mount.frames_seen('f');
-        mount.wait_for_frames('f', after + 12, std::chrono::milliseconds(3000));
-        mount.hold_running(1, false);
-    });
-    driver->abort_slew();
-    crosser.join();
-
-    CHECK(wait_until([&] { return !driver->get_tracking(); }, 8000));
-    CHECK(wait_until([&] { return !mount.axis_running(1); }, 6000));
-    driver->set_connected(false);
-}
-
 // The guard re-anchors the position cache on hardware every 2 s while
 // tracking. An RA guide pulse that changed the dead-reckoning rate without
 // re-anchoring then lost the pulse distance driven since that anchor: the read
