@@ -565,7 +565,7 @@ private:
 }  // namespace
 
 // Falsified by: locked_astroasis_hid_transport.h: write() and read() forward without the lock_guard.
-TEST_CASE("Astroasis Locked HID transport - concurrent write and read never overlap in the inner transport",
+TEST_CASE("Astroasis FakeHid Locked decorator - concurrent write and read never overlap in the inner transport",
           "[astroasis][focuser][unit]") {
     auto probe = std::make_shared<OverlapProbe>();
     alpacacore::test::LockedAstroasisHidTransport locked(std::make_unique<OverlapProbeTransport>(probe));
@@ -586,12 +586,17 @@ TEST_CASE("Astroasis Locked HID transport - concurrent write and read never over
     CHECK(probe->max_inside.load() == 1);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp: the path-only factory takes a fake or null transport instead of the
-// hidapi one.
+// Falsified by: astroasis_protocol_wrapper.cpp:136: HidapiTransport::open() returns true without a hidapi open.
 TEST_CASE("Astroasis Focuser Driver - by-path factory builds the hidapi transport", "[astroasis][focuser][unit]") {
-    // The sentinel is not a hidraw node, so only a real hidapi open can fail on it; a fake transport would connect.
+    // The sentinel is not a hidraw node, so only a real hidapi open fails on it with this message; a fake or
+    // mute transport would connect or fail later, in the handshake.
     auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent");
     REQUIRE_FALSE(driver->get_connected());
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("Failed to open Astroasis focuser HID device") != std::string::npos);
+    }
     CHECK_FALSE(driver->get_connected());
 }
