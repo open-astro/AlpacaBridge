@@ -1,6 +1,6 @@
 # Mount UTC offset
 
-Status: proposed
+Status: accepted
 
 ## Context
 
