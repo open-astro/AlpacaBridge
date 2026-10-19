@@ -1,0 +1,228 @@
+---
+applyTo: "AlpacaCore/src/**,AlpacaCore/include/**,AlpacaCore/tests/**,AlpacaHTTP/src/**"
+---
+
+## ASCOM contract rules shared by drivers
+
+Shared rules for every vendor, moved verbatim from `AGENTS.md`, which keeps the
+core rules and routes here. A rule that applies to a second vendor belongs in
+the matching shared file, not in a vendor file.
+
+### Telescope Park / MoveAxis(axis, 0) are asynchronous initiators (all drivers)
+
+ConformU 4.5 times `Park` (and every ITelescopeV4 initiator) against the 1 s STANDARD
+target and completes it by polling `AtPark`/`Slewing`. Never block through a park slew.
+The proven shape (SkyWatcher, then SynScan / Celestron in issue #208, the Celestron and SynScan flow now one `util::run_park_slew()`; Bisque pending on `fix/bisque-async-park`): snapshot the park target under the mutex, publish `slewing_cached_ = true` and a
+`parking_` flag, then run the slew + completion poll + tracking stop as a body in the driver's
+operation slot (`util::AsyncOperation`, see Threads & shutdown in [driver-lifecycle](driver-lifecycle.instructions.md): the slot owns the thread, the reaping and the cancellable `ctx.wait_for()` between polls). `AtPark` and
+`Slewing` flip in the same locked step (the public `Slewing` getter returns true while
+`parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
+Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
+stops the axes and cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
+pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
+still throws instead of silently never reaching `AtPark`. Drivers with native park commands
+that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
+on the iOptron HAE29C with ConformU 4.5.0 (Park 11.5 s of motion, initiator well under 1 s).
+`MoveAxis(axis, 0)` must likewise send the stop and return; only add a background
+stop-completion task (SkyWatcher) when the mount has a deceleration ramp longer than the
+target. Hardware-free coverage lives in `tests/test_<vendor>_async_park.cpp` over
+`FakeMountServer`: the fake must answer the alignment/position probes the driver gates on
+(Celestron `J` → `1#`, SynScan/NexStar `e` → a parseable pair with Dec < 90°), or the park
+is refused before the GOTO is ever sent.
+
+### Sky-Watcher MoveAxis is sky-referenced (issue #297)
+
+On the Sky-Watcher direct driver a positive `MoveAxis` rate on axis 0 moves the tube east (the reported RightAscension rises) and a positive rate on axis 1 moves it north (the reported Declination rises), in both hemispheres and on both pier sides, as `indi-eqmod` does. The hemisphere and Dec branch come from `sky_move_axis_rate_locked()`, which reuses `ra_axis_sign_locked()` and the pulse-guide Dec rule. A client needs no reverse toggle: NINA's "Primary Reversed" stays off. Goto, tracking and guiding are unchanged. Tests: `test_skywatcher_pointing.cpp`, `[moveaxis]`.
+
+### TargetRightAscension and TargetDeclination are independent (all telescope drivers)
+
+ASCOM treats the two target properties as separate: each getter must refuse a read
+until **that property itself** has been written. The current Master Interfaces
+documentation (revision 1.0.27) specifies `InvalidOperation`; this is a documentation
+revision, not a new telescope interface version. The direct CGX backend follows it.
+The existing Celestron NexStar, SynScan, iOptron, OnStep, ZWO, Bisque and SkyWatcher
+backends and their tests still use `ValueNotSet`, a known migration gap not repaired
+by the CGX PR. Do not copy that legacy error into new implementations.
+Every driver therefore carries `target_ra_set_`
+**and** `target_dec_set_`, each set only by its own setter. One flag for both is a
+review-blocking regression — it was the original shape in all seven drivers and took two
+passes to remove (#304, then #346).
+
+Protect each target value and flag with the driver's mutex. The three target-consuming
+operations snapshot both values and flags while holding it, then release it before calling
+the coordinate operation that acquires the same non-recursive mutex.
+
+The paths that legitimately define both coordinates at once set or clear both: the slew
+and sync *coordinate* forms, the post-slew position-override and arrival reads, and the
+connect/disconnect resets. A pulse-guide position estimate is internal state, not either
+public target property (SynScan keeps it separately). `SlewToTarget`,
+`SlewToTargetAsync` and `SyncToTarget` require the pair when supported. CGX reports
+`InvalidOperation` for unset targets; the legacy backends retain `ValueNotSet` pending
+migration — Celestron and SynScan were both missing that check on the
+synchronous form, which one shared flag hid, since any target write made it pass.
+
+Hardware-free coverage per driver: while connected, read each property before any write
+and expect the backend's error above; write RA alone and check Dec still throws while RA reads
+back, confirm supported `*ToTarget` calls refuse the half-set pair with the same error,
+then write Dec and expect both. A driver whose setters write to the mount (iOptron) needs
+the fake rather than a disconnected instance. Disconnected getters still return
+`NotConnected` first.
+
+### Equatorial slews require Tracking (all telescope drivers)
+
+ITelescopeV4 raises `InvalidOperation` for `SlewToCoordinates`, `SlewToCoordinatesAsync`, `SlewToTarget` and
+`SlewToTargetAsync` while `Tracking` is false (#775 SynScan, #1274 every other telescope
+driver). The check runs after argument validation (`InvalidValue`) and the parked check, and before the driver cancels
+or sends anything, so a refused slew leaves a park, goto or pulse guide in flight running. Read Tracking the way the
+driver's own `Tracking` getter does, a commanded `Tracking=false` still in flight included, with two exceptions that do
+not count as off: a motion state the getter cannot tell apart from Tracking off (iOptron `:GLS` reports a GOTO,
+guiding or a meridian flip in place of tracking, so its guard refuses only a stopped mount), and a retarget of the
+driver's own slew still in flight (ZWO `:GU`, Bisque `IsTracking`: nothing says what they report during a GOTO).
+Syncs and Alt/Az slews are exempt. A driver test that slews turns Tracking on first; do not leave it off and assert
+only that the slew threw.
+
+### ASCOM exception vocabulary (pick the right one — ConformU checks it)
+
+| Throw | When |
+|---|---|
+| `InvalidValue` | Bad argument / out-of-range id or index — **even while disconnected** (precedes the connection check). |
+| `NotConnected` | Any operational property/method called while disconnected. |
+| `PropertyNotImplemented` | A property the hardware genuinely lacks (e.g. `Offsets` list, `SubExposureDuration`). |
+| `MethodNotImplemented` | A method the hardware lacks (e.g. `PulseGuide` when `CanPulseGuide` is false). |
+| `ActionNotImplemented` | `Action()` called with a name the driver does not list in `SupportedActions` (0x40C, ASCOM's `ActionNotImplementedException`). An unsupported `CommandBlind`/`CommandBool`/`CommandString` is `MethodNotImplemented`, not this. |
+| `NotImplemented` | A generic unsupported action (e.g. `set_temp_comp(true)` with no temp-comp support) — never `DriverException` for "not supported". |
+| `InvalidOperation` | Valid call, wrong state (e.g. changing readout mode/geometry mid-exposure). |
+| `DriverException` | A genuine internal/driver failure only — not a stand-in for any of the above. |
+
+All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not the status.
+
+A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
+
+### Camera ROI alignment (all camera vendors)
+
+Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:
+**keep the client-requested values for the Alpaca interface, align down for the SDK
+call, and pad outputs if needed** — ConformU's read-back checks must see the requested
+geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / height%2
+after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
+sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
+odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
+
+### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
+
+A Switch that drives a camera's dew heater or fan (ZWO Dew Heater, ToupTek thermal,
+Player One thermal) binds through `util::choose_thermal_camera()`
+(`alpacacore/util/thermal_camera_choice.h`), never a bare position in the
+enumeration. A bare index bound the 5.0.0~beta4 rig's dew heater to an ASI290MM Mini
+(no heater) at index 0 beside the ASI2600MM Pro at index 1, and the refusal named
+neither camera. The rules:
+
+- **`cameraIndex` -1 is Auto**: the one attached camera with the controls; none or
+  several is a refusal that lists them. A `serialNumber` (ZWO, Player One) binds that
+  camera only and never falls back to the index. A pinned index binds that camera
+  whatever the listing says, so the driver's own probe decides (the ToupTek tail light
+  has no flag), and an empty probe throws `util::thermal_capability_refusal()`, which
+  names the camera to pick. Saved switches keep their index.
+- **One listing per vendor**, `list_<vendor>_*_cameras()`, used by the driver's connect
+  AND by `GET /management/v1/thermalcameras`, through
+  `DeviceCatalog::add_thermal_camera_lister()` so the router includes no vendor header
+  for it. A listing that must open cameras (ZWO controls and serial, Player One
+  heater/fan) opens through the vendor's ref-counted wrapper and closes again.
+- **The web form is the `createThermalCameraPicker()` dropdown** (model in `format.js`,
+  `thermalCameraOptions`) and it always asks: nothing is preselected for a new switch,
+  cameras without the controls are disabled, the submit refuses until one is picked,
+  and Auto is not offered (a rig can carry a 2600MC, a 6200 and a 2400, all with
+  heaters, and a guess that follows a camera swap is the bug this replaced). Its select
+  has no `name`, so it never reaches `FormData`; the submit reads `picker.read()`. A new
+  camera-attached switch for another vendor reuses all three pieces.
+
+### FilterWheel semantics (all vendors)
+
+- **`Position == -1` IS the ASCOM "moving" sentinel.** SDKs that report `-1` while in
+  motion (ToupTek AFW) or a distinct moving state (Player One `PW_ERROR_IS_MOVING`)
+  map directly onto it — pass it through; don't invent a separate is-moving flag, and
+  never translate the SDK's moving-read into an exception on the read path.
+- **Names must be non-empty** — default `"Filter 1..N"`; names and focus offsets are
+  settable while disconnected.
+- **DeviceState includes operational fields only** (e.g. `Position`); omit `Connected`
+  for ConformU compatibility.
+
+### GPIO power-switch / soft-PWM drivers (general rules)
+
+All GPIO 12V power-port Switch drivers (ZWO ASIAIR Pro / Plus CM4 / Plus RK3568,
+ToupTek StellaVita, iOptron iMate, and any future board) share these rules; the vendor
+notes carry only the pin map and per-board deltas.
+
+- **libgpiod v2 only** (`libgpiod-dev (>= 2.0)`, `libgpiod3` runtime): one
+  `gpiod_line_request*` owns all lines together; values go through
+  `gpiod_line_request_set_value`. Never port back to the v1 per-line API. The daemon
+  user needs `gpio`-group access to the chip/char device via a udev rule.
+- **Boot-high preserve**: these boards drive the DC ports HIGH at boot
+  (`gpio=...=op,dh[,pu]`), so attached gear is powered before userspace runs. The
+  wrapper requests lines with an initial value of high and defaults its cached state
+  to "on" — connecting the driver must not glitch power.
+- **Never power-cycle on disconnect**: `close()` releases the lines without driving a
+  boolean line low; a PWM port first stops its worker and drives a defined steady
+  level (duty > 0 ⇒ high). Users who want a port off must set it off in the client
+  before disconnecting. Do NOT add a drive-low-on-close path without making it opt-in
+  config — it would silently flip the policy for everyone who upgrades. Documented
+  user-facing in [`AlpacaCore/PowerPorts.md`](../../AlpacaCore/PowerPorts.md).
+- **Userspace soft-PWM, per-port worker threads** (`sleep_until` bit-bang): hardware
+  or DMA PWM is board-specific and unavailable/unreachable on every board we ship, so
+  userspace toggling is the standard mechanism. Steady-state 0%/100% skips the
+  per-period syscall. Every line write checks the return code — on failure, log at
+  ERROR and set the per-port stop flag so the thread exits cleanly instead of looping
+  while the ASCOM API reports success. Two-phase shutdown: signal stop under the
+  mutex, join outside it, release/close back under it (the classic
+  join-under-the-same-mutex deadlock otherwise).
+  These per-port periodic workers are not operation-slot bodies; a cancellable one-shot
+  or polling body added to a GPIO driver uses the slot (Threads & shutdown in [driver-lifecycle](driver-lifecycle.instructions.md)).
+- **PWM frequency is the lever, not load type** — a flat panel's internal LED driver
+  smooths a too-fast chop into plain on/off (a panel that "won't dim" at 1 kHz dims
+  fine at 50 Hz); resistive dew heaters dim at any frequency; regulated gear
+  (cameras/mounts) stays on/off regardless. The default is **per-driver**, verified
+  against the stock firmware's actual value or on real hardware — never re-derived
+  from bench psychoacoustics: ASIAIR Pro/CM4 1 kHz, ASIAIR Plus RK3568 50 Hz, iMate
+  50 Hz, StellaVita 100 Hz.
+- **Read-only pass-through ports** (e.g. iMate DC3): writes throw `NotImplemented`
+  *before* the connection check, so the static capability holds while disconnected
+  and is unit-testable without hardware.
+
+### Platform 7 InterfaceVersion + DeviceState
+
+- Drivers advertise ASCOM Platform 7 interface versions: Camera 4 (ICameraV4),
+  Telescope 4, Focuser 4, Rotator 4, FilterWheel 3, Switch 3, CoverCalibrator 2 (ICoverCalibratorV2),
+  ObservingConditions 2.
+  Keep `get_interface_version()` and its unit-test assertion in sync when adding a driver.
+- **Do not** write a per-vendor `get_device_state()`. Each device base class
+  (`CameraDriver`, `TelescopeDriver`, …) implements it once, inline, building the
+  operational-property list by calling that device's own property getters inside a
+  `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
+  or any unwrapped vendor error — is omitted, never propagated) and
+  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. A disconnected
+  driver returns the empty list with no `TimeStamp` (each base class checks `get_connected()`
+  first). Using the
+  same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
+  what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
+- DeviceState is **not an atomic snapshot**: each getter locks the driver mutex
+  separately, so e.g. `RightAscension` and `Slewing` can straddle a state change, and a
+  device dropping mid-call yields a partially populated response. The old per-vendor
+  overrides read everything under one mutex. ASCOM doesn't require atomicity and
+  ConformU only checks DeviceState ↔ GET consistency, so don't "fix" this by adding a
+  snapshot lock — but don't build features that assume mutual consistency within one
+  DeviceState response either.
+- The base `get_device_state()` and `device_state_timestamp()` are **inline in the
+  headers on purpose**: an out-of-line virtual would make the device class's vtable a
+  "key function" emitted only in the core library, and the per-vendor static libraries
+  (linked before it) would fail to resolve `vtable for XDriver`. Keep them inline.
+- **Value types must match the ASCOM member type**: ConformU coerces each DeviceState
+  value to the member's declared type and treats a failure as "property not included"
+  (INFO, not an issue, so it hides in a passing log). `PercentCompleted` is a `short`; the
+  camera base emitted it as a double (`0.0`) for a year and every camera log carried the
+  INFO line. Emit integers for integer members (`CameraState`, `PercentCompleted`,
+  `Position`, …) and doubles only for double members.
+- ConformU is lenient about DeviceState contents (it does not require a fixed property
+  set or even a TimeStamp — the iOptron switch passed at ISwitchV3 with neither), but it
+  does flag values inconsistent with the individual GETs. The getter-based pattern above
+  satisfies it. Still, bumping any InterfaceVersion **requires a fresh ConformU V4 run on
+  real hardware** before release, since it switches ConformU to the stricter test suite.

@@ -26,7 +26,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   `get_connected()`** (QHY ConformU session, 2026-07). The `PUT /connected`
   handler synchronously waits for an async disconnect to finish before
   replying. `get_connected()` is not a valid completion signal for that wait:
-  per the [Handles/locks rule](../../AGENTS.md#driver-concurrency--lifecycle-read-before-writing-a-driver), `set_connected(false)` correctly clears
+  per the [Handles/locks rule](driver-lifecycle.instructions.md#driver-concurrency--lifecycle-read-before-writing-a-driver), `set_connected(false)` correctly clears
   `connected_` at the *start* of teardown (so a throwing close can't leave
   the driver looking half-connected), which means `get_connected()` can read
   `false` while the disconnect task is still running. A wait that polled

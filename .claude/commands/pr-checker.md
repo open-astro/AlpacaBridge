@@ -534,7 +534,7 @@ commits that landed mid-run, one line each.
 **Retrospective, one line per PR:** which bot findings were about code pushed earlier in the
 same loop (a fix that introduced the next finding), and what probe would have caught each
 before the push. If the answer repeats across PRs, the fix belongs in this skill's "Prove it
-before you push" list or in `AGENTS.md`, in the same session.
+before you push" list or in the matching shared topic file under `.github/instructions/`, in the same session.
 
 Then a single line naming anything the next session
 should know (e.g. an `update-branch` still running on a

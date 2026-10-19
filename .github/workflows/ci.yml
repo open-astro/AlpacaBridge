@@ -989,7 +989,7 @@ jobs:
         run: python3 scripts/check_stress_registration.py --self-test
 
       - name: Check [stress] coverage, and that neither stress tag is misplaced
-        # AGENTS.md requires a [stress] TEST_CASE for every driver exercised
+        # The ci-gates instructions require a [stress] TEST_CASE for every driver exercised
         # by the sanitizers-tsan job; this was previously enforced only by
         # code review. See scripts/check_stress_registration.py.
         run: python3 scripts/check_stress_registration.py

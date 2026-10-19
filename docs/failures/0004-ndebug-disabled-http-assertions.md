@@ -14,6 +14,6 @@ Use the always-on `EXPECT()` macro in `AlpacaHTTP/tests/test_assert.h`. It evalu
 
 ## Evidence
 
-- Rule: `AGENTS.md` (“AlpacaHTTP hand-rolled tests must not use assert”).
+- Rule: `.github/instructions/testing.instructions.md` (“AlpacaHTTP hand-rolled tests must not use assert”).
 - Guard implementation: `AlpacaHTTP/tests/test_assert.h`; representative test use: `AlpacaHTTP/tests/test_routing.cpp`.
 - Recurrence check: review or static search for `assert(` in first-party AlpacaHTTP tests; there is no dedicated automated lint gate for this rule yet.

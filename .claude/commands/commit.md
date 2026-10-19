@@ -36,7 +36,7 @@ For each changed file, briefly note what was modified. Group changes by category
 - **HTTP/Web UI** (AlpacaHTTP src, web/)
 - **Tests** (AlpacaCore/tests, AlpacaHTTP/tests)
 - **Build system** (CMakeLists.txt, debian/, build scripts)
-- **Documentation** (changelog.d/ fragment, SUPPORTED-DRIVERS.md, AGENTS.md, README)
+- **Documentation** (changelog.d/ fragment, SUPPORTED-DRIVERS.md, AGENTS.md, `.github/instructions/`, README)
 - **ConformU results** (AlpacaCore/conformu/)
 - **SDK files** (AlpacaCore/external/)
 
@@ -274,7 +274,7 @@ If changes span multiple logical units (e.g., driver code + ConformU results + d
 1. **Driver implementation** — driver code + protocol/SDK wrapper + tests + CMake
 2. **ConformU validation** — ConformU result files + SUPPORTED-DRIVERS.md updates
 3. **HTTP/Web UI integration** — router + web UI + routing tests
-4. **Documentation** — changelog.d/ fragment, AGENTS.md, SUPPORTED-DRIVERS.md
+4. **Documentation** — changelog.d/ fragment, AGENTS.md, `.github/instructions/`, SUPPORTED-DRIVERS.md
 5. **SDK addition** — external/ SDK files (often a large commit on its own)
 
 ## Step 7 — Write the commit message

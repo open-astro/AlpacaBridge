@@ -218,7 +218,7 @@ Review the branch contents and warn the user about anything that's missing:
 - [ ] **ConformU results**: If this is a driver PR, is an arm64 ConformU report included AND clean (verified in Step 1 — errors=0, issues=0, timing issues=0)?
 - [ ] **Changelog fragment**: Does the branch add `changelog.d/<branch-slug>.md` (and leave `CHANGELOG.md` alone), with categories that match the **Versioning policy** below for everything on this branch?
 - [ ] **SUPPORTED-DRIVERS.md**: If this adds or validates a driver, is the table updated?
-- [ ] **AGENTS.md**: Were lessons learned captured?
+- [ ] **Instructions**: Were lessons learned captured (shared topic file under `.github/instructions/`, or the vendor file)?
 - [ ] **AGPL license headers**: `check_docs_drift.py` check 9 fails CI on any first-party source file without the current header, so this is only a reminder to run it (the pre-flight does).
 - [ ] **SDK cleanup**: If SDK files were added under `external/`, have Windows/macOS/32-bit/demo files been removed?
 
@@ -378,7 +378,7 @@ After submission, display the PR URL to the user.
 
 The bot (`.github/workflows/claude-review.yml`) runs automatically on every push to a **same-repo**
 PR branch. On a **fork** PR it runs only once a maintainer applies the `safe-to-review` label
-(`pull_request_target`, gated per-PR — see AGENTS.md § "Review bot on fork PRs" for why). It is
+(`pull_request_target`, gated per-PR — see `.github/instructions/ci-gates.instructions.md` § "Review bot on fork PRs" for why). It is
 NOT limited to any one maintainer's own PRs; a fork contributor listed in `allowed_non_write_users`
 in that workflow gets reviewed the same way once labeled. Determine which flow applies from the
 Step 2 repo detection:
@@ -553,4 +553,4 @@ Show the user each issue title/body for approval before creating.
 ## Step 10 — Wrap-up
 
 - Display the PR URL, final verdict, the Notes the final review carried, and any follow-up issues opened
-- If AGENTS.md wasn't updated: "Consider updating AGENTS.md with any lessons learned from this work."
+- If no instruction file was updated: "Consider capturing lessons learned in the matching `.github/instructions/` file."

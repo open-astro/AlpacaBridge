@@ -23,7 +23,7 @@ Checks:
   2. The zizmor pinned version + sha256 are identical between ci.yml and
      ci_preflight.sh.
   3. The cppcheck --suppress list is identical between ci.yml and
-     ci_preflight.sh (AGENTS.md: "Keep the cppcheck --suppress list
+     ci_preflight.sh (ci-gates instructions: "Keep the cppcheck --suppress list
      identical between ci.yml and ci_preflight.sh").
   4. VERSION matches the version in the README's changelog badge line.
   5. The drivers whose `get_connected()` blocks are exactly the ones
@@ -135,8 +135,8 @@ Checks:
      behind, and never more than MAX_UPDATED_DAYS_AHEAD past the badge, which
      catches a typo'd year without consulting the clock. Pure, so it runs in
      pre-flight; no git state is consulted.
- 17. Every AlpacaError value AGENTS.md and .claude/commands/driver-build.md
-     write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
+ 17. Every AlpacaError value AGENTS.md, the ascom-contract and testing
+     instructions and .claude/commands/driver-build.md write down matches the enum in AlpacaCore/include/alpacacore/alpaca_errors.h
      (issue #682): the name must be a constant in `namespace AlpacaError` and
      the hex value must be the one the header defines. Four written forms are
      read: `Name` (0xNNN), Name `0xNNN`, `A` (or `B` ..., both 0xNNN), and an
@@ -144,8 +144,8 @@ Checks:
      the row's name. CamelCase names only, so a protocol constant such as
      MC_AUX_GUIDE 0x26 is not read as a pin; a floor catches an extractor that
      stops matching.
- 18. The first bullet under AGENTS.md's "Continuous Integration and Pre-flight"
-     heading (`- CI (...`) names exactly the job ids under `jobs:` in
+ 18. The first bullet under the "Continuous Integration and Pre-flight" heading
+     of .github/instructions/ci-gates.instructions.md (`- CI (...`) names exactly the job ids under `jobs:` in
      .github/workflows/ci.yml, in both directions and by id, not by count
      (issue #702): it listed 11 of 18 jobs and called `format` `clang-format`.
      The roster is every backticked token in the bullet outside parentheses,
@@ -165,6 +165,11 @@ Checks:
      before its first `${{`; restoring another job's whole prefix on purpose
      (clang-tidy reads `ccache-all-vendors-coverage-`) is an equal prefix and
      is allowed.
+ 21. AGENTS.md stays at or under AGENTS_MD_MAX_BYTES (15,000 bytes). It is
+     loaded whole into every agent session; it grew from 100k to 144k in five
+     weeks after the #523 split because every cross-vendor lesson was appended
+     to it. Shared rules go in the topic files under .github/instructions/ and
+     AGENTS.md carries a one-line pointer.
 """
 
 import glob
@@ -855,7 +860,7 @@ DOUBLE_BACKTICK_SPAN_RE = re.compile(r"``.+?``")
 CODE_SPAN_RE = re.compile(r"`([^`]+)`")
 # Tripwire for the span matcher, not a rule about document size: if
 # AGENTS.md is legitimately trimmed below this, lower the floor.
-MIN_AGENTS_MD_PATH_REFS = 40
+MIN_AGENTS_MD_PATH_REFS = 15
 # Tripwire for a docs/agents/ rename, not a target file count.
 MIN_AGENTS_DIR_FILES = 1
 # Tripwire for a .claude/skills/ rename, not a target file count.
@@ -1945,8 +1950,9 @@ def check_supported_drivers_updated_date(root=ROOT):
 # --- check 17: documented AlpacaError values vs alpaca_errors.h ---------------
 
 ALPACA_ERRORS_H = "AlpacaCore/include/alpacacore/alpaca_errors.h"
-ERROR_CODE_DOCS = ("AGENTS.md", ".claude/commands/driver-build.md")
-# Today's two docs carry ~15 pins; a floor well under that catches an
+ERROR_CODE_DOCS = ("AGENTS.md", ".github/instructions/ascom-contract.instructions.md",
+                   ".github/instructions/testing.instructions.md", ".claude/commands/driver-build.md")
+# The four docs carry ~20 pins today (AGENTS.md none); a floor well under that catches an
 # extractor that stops matching without tripping on an ordinary rewording.
 MIN_ERROR_CODE_PINS = 8
 
@@ -2020,8 +2026,9 @@ def check_error_codes_match_header(root=ROOT):
     return _error_code_findings(read(ALPACA_ERRORS_H, root), {p: read(p, root) for p in ERROR_CODE_DOCS})
 
 
-# --- check 18: AGENTS.md CI job roster vs ci.yml ------------------------------
+# --- check 18: CI job roster vs ci.yml --------------------------------------
 
+CI_ROSTER_DOC = ".github/instructions/ci-gates.instructions.md"
 CI_ROSTER_HEADING = "## Continuous Integration and Pre-flight"
 CI_ROSTER_BULLET = "- CI ("
 _CI_JOBS_BLOCK_RE = re.compile(r"^jobs:[ \t]*\n(.*?)(?=^\S|\Z)", re.MULTILINE | re.DOTALL)
@@ -2080,27 +2087,27 @@ def _ci_roster_findings(ci_text, agents_text):
         return ["found no job ids under `jobs:` in .github/workflows/ci.yml: the parser is stale"]
     bullet = _ci_roster_bullet(agents_text)
     if bullet is None:
-        return ["could not find the '%s...' job roster bullet under '%s' in AGENTS.md"
-                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING)]
+        return ["could not find the '%s...' job roster bullet under '%s' in %s"
+                % (CI_ROSTER_BULLET, CI_ROSTER_HEADING, CI_ROSTER_DOC)]
     named = _BACKTICK_RE.findall(_strip_parenthesized(bullet))
     failures = []
     seen = set()
     for job in named:
         if job in seen:
-            failures.append("AGENTS.md CI roster names '%s' twice" % job)
+            failures.append("%s CI roster names '%s' twice" % (CI_ROSTER_DOC, job))
         seen.add(job)
         if job not in jobs:
-            failures.append("AGENTS.md CI roster names '%s', which does not exist as a job id in "
-                            ".github/workflows/ci.yml (ids: %s)" % (job, ", ".join(jobs)))
+            failures.append("%s CI roster names '%s', which does not exist as a job id in "
+                            ".github/workflows/ci.yml (ids: %s)" % (CI_ROSTER_DOC, job, ", ".join(jobs)))
     for job in jobs:
         if job not in seen:
-            failures.append("ci.yml job '%s' is missing from the AGENTS.md CI roster bullet ('%s...')"
-                            % (job, CI_ROSTER_BULLET))
+            failures.append("ci.yml job '%s' is missing from the %s CI roster bullet ('%s...')"
+                            % (job, CI_ROSTER_DOC, CI_ROSTER_BULLET))
     return failures
 
 
 def check_ci_roster_matches_workflow(root=ROOT):
-    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read("AGENTS.md", root))
+    return _ci_roster_findings(read(".github/workflows/ci.yml", root), read(CI_ROSTER_DOC, root))
 
 
 # Check 19: a vendored `.so` committed twice as regular files. Matches
@@ -2193,6 +2200,26 @@ def check_cache_restore_prefixes_distinct(root=ROOT):
                                    for p in paths})
 
 
+
+# Check 21: AGENTS.md size budget.
+AGENTS_MD_MAX_BYTES = 15000
+
+
+def _agents_md_size_findings(size, limit=AGENTS_MD_MAX_BYTES):
+    if size > limit:
+        return ["AGENTS.md is %d bytes, over its %d-byte budget: move the rule into the matching shared topic "
+                "file under .github/instructions/ (see docs/agent-instructions.md) and leave a one-line "
+                "pointer in AGENTS.md" % (size, limit)]
+    return []
+
+
+def check_agents_md_size(root=ROOT):
+    path = Path(root) / "AGENTS.md"
+    if not path.is_file():
+        return ["AGENTS.md is missing"]
+    return _agents_md_size_findings(len(path.read_bytes()))
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2212,9 +2239,10 @@ CHECKS = [
     ("README headline counts match SUPPORTED-DRIVERS.md", check_readme_headline_counts),
     ("SUPPORTED-DRIVERS.md Updated date is not behind the README release date", check_supported_drivers_updated_date),
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
-    ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
+    ("CI job roster (ci-gates instructions) matches ci.yml job ids", check_ci_roster_matches_workflow),
     ("Vendored shared libraries are not committed twice", check_vendored_so_not_duplicated),
     ("Cache restore-keys prefixes match only their own caches", check_cache_restore_prefixes_distinct),
+    ("AGENTS.md stays within its size budget", check_agents_md_size),
 ]
 
 
@@ -2900,7 +2928,7 @@ def self_test():
     check("error codes: an enum the parser cannot read is a finding, not a pass",
           f is not None and any("no AlpacaError constants" in x for x in f))
 
-    # check 18: the AGENTS.md CI job roster vs ci.yml (issue #702).
+    # check 18: the ci-gates CI job roster vs ci.yml (issue #702).
     roster_ci = (
         "on:\n"
         "  pull_request:\n"
@@ -3029,6 +3057,12 @@ def self_test():
           f is not None and len(f) == 2 and all("nightly.yml:2" in x for x in f))
     f = cache_prefixes("jobs:\n  a:\n    steps:\n      - run: echo\n")
     check("cache prefixes: no key at all is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
+
+    # check 21: AGENTS.md size budget.
+    check("agents size: a file at the budget is clean", _agents_md_size_findings(AGENTS_MD_MAX_BYTES) == [])
+    f = _agents_md_size_findings(AGENTS_MD_MAX_BYTES + 1)
+    check("agents size: one byte over the budget is reported with the size",
+          len(f) == 1 and str(AGENTS_MD_MAX_BYTES + 1) in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

@@ -152,7 +152,7 @@ it is never reachable through `router.cpp` or the web UI.
   no poll thread, and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost.
-- **An equatorial slew needs Tracking** (#1274, the AGENTS.md rule): `SlewToCoordinates(Async)` and
+- **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
   `Tracking` reads false, after the parked check and coordinate validation and before any target or
   GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
@@ -197,7 +197,7 @@ it is never reachable through `router.cpp` or the web UI.
   `AlignmentMode` and `EquatorialSystem` are compile-time constants with no serial I/O, so that
   time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
   an enum type, which matches ConformU's first-use JIT cost on enum-typed members
-  (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see AGENTS.md).
+  (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
   `Declination` is a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
   with ~0.16s each, what that pair measured on the HM-17 while the per-character sleep fixed in
   #1242 was in place. The HM-17 run on ConformU 4.5.2-rc.1, with nothing else connected, has every member

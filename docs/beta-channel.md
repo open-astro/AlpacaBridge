@@ -164,7 +164,7 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
   can read (`CanStopExposure`, `CanPulseGuide`, ...), a rewrite of an exposure or slew state
   machine, and a driver change that would need a fresh ConformU run. New
   test cases over an existing fake are not a new fake: a stable fix carries them as usual,
-  including the fake-SDK test `AGENTS.md` asks for with a connect-path fix. One case overrides
+  including the fake-SDK test `.github/instructions/testing.instructions.md` asks for with a connect-path fix. One case overrides
   this list: a maintainer may admit a fix that meets the test above but hits one of these
   exclusions, by name in an issue on the `X.Y.0 promotion` milestone. That is a deliberate
   decision, not a criterion a contributor can meet by filing an issue, and it never admits a

@@ -14,5 +14,5 @@ Before pushing a review fix, name the full sibling set in the commit body or PR 
 
 ## Evidence
 
-- Review history: [PR #99](https://github.com/open-astro/AlpacaBridge/pull/99); shared rule: `AGENTS.md` (“When fixing a review finding”).
+- Review history: [PR #99](https://github.com/open-astro/AlpacaBridge/pull/99); shared rule: `.github/instructions/driver-lifecycle.instructions.md` (“When fixing a review finding”).
 - Regression tests for related lifecycle paths: `AlpacaCore/tests/test_touptek_concurrency_stress.cpp` AFW homing-window and camera racing-disconnect cases; `AlpacaCore/tests/test_touptek_fake_sdk.cpp` connect-path failure and AFW homing cases. The sibling-sweep process itself remains a review requirement, not a single executable test.
