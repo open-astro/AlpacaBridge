@@ -1,0 +1,3 @@
+### Changed
+
+- **Astroasis HID test seam**, Astroasis focuser tests, issue #1380. The scripted HID fake moved to the shared `AlpacaCore/tests/fake_astroasis_hid.h` and gained a Locked decorator (`locked_astroasis_hid_transport.h`, covered by the "Astroasis FakeHid Locked decorator - concurrent write and read never overlap in the inner transport" case in `test_astroasis_focuser.cpp`). The `[stress]` lifecycle and destruction cases in `test_astroasis_concurrency_stress.cpp` now connect over the fake, so they run past the connect-failure path (they assert `opens > 0`), and `astroasis_focuser` is a tier 2 host in the contract sweep roster. No production code changed.
