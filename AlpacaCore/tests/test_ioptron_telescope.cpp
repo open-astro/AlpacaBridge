@@ -1047,7 +1047,7 @@ TEST_CASE("iOptron Telescope Driver - a disconnect inside the clock-sync start d
     });
     const bool joined_without_advance = done.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     if (!joined_without_advance) {
-        clock.advance(std::chrono::seconds(1));  // release the parked thread so the test can end
+        clock.advance(std::chrono::seconds(1));  // release the parked body so the test can end
     }
     disconnecter.join();
     CHECK(joined_without_advance);
