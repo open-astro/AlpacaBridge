@@ -128,10 +128,9 @@ TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress"
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only get_max_switch() was ever storm-tested.
     //
-    // The set replaces the default {NotConnected}: a connected switch also
-    // answers InvalidValue for an id or value out of range.
-    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
-                                            alpacacore::AlpacaError::InvalidValue};
+    // Only the default {NotConnected} is expected: against FakeGpio a storm saw
+    // no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
         guard([&] { static_cast<void>(sw.get_max_switch()); });
@@ -139,6 +138,7 @@ TEST_CASE("iMate PowerBox Switch - concurrent connect/disconnect/operate stress"
         // switch 1 ("DC1"); switch 0 is read-only pass-through
         guard([&] { sw.set_switch(1, true); });
         guard([&] { static_cast<void>(sw.get_switch_value(1)); });
+        guard([&] { sw.set_switch_value(1, 1.0); });
     });
 
     // open-astro#326: settle_connected() rather than a bare set_connected():

@@ -274,27 +274,6 @@ private:
 
 }  // namespace
 
-namespace {
-
-// Operate callbacks shared by the storm and the racing-disconnect cases.
-void iefw_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
-    auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
-    guard([&] { static_cast<void>(wheel.get_position()); });
-    guard([&] { wheel.set_position(1); });
-    guard([&] { static_cast<void>(wheel.get_names()); });
-    guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
-}
-
-void ieaf_operate(alpacacore::test::StressCallGuard& guard, AlpacaDriver& d) {
-    auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
-    guard([&] { static_cast<void>(focuser.get_position()); });
-    guard([&] { static_cast<void>(focuser.get_temperature()); });
-    guard([&] { focuser.move(100); });
-    guard([&] { focuser.halt(); });
-}
-
-}  // namespace
-
 TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[ioptron][filterwheel][stress]") {
     FakeIefw fake;
     auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
@@ -304,13 +283,18 @@ TEST_CASE("iEFW filter wheel - concurrent connect/disconnect/operate stress", "[
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
     REQUIRE(fake.connects() >= 1);
 
-    // open-astro#326: one guard per call. The set replaces the default
-    // {NotConnected}: a connected wheel also answers InvalidOperation for a
-    // move while it is still moving and InvalidValue for a slot out of range.
-    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
-                                            alpacacore::AlpacaError::InvalidValue,
-                                            alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { iefw_operate(guard, d); });
+    // open-astro#326: one guard per call. Only the default {NotConnected} is
+    // expected: against the fake a storm saw no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { wheel.set_names({"L", "R", "G", "B", "Ha"}); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+        guard([&] { wheel.set_focus_offsets({0, 0, 0, 0, 0}); });
+    });
 
     // open-astro#326: settle_connected() rather than a bare set_connected().
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -348,13 +332,17 @@ TEST_CASE("iEAF focuser - concurrent connect/disconnect/operate stress", "[ioptr
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
     REQUIRE(fake.connects() >= 1);
 
-    // open-astro#326: one guard per call. The set replaces the default
-    // {NotConnected}: a connected focuser also answers InvalidOperation for a
-    // move while it is still moving and InvalidValue for a target out of range.
-    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected,
-                                            alpacacore::AlpacaError::InvalidValue,
-                                            alpacacore::AlpacaError::InvalidOperation};
-    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { ieaf_operate(guard, d); });
+    // open-astro#326: one guard per call. Only the default {NotConnected} is
+    // expected: against the fake a storm saw no other code (guard.report() empty).
+    alpacacore::test::StressCallGuard guard{alpacacore::AlpacaError::NotConnected};
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& focuser = static_cast<alpacacore::FocuserDriver&>(d);
+        guard([&] { static_cast<void>(focuser.get_position()); });
+        guard([&] { static_cast<void>(focuser.get_is_moving()); });
+        guard([&] { static_cast<void>(focuser.get_temperature()); });
+        guard([&] { focuser.move(100); });
+        guard([&] { focuser.halt(); });
+    });
 
     // open-astro#326: settle_connected() rather than a bare set_connected().
     CHECK(alpacacore::test::settle_connected(*driver, false));
