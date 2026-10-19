@@ -927,6 +927,11 @@ jobs:
         # here a change to its keyword parser fails the PR that makes it.
         run: python3 scripts/close_linked_issues.py --self-test
 
+      - name: Self-test the scheduled-run issue reporter
+        # scheduled-failure.yml runs it only after a scheduled run on main;
+        # here a change to when it opens or closes an issue fails the PR.
+        run: python3 scripts/scheduled_run_issue.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent

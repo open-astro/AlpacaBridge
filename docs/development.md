@@ -409,6 +409,10 @@ The Debian package is built from the `debian/` directory. It installs:
 - Systemd unit `alpacabridge.service` running as the `alpacabridge` system user
 - The software-update helper: root-owned oneshot unit `alpacabridge-update.service`, its script `/usr/libexec/alpacabridge/software-update`, and the polkit rule `/usr/share/polkit-1/rules.d/50-alpacabridge-update.rules` that lets the service user start that one unit and the two `alpacabridge-channel@stable`/`@beta` update-channel units (helper `/usr/libexec/alpacabridge/set-update-channel`; see [software-update.md](software-update.md)). `debian/rules` passes only `alpacabridge.service` to `dh_installsystemd` so the helper never gets enable/start/restart snippets.
 
+## Scheduled run failures
+
+`.github/workflows/scheduled-failure.yml` runs after each scheduled or manually dispatched run of Nightly Build, CodeQL, OSV scan and Dependency updates on `main` (issue #1352). A failed, timed-out or never-started run opens one issue for its workflow (`Scheduled run failing: <workflow>`, labels `bug` and `P3`), or adds a comment with the run link when that issue is already open; the next successful run of that workflow closes it, unless one of that run's jobs was skipped (a Nightly Build run whose `check` job found the tag already at `HEAD` skips the build and the suite, so it does not show that the failure is fixed). A cancelled run changes nothing. The issue is found by the `<!-- scheduled-run: ... -->` marker in its body, so it can be retitled or relabelled. The rules are in `scripts/scheduled_run_issue.py`; to see what it would do for a run: `WORKFLOW_NAME="Nightly Build" CONCLUSION=failure RUN_URL=<url> HEAD_SHA=<sha> EVENT=schedule GH_REPO=open-astro/AlpacaBridge python3 scripts/scheduled_run_issue.py --dry-run`.
+
 ## Releases
 
 The only install channel is the OpenAstro APT repository ([apt.openastro.net](https://apt.openastro.net)): install once, then `apt upgrade`. Every version published there is also marked in this repository so a shipped build has a name:
