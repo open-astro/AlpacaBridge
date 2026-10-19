@@ -58,10 +58,32 @@ TEST_CASE("ZWO EFW seam - driver connects over the injected SDK and moves the wh
 
     driver->set_position(4);
     CHECK(sdk.last_set_position == 4);
+    // moving_reads is 0, so the fake settles at once, which hardware never does; the moving
+    // path is pinned by "ZWO EFW seam - Position reads -1 while the wheel moves".
     CHECK(driver->get_position() == 4);
 
     driver->set_connected(false);
     CHECK(sdk.close_calls == 1);
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp get_position() mapping the SDK's -1 to slot 0 (Position
+// reads 0, not the ASCOM moving sentinel).
+TEST_CASE("ZWO EFW seam - Position reads -1 while the wheel moves", "[zwo][filterwheel][unit][fake-sdk]") {
+    FakeZWOEFWSDK sdk;
+    sdk.moving_reads = 2;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->set_position(4);
+    CHECK(driver->get_position() == -1);
+    CHECK(error_code([&] { driver->set_position(2); }) == alpacacore::AlpacaError::InvalidOperation);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 4);
+    CHECK(sdk.moving_refusals == 1);
+
+    driver->set_position(2);
+    CHECK(sdk.last_set_position == 2);
 }
 
 // Falsified by: zwo_filterwheel_driver.cpp get_device_sdk_version() reading the wrapper singleton
@@ -99,14 +121,18 @@ TEST_CASE("ZWO EFW seam - a failed connect leaves the wheel closed", "[zwo][filt
 }
 
 // Falsified by: locked_zwo_efw_sdk.h set_position() forwarding wheel_id as the slot (get_position reads
-// 5, not 3).
+// 5, not 3). Every one of the 14 forwards has an assertion that fails when it is broken.
 TEST_CASE("FakeZWOEFWSDK behind LockedZWOEFWSDK - forwards every call", "[zwo][unit][fake-sdk]") {
     FakeZWOEFWSDK efw;
+    efw.hardware_error_code = 7;
     LockedZWOEFWSDK locked_efw(efw);
     zwo::ZWOEFWInfo wheel;
     REQUIRE(locked_efw.enumerate_wheels().size() == 1);
     REQUIRE(locked_efw.get_wheel_info_by_id(efw.id, wheel));
     CHECK(wheel.slot_count == 7);
+    zwo::ZWOEFWInfo by_index;
+    REQUIRE(locked_efw.get_wheel_info_by_index(0, by_index));
+    CHECK(by_index.wheel_id == efw.id);
     locked_efw.open_wheel(efw.id);
     locked_efw.set_position(efw.id, 3);
     CHECK(locked_efw.get_position(efw.id) == 3);
@@ -114,7 +140,9 @@ TEST_CASE("FakeZWOEFWSDK behind LockedZWOEFWSDK - forwards every call", "[zwo][u
     CHECK(locked_efw.get_unidirectional(efw.id));
     locked_efw.calibrate(efw.id);
     CHECK(efw.calibrate_calls == 1);
+    CHECK(locked_efw.get_hardware_error_code(efw.id) == 7);
     CHECK(locked_efw.get_serial_number(efw.id) == "EFW-SN-1");
+    CHECK(locked_efw.get_firmware_version(efw.id) == "1.0.0");
     CHECK(locked_efw.get_sdk_version() == "1, 7, 0, 0");
     locked_efw.close_wheel(efw.id);
     CHECK(efw.open_calls == 1);

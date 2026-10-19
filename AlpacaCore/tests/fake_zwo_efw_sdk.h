@@ -31,6 +31,15 @@ namespace alpacacore::test {
 // the public knobs and counters are plain fields for single-threaded tests, set before
 // the driver starts and read after it stops. No call blocks except the explicit
 // open_delay, which holds a connect open (contract sweep tier 2).
+//
+// KNOWN PARITY GAPS (the real EFW SDK is harsher here; prefer closing a gap):
+// - With moving_reads at 0 (the default) a move settles at once. On hardware
+//   EFWGetPosition reports -1 while the wheel turns and EFWSetPosition during a move
+//   fails with EFW_ERROR_MOVING; set moving_reads to script that window.
+// - The moving window ends after a number of reads, not after a time, and calibrate()
+//   opens none, though the real wheel turns while it calibrates.
+// - Serial number, firmware and SDK version are fixed strings.
+// - fail_reads throws std::runtime_error; the real wrapper throws only AlpacaException.
 
 class FakeZWOEFWSDK final : public vendor::zwo::ZWOEFWSDK {
 public:
@@ -47,12 +56,18 @@ public:
     bool fail_open{false};
     // open_wheel() sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};
+    // After a set_position(), get_position() reads -1 (moving) this many times, and a
+    // set_position() inside that window throws InvalidOperation (EFW_ERROR_MOVING).
+    int moving_reads{0};
+    // What get_hardware_error_code() answers.
+    int hardware_error_code{0};
     int open_calls{0};
     int close_calls{0};
     int position_calls{0};
     int set_position_calls{0};
     int last_set_position{-1};
     int calibrate_calls{0};
+    int moving_refusals{0};
 
     std::vector<Info> enumerate_wheels() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -75,52 +90,84 @@ public:
         info = Info{id, "EFW", slot_count};
         return true;
     }
-    void open_wheel(int) override {
+    void open_wheel(int wheel_id) override {
         if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
     }
-    void close_wheel(int) override {
+    void close_wheel(int wheel_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         ++close_calls;
     }
-    int get_position(int) override {
+    int get_position(int wheel_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         ++position_calls;
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
+        if (moving_left_ > 0) {
+            --moving_left_;
+            return -1;
+        }
         return position;
     }
-    void set_position(int, int slot) override {
+    void set_position(int wheel_id, int slot) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         ++set_position_calls;
         last_set_position = slot;
         if (slot < 0 || slot >= slot_count) {
             throw AlpacaException("EFWSetPosition: EFW_ERROR_INVALID_VALUE", AlpacaError::InvalidValue);
         }
+        if (moving_left_ > 0) {
+            ++moving_refusals;
+            throw AlpacaException("EFWSetPosition: EFW_ERROR_MOVING", AlpacaError::InvalidOperation);
+        }
         position = slot;
+        moving_left_ = moving_reads;
     }
-    void set_unidirectional(int, bool enabled) override {
+    void set_unidirectional(int wheel_id, bool enabled) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         unidirectional = enabled;
     }
-    bool get_unidirectional(int) override {
+    bool get_unidirectional(int wheel_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         return unidirectional;
     }
-    void calibrate(int) override {
+    void calibrate(int wheel_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
         ++calibrate_calls;
     }
-    int get_hardware_error_code(int) override { return 0; }
-    std::string get_serial_number(int) override { return "EFW-SN-1"; }
-    std::string get_firmware_version(int) override { return "1.0.0"; }
+    int get_hardware_error_code(int wheel_id) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_id(wheel_id);
+        return hardware_error_code;
+    }
+    std::string get_serial_number(int wheel_id) override {
+        check_id(wheel_id);
+        return "EFW-SN-1";
+    }
+    std::string get_firmware_version(int wheel_id) override {
+        check_id(wheel_id);
+        return "1.0.0";
+    }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
+    // A wrong id is EFW_ERROR_INVALID_ID on hardware, which the wrapper maps to InvalidValue.
+    void check_id(int wheel_id) const {
+        if (wheel_id != id) throw AlpacaException("EFW: EFW_ERROR_INVALID_ID", AlpacaError::InvalidValue);
+    }
+
     mutable std::mutex mutex_;
+    int moving_left_{0};
 };
 
 }  // namespace alpacacore::test
