@@ -968,7 +968,7 @@ public:
         }
         const long exposure_us = static_cast<long>(std::lround(exposure_us_value));
 
-        wait_for_usb2_download_settle();
+        wait_for_usb2_download_settle(duration);
 
         int active_camera_id = -1;
         std::uint64_t start_seq = 0;
@@ -1052,17 +1052,22 @@ public:
     void stop_exposure() override { stop_exposure_impl(false); }
 
 private:
-    // Issue #1349. A USB 2.0 camera (ASI120MM) needs time after ASIGetDataAfterExp before the next
-    // ASIStartExposure: a start inside the window joins a frame already in progress (the exposure
-    // reports ready early) or collides with it and ends in ASI_EXP_FAILED, which the retry then
-    // repairs at the cost of a second full exposure. Rig-measured on an ASI120MM Mini with a 10 s
-    // exposure: fails at 0.25-0.35 s after the download, reports ready 0.5 s early below 0.15 s,
-    // clean from 0.4 s. 600 ms keeps a margin over the 0.4 s edge. USB 3.0 cameras show nothing.
+    // Issue #1349. On a USB 2.0 camera (ASI120MM) a long exposure started 0.3-0.45 s after the
+    // previous ASIGetDataAfterExp ends in ASI_EXP_FAILED, which the retry then repairs at the cost of a
+    // second full exposure. Rig-measured on an ASI120MM Mini (beta5, SDK 1.40, 4-9 frames per point):
+    // 5 s and 10 s exposures fail at those gaps and are clean from 0.5 s; 1, 2 and 3 s exposures never
+    // failed at any gap from 0.15 s to 0.5 s. So only an exposure longer than
+    // kUsb2SettleMinExposure waits, until kUsb2PostDownloadSettle after the download, and a guide
+    // loop of short exposures restarts at once. Below 0.3 s the camera also delivers every other
+    // frame early: the next frame becomes ready a fixed time after the previous download whatever the
+    // start time, so it looks started by the camera itself; the wait avoids that for long exposures
+    // and leaves short ones as they were. USB 3.0 cameras show neither.
     // Called with exposure_trigger_mutex_ held and neither mutex_ nor the image lock held, so
     // status reads stay live during the wait. stop_exposure queues behind the trigger mutex for at
     // most this long. set_connected() takes the trigger mutex too, so a disconnect queues behind
     // the wait (up to this long) and runs after the exposure has started; it then stops it.
-    void wait_for_usb2_download_settle() {
+    void wait_for_usb2_download_settle(double duration_s) {
+        if (duration_s <= kUsb2SettleMinExposure.count()) return;
         const auto downloaded_ns = last_download_ns_.load();
         if (downloaded_ns == kNoDownload) return;
         {
@@ -1188,6 +1193,7 @@ private:
     static constexpr int kExposureRetries = 2;
     // See wait_for_usb2_download_settle().
     static constexpr std::chrono::milliseconds kUsb2PostDownloadSettle{600};
+    static constexpr std::chrono::duration<double> kUsb2SettleMinExposure{3.0};
     static constexpr std::int64_t kNoDownload = std::numeric_limits<std::int64_t>::min();
     // TaskClock time (ns since its epoch) of the last successful ASIGetDataAfterExp on this
     // connection, or kNoDownload. Atomic: written under image_operation_mutex_, read under the

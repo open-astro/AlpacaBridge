@@ -60,13 +60,15 @@ public:
     bool fail_exposure_start{false};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
     int zero_temperature_reads_after_open{0};
-    // Issue #1349: the ASI120MM (USB 2.0) fails an exposure at its end when it starts inside ~0.4 s
-    // of the previous download (measured: fails at 0.25-0.35 s, clean at 0.4 s or more). Set a clock
-    // to model it on a camera whose is_usb3 is false: such a start reports Failed from then on.
-    // USB 3.0 cameras, and any fake without a clock, keep the plain behaviour. The early-ready
-    // branch the rig also showed below 0.15 s is not modelled.
+    // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
+    // inside ~0.5 s of the previous download (measured: 5 s and 10 s fail at 0.3-0.45 s, clean at
+    // 0.5 s; 1-3 s never failed). Set a clock to model it on a camera whose is_usb3 is false: such a
+    // start reports Failed from then on. The fake fails the whole 0-0.5 s window, harsher than the
+    // rig, where a start below 0.3 s joins a frame the camera began itself. USB 3.0 cameras, short
+    // exposures, and any fake without a clock keep the plain behaviour.
     const util::TaskClock* usb2_settle_clock{nullptr};
-    static constexpr std::chrono::milliseconds kUsb2FailWindow{400};
+    static constexpr std::chrono::milliseconds kUsb2FailWindow{500};
+    static constexpr long kUsb2FailMinExposureUs{3'000'000};
 
     static CameraInfo default_camera() {
         CameraInfo info;
@@ -283,7 +285,10 @@ public:
         if (usb2_settle_clock != nullptr) {
             const auto now = usb2_settle_clock->now();
             start_times_.push_back(now);
-            if (!camera.is_usb3 && last_download_time_.has_value() && now - *last_download_time_ < kUsb2FailWindow) {
+            const auto exposure = controls_.find(ControlType::Exposure);
+            const bool long_exposure = exposure != controls_.end() && exposure->second > kUsb2FailMinExposureUs;
+            if (!camera.is_usb3 && long_exposure && last_download_time_.has_value() &&
+                now - *last_download_time_ < kUsb2FailWindow) {
                 status_ = ExposureStatus::Failed;
             }
         }
