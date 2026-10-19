@@ -739,6 +739,12 @@ public:
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
                         if (!connected_ || ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
+                            // Two start() calls can run in the opposite order
+                            // to their requests, so a body the slot stopped
+                            // while its request is current retires it here.
+                            if (request == pulse_request_) {
+                                pulse_guiding_ = false;
+                            }
                             return;
                         }
                     }
@@ -753,6 +759,9 @@ public:
                     // The request check and the state write share one mutex_ hold.
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (ctx.stop_reason() != util::StopReason::None || request != pulse_request_) {
+                        if (request == pulse_request_) {
+                            pulse_guiding_ = false;
+                        }
                         return;
                     }
                     if (error.empty()) {
