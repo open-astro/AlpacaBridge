@@ -1118,6 +1118,38 @@ TEST_CASE("SkyWatcher async - AbortSlew during a Dec MoveAxis returns tracking t
     driver->set_connected(false);
 }
 
+// open-astro#1341 item 1: a MoveAxis(RA, 0) stop body still polling when
+// AbortSlew lands. AbortSlew restores tracking itself; the stop body, which
+// AbortSlew leaves running, then restores it a second time (another RA stop
+// ahead of the restart). The restore must happen exactly once: AbortSlew's
+// own instant stop plus the restore's one stop make two ':L'/':K' on RA.
+TEST_CASE("SkyWatcher async - AbortSlew with a MoveAxis stop pending restarts tracking once", "[skywatcher][async]") {
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    driver->set_tracking(true);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+
+    driver->move_axis(0, 2.0);
+    REQUIRE(wait_until([&] { return mount.axis_running(1); }, 2000));
+    mount.set_stop_ramp_ms(2000);  // the stop body is still polling when AbortSlew lands
+    driver->move_axis(0, 0.0);
+    REQUIRE(driver->get_slewing());
+    const int starts_before = mount.start_count(1);
+    const int stops_before = mount.stop_count(1);
+    driver->abort_slew();
+
+    // The stop body sees RA running again (AbortSlew restarted it) until its 5 s
+    // timeout, then runs its tail; wait for a second restart to show up.
+    wait_until([&] { return mount.start_count(1) - starts_before >= 2; }, 7000);
+    CHECK(driver->get_tracking());
+    CHECK(mount.axis_running(1));
+    INFO("stops " << mount.stop_count(1) - stops_before << " starts " << mount.start_count(1) - starts_before);
+    CHECK(mount.start_count(1) - starts_before == 1);
+    CHECK(mount.stop_count(1) - stops_before == 2);  // instant stop + one restore's stop
+    driver->set_connected(false);
+}
+
 namespace {
 // Counts ERROR-level "telescope" log lines mentioning the #547 watchdog, so
 // a case can assert it fired (or didn't) without depending on log text
