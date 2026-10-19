@@ -2654,6 +2654,7 @@ public:
         slew_.set_spawn_for_testing(std::move(spawn));
     }
     void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
+    void start_clock_sync_for_testing() { start_clock_sync(); }
     std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
 
 private:
@@ -3068,6 +3069,12 @@ void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thre
 void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
         ioptron->set_clock_sync_hook_for_testing(std::move(hook));
+    }
+}
+
+void start_clock_sync_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->start_clock_sync_for_testing();
     }
 }
 

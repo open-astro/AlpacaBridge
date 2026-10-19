@@ -184,4 +184,57 @@ TEST_CASE("iOptron Telescope Driver - the destructor joins a clock-sync body tha
     releaser.join();
 }
 
+TEST_CASE("iOptron Telescope Driver - a second clock-sync start supersedes a body blocked in the first",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    // Only the first body blocks; the second passes the hook at once.
+    Gate gate;
+    std::atomic<int> hook_calls{0};
+    ioptron::set_clock_sync_hook_for_testing(*driver, [&] {
+        if (hook_calls.fetch_add(1) == 0) {
+            gate.block();
+        }
+    });
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(gate.wait_entered());
+    const int sla_before = mount.count(":SLA");
+    const int slo_before = mount.count(":SLO");
+    const int sut_before = mount.count(":SUT");
+
+    // The second start must return while the first body is still blocked (no join).
+    std::promise<void> started;
+    auto started_future = started.get_future();
+    std::thread starter([&] {
+        ioptron::start_clock_sync_for_testing(*driver);
+        started.set_value();
+    });
+    const bool returned = started_future.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    if (!returned) {
+        gate.release();  // do not hang the suite when the start joins
+    }
+    REQUIRE(returned);
+    starter.join();
+    CHECK_FALSE(gate.finished());
+
+    // Release the first body: it sees it was superseded and sends nothing.
+    gate.release();
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // the second body's start delay
+    clock.advance(std::chrono::milliseconds(250));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (mount.count(":SUT") <= sut_before && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    driver->set_connected(false);  // joins both bodies
+    CHECK(gate.finished());
+    CHECK(mount.count(":SLA") == sla_before + 1);
+    CHECK(mount.count(":SLO") == slo_before + 1);
+    CHECK(mount.count(":SUT") == sut_before + 1);
+}
+
 #endif  // _WIN32
