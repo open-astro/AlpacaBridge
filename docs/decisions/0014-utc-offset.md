@@ -4,7 +4,7 @@ Status: accepted
 
 ## Context
 
-Several telescope drivers keep the same anchor pair for UTCDate readback: the UTC instant a client wrote, the `steady_clock` time of the write, and a valid flag. The readback is the written value plus the steady time elapsed since. Celestron and SynScan carried a comment saying this runs on the real steady clock on purpose, because [decision 0005](0005-task-clock.md) says the task clock is "never for LST or UTCDate". The readback could not be tested without a real sleep, and 0005 forbids a sleeping test on a driver that is on the clock. Celestron, SynScan and iOptron cleared the value on different events (connect only, connect only, connect and disconnect); ZWO never. Sky-Watcher's offset model, with host-discipline policy and clock-step detection, is [decision 0001](0001-skywatcher-pointing-clock.md) and does not move.
+Several telescope drivers keep the same anchor pair for UTCDate readback: the UTC instant a client wrote, the `steady_clock` time of the write, and a valid flag. The readback is the written value plus the steady time elapsed since. Celestron and SynScan carried a comment saying this runs on the real steady clock on purpose, because [decision 0005](0005-task-clock.md) says the task clock is "never for LST or UTCDate". The readback could not be tested without a real sleep, and 0005 forbids a sleeping test on a driver that is on the clock. Celestron, SynScan and OnStep cleared the value on connect only, iOptron on connect and disconnect, ZWO never. Sky-Watcher's offset model, with host-discipline policy and clock-step detection, is [decision 0001](0001-skywatcher-pointing-clock.md) and does not move.
 
 ## Decision
 
