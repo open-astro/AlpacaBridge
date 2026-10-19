@@ -443,7 +443,7 @@ public:
 
     CameraState get_camera_state() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load()) return CameraState::Idle;
+        ensure_connected();
         latch_exposure_timeout_locked();
         if (capture_stop_failed_) return CameraState::Error;
         ensure_capture_stop_confirmed_locked();
@@ -765,7 +765,7 @@ public:
 
     double get_percent_completed() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_.load()) return 0.0;
+        ensure_connected();
         latch_exposure_timeout_locked();
         if (capture_stop_failed_) return 0.0;
         ensure_capture_stop_confirmed_locked();

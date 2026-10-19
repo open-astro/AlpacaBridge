@@ -203,8 +203,8 @@ TEST_CASE("Altair Camera Driver - State machine", "[altair][camera][unit]") {
     auto fake = make_fake_with_178m();
     auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
 
-    // Disconnected: Idle, not guiding.
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    // Disconnected: CameraState throws NotConnected, not guiding.
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
 
     // Connected, before any exposure: still Idle with no image.
@@ -214,7 +214,7 @@ TEST_CASE("Altair Camera Driver - State machine", "[altair][camera][unit]") {
     CHECK(driver->get_image_ready() == false);
     CHECK(driver->get_is_pulse_guiding() == false);
     driver->set_connected(false);
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, AlpacaError::NotConnected);
 }
 
 TEST_CASE("Altair Camera Driver - Unsupported members", "[altair][camera][unit]") {

@@ -275,7 +275,7 @@ TEST_CASE("Vendor Telescope - Target Coordinate Persistence", "[vendor][telescop
 TEST_CASE("Vendor Camera - State Machine Contracts", "[vendor][camera][unit]") {
     auto driver = create_vendor_camera(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&] { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == true);
@@ -313,7 +313,7 @@ Most ConformU checks can be replicated without hardware. The key is knowing whic
 ### Device-type specific contracts
 
 **Camera drivers** must also test:
-- `CameraState` is `Idle` before first exposure
+- `CameraState` and `PercentCompleted` throw `NotConnected` while disconnected, and `CameraState` is `Idle` when connected before the first exposure
 - `IsPulseGuiding` is false when idle
 - `ImageReady` is false before any exposure (or throws NotConnected)
 - `CanAbortExposure` and `CanStopExposure` are reportable

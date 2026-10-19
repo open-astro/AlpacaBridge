@@ -400,7 +400,7 @@ public:
     void set_bin_y(int bin_y) override { set_bin_locked(bin_y, bin_y); }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) return CameraState::Idle;
+        ensure_connected();
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
@@ -710,7 +710,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) return 0.0;
+        ensure_connected();
         if (!exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             return image_ready_ ? 100.0 : 0.0;
