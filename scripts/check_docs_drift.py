@@ -157,6 +157,14 @@ Checks:
      camera SDK shipped twice in every .deb (3.4 MB) from March 2026 until this
      check. Read from the git index, so a staged fix is seen. The empty blob is
      skipped: a 0-byte placeholder is not a library copy.
+ 20. No `restore-keys:` prefix in a workflow under .github/workflows/ is a
+     strict prefix of another cache key's prefix (issue #1355). A restore by
+     prefix takes the newest cache whose key starts with it, so the ASan job's
+     `ccache-sanitizers-` restored the TSan job's `ccache-sanitizers-tsan-`
+     cache on every run and missed every compile. A prefix is the key's text
+     before its first `${{`; restoring another job's whole prefix on purpose
+     (clang-tidy reads `ccache-all-vendors-coverage-`) is an equal prefix and
+     is allowed.
 """
 
 import glob
@@ -2135,6 +2143,56 @@ def check_vendored_so_not_duplicated(root=ROOT):
     return _duplicate_so_findings(entries)
 
 
+# Check 20: a restore-keys prefix that also matches another cache's keys.
+_CACHE_KEY_RE = re.compile(r"^\s*key:\s*(\S.*?)\s*$")
+_RESTORE_KEYS_RE = re.compile(r"^(\s*)restore-keys:\s*(.*?)\s*$")
+
+
+def _static_prefix(value):
+    """A cache key's text before its first `${{` expression, unquoted."""
+    return value.strip().strip("'\"").split("${{", 1)[0]
+
+
+def _cache_prefix_findings(workflows):
+    """Check 20 over {workflow path: text}. Pure, so --self-test can drive it."""
+    keys = {}       # prefix -> first "path:line" that saves or restores it
+    restores = []   # (prefix, "path:line")
+    for path, text in sorted(workflows.items()):
+        lines = text.splitlines()
+        for n, line in enumerate(lines, 1):
+            m = _CACHE_KEY_RE.match(line)
+            if m:
+                keys.setdefault(_static_prefix(m.group(1)), "%s:%d" % (path, n))
+                continue
+            m = _RESTORE_KEYS_RE.match(line)
+            if not m:
+                continue
+            values = [m.group(2)] if m.group(2) not in ("", "|", ">") else []
+            if not values:
+                for more in lines[n:]:
+                    if more.strip() and len(more) - len(more.lstrip()) <= len(m.group(1)):
+                        break
+                    if more.strip():
+                        values.append(more)
+            restores.extend((_static_prefix(v), "%s:%d" % (path, n)) for v in values)
+    if not keys:
+        return ["found no cache `key:` in .github/workflows/: the reader is stale"]
+    failures = []
+    for prefix, where in restores:
+        for other, other_where in sorted(keys.items()):
+            if prefix and other != prefix and other.startswith(prefix):
+                failures.append("%s restores by the prefix '%s', which also matches the '%s' keys saved at %s: "
+                                "a restore takes the newest match, so this job can get that cache; give one of "
+                                "them a prefix the other does not start with" % (where, prefix, other, other_where))
+    return failures
+
+
+def check_cache_restore_prefixes_distinct(root=ROOT):
+    paths = sorted(glob.glob(str(Path(root) / ".github/workflows/*.yml")))
+    return _cache_prefix_findings({Path(p).relative_to(root).as_posix(): Path(p).read_text(encoding="utf-8")
+                                   for p in paths})
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2156,6 +2214,7 @@ CHECKS = [
     ("Documented AlpacaError values match alpaca_errors.h", check_error_codes_match_header),
     ("AGENTS.md CI job roster matches ci.yml job ids", check_ci_roster_matches_workflow),
     ("Vendored shared libraries are not committed twice", check_vendored_so_not_duplicated),
+    ("Cache restore-keys prefixes match only their own caches", check_cache_restore_prefixes_distinct),
 ]
 
 
@@ -2916,6 +2975,60 @@ def self_test():
     f = dup_so([("100755", blob_a, "AlpacaCore/src/libx.so"), ("100755", blob_a, "AlpacaCore/src/libx.so.1")])
     check("vendored so: an index with no vendored .so is a finding, not a pass",
           f is not None and len(f) == 1 and "stale" in f[0])
+
+    cache_wf = (
+        "jobs:\n"
+        "  asan:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-asan-${{ github.sha }}\n"
+        "          restore-keys: ccache-asan-\n"
+        "  tsan:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-sanitizers-tsan-${{ github.sha }}\n"
+        "          restore-keys: |\n"
+        "            ccache-sanitizers-tsan-\n"
+        "      - uses: actions/cache/save@x\n"
+        "        with:\n"
+        "          key: ccache-sanitizers-tsan-${{ github.sha }}\n"
+        "  tidy:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: ccache-asan-${{ github.sha }}\n"
+        "          restore-keys: ccache-asan-\n"
+        "  cpp:\n"
+        "    steps:\n"
+        "      - uses: actions/cache/restore@x\n"
+        "        with:\n"
+        "          key: cppcheck-${{ runner.os }}-${{ hashFiles('x') }}\n"
+        "          restore-keys: cppcheck-${{ runner.os }}-\n"
+    )
+
+    def cache_prefixes(text, other=None):
+        wf = {"ci.yml": text}
+        if other is not None:
+            wf["nightly.yml"] = other
+        return attempt("cache prefixes", lambda: _cache_prefix_findings(wf))
+
+    f = cache_prefixes(cache_wf)
+    check("cache prefixes: distinct prefixes, a shared equal prefix and expression keys are clean", f == [])
+    m = cache_wf.replace("ccache-asan-", "ccache-sanitizers-")
+    f = cache_prefixes(m)
+    check("cache prefixes: the #1355 shape (ASan prefix starts the TSan keys) is reported with both prefixes",
+          f is not None and len(f) == 2 and all("'ccache-sanitizers-'" in x and "'ccache-sanitizers-tsan-'" in x
+                                                for x in f))
+    f = cache_prefixes(cache_wf.replace("            ccache-sanitizers-tsan-\n", "            ccache-\n"))
+    check("cache prefixes: a block-style restore-keys entry is read",
+          f is not None and len(f) == 2 and all("ci.yml:13 restores by the prefix 'ccache-'" in x for x in f))
+    f = cache_prefixes(cache_wf, other="      - with:\n          key: ccache-asan-nightly-${{ github.sha }}\n")
+    check("cache prefixes: a key in another workflow file counts",
+          f is not None and len(f) == 2 and all("nightly.yml:2" in x for x in f))
+    f = cache_prefixes("jobs:\n  a:\n    steps:\n      - run: echo\n")
+    check("cache prefixes: no key at all is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

@@ -377,12 +377,15 @@ jobs:
             libcurl4-openssl-dev
 
       - name: Restore the compiler cache
-        # Keyed per job; see the build-test job.
+        # Keyed per job; see the build-test job. Not `ccache-sanitizers-`: that
+        # prefix also matches the TSan job's keys, and a restore by prefix takes
+        # the newest match, so this job restored the TSan cache and missed every
+        # compile (issue #1355; docs-drift check 20).
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-sanitizers-${{ github.sha }}
-          restore-keys: ccache-sanitizers-
+          key: ccache-asan-${{ github.sha }}
+          restore-keys: ccache-asan-
 
       - name: Build + run tests with sanitizers (vendor-neutral)
         # CMake seeds CMAKE_CXX_FLAGS / linker flags from CXXFLAGS / LDFLAGS on
@@ -409,7 +412,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/ccache
-          key: ccache-sanitizers-${{ github.sha }}
+          key: ccache-asan-${{ github.sha }}
 
   sanitizers-tsan:
     name: Sanitizers (TSan concurrency stress, arm64)

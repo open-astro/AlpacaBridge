@@ -1,0 +1,2 @@
+### Fixed (CI)
+- **The ASan job restores its own compiler cache** (`.github/workflows/ci.yml`, `scripts/check_docs_drift.py`, issue #1355): the `sanitizers` job restored by the prefix `ccache-sanitizers-`, which also matches the TSan job's `ccache-sanitizers-tsan-` keys, so it took the newer TSan cache and missed all of its ~100 compiles on every run (0 hits in runs 39204739725 and 39202587934). Its key is now `ccache-asan-`. New docs-drift check 20 fails when a `restore-keys:` prefix in any workflow is a strict prefix of another cache key's prefix.
