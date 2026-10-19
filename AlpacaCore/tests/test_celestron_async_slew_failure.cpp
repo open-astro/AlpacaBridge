@@ -878,6 +878,7 @@ TEST_CASE("Celestron slot - a refused park start keeps AtHome after FindHome", "
         0, endpoint(server.port()), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    alpacacore::vendor::celestron::set_status_poll_paused_for_testing(*driver, true);  // no tick of its own overlaps
     driver->find_home();
     REQUIRE(
         alpacacore::vendor::celestron::poll_status_now_for_testing(*driver));  // the status poll completes the homing
@@ -1091,7 +1092,7 @@ TEST_CASE("Celestron PulseGuide - an expired unpolled opposite-axis pulse does n
         driver->pulse_guide(second_direction, 1500);
         const double held = is_ra ? driver->get_right_ascension() : driver->get_declination();
         st->shifted_position.store(true);
-        clock.advance(std::chrono::milliseconds(2100));  // Expire the 2 s position cache.
+        clock.advance(std::chrono::milliseconds(2100));  // Poll ticks may now publish the shifted position.
         CHECK(clock.wait_for_woken_settled(std::chrono::seconds(2)));
 
         const double during = is_ra ? driver->get_right_ascension() : driver->get_declination();

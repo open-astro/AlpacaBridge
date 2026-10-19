@@ -2312,6 +2312,7 @@ private:
     // The first frame, at the end of a connect with mutex_ held, so the getters have an answer the moment Connect
     // returns. Best effort: a mount that does not answer the slewing query still gives its position, and one that
     // answers nothing leaves a frame with nothing known; the poll fills it in.
+    // The seed's failures do not feed position_link_health_: the status poll that follows judges the link.
     void seed_snapshot_locked() {
         const auto token = snapshot_.begin_poll();
         PolledFrame frame;
@@ -2399,6 +2400,9 @@ private:
             }
             if (homing_) {
                 check_homing_complete_locked();  // a FindHome in flight is completed here, not by a getter
+                if (home_status_poll_failures_ != 0) {
+                    return true;  // it timed out: no second timeout in this tick (Disconnect waits for the tick)
+                }
             }
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
             // The control path owns the Slewing value while it moves the mount itself.
@@ -2416,8 +2420,11 @@ private:
             if (!connected_ || stopped()) {
                 return false;
             }
+            if (!site) {
+                return true;  // it timed out: no second timeout in this tick; the next tick samples
+            }
             // A client's SiteLatitude/SiteLongitude write that landed during the read wins over the older value.
-            if (site && !site_info_valid_) {
+            if (!site_info_valid_) {
                 site_latitude_cached_ = site->latitude_degrees;
                 site_longitude_cached_ = site->longitude_degrees;
                 site_info_valid_ = true;
