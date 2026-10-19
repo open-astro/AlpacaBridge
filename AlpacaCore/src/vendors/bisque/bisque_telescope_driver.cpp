@@ -1458,7 +1458,9 @@ private:
             if (!BisqueProtocolWrapper::instance().is_slew_complete()) {
                 return true;
             }
-            publish_measurement_locked();  // the position read after the stop goes out with Slewing false
+            // No measurement here: an initiator holds mutex_ and is timed against the 1 s target, and a retarget
+            // starts a new slew at once. Drop the tick in flight; the next poll publishes the position.
+            drop_poll_in_flight_locked();
             slewing_cached_ = false;
             slew_poll_error_.clear();
         } catch (const std::exception&) {

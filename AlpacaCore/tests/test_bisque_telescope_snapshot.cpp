@@ -328,8 +328,8 @@ TEST_CASE("Bisque snapshot - the slew Tracking gate falls back to the frame when
     CHECK(rig.mount.slew_commands.load() == 1);
 }
 
-// Falsified by: bisque_telescope_driver.cpp, the pulse-guide body: replace publish_measurement_locked() with
-// drop_poll_in_flight_locked() after a successful pulse.
+// Falsified by: bisque_telescope_driver.cpp, the pulse-guide body: replace publish_measured_locked(token, measured)
+// with drop_poll_in_flight_locked() after a successful pulse.
 TEST_CASE("Bisque snapshot - the position after a pulse guide is measured at pulse end, not a poll later",
           "[bisque][telescope][snapshot]") {
     Rig rig;
@@ -387,4 +387,22 @@ TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live rea
     }
     // The refused slew read Tracking live; the getter agrees without a poll.
     CHECK_FALSE(rig.driver->get_tracking());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, own_slew_in_flight_locked: call publish_measurement_locked() instead of
+// drop_poll_in_flight_locked() once IsSlewComplete answers true.
+TEST_CASE("Bisque snapshot - a retarget after a finished slew makes no measurement exchanges in the initiator",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    rig.mount.slew_polls_needed = 0;
+    rig.driver->slew_to_coordinates_async(5.0, 10.0);
+    rig.clock.advance(seconds(9));  // past the 8 s force window, no poll tick ran
+    rig.mount.latency_ms = static_cast<int>(kLatency.count());
+    const int reads_before = rig.mount.position_reads.load();
+    const int transactions_before = rig.mount.transactions.load();
+    rig.driver->slew_to_coordinates_async(6.0, 11.0);
+    CHECK(rig.mount.position_reads.load() == reads_before);
+    // IsSlewComplete, IsTracking and the slew command only.
+    CHECK(rig.mount.transactions.load() - transactions_before <= 3);
+    CHECK(rig.driver->get_slewing());
 }
