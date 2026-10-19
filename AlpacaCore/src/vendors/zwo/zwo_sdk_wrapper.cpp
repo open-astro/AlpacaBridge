@@ -241,6 +241,7 @@ ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
     out.has_cooler = (info.IsCoolerCam == ASI_TRUE);
     out.electrons_per_adu = info.ElecPerADU;
     out.bit_depth = info.BitDepth;
+    out.is_usb3 = (info.IsUSB3Camera == ASI_TRUE);
 
     out.supported_bins.clear();
     for (int i = 0; i < 16; ++i) {

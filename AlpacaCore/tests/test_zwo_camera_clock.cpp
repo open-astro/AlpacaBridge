@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -130,4 +131,112 @@ TEST_CASE("ZWO camera clock - exposure retries are paced by the task clock", "[z
     CHECK(sdk.call_count("start_exposure") == starts + 2);
     clock.advance(milliseconds(250));
     CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+}
+
+namespace {
+
+// Exposure 1 on a camera of the given bus, downloaded at virtual time 1 s. The fake models the
+// ASI120MM (issue #1349): an exposure longer than 3 s started less than 500 ms after a download fails
+// at its end.
+struct SettleRig {
+    FakeZWOSDK sdk;
+    FakeTaskClock clock;
+    std::unique_ptr<alpacacore::CameraDriver> camera;
+
+    explicit SettleRig(bool usb3) {
+        sdk.camera.is_usb3 = usb3;
+        sdk.usb2_settle_clock = &clock;
+        sdk.frame_bytes = std::vector<std::uint8_t>(16 * 8 * 2, 1);
+        camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+        camera->set_connected(true);
+        clock.advance(std::chrono::seconds(1));
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        static_cast<void>(camera->get_image_array());
+    }
+};
+
+// Long enough to need the settle wait (over 3 s), and the 3 s edge that does not.
+constexpr double kLongExposure = 10.0;
+constexpr double kShortExposure = 3.0;
+
+}  // namespace
+
+TEST_CASE("ZWO camera clock - USB 2.0 start waits 600 ms after the previous download", "[zwo][camera][unit][clock]") {
+    SettleRig rig(false);
+    const auto downloaded_at = rig.clock.now();
+
+    std::thread starter([&] { rig.camera->start_exposure(kLongExposure, true); });
+    const bool waiting = rig.clock.wait_for_waiters(1, kRendezvous);
+    CHECK(waiting);
+    if (waiting) {
+        rig.clock.advance(milliseconds(599));
+        CHECK(rig.sdk.call_count("start_exposure") == 1);  // still inside the settle window
+        rig.clock.advance(milliseconds(1));
+    }
+    starter.join();
+
+    REQUIRE(rig.sdk.call_count("start_exposure") == 2);
+    const auto starts = rig.sdk.start_times();
+    CHECK(starts[1] - downloaded_at >= milliseconds(600));
+    CHECK(rig.camera->get_image_ready());  // no ASI_EXP_FAILED, so no retry
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+}
+
+namespace {
+
+// Starts exposure 2 on a thread and reports whether it parked on the clock. A start that wrongly waits is
+// released after the check, so a broken driver fails the case instead of hanging it.
+bool start_parks_on_clock(SettleRig& rig, double duration = kLongExposure) {
+    std::thread starter([&] { rig.camera->start_exposure(duration, true); });
+    const bool waited = rig.clock.wait_for_waiters(1, milliseconds(200));
+    if (waited) rig.clock.advance(milliseconds(600));
+    starter.join();
+    return waited;
+}
+
+}  // namespace
+
+TEST_CASE("ZWO camera clock - USB 3.0 start does not wait after a download", "[zwo][camera][unit][clock]") {
+    SettleRig rig(true);
+
+    CHECK_FALSE(start_parks_on_clock(rig));
+
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    CHECK(rig.camera->get_image_ready());
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+}
+
+TEST_CASE("ZWO camera clock - USB 2.0 start after the settle time has passed does not wait",
+          "[zwo][camera][unit][clock]") {
+    SettleRig rig(false);
+    rig.clock.advance(milliseconds(600));
+
+    CHECK_FALSE(start_parks_on_clock(rig));
+
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    CHECK(rig.camera->get_image_ready());
+}
+
+TEST_CASE("ZWO camera clock - USB 2.0 first start after a reconnect does not wait", "[zwo][camera][unit][clock]") {
+    SettleRig rig(false);  // downloaded one exposure on the first connection
+    rig.camera->set_connected(false);
+    rig.camera->set_connected(true);
+
+    CHECK_FALSE(start_parks_on_clock(rig));
+
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    CHECK(rig.camera->get_image_ready());
+}
+
+TEST_CASE("ZWO camera clock - USB 2.0 exposure of 3 s or less does not wait after a download",
+          "[zwo][camera][unit][clock]") {
+    SettleRig rig(false);  // downloaded at once: a long exposure would wait the full 600 ms here
+
+    CHECK_FALSE(start_parks_on_clock(rig, kShortExposure));
+
+    CHECK(rig.sdk.call_count("start_exposure") == 2);
+    const auto starts = rig.sdk.start_times();
+    REQUIRE(starts.size() == 2);
+    CHECK(starts[1] - starts[0] < std::chrono::milliseconds(600));
 }

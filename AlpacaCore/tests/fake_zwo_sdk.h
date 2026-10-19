@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 
@@ -59,6 +60,16 @@ public:
     bool fail_exposure_start{false};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
     int zero_temperature_reads_after_open{0};
+    // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
+    // inside ~0.5 s of the previous download (measured: 5 s and 10 s fail at 0.3-0.45 s, clean at
+    // 0.5 s; 1-3 s never failed). Set a clock to model it on a camera whose is_usb3 is false: such a
+    // start reports Failed at once, where the camera reports it only at the end of the exposure. The
+    // fake also fails the whole 0-0.5 s window, harsher than the rig, where a start below 0.3 s joins
+    // a frame the camera began itself. USB 3.0 cameras, short exposures, and any fake without a clock
+    // keep the plain behaviour.
+    const util::TaskClock* usb2_settle_clock{nullptr};
+    static constexpr std::chrono::milliseconds kUsb2FailWindow{500};
+    static constexpr long kUsb2FailMinExposureUs{3'000'000};
 
     static CameraInfo default_camera() {
         CameraInfo info;
@@ -73,6 +84,7 @@ public:
         info.has_st4_port = true;
         info.has_cooler = true;
         info.bit_depth = 16;
+        info.is_usb3 = true;
         return info;
     }
 
@@ -124,6 +136,12 @@ public:
         status_ = status;
     }
 
+    /// Clock time of every start_exposure call, in call order (empty without usb2_settle_clock).
+    std::vector<util::TaskClock::clock::time_point> start_times() const {
+        std::lock_guard lock(mutex_);
+        return start_times_;
+    }
+
     int open_count() const {
         std::lock_guard lock(mutex_);
         return open_count_;
@@ -168,6 +186,7 @@ public:
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         std::lock_guard lock(mutex_);
         ++open_count_;
+        last_download_time_.reset();  // a reopened camera has no download behind it
         temperature_reads_since_open_ = 0;
     }
 
@@ -264,6 +283,16 @@ public:
             throw AlpacaException("scripted exposure-trigger failure", AlpacaError::DriverException);
         }
         status_ = auto_complete_exposure ? ExposureStatus::Success : ExposureStatus::Working;
+        if (usb2_settle_clock != nullptr) {
+            const auto now = usb2_settle_clock->now();
+            start_times_.push_back(now);
+            const auto exposure = controls_.find(ControlType::Exposure);
+            const bool long_exposure = exposure != controls_.end() && exposure->second > kUsb2FailMinExposureUs;
+            if (!camera.is_usb3 && long_exposure && last_download_time_.has_value() &&
+                now - *last_download_time_ < kUsb2FailWindow) {
+                status_ = ExposureStatus::Failed;
+            }
+        }
     }
 
     void stop_exposure(int camera_id) override {
@@ -319,6 +348,11 @@ public:
             download_in_progress_ = false;
         }
         if (!error.empty()) throw AlpacaException(error, AlpacaError::DriverException);
+        if (usb2_settle_clock != nullptr) {
+            const auto now = usb2_settle_clock->now();
+            std::lock_guard lock(mutex_);
+            last_download_time_ = now;
+        }
     }
 
     void pulse_guide_on(int camera_id, GuideDirection) override {
@@ -378,6 +412,8 @@ private:
     ExposureStatus status_{ExposureStatus::Idle};
     std::deque<ExposureStatus> status_script_;
     std::string exposure_status_error_;
+    std::vector<util::TaskClock::clock::time_point> start_times_;
+    std::optional<util::TaskClock::clock::time_point> last_download_time_;
     int open_count_{0};
     int temperature_reads_since_open_{0};
     bool download_held_{false};
