@@ -153,7 +153,7 @@ vendor-agnostic; do them in the driver from the start.
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
   ZWO telescope (`goto_thread_`, `pulse_thread_`, `poll_thread_`, `disconnect_thread_`),
-  the iOptron clock-sync thread, the QHYCFW3 move thread,
+  the QHYCFW3 move thread,
   the camera exposure workers, the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later

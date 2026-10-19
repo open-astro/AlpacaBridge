@@ -204,7 +204,7 @@ public:
     // no-op task; a disconnect() racing that window is recorded and honored
     // by the task tail rather than spawning immediately.
     //
-    // LATENCY NOTE: this driver's teardown joins the clock-sync thread, which
+    // LATENCY NOTE: this driver's teardown joins the clock-sync body, which
     // can sit in multi-second serial protocol retries. When that teardown runs
     // as the base's DEFERRED disconnect (disconnect-races-connect path only),
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
@@ -2203,6 +2203,9 @@ private:
         const auto delay = std::chrono::milliseconds(750);
         std::string last_error;
         for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            if (ctx && ctx->stop_reason() != util::StopReason::None) {
+                return false;  // stopped between commands: send nothing more
+            }
             try {
                 fn();
                 return true;

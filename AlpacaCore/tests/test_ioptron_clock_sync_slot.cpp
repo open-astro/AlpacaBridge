@@ -140,6 +140,28 @@ TEST_CASE("iOptron Telescope Driver - a disconnect joins a clock-sync body that 
     CHECK_FALSE(driver->get_connected());
 }
 
+TEST_CASE("iOptron Telescope Driver - a disconnect during a clock-sync command stops the remaining commands",
+          "[ioptron][telescope][unit][fake][taskclock]") {
+    alpacacore::test::FakeIoptronMount mount("0036", 0.0);
+    REQUIRE(mount.ok());
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = ioptron::create_ioptron_telescope_with_site(0, endpoint(mount.port()), -33.856784, 151.215297,
+                                                              std::nullopt, true, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    // The first site command is in flight (reply held) when the disconnect lands.
+    mount.hold_next_reply(std::chrono::milliseconds(800));
+    clock.advance(std::chrono::milliseconds(250));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (mount.count(":SLA") < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(mount.count(":SLA") == 1);
+    driver->set_connected(false);
+    CHECK(mount.count(":SLO") == 0);
+    CHECK(mount.count(":SUT") == 0);
+}
+
 TEST_CASE("iOptron Telescope Driver - the destructor joins a clock-sync body that is mid-run",
           "[ioptron][telescope][unit][fake][taskclock]") {
     alpacacore::test::FakeIoptronMount mount("0036", 0.0);
