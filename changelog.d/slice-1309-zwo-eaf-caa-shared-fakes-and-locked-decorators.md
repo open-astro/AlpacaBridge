@@ -1,0 +1,5 @@
+### Changed
+- **ZWO EAF focuser and CAA rotator tests share scripted SDK fakes and Locked decorators** (AlpacaCore tests, issue #1309): the test-local EAF and CAA fakes move out of `test_zwo_focuser.cpp` and `test_zwo_rotator.cpp` into `fake_zwo_eaf_sdk.h` and `fake_zwo_caa_sdk.h` (internal mutex, `fail_open`, `open_delay`), with `locked_zwo_eaf_sdk.h` and `locked_zwo_caa_sdk.h` beside them. New cases cover each fake and decorator (`test_zwo_seam_fakes.cpp`), connected `[stress]` runs for both drivers (`test_zwo_concurrency_stress.cpp`), and `zwo_focuser` and `zwo_rotator` rows in the tier-2 contract sweep. ConformU was not re-run.
+
+### Fixed
+- **ZWO CAA rotator no longer races its connect against Move and Sync** (AlpacaCore, issue #1309): the wrap limit `max_degree_` that connect writes is now atomic (`zwo_rotator_driver.cpp`), because `normalize_angle()` read it without `mutex_` from `move()` and `move_absolute()` while a connect refreshed it. The connected CAA stress case (`test_zwo_concurrency_stress.cpp`) runs under ThreadSanitizer in CI and reported the race.
