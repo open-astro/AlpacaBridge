@@ -1,0 +1,2 @@
+### Fixed (tests)
+- **SVBONY "abort reports stop failure and later recovers" no longer fails intermittently** (AlpacaCore tests): the case checked `ImageReady` as soon as the fake's held read returned, but the exposure worker retries the capture stop and clears the unconfirmed-stop refusal only after that, so a slow worker made `ImageReady` throw "capture stop was not confirmed". The case now waits for that refusal to clear first.
