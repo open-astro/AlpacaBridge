@@ -981,7 +981,8 @@ TEST_CASE("Bisque PulseGuide - a start after AbortSlew returns at once while the
     REQUIRE(calls->load() == 1);
 
     std::thread aborter([&] { driver->abort_slew(); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // AbortSlew clears IsPulseGuiding before it waits on the wrapper; wait for that state, not for time.
+    REQUIRE(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(1)) == 0);
     const auto start = std::chrono::steady_clock::now();
     REQUIRE_NOTHROW(driver->pulse_guide(0, 100));
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(300));
