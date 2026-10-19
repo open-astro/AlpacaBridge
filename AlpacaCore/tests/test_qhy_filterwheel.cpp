@@ -22,6 +22,7 @@
 
 #include "catch2_compat.h"
 #include "fake_qhy_sdk.h"
+#include "fake_task_clock.h"
 #include "locked_qhy_sdk.h"
 
 namespace {
@@ -378,22 +379,22 @@ TEST_CASE("QHY Filter Wheel Driver - A wheel settling on a non-target slot repor
           "[qhy][filterwheel][unit]") {
     auto fake = make_fake();
     LockedQHYSDK sdk(fake);
-    auto now = std::chrono::steady_clock::now();
-    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, [&now] { return now; });
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk, clock);
     driver->set_connected(true);
 
     driver->set_position(3);
     // Transit readings change every poll, so they stay -1 however long the move runs.
     fake.cfw_position_script = {4, 5, 6, 0, 1, 2};
     for (int i = 0; i < 6; ++i) {
-        now += std::chrono::seconds(1);
+        clock.advance(std::chrono::seconds(1));
         CHECK(driver->get_position() == -1);
     }
     // Rest at slot 2: still -1 until the settle time has passed.
     CHECK(driver->get_position() == -1);
-    now += std::chrono::seconds(1);
+    clock.advance(std::chrono::seconds(1));
     CHECK(driver->get_position() == -1);
-    now += std::chrono::seconds(2);
+    clock.advance(std::chrono::seconds(2));
     CHECK(driver->get_position() == 2);
     // The pending state ended: later reads are served from the settled slot.
     CHECK(driver->get_position() == 2);
