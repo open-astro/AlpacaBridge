@@ -173,7 +173,7 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
 TEST_CASE("QHY Camera Driver - Disconnected state", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == false);
@@ -216,7 +216,7 @@ TEST_CASE("QHY Camera Driver - ASCOM Error Codes", "[qhy][camera][unit]") {
 TEST_CASE("QHY Camera Driver - State Machine Contracts", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == false);

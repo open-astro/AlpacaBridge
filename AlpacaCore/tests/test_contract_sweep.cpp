@@ -302,6 +302,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
             p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_camera_state", [&] { (void)c.get_camera_state(); }});
+            p.push_back({"get_percent_completed", [&] { (void)c.get_percent_completed(); }});
             p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
             p.push_back({"get_cooler_on", [&] { (void)c.get_cooler_on(); }});
             p.push_back({"get_cooler_power", [&] { (void)c.get_cooler_power(); }});
