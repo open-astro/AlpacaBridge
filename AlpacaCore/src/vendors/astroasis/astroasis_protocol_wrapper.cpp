@@ -50,8 +50,7 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // gain.
 //
 // Lock order (AGENTS.md "driver mutex_ -> operation lock -> SDK-wrapper
-// mutex"): driver mutex_ -> status-cache mutex ->
-// Impl::mutex_ -> this. Nothing may take Impl::mutex_ while holding it;
+// mutex"): driver transition_mutex_ -> Impl::mutex_ -> this. Nothing may take Impl::mutex_ while holding it;
 // enumerate_astroasis_focusers() takes only this one.
 //
 // File-local because Astroasis is the only vendor linking hidapi. If a second
@@ -63,10 +62,10 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // that must be copied out before hid_free_enumeration), so a by-index device
 // creation on an HTTP thread can stall another focuser's connect/disconnect for
 // tens of milliseconds on a busy USB tree -- and, since AstroasisFocuserDriver
-// holds its own mutex_ across protocol_.connect()/disconnect(), a property
-// getter on that focuser fails fast with NotConnected for the same duration
-// (a status refill queues on the cache mutex and Impl::mutex_ only). Bounded,
-// never a deadlock. (2) A
+// holds its own transition_mutex_ across protocol_.connect()/disconnect(), a
+// connect or disconnect on that focuser waits the same duration. Getters read
+// the driver's state snapshot and never reach the wrapper; only the poll body
+// (and move/halt) does, queuing on Impl::mutex_. Bounded, never a deadlock. (2) A
 // function-local static is destroyed at exit, before any static-lifetime object
 // constructed earlier. What keeps that unreachable is NOT heap ownership: the
 // DeviceRegistry singleton is constructed at startup registration and this mutex
@@ -167,7 +166,7 @@ public:
 
     void connect(const std::string& hid_path) {
         std::lock_guard<std::mutex> lock(mutex_);
-        // The caller (the driver's own mutex_, AsyncConnectable obligations
+        // The caller (the driver's transition_mutex_, AsyncConnectable obligations
         // 4/5) is what actually guarantees a single in-flight connect; this
         // makes that invariant local instead of only living in the caller's
         // head. A throw, not a silent guard that closes and reopens: closing

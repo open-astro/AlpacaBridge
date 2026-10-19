@@ -14,6 +14,7 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/astroasis/astroasis_hid_transport.h>
 
 #include <memory>
@@ -33,6 +34,11 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
 /// Test seam: as create_astroasis_focuser(), over an injected HID transport (open-astro#294).
 std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
                                                         std::unique_ptr<AstroasisHidTransport> transport);
+
+/// As above, with the clock the state poll waits on (a FakeTaskClock in tests, so a tick is an advance()).
+std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
+                                                        std::unique_ptr<AstroasisHidTransport> transport,
+                                                        util::TaskClock& clock);
 
 /**
  * @brief Create an Astroasis Oasis Focuser driver by auto-detecting the USB HID device.

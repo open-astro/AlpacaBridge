@@ -11,10 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/ttl_status_cache.h>
+#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -22,9 +25,26 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace alpacacore::vendor::astroasis {
+
+namespace {
+
+// State poll (open-astro#1327, decision 0010), start to start. One poll is one
+// 0x32 exchange, which fills position, motion and temperature. Getters read the
+// snapshot and make no exchange. The freshness bound is two periods: a frame
+// older than that is still served, and one older than util::kLinkStalenessBound
+// is a lost link (decision 0009). kFaultThreshold failed polls in a row latch
+// the #237 "communications compromised" fault, which the getters report until a
+// poll succeeds.
+constexpr auto kStatePollPeriod = std::chrono::milliseconds(100);
+constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
+constexpr int kFaultThreshold = 3;
+static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
+
+}  // namespace
 
 class AstroasisFocuserDriver : public FocuserDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -33,19 +53,23 @@ public:
 
     AstroasisFocuserDriver(int device_number, std::string hid_path,
                            util::ConnectionResolver<std::string> connection_resolver = {},
-                           std::unique_ptr<AstroasisHidTransport> transport = nullptr)
+                           std::unique_ptr<AstroasisHidTransport> transport = nullptr,
+                           util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("Astroasis"),
+          clock_(clock),
           device_number_(device_number),
           hid_path_(std::move(hid_path)),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          protocol_(std::move(transport)),
-          status_cache_("Astroasis focuser", kStatusTtl, 3, "Astroasis") {}
+          protocol_(std::move(transport)) {}
 
     ~AstroasisFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
+        // Joins the poll body before the members it touches go away; a driver
+        // that never finished a connect has no body, so this is a no-op.
+        state_poll_.cancel_all_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
@@ -71,15 +95,12 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    // Deliberately a plain atomic read, not under mutex_ -- do NOT pull it in
-    // during a sweep of the "connected_ only under mutex_" invariant. Taking
-    // the lock here would be safe (async_connectable.h explicitly allows
-    // get_connected() to take the driver mutex, and several telescope drivers
-    // do; the task tail reads it BEFORE pending_mutex_ so that stays deadlock-
-    // free), but it would buy nothing -- connected_ is one atomic -- and would
-    // cost: a Connected poll landing during an in-flight connect would block
-    // for the whole ~1.1 s HID handshake instead of answering immediately.
-    bool get_connected() const override { return connected_.load(); }
+    // Lock-free: two atomic reads, so a Connected poll landing during an
+    // in-flight connect answers at once instead of waiting out the ~1.1 s HID
+    // handshake. A poll that has gone unanswered for util::kLinkStalenessBound
+    // latches link_lost_ (decision 0009), and Connected reads false without a
+    // reconnect.
+    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -90,10 +111,10 @@ public:
         // concurrent by-index enumeration's bus scan (bounded; see accepted
         // cost (1) on that mutex in astroasis_protocol_wrapper.cpp) — but
         // connected_ is stored false before it, so the flip never waits on
-        // THAT lock. It can still wait on this driver's mutex_ behind a connect
+        // THAT lock. It can still wait on this driver's transition_mutex_ behind a connect
         // handshake, which can itself be queued on hid_global_mutex() behind a
-        // concurrent enumeration's bus scan. Getters no longer take mutex_; a
-        // status refill holds the cache mutex and Impl::mutex_ instead.
+        // concurrent enumeration's bus scan. Getters never take
+        // transition_mutex_ and never touch the device.
         stop_connection_thread();
         try {
             set_connected(false);
@@ -105,26 +126,36 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        // Driver state mutex (AsyncConnectable obligations 4/5): keeps the
-        // connected_ read+act atomic against a racing async connect task's
-        // set_connected(true) (this driver's disconnect() calls set_connected
-        // synchronously, outside the task machinery) — without it, two
+        // Serializes whole transitions against each other (AsyncConnectable
+        // obligations 4/5): this driver's disconnect() calls set_connected
+        // synchronously, outside the task machinery, and without the lock two
         // set_connected(true) calls can both observe connected_==false and
-        // both reach protocol_.connect(), leaking the first HID handle.
-        std::lock_guard<std::mutex> lock(mutex_);
+        // both reach protocol_.connect(), leaking the first HID handle. Only
+        // set_connected() takes it; no getter, move or halt does, and the poll
+        // body takes no lock this thread holds across its join.
+        std::lock_guard<std::mutex> lock(transition_mutex_);
+        // A lost link counts as disconnected for a connect: Connected=true
+        // against a lost link reconnects instead of taking the idempotency
+        // return. The disconnect gate takes the raw connected_, so Connected=false
+        // still tears down a lost link (QHY Q-Focuser shape, decision 0009).
+        const bool live = connected_.load() && !link_lost_.load();
         // See AsyncConnectable's class comment for why these gates run before
         // the idempotency check.
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                // Stale connection over a lost link: start from a clean driver.
+                teardown_locked();
+            }
             // An auto-detected focuser resolves its HID path here, not in the factory (#659).
             util::connect_resolved(
                 hid_path_, connection_resolved_, connection_resolver_,
@@ -147,19 +178,35 @@ public:
                 protocol_.disconnect();
                 throw;
             }
-            status_cache_.reset();
+            // First frame before Connected reads true, so a getter has an
+            // answer the moment Connect returns. A failure leaves the snapshot
+            // empty; the getters then report it and the poll fills it later.
+            reset_state();
+            link_lost_.store(false);
+            poll_state_once();
             connected_.store(true);
+            start_state_poll();
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
-            // Clear driver state BEFORE the SDK close (AGENTS.md concurrency
-            // checklist): a throwing close must not leave the driver
-            // half-connected.
-            connected_.store(false);
-            max_step_.store(0);
-            status_cache_.reset();
-            protocol_.disconnect();
+            teardown_locked();
             ALPACA_LOG_INFO("Astroasis", "Focuser disconnected");
         }
+    }
+
+    // The disconnect body, shared by the explicit disconnect and the
+    // stale-link reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Clear driver state BEFORE the SDK close (AGENTS.md concurrency
+        // checklist): a throwing close must not leave the driver
+        // half-connected.
+        connected_.store(false);
+        max_step_.store(0);
+        // Join the poll before the transport closes; its body takes no lock
+        // this thread holds.
+        state_poll_.cancel_all_and_join();
+        reset_state();
+        link_lost_.store(false);
+        protocol_.disconnect();
     }
 
     std::vector<std::string> get_supported_actions() const override { return {}; }
@@ -186,7 +233,7 @@ public:
 
     bool get_absolute() const override { return true; }
 
-    bool get_is_moving() const override { return read_status().moving; }
+    bool get_is_moving() const override { return served_frame().moving; }
 
     int get_max_step() const override {
         ensure_connected();
@@ -198,10 +245,10 @@ public:
         return max_step_.load();
     }
 
-    int get_position() const override { return read_status().position; }
+    int get_position() const override { return served_frame().position; }
 
     double get_step_size() const override {
-        // No mutex_: touches nothing it guards -- ensure_connected() is
+        // No transition_mutex_: touches nothing it guards -- ensure_connected() is
         // already a lock-free atomic read, and every path here throws
         // unconditionally, so taking the lock would only add a stall behind
         // an in-flight connect's full HID handshake for no protection.
@@ -227,34 +274,36 @@ public:
     }
 
     void set_temp_comp(bool) override {
-        // No mutex_: same reasoning as get_step_size() above.
+        // No transition_mutex_: same reasoning as get_step_size() above.
         ensure_connected();
         throw AlpacaException("Temperature compensation not supported", AlpacaError::PropertyNotImplemented);
     }
 
-    double get_temperature() const override {
-        const auto status = read_status();
-        if (status.temperature_external_valid) {
-            return status.temperature_external;
-        }
-        return status.temperature_internal;
-    }
+    double get_temperature() const override { return served_frame().temperature; }
 
     void halt() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // No transition_mutex_: a command may reach the device while a disconnect runs. Accepted:
+        // the wrapper's Impl::mutex_ and require_connected() order it before the close or make it
+        // throw NotConnected.
         ensure_connected();
+        // Never refused for a link fault: Halt is the safety stop, and the wrapper
+        // serialises the exchange. The write drops a poll in flight whatever the
+        // outcome: a halt whose reply was lost may still have stopped the device,
+        // and the next poll measures which.
         try {
             protocol_.stop_move();
         } catch (...) {
-            status_cache_.invalidate();
+            snapshot_.write([](StateFrame&) {});
             throw;
         }
-        status_cache_.invalidate();  // a frame up to one TTL old would still say "moving"
+        // Write-through (decision 0010, point 3): IsMoving reads false now, not after the next poll.
+        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // No transition_mutex_: see halt().
         ensure_connected();
+        throw_if_faulted();
         const int max_step = max_step_.load();
         // ConformU requires graceful clamping, not exceptions.
         if (position < 0) {
@@ -265,29 +314,170 @@ public:
         try {
             protocol_.move_to(position);
         } catch (...) {
-            status_cache_.invalidate();
+            snapshot_.write([](StateFrame&) {});  // the device may have moved; the next poll measures it
             throw;
         }
-        status_cache_.invalidate();  // the next IsMoving/Position read must see the move
+        // Write-through: IsMoving must read true right after a successful Move,
+        // not after the next poll. Position stays the measured one.
+        snapshot_.write([position](StateFrame& frame) { frame.moving = frame.position != position; });
     }
 
 private:
+    // What one poll measured: position, motion and the temperature the getter reports.
+    struct StateFrame {
+        int position = 0;
+        bool moving = false;
+        double temperature = 0.0;
+    };
+
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.faulted()) return health_.fault();
+        }
+        return link_lost_.load() ? "no answer to the state poll" : std::string();
+    }
+
+    // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
+    std::optional<std::chrono::nanoseconds> device_state_age() const override {
+        const auto reading = snapshot_.read();
+        if (!reading.has_value()) return std::nullopt;
+        return clock_.now() - reading->measured_at;
+    }
+
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
+        if (link_lost_.load()) {
+            throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
+                                  AlpacaError::NotConnected);
+        }
     }
 
-    static constexpr std::chrono::milliseconds kStatusTtl{100};
+    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // poll has failed kFaultThreshold times in a row; Connected stays true.
+    void throw_if_faulted() const {
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        if (health_.faulted()) {
+            throw AlpacaException("Astroasis focuser communications compromised: " + health_.fault(),
+                                  AlpacaError::DriverException);
+        }
+    }
 
-    // One 0x32 transaction fills position, moving and temperature for every
-    // getter within the TTL (open-astro#294). The refill takes the wrapper's
-    // own mutex, never mutex_, so a getter is not queued behind a connect.
-    AstroasisProtocolWrapper::Status read_status() const {
+    // The frame the getters serve. A stale frame is still served (decision
+    // 0010), until it is older than util::kLinkStalenessBound: then the link is
+    // lost (decision 0009) and the getter says NotConnected. A faulted link is
+    // not served.
+    StateFrame served_frame() const {
         ensure_connected();
-        return status_cache_.get([this] { return const_cast<AstroasisFocuserDriver*>(this)->protocol_.get_status(); });
+        const auto reading = snapshot_.read();
+        if (reading.has_value() && clock_.now() - reading->measured_at >= util::kLinkStalenessBound) {
+            link_lost_.store(true);
+            ensure_connected();
+        }
+        throw_if_faulted();
+        if (!reading.has_value()) {
+            // A disconnect between the check and the read dropped the frame.
+            ensure_connected();
+            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+        }
+        return reading->value;
     }
 
+    // One poll: one exchange with no driver lock held (the protocol wrapper
+    // serialises it), then publish. A write that landed since begin_poll()
+    // makes publish() drop the frame; the next poll publishes.
+    void poll_state_once() {
+        const auto token = snapshot_.begin_poll();
+        StateFrame frame;
+        try {
+            const auto status = protocol_.get_status();
+            frame.position = status.position;
+            frame.moving = status.moving;
+            frame.temperature =
+                status.temperature_external_valid ? status.temperature_external : status.temperature_internal;
+        } catch (const std::exception&) {
+            // The exception text can carry the device's reply; AlpacaCore has
+            // no log escaper (CWE-117), so the lines state the fact only.
+            note_poll_failure();
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.on_reply()) {
+                ALPACA_LOG_INFO("Astroasis", "Focuser communications restored");
+            }
+        }
+        snapshot_.publish(token, frame);
+    }
+
+    void note_poll_failure() {
+        bool lost = false;
+        {
+            std::lock_guard<std::mutex> lock(health_mutex_);
+            if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
+                ALPACA_LOG_ERROR("Astroasis", "Focuser communications compromised: " + health_.fault());
+            } else {
+                ALPACA_LOG_DEBUG("Astroasis", "Focuser state poll failed; the frame keeps its age");
+            }
+            lost = health_.fault_stale(clock_.now());
+        }
+        if (!lost) {
+            const auto reading = snapshot_.read();
+            lost = reading.has_value() && clock_.now() - reading->measured_at >= util::kLinkStalenessBound;
+        }
+        if (lost && !link_lost_.exchange(true)) {
+            ALPACA_LOG_ERROR(
+                "Astroasis",
+                "Focuser link lost: no answer to the state poll for " +
+                    std::to_string(
+                        std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+                    " s; set Connected false then true to reconnect");
+        }
+    }
+
+    void run_state_poll(util::OperationContext& ctx) {
+        if (!ctx.wait_for(kStatePollPeriod)) {
+            return;
+        }
+        for (;;) {
+            const auto started = clock_.now();
+            poll_state_once();
+            if (link_lost_.load()) {
+                // Lost: release the transport (decision 0009, point 3) and end;
+                // no autonomous reconnect (point 4).
+                protocol_.disconnect();
+                return;
+            }
+            // Start to start: skip any tick a slow poll ran over (no catch-up).
+            const auto spent = clock_.now() - started;
+            const auto ticks = spent / kStatePollPeriod + 1;
+            if (!ctx.wait_for(ticks * kStatePollPeriod - spent)) {
+                return;
+            }
+        }
+    }
+
+    // After the store(true), with no driver lock held (AsyncOperation rule 10).
+    void start_state_poll() {
+        try {
+            state_poll_.start([this](util::OperationContext& ctx) { run_state_poll(ctx); });
+        } catch (const std::exception&) {
+            ALPACA_LOG_ERROR("Astroasis", "Focuser state poll did not start");
+        }
+    }
+
+    // At connect and disconnect: drop the frame and the fault.
+    void reset_state() {
+        snapshot_.reset();
+        std::lock_guard<std::mutex> lock(health_mutex_);
+        health_.reset();
+    }
+
+    util::TaskClock& clock_;
     int device_number_;
     std::string hid_path_;
     // Set by the by-index factory; empty for an explicit path. connection_resolved_
@@ -296,10 +486,23 @@ private:
     util::ConnectionResolver<std::string> connection_resolver_;
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
+    // Latched when the state poll has gone unanswered past
+    // util::kLinkStalenessBound (decision 0009); cleared at connect and disconnect.
+    mutable std::atomic<bool> link_lost_{false};
     AstroasisProtocolWrapper protocol_;
     std::atomic<int> max_step_{0};  // read at connect, cleared at disconnect
-    mutable util::TtlStatusCache<AstroasisProtocolWrapper::Status> status_cache_;
-    mutable std::mutex mutex_;
+    // Position, motion and temperature served to the getters (open-astro#1327).
+    // Declared after clock_ and protocol_: state_poll_ is destroyed first and
+    // joins its body while both are still alive.
+    mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
+    // Link health of the poll (issue #237). health_mutex_ is narrow: held for a
+    // counter or a string, never across an exchange.
+    mutable std::mutex health_mutex_;
+    util::PolledLinkHealth health_;
+    util::OperationGeneration state_poll_generation_;
+    util::AsyncOperation state_poll_{"Astroasis focuser state poll", state_poll_generation_, clock_};
+    // Serializes whole connect/disconnect transitions; see set_connected().
+    std::mutex transition_mutex_;
 };
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path) {
@@ -310,6 +513,13 @@ std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const
                                                         std::unique_ptr<AstroasisHidTransport> transport) {
     return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path, util::ConnectionResolver<std::string>{},
                                                     std::move(transport));
+}
+
+std::unique_ptr<FocuserDriver> create_astroasis_focuser(int device_number, const std::string& hid_path,
+                                                        std::unique_ptr<AstroasisHidTransport> transport,
+                                                        util::TaskClock& clock) {
+    return std::make_unique<AstroasisFocuserDriver>(device_number, hid_path, util::ConnectionResolver<std::string>{},
+                                                    std::move(transport), clock);
 }
 
 std::unique_ptr<FocuserDriver> create_astroasis_focuser_deferred(int device_number,
