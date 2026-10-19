@@ -820,7 +820,7 @@ public:
                     }
                     if (error.empty()) {
                         pulse_guiding_ = false;
-                        drop_poll_in_flight_locked();  // the pulse moved the mount: a sample from before is old
+                        publish_measurement_locked();  // the pulse moved the mount: read where it ended up now
                     } else {
                         // pulse_guiding_ stays true; IsPulseGuiding reports the
                         // error until the next PulseGuide, abort or connect.
@@ -1135,7 +1135,7 @@ private:
         return clock_.now() - reading->measured_at;
     }
 
-    // A write that changed what the mount's position means (a slew start, a pulse, a move): drops the poll in flight,
+    // A write that changed what the mount's position means (a slew start, a move): drops the poll in flight,
     // so its older sample cannot overwrite what the control path knows. The next poll publishes.
     void drop_poll_in_flight_locked() const {
         snapshot_.write([](PolledFrame&) {});

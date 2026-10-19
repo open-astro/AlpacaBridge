@@ -327,3 +327,33 @@ TEST_CASE("Bisque snapshot - the slew Tracking gate falls back to the frame when
     CHECK(rig.mount.fail_tracking_reads.load() == 0);
     CHECK(rig.mount.slew_commands.load() == 1);
 }
+
+// Falsified by: bisque_telescope_driver.cpp, the pulse-guide body: replace publish_measurement_locked() with
+// drop_poll_in_flight_locked() after a successful pulse.
+TEST_CASE("Bisque snapshot - the position after a pulse guide is measured at pulse end, not a poll later",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    REQUIRE(rig.poll());
+    REQUIRE(rig.driver->get_right_ascension() == 5.5);
+    rig.mount.guide_ra_step_hours = 0.25;
+    rig.driver->pulse_guide(2, 100);
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    REQUIRE_FALSE(rig.driver->get_is_pulse_guiding());
+    // No poll ran: the frame holds the position the pulse ended at.
+    CHECK(rig.driver->get_right_ascension() == 5.75);
+}
+
+// Falsified by: bisque_telescope_driver.cpp, get_tracking_locked: remove the snapshot_.write on the success branch.
+TEST_CASE("Bisque snapshot - the slew Tracking gate writes a successful live read through to the frame",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    REQUIRE(rig.poll());
+    REQUIRE(rig.driver->get_tracking());
+    rig.mount.tracking = false;  // the poll has not run since
+    CHECK_THROWS(rig.driver->slew_to_coordinates_async(12.0, 10.0));
+    // The refused slew read Tracking live; the getter agrees without a poll.
+    CHECK_FALSE(rig.driver->get_tracking());
+}

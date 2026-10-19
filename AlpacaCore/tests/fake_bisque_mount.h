@@ -42,6 +42,8 @@ namespace alpacacore::test {
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
  * default: most cases read the fixed position).
  *
+ * A DirectGuide pulse adds `guide_ra_step_hours` to the reported RA.
+ *
  * Counters are atomics: the server's handler thread writes them while the
  * test thread reads.
  */
@@ -71,6 +73,8 @@ public:
     std::atomic<double> ra_hours{5.5};
     std::atomic<double> dec_degrees{20.0};
     std::atomic<bool> land_on_target{false};
+    /// Added to the reported RA by every DirectGuide pulse, as a guide pulse moves the mount.
+    std::atomic<double> guide_ra_step_hours{0.0};
 
     std::function<std::string(const std::string&)> responder() {
         return [this](const std::string& command) { return answer(command); };
@@ -136,6 +140,10 @@ private:
                 }
             }
             return slewing ? "|No error. Error = 0.0#" : "|No error. Error = 0.1#";
+        }
+        if (has(command, "DirectGuide")) {
+            ra_hours = ra_hours.load() + guide_ra_step_hours.load();
+            return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsTracking") && fail_tracking_reads.load() > 0) {
             --fail_tracking_reads;
