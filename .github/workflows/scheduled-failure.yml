@@ -1,0 +1,63 @@
+# Open one issue per scheduled workflow while its runs on main fail, and close
+# it on the next success (issue #1352). A red nightly build or CodeQL scan was
+# otherwise visible only in the Actions tab. The rules are in
+# scripts/scheduled_run_issue.py.
+#
+# workflow_run: this runs after the watched workflow, with the run's result.
+# The job checks out the default branch (never a run's head), reads no
+# artifact, and passes the run's name, result, URL and SHA to the script
+# through the environment only. The `if:` acts only on scheduled or manually
+# dispatched runs in this repository, so a fork's runs and PR runs change
+# nothing.
+
+name: Scheduled run failures
+
+on:
+  workflow_run:  # zizmor: ignore[dangerous-triggers] -- no checkout of the run's head, no artifacts; run fields via env only
+    workflows: ["Nightly Build", "CodeQL", "OSV scan", "Dependency updates"]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+# One group per watched workflow: a group holds at most one pending run and a
+# newer one cancels it, so a shared group could drop one workflow's report when
+# several finish together (Monday 05:41 UTC: CodeQL and Dependency updates).
+# Runs that share an issue still run one at a time.
+concurrency:
+  group: scheduled-failure-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: Report the scheduled run's result
+    if: >-
+      github.repository == 'open-astro/AlpacaBridge' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.event == 'schedule' || github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read   # the run's job conclusions: a green run with a skipped job closes nothing
+      issues: write   # open, comment on and close the failure issue
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Open, update or close the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event.workflow_run.event }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        # pipefail: the default `bash -e` would let tee hide a failed gh call.
+        run: |
+          set -o pipefail
+          python3 scripts/scheduled_run_issue.py | tee -a "${GITHUB_STEP_SUMMARY}"

@@ -912,6 +912,11 @@ jobs:
         # it is tested by the PR that makes it.
         run: python3 scripts/nightly_version.py --self-test
 
+      - name: Self-test the cache pruning rule
+        # cache-prune.yml runs it only after a run on main; here a change to
+        # which caches it deletes fails the PR that makes it.
+        run: python3 scripts/prune_actions_caches.py --self-test
+
       - name: Self-test the merge-down exemption
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.
@@ -921,6 +926,11 @@ jobs:
         # close-linked-issues.yml runs the script only on a merged stable PR;
         # here a change to its keyword parser fails the PR that makes it.
         run: python3 scripts/close_linked_issues.py --self-test
+
+      - name: Self-test the scheduled-run issue reporter
+        # scheduled-failure.yml runs it only after a scheduled run on main;
+        # here a change to when it opens or closes an issue fails the PR.
+        run: python3 scripts/scheduled_run_issue.py --self-test
 
   connect-error-hook:
     name: Connect-error hook

@@ -957,6 +957,63 @@ TEST_CASE("Bisque AbortSlew - a getter does not stall behind a pending pulse gui
     driver->set_connected(false);
 }
 
+TEST_CASE("Bisque PulseGuide - a start after AbortSlew returns at once while the superseded guide is still blocked",
+          "[bisque][telescope][pulseguiding]") {
+    auto calls = std::make_shared<std::atomic<int>>(0);
+    auto base = bisque_guide_responder(std::chrono::milliseconds(0), "|No error. Error = 0.OK#");
+    alpacacore::test::FakeMountServer server([calls, base](const std::string& command) {
+        if (command.find("MoveTelescope") != std::string::npos && calls->fetch_add(1) == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        }
+        return base(command);
+    });
+    REQUIRE(server.ok());
+    auto info = loopback(server.port());
+    info.response_timeout_ms = 3000;
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, info);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    REQUIRE_NOTHROW(driver->pulse_guide(2, 5000));
+    const auto entered_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (calls->load() == 0 && std::chrono::steady_clock::now() < entered_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(calls->load() == 1);
+
+    std::thread aborter([&] { driver->abort_slew(); });
+    // AbortSlew clears IsPulseGuiding before it waits on the wrapper; wait for that state, not for time.
+    REQUIRE(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(1)) == 0);
+    const auto start = std::chrono::steady_clock::now();
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 100));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(300));
+    aborter.join();
+    // The superseded guide's reply must not clear or fail the new guide's state.
+    CHECK(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(4)) == 0);
+    CHECK(calls->load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Bisque PulseGuide - a failed guide's error is dropped by disconnect and reconnect",
+          "[bisque][telescope][pulseguiding]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) -> std::string {
+        if (command.find("MoveTelescope") != std::string::npos) {
+            return "|No error. Error = 0.TypeError: Telescope not connected#";
+        }
+        return bisque_guide_responder(std::chrono::milliseconds(0), "")(command);
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, loopback(server.port()));
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    REQUIRE_NOTHROW(driver->pulse_guide(0, 100));
+    CHECK(wait_for_pulse_guide_end(*driver, std::chrono::steady_clock::now() + std::chrono::seconds(2)) ==
+          alpacacore::AlpacaError::DriverException);
+    driver->set_connected(false);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
+
 TEST_CASE("Bisque PulseGuide - a short pulse keeps the configured response timeout",
           "[bisque][telescope][pulseguiding]") {
     // MoveTelescope runs at TheSkyX's fixed speed, not the requested duration,
