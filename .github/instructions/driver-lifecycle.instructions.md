@@ -101,10 +101,13 @@ vendor-agnostic; do them in the driver from the start.
   per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache`,
   `StateSnapshot` or protocol wrapper that already serialises the wire).
   Identity, limits and capabilities (`Name`, `UniqueID`, `Max*`, `Can*`, names
-  lists) are published at the end of connect; `Connected` is lock-free. One fixed
-  lock order everywhere: `transition_mutex_` → I/O lock → state `mutex_` (leaf) →
-  SDK-wrapper mutex. Never acquire in reverse, and convert a whole driver class in
-  one PR so the old and new order never mix in one class.
+  lists) are published at the end of connect; `Connected` is lock-free. Lock order in
+  a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf) →
+  SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
+  operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
+  slot mutex nests under `mutex_` (decision 0006). Never acquire in reverse, and
+  convert a whole driver class in one PR so the old and new order never mix in one
+  class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
   underneath it. `set_connected(false)` clears state under `mutex_`, then takes
   the I/O lock (a snapshot-then-call op-lock, in a driver that has one) across the

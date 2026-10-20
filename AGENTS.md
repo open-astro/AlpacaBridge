@@ -55,8 +55,9 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - Never `.detach()` a thread that touches `this`; join every thread before members die.
 - Getters never wait on device I/O: `mutex_` is a short state lock, never held across
   an SDK call, serial exchange or connect handshake; one per-link I/O lock serialises the
-  wire. Lock order: `transition_mutex_` → I/O lock → `mutex_` (leaf) → SDK-wrapper mutex.
-  Cameras keep `with_camera`/`with_handle` over short SDK calls until a stall is measured
+  wire. Lock order in a converted driver: `transition_mutex_` → I/O lock → `mutex_` (leaf) →
+  SDK-wrapper mutex; cameras and unconverted drivers keep `mutex_` → operation lock →
+  SDK-wrapper mutex. Cameras keep `with_camera`/`with_handle` over short SDK calls until a stall is measured
   ([decision 0016](docs/decisions/0016-getters-never-wait-on-device-io.md)).
 - `set_connected(false)` clears driver state before the SDK close; a connect guards all
   post-open init so a throw closes the handle.
