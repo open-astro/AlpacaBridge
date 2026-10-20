@@ -14,7 +14,7 @@ The fake's `advance()` takes each due waiter's mutex before notifying it, so a w
 
 Once a driver is on the clock, every wait in it goes through the clock: the task waits, the rate-verify window, and the raw settle and poll sleeps. A test that sleeps to wait for a driver timer on such a driver is a review-blocking regression. `StreamLinkHealth` callers take `now()` from the clock; `ConsecutiveSettle` and `PolledLinkHealth` stay clock-free.
 
-Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for LST or UTCDate.
+Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for the LST or UTCDate value; [decision 0014](0014-utc-offset.md) splits the two: the UTC value stays on `system_clock`, and only the host time elapsed since the write reads this clock.
 
 ## Alternatives rejected
 
@@ -22,7 +22,7 @@ Keep wall-clock waits and shorten the test timeouts: that trades a slow suite fo
 
 ## Consequences
 
-Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync body waits through it; the ToupTek camera and filter wheel drivers followed (#1268): the camera's pulse-guide and thermal-poll waits, exposure deadline and thermal cache ages, and the wheel's homing poll sleep read the clock; the Player One camera driver followed (#1279): its pulse-guide timer, exposure deadline and image-readiness poll read the clock; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
+Drivers move onto the clock one at a time, starting with the SkyWatcher, Celestron and SynScan telescope drivers that share `task_wait_for`; the iOptron telescope driver followed (#1223): its slew poll and settle sleeps, deadlines and override windows read the clock, and its clock-sync body waits through it; the ToupTek camera and filter wheel drivers followed (#1268): the camera's pulse-guide and thermal-poll waits, exposure deadline and thermal cache ages, and the wheel's homing poll sleep read the clock; the Player One camera driver followed (#1279): its pulse-guide timer, exposure deadline and image-readiness poll read the clock; the QHY camera driver followed (#1386): its exposure watchdog, pulse-guide timer, settle sleep, worker waits and 2 s reap loops read the clock, and the QHY filter wheel's own settle-clock function became the same `TaskClock`; a driver not yet moved keeps its raw sleeps, and the rule above applies only from the move on. The fake's wakeup rule needs a ThreadSanitizer case for the window between predicate check and block. The async operation slot and the state snapshot, which come later, test through this clock rather than through sleeps.
 
 ## Links
 

@@ -27,8 +27,10 @@ namespace alpacacore::util {
  * Real by default (RealTaskClock, over std::chrono::steady_clock), virtual in
  * tests (alpacacore::test::FakeTaskClock in AlpacaCore/tests/fake_task_clock.h),
  * so a test drives a driver timer with advance() instead of sleeping for it.
- * This clock is for waits and deadlines only: pointing time (LST, UTCDate)
- * stays on util::HostClock (decision 0001), which is a different contract.
+ * This clock is for waits and deadlines only: pointing time (LST) and the
+ * UTC value of a UTCDate write stay off it (decision 0001, a different
+ * contract). The host time elapsed since such a write reads this clock
+ * through util::UtcOffset (decision 0014).
  */
 class TaskClock {
 public:

@@ -1165,4 +1165,40 @@ TEST_CASE("Celestron snapshot - past the staleness bound DeviceState is empty wi
     driver->set_connected(false);
 }
 
+// The UTCDate readback is the client's value plus the host time elapsed since the write, and that elapsed time is read
+// from the driver's TaskClock (decision 0014), so the case moves it with advance() and never sleeps.
+TEST_CASE("Celestron UTCDate - a written UTCDate reads back advanced by the task clock and is dropped on reconnect",
+          "[celestron][telescope][snapshot][utc-offset]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    (void)clock.wait_for_waiters(1, std::chrono::milliseconds(1000));
+
+    // An hour from the host, with a sub-second part, so neither the re-seed after a reconnect nor a truncating
+    // readback can equal it by coincidence.
+    const auto written = std::chrono::time_point_cast<std::chrono::milliseconds>(std::chrono::system_clock::now() +
+                                                                                 std::chrono::hours(1)) +
+                         std::chrono::milliseconds(250);
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() - written < std::chrono::seconds(2));
+
+    clock.advance(std::chrono::seconds(60));
+    (void)clock.wait_for_woken_settled(std::chrono::milliseconds(2000));
+    REQUIRE(driver->get_connected());
+    const auto advanced = driver->get_utc_date();
+    CHECK(advanced >= written + std::chrono::seconds(60));
+    CHECK(advanced < written + std::chrono::seconds(62));
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    const auto reseeded = driver->get_utc_date();
+    const auto gap = reseeded > written ? reseeded - written : written - reseeded;
+    CHECK(gap > std::chrono::minutes(30));
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32

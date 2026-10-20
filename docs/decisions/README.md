@@ -27,3 +27,4 @@ A record is referred to by its slug until it is written, and numbered then.
 - [CGX logical-disconnect reference continuity](0011-cgx-logical-reference-continuity.md)
 - [Bundled libgphoto2](0012-bundled-libgphoto2.md)
 - [Designs to avoid](0013-designs-to-avoid.md)
+- [Mount UTC offset](0014-utc-offset.md)

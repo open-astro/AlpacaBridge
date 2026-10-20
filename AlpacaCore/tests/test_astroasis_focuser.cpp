@@ -32,7 +32,9 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_astroasis_hid.h"
 #include "fake_task_clock.h"
+#include "locked_astroasis_hid_transport.h"
 
 namespace {
 
@@ -45,121 +47,8 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     }
 }
 
-// Scripted HID device (open-astro#294). Answers the wire protocol the wrapper
-// speaks and counts transactions per command. The state is shared so a test
-// keeps a handle after handing the transport to the driver.
-struct FakeHidState {
-    std::mutex mutex;
-    int status_reads = 0;  // cmd 0x32
-    int config_reads = 0;  // cmd 0x30 / 0x3a
-    int moves = 0;         // cmd 0x36
-    int halts = 0;         // cmd 0x37
-    int position = 1234;
-    bool moving = false;
-    bool dead = false;         // reads time out, as a pulled cable does
-    bool fail_config = false;  // MaxStep (0x30) goes unanswered
-    bool fail_move = false;    // the device moves (0x36) but the reply is lost
-    bool fail_halt = false;    // the device stops (0x37) but the reply is lost
-    int closes = 0;
-    bool move_reports_moving = true;  // the device reports "moving" after a Move (0x36)
-    std::uint8_t gate_cmd = 0;        // hold this command's exchange open until released
-    bool gate_entered = false;        // the gated exchange reached the gate
-    std::condition_variable cv;
-    std::vector<std::uint8_t> pending;
-
-    int transactions() {
-        std::lock_guard<std::mutex> lock(mutex);
-        return status_reads + config_reads + moves + halts;
-    }
-};
-
-class FakeHidTransport final : public alpacacore::vendor::astroasis::AstroasisHidTransport {
-public:
-    explicit FakeHidTransport(std::shared_ptr<FakeHidState> state) : state_(std::move(state)) {}
-
-    bool open(const std::string&) override { return true; }
-    void close() override {
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        ++state_->closes;
-    }
-
-    int write(const std::uint8_t* data, std::size_t length) override {
-        std::unique_lock<std::mutex> lock(state_->mutex);
-        const std::uint8_t cmd = data[1];
-        std::vector<std::uint8_t> resp;
-        auto be32 = [&resp](std::uint32_t v) {
-            for (int shift = 24; shift >= 0; shift -= 8) resp.push_back(static_cast<std::uint8_t>(v >> shift));
-        };
-        resp.push_back(cmd);
-        switch (cmd) {
-            case 0x11:
-                resp.insert(resp.end(), {1, 0});
-                break;
-            case 0x10:
-                resp.push_back(4);
-                be32(0);
-                break;
-            case 0x32:
-                ++state_->status_reads;
-                resp.push_back(14);
-                be32(2048);        // internal ADC
-                be32(0x80000000);  // no external probe
-                resp.push_back(0);
-                resp.push_back(state_->moving ? 1 : 0);
-                be32(static_cast<std::uint32_t>(state_->position));
-                break;
-            case 0x30:
-                ++state_->config_reads;
-                if (state_->fail_config) break;
-                resp.push_back(18);
-                be32(0xFFFFFFFF);
-                be32(50000);
-                resp.insert(resp.end(), 10, 0);
-                break;
-            case 0x36:
-                ++state_->moves;
-                state_->moving = state_->move_reports_moving;
-                hold_gate(lock, cmd);
-                if (state_->fail_move) break;
-                resp.insert(resp.end(), {1, 0});
-                break;
-            case 0x37:
-                ++state_->halts;
-                state_->moving = false;
-                hold_gate(lock, cmd);
-                if (state_->fail_halt) break;
-                resp.insert(resp.end(), {1, 0});
-                break;
-            default:
-                break;
-        }
-        state_->pending = std::move(resp);
-        return static_cast<int>(length);
-    }
-
-    int read(std::uint8_t* data, std::size_t length, int) override {
-        std::lock_guard<std::mutex> lock(state_->mutex);
-        if (state_->dead || state_->pending.empty()) {
-            state_->pending.clear();
-            return 0;
-        }
-        std::memset(data, 0, length);
-        std::memcpy(data, state_->pending.data(), state_->pending.size());
-        state_->pending.clear();
-        return static_cast<int>(length);
-    }
-
-private:
-    // Blocks the exchange of the gated command until the test clears gate_cmd.
-    void hold_gate(std::unique_lock<std::mutex>& lock, std::uint8_t cmd) {
-        if (state_->gate_cmd != cmd) return;
-        state_->gate_entered = true;
-        state_->cv.notify_all();
-        state_->cv.wait(lock, [this] { return state_->gate_cmd == 0; });
-    }
-
-    std::shared_ptr<FakeHidState> state_;
-};
+using alpacacore::test::FakeHidState;
+using alpacacore::test::FakeHidTransport;
 
 std::unique_ptr<alpacacore::FocuserDriver> make_fake_focuser(const std::shared_ptr<FakeHidState>& state,
                                                              alpacacore::test::FakeTaskClock& clock) {
@@ -639,4 +528,75 @@ TEST_CASE("Astroasis Focuser Driver - Unique IDs", "[astroasis][focuser][unit]")
     REQUIRE(driver0->get_unique_id() != driver1->get_unique_id());
     CHECK(driver0->get_unique_id() == "ASTROASIS_FOCUSER_0");
     CHECK(driver1->get_unique_id() == "ASTROASIS_FOCUSER_1");
+}
+
+namespace {
+
+// Inner transport that reports the most calls ever inside it at once. Each call dwells long enough for a
+// second thread to enter if nothing serialises them.
+struct OverlapProbe {
+    std::atomic<int> inside{0};
+    std::atomic<int> max_inside{0};
+    std::atomic<int> calls{0};
+};
+
+class OverlapProbeTransport final : public alpacacore::vendor::astroasis::AstroasisHidTransport {
+public:
+    explicit OverlapProbeTransport(std::shared_ptr<OverlapProbe> probe) : probe_(std::move(probe)) {}
+    bool open(const std::string&) override { return dwell(), true; }
+    void close() override { dwell(); }
+    int write(const std::uint8_t*, std::size_t length) override { return dwell(), static_cast<int>(length); }
+    int read(std::uint8_t*, std::size_t, int) override { return dwell(), 0; }
+
+private:
+    void dwell() {
+        const int now = probe_->inside.fetch_add(1) + 1;
+        int seen = probe_->max_inside.load();
+        while (now > seen && !probe_->max_inside.compare_exchange_weak(seen, now)) {
+        }
+        probe_->calls.fetch_add(1);
+        std::this_thread::sleep_for(std::chrono::microseconds(200));
+        probe_->inside.fetch_sub(1);
+    }
+
+    std::shared_ptr<OverlapProbe> probe_;
+};
+
+}  // namespace
+
+// Falsified by: locked_astroasis_hid_transport.h: write() and read() forward without the lock_guard.
+TEST_CASE("Astroasis FakeHid Locked decorator - concurrent write and read never overlap in the inner transport",
+          "[astroasis][focuser][unit]") {
+    auto probe = std::make_shared<OverlapProbe>();
+    alpacacore::test::LockedAstroasisHidTransport locked(std::make_unique<OverlapProbeTransport>(probe));
+    constexpr int kIterations = 200;
+    std::array<std::uint8_t, 8> buffer{};
+    std::thread writer([&] {
+        for (int i = 0; i < kIterations; ++i) locked.write(buffer.data(), buffer.size());
+    });
+    std::thread reader([&] {
+        std::array<std::uint8_t, 8> in{};
+        for (int i = 0; i < kIterations; ++i) locked.read(in.data(), in.size(), 0);
+    });
+    writer.join();
+    reader.join();
+    locked.open("/dev/hidraw-fake");
+    locked.close();
+    CHECK(probe->calls.load() == 2 * kIterations + 2);
+    CHECK(probe->max_inside.load() == 1);
+}
+
+// Falsified by: astroasis_protocol_wrapper.cpp:136: HidapiTransport::open() returns true without a hidapi open.
+TEST_CASE("Astroasis Focuser Driver - by-path factory builds the hidapi transport", "[astroasis][focuser][unit]") {
+    // The sentinel is not a hidraw node, so only a real hidapi open fails on it with this message; a fake or
+    // mute transport would connect or fail later, in the handshake.
+    auto driver = alpacacore::vendor::astroasis::create_astroasis_focuser(0, "/dev/hidraw-alpacabridge-absent");
+    REQUIRE_FALSE(driver->get_connected());
+    try {
+        driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("Failed to open Astroasis focuser HID device") != std::string::npos);
+    }
+    CHECK_FALSE(driver->get_connected());
 }

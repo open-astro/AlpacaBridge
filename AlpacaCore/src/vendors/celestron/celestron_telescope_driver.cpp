@@ -22,6 +22,7 @@
 #include <alpacacore/util/park_slew.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -186,10 +187,6 @@ public:
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
-          last_utc_set_{},
-          // Pointing time stays on the host's steady clock, not the task clock (decision 0005).
-          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
-          last_utc_valid_(false),
           parked_(false),
           at_home_(false),
           mount_model_id_(-1),
@@ -364,7 +361,7 @@ public:
             set_slewing_locked(false);
             slew_force_until_ = util::TaskClock::clock::time_point::min();
             position_override_until_ = util::TaskClock::clock::time_point::min();
-            last_utc_valid_ = false;
+            utc_offset_.clear();
             client_disagreement_warned_ = false;
             position_link_health_.reset();
             publish_link_fault_locked();
@@ -979,7 +976,8 @@ public:
 private:
     // The mount's clock, read once at connect so no getter reaches the mount for it.
     void ensure_utc_cached_locked() const {
-        if (!last_utc_valid_) {
+        if (!utc_offset_.valid()) {
+            std::chrono::system_clock::time_point seeded;
             try {
                 TimeInfo info = CelestronProtocolWrapper::instance().get_time();
                 timezone_offset_minutes_ = info.timezone_offset_minutes;
@@ -993,12 +991,11 @@ private:
                                          std::chrono::day{static_cast<unsigned>(info.day)}};
                 auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
                 int total_offset = info.timezone_offset_minutes + (info.dst_enabled ? 60 : 0);
-                last_utc_set_ = local_time - minutes{total_offset};
+                seeded = local_time - minutes{total_offset};
             } catch (...) {
-                last_utc_set_ = std::chrono::system_clock::now();
+                seeded = std::chrono::system_clock::now();
             }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+            utc_offset_.set(seeded, clock_.now());
         }
     }
 
@@ -1035,9 +1032,7 @@ private:
         timezone_offset_minutes_ = tz_info.offset_minutes;
         timezone_offset_valid_ = true;
         dst_observed_ = tz_info.dst;
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
+        utc_offset_.set(utc, clock_.now());
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("Celestron", client_minus_host, client_disagreement_warned_);
@@ -1971,6 +1966,7 @@ private:
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
             firmware_cache_.clear();
         }
+        utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
         target_ra_set_ = false;
         target_dec_set_ = false;
         parked_ = false;
@@ -3025,15 +3021,16 @@ private:
         set_utc_date_locked(now_utc);
     }
 
+    // The lazy re-seed below can now also follow a disconnect, which clears
+    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+        const auto now = clock_.now();
+        if (const auto utc = utc_offset_.current(now)) {
+            return *utc;
         }
-        // Pointing time (UTC extrapolation), not a task wait: real steady clock on purpose.
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        const auto seeded = std::chrono::system_clock::now();
+        utc_offset_.set(seeded, now);
+        return seeded;
     }
 
     static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
@@ -3100,9 +3097,8 @@ private:
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_;
+    // The client's UTCDate (or the mount/host seed) and the task-clock time since (decision 0014); guarded by mutex_.
+    mutable util::UtcOffset utc_offset_;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
