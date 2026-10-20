@@ -3159,7 +3159,7 @@ private:
     // get_tracking()).
     //
     // Atomic rather than moving the reads under mutex_ deliberately: these are
-    // capability getters that AGENTS.md requires to be cheap, and mutex_ is
+    // capability getters that alpaca-http-conformance.instructions.md wants cheap, and mutex_ is
     // held across the whole blocking connect handshake, so locking them would
     // park a polling client for the duration -- the issue #130 shape.
     std::atomic<bool> has_autoguider_port_{false};

@@ -8562,7 +8562,7 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
     if (!changed) {
         return;  // no persisted entry (a device registered for this process only), or same value
     }
-    // File I/O on a PUT setter, not on a getter or DeviceState: AGENTS.md's
+    // File I/O on a PUT setter, not on a getter or DeviceState: alpaca-http-conformance.instructions.md's
     // cheap-read rule does not apply, and this runs once per changed value.
     std::ostringstream msg;
     msg << "Telescope " << device_number << " (" << vendor << "): client " << key << " = " << std::fixed

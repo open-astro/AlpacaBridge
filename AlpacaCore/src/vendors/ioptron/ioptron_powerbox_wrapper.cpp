@@ -276,7 +276,7 @@ public:
     }
 
     // Lock-free on purpose (issue #382): the driver answers get_connected()
-    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // with this, and alpaca-http-conformance.instructions.md wants that getter cheap. open() holds mutex_
     // for its whole sequence and close() holds it for its locked phases
     // (it drops the lock to join the PWM workers), so a locked read here
     // waited behind whichever phase was running. open_ is written only
