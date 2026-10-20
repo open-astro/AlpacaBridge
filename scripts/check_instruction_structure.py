@@ -232,13 +232,14 @@ def self_test():
         link = re.search(r'\]\(([^)#\s]+\.md)#([^)\s]+)\)', original)
         assert link, 'docs/architecture.md has no cross-file anchor link for the rename mutation'
         target = (index.parent / link[1]).resolve()
-        if target.is_file() and root in target.parents:
-            target_text = target.read_text(encoding="utf-8", errors="replace")
-            target.write_text(re.sub(r'^(#{1,6} )', r'\1Renamed ', target_text, flags=re.M))
-            renamed = set(check(root)) - baseline
-            target.write_text(target_text)
-            assert any('names a heading that does not exist' in f for f in renamed), \
-                'Renaming the headings a cross-file link targets escaped the anchor check'
+        assert target.is_file() and root in target.parents, 'rename mutation target is not in the fixture'
+        target_text = target.read_text(encoding="utf-8", errors="replace")
+        target.write_text(re.sub(r'^(#{1,6} )', r'\1Renamed ', target_text, flags=re.M))
+        renamed = set(check(root)) - baseline
+        target.write_text(target_text)
+        assert any('docs/architecture.md' in f and 'names a heading that does not exist' in f
+                   for f in renamed), \
+            'Renaming the headings a cross-file link targets escaped the anchor check'
         broken = root / 'docs/decisions/zz-broken-link.md'
         broken.write_text('[gone](missing-target.md)\n')
         new_findings = set(check(root)) - baseline
