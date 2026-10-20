@@ -98,14 +98,17 @@ vendor-agnostic; do them in the driver from the start.
 - **Getters never wait on device I/O** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md)).
   The driver `mutex_` is a short state lock and is never held across an SDK call, a
   serial exchange, a connect handshake or a move. Device transactions run under one
-  per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache`,
-  `StateSnapshot` or protocol wrapper that already serialises the wire).
+  per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache` or
+  protocol wrapper that already serialises the wire). The `StateSnapshot` mutex is not
+  an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
+  a getter served from a snapshot already meets this rule.
   Identity, limits and capabilities (`Name`, `UniqueID`, `Max*`, `Can*`, names
   lists) are published at the end of connect; `Connected` is lock-free. Lock order in
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
-  slot mutex nests under `mutex_` (decision 0006). Never acquire in reverse, and
+  slot mutex and the `StateSnapshot` mutex are leaves that nest under `mutex_`
+  (decisions 0006, 0010). Never acquire in reverse, and
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
