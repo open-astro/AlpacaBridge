@@ -1,0 +1,2 @@
+### Changed (CI)
+- **The nightly build checks the `.deb` it publishes** (`.github/workflows/nightly-build.yml`): it now installs the `.deb` it builds and runs `scripts/check_bundled_gphoto.sh` before the SBOM, the attestations and the publish, so a nightly that fails the check is never published. Before, only the `package-deb` CI job on pull requests installed and checked the package; that job is unchanged. Decision 0012's Rules, the gphoto and CI-gates instructions and the script header name both checks.
