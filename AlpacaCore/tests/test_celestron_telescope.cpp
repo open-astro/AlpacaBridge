@@ -33,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -942,6 +943,52 @@ TEST_CASE("Celestron Telescope Driver - PulseGuide joins the previous pulse with
     CHECK_FALSE(second_threw);
     INFO("longest get_is_pulse_guiding wait " << max_blocked_ms.load() << " ms");
     CHECK(max_blocked_ms.load() < 100);
+    driver->set_connected(false);
+}
+
+// #1408: a refused chain start leaves the first chunk running on the mount; the driver stops the axis as
+// AbortSlew does and drops the pulse state before the refusal reaches the client.
+TEST_CASE("Celestron Telescope Driver - a refused PulseGuide chain start stops the axis and clears the pulse",
+          "[celestron][telescope][unit][pulseguide]") {
+    auto st = std::make_shared<SnapshotMount>();
+    auto commands = std::make_shared<std::vector<std::string>>();
+    auto commands_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([st, commands, commands_mutex](const std::string& command) {
+        {
+            std::lock_guard<std::mutex> lock(*commands_mutex);
+            commands->push_back(command);
+        }
+        return snapshot_reply(*st, command);
+    });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = cel::create_celestron_telescope(0, info);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    cel::set_pulse_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    {
+        std::lock_guard<std::mutex> lock(*commands_mutex);
+        commands->clear();
+    }
+    CHECK_THROWS_AS(driver->pulse_guide(2, 5000), alpacacore::AlpacaException);  // 5 s needs a chained chunk
+
+    const auto sent = [&](const std::string& prefix) {
+        std::lock_guard<std::mutex> lock(*commands_mutex);
+        for (const auto& c : *commands) {
+            if (c.compare(0, prefix.size(), prefix) == 0) return true;
+        }
+        return false;
+    };
+    CHECK(sent(std::string("P\x03\x10\x26", 4)));  // the first guide chunk
+    const bool stop = sent(std::string("P\x02\x10\x24\x00", 5));
+    CHECK(stop);  // then the stop
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     driver->set_connected(false);
 }
 

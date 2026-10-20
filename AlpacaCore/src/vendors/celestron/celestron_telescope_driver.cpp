@@ -2088,6 +2088,11 @@ public:
         slew_.set_spawn_for_testing(std::move(spawn));
     }
 
+    void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_ops_[0].set_spawn_for_testing(spawn);
+        pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
+    }
+
 private:
     void clear_pulse_guiding_locked() {
         pulse_guide_active_.fill(false);
@@ -3275,6 +3280,12 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_pulse_spawn_for_testing(std::move(spawn));
     }
 }
 
