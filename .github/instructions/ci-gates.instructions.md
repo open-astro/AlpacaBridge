@@ -42,12 +42,12 @@ author must do. Read the docstring before changing a gate.
   A merge-down PR skips `falsified-by`; `scripts/merge_down.py` decides it (`docs/beta-channel.md`).
   `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
   every record in `docs/decisions/` the PR changes.
+  `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
 - **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
   commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <head sha>`
   comment; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
   review bot gets the in-scope rules from `scripts/check_adr_scope.py --list`, run from the base branch.
   See `docs/decisions/README.md` ("Changing a record").
-  `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
 - **Layering** (`scripts/check_layering.py`, gate 2f): the vendor-include baselines in the script
   only go down; the PR that deletes includes lowers them. It also enforces CMake rules L1-L3
   (see [CMake and Vendor Integration](packaging-release.instructions.md#cmake-and-vendor-integration)).

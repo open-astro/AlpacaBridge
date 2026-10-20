@@ -36,7 +36,8 @@ from check_docs_drift import (  # noqa: E402  (the one owner of the Rules gramma
 
 ROOT = Path(__file__).resolve().parent.parent
 SECTION = "decision records"
-RECORD_NUMBER_RE = re.compile(r"\b(\d{4})\b")
+# A record number, not an issue or PR number such as #1415 (#1416 review).
+RECORD_NUMBER_RE = re.compile(r"(?<![#\d])\b(\d{4})\b")
 HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 
@@ -177,6 +178,10 @@ def self_test():
            "a PR that changes no record may say None")
     expect(any("0005" in e for e in body_findings("## Decision records\n<!-- 0005 -->\nNone\n", changed)),
            "a record named only inside an HTML comment does not count")
+    expect(any("0005" in e for e in body_findings("## Decision records\n\n- from the #0005 review\n", changed)),
+           "an issue or PR number (#NNNN) does not name a record")
+    expect(body_findings("## Decision records\n\n- 0005, from the #1415 review\n", changed) == [],
+           "a record named beside an issue number still counts")
     expect(body_findings("## Decision records\n\n- docs/decisions/README.md\n",
                          ["docs/decisions/README.md"]) == [], "the index is not a record")
 
