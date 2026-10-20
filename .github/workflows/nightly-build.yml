@@ -21,6 +21,10 @@
 # SPDX SBOM attestation (Actions > Attestations); `gh attestation verify` on
 # the file proves it was built here, by this workflow, from the named commit.
 #
+# The .deb is also installed and scripts/check_bundled_gphoto.sh runs against
+# it before anything is published, as ci.yml's package-deb job does on every
+# pull request, so a nightly .deb that fails the check is never published.
+#
 # The same run also builds all vendors optimized and runs the full suite
 # (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
 # nothing else tests optimized, NDEBUG code like the .deb's. The test job
@@ -208,7 +212,7 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh binutils
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
@@ -261,6 +265,21 @@ jobs:
           (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
           dpkg-deb --info "dist/${ASSET}" | sed -n '/Package:/,/Depends:/p'
           ls -l dist
+
+      # The packaging acceptance checks of ci.yml's package-deb job, on the .deb
+      # this run publishes: install it and check the bundled libgphoto2 loader
+      # path (decision 0012). Both run before the SBOM, the attestations and the
+      # publish, so a .deb that fails them is never published. Recommends
+      # (NetworkManager, polkit) are not needed.
+      - name: Install the .deb
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends "./dist/${ASSET}"
+
+      - name: Check the bundled libgphoto2
+        run: scripts/check_bundled_gphoto.sh
 
       - name: Generate the SBOM
         # The repository's own inventory (scripts/dependency_snapshot.py), not a
