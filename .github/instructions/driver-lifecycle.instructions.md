@@ -97,14 +97,15 @@ vendor-agnostic; do them in the driver from the start.
 **Handles, locks & disconnect — the #1 source of use-after-close bugs**
 - **Getters never wait on device I/O** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md)).
   The driver `mutex_` is a short state lock and is never held across an SDK call, a
-  serial exchange, a connect handshake or a move. Device transactions run under one
+  serial exchange, a connect handshake or a move; the one exception is a camera's
+  short `with_camera`/`with_handle` SDK calls (the camera exception below). Device transactions run under one
   per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache` or
   protocol wrapper that already serialises the wire). The `StateSnapshot` mutex is not
   an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
   a getter served from a snapshot already meets this rule.
   Identity, limits and capabilities (`Name`, `UniqueID`, `Max*`, `Can*`, names
   lists) are published at the end of connect; `Connected` is lock-free. Lock order in
-  a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf) →
+  a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
   slot mutex and the `StateSnapshot` mutex are leaves that nest under `mutex_`
@@ -112,9 +113,11 @@ vendor-agnostic; do them in the driver from the start.
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
-  underneath it. `set_connected(false)` clears state under `mutex_`, then takes
-  the I/O lock (a snapshot-then-call op-lock, in a driver that has one) across the
-  close, **and** the operation re-checks `ensure_connected()`/`!handle_` under
+  underneath it. In a converted driver, `set_connected(false)` clears state under
+  `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
+  lock is never taken under `mutex_`. In a camera or unconverted driver it takes the
+  op-lock (`readout_mutex_`, …) nested under `mutex_` across the close, as the old
+  order requires. In both, **and** the operation re-checks `ensure_connected()`/`!handle_` under
   that lock before the SDK call. A snapshot-then-call gap with no re-check is a
   use-after-close.
 - **A "copy the handle out, then call the SDK" helper is a trap** — returning the
