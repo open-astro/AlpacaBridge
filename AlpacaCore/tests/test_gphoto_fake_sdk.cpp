@@ -1359,12 +1359,45 @@ TEST_CASE("GPhoto camera fake - an abort during the MLU settle still fires the s
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - a failed release in the MLU sequence is reported, not retried",
+TEST_CASE("GPhoto camera fake - a refused press in the MLU sequence is reported once and not retried",
           "[gphoto][camera][unit][fakesdk][mlu]") {
     reset_gphoto_sensor_cache();
     alpacacore::test::FakeTaskClock clock;
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_mlu_camera());
+    fake.skip_sleeps = true;
+    FakeRawDecoder decoder;
+    int press_attempts = 0;
+    fake.before_call = [&](const std::string& name) {
+        if (name == "drain_events") clock.advance(std::chrono::milliseconds(100));
+        if (name == "set_choice_value") ++press_attempts;
+    };
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    fake.refuse_choice_writes.push_back("eosremoterelease");
+    press_attempts = 0;
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_exposure_failure_reported(*driver, "Failed to set eosremoterelease = Press Full");
+    CHECK(press_attempts == 2);  // the shutter-speed write, then the one refused press
+    CHECK(count_calls(fake, "capture_and_download") == 0);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - MLU on beside a bulb toggle still fires the eosremoterelease pair",
+          "[gphoto][camera][unit][fakesdk][taskclock][mlu]") {
+    // A Canon body that lists a "bulb" widget as well as eosremoterelease: the pair is still found, so MLU is
+    // not refused, and the shutter is fired with the pair, never the bulb toggle.
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    auto cam = make_mlu_camera();
+    cam.toggle_value["bulb"] = false;
+    fake.cameras.push_back(cam);
     fake.skip_sleeps = true;
     FakeRawDecoder decoder;
     fake.before_call = [&](const std::string& name) {
@@ -1373,12 +1406,12 @@ TEST_CASE("GPhoto camera fake - a failed release in the MLU sequence is reported
 
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
     driver->set_connected(true);
-    fake.refuse_choice_writes.push_back("eosremoterelease");
-    driver->start_exposure(0.01, true);
+    driver->start_exposure(1.0, true);  // > 1/50 s native ceiling => bulb path
     wait_for_exposure_to_finish(*driver);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
-    require_exposure_failure_reported(*driver, "Failed to set eosremoterelease = Press Full");
+    CHECK(driver->get_image_ready() == true);
+    CHECK(fake.remote_release_history == kPressReleasePressRelease);
+    CHECK(fake.bulb_toggle_history.empty());
     CHECK(count_calls(fake, "capture_and_download") == 0);
 
     driver->set_connected(false);

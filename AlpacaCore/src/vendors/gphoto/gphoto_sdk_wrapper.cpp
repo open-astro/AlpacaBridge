@@ -25,6 +25,8 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 

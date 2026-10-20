@@ -118,9 +118,9 @@ inline std::string unique_test_model(const std::string& base) {
  *    failing write with `refuse_choice_writes` instead.
  *  - The mirror lock-up widgets (`mirrorlock`, `mirrorlockstatus`) are modelled
  *    as text widgets holding "0"/"1" (`mirrorlockstatus` also "2" after the
- *    first press). The real `mirrorlock` is a RANGE or TOGGLE widget; the
- *    wrapper's type-aware read turns it into the same string, so the fake
- *    skips that layer. The fake does not move `mirrorlockstatus` when the
+ *    first press). The real `mirrorlock` is a RANGE or TEXT widget
+ *    (`_get_INT`); the wrapper's type-aware read turns it into the same
+ *    string, so the fake skips that layer. The fake does not move `mirrorlockstatus` when the
  *    driver presses the shutter, and it does not model a camera that stalls
  *    in gp_camera_capture with mirror lock-up on (the real body times out
  *    after 60 s); a case asserts that capture_and_download is never called.

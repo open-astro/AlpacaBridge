@@ -1332,12 +1332,16 @@ private:
         // standalone "bulb" toggle (Nikon), or on Canon bodies, which have no
         // such widget, the eosremoterelease press/release pair together with
         // the shutter-speed "bulb" choice. Without either, ExposureMax stays
-        // capped at the longest native shutter speed.
+        // capped at the longest native shutter speed. The pair is also kept in
+        // remote_release_pair_ whatever the mode dial says, because mirror
+        // lock-up fires the shutter with it (mlu_capture_with_abort).
         remote_press_choice_.clear();
         remote_release_choice_.clear();
         remote_release_pair_.reset();
         has_bulb_ = sdk.has_widget(handle, "bulb");
-        if (!has_bulb_ && sdk.has_widget(handle, "eosremoterelease")) {
+        // The pair is looked up whenever the widget exists, even beside a "bulb" toggle: mirror lock-up needs it
+        // to fire the shutter whatever the bulb path is.
+        if (sdk.has_widget(handle, "eosremoterelease")) {
             const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
             const auto has = [&](const char* choice) {
                 return std::find(remote_choices.begin(), remote_choices.end(), choice) != remote_choices.end();
@@ -1356,7 +1360,7 @@ private:
                 }
             }
             // Bulb on a Canon body is the shutter-speed "bulb" choice held open by that pair.
-            if (remote_release_pair_.has_value() && to_lower(bulb_choice_) == "bulb") {
+            if (!has_bulb_ && remote_release_pair_.has_value() && to_lower(bulb_choice_) == "bulb") {
                 remote_press_choice_ = remote_release_pair_->first;
                 remote_release_choice_ = remote_release_pair_->second;
                 has_bulb_ = true;
@@ -1512,7 +1516,7 @@ private:
         exposure_active_.store(false);
     }
 
-    // How long to keep polling for the frame after a bulb shutter closes. A
+    // How long to keep polling for the frame after a bulb (or mirror lock-up) shutter closes. A
     // body with long-exposure noise reduction on holds the file for a second
     // exposure-length (the dark frame) before posting it, so the window
     // scales with the exposure rather than being a fixed few seconds; the
@@ -1560,7 +1564,7 @@ private:
 
     // After the shutter closes, polls for the frame in slices up to bulb_file_wait_for(duration_s), checking the
     // abort flag between slices.
-    GPhotoCaptureResult wait_for_bulb_file(int handle, double duration_s) {
+    GPhotoCaptureResult wait_for_bulb_file(int handle, double duration_s, const char* what = "Bulb capture") {
         auto& sdk = sdk_;
         using clock = util::TaskClock::clock;
         constexpr auto kFilePollSlice = std::chrono::seconds(1);
@@ -1583,7 +1587,7 @@ private:
             }
         }
         throw AlpacaException(
-            "Bulb capture: no file-added event from camera within " +
+            std::string(what) + ": no file-added event from camera within " +
                 std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
                                    aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s))
                                    .count()) +
@@ -1645,7 +1649,7 @@ private:
         } else {
             release();
         }
-        return wait_for_bulb_file(handle, duration_s);
+        return wait_for_bulb_file(handle, duration_s, "Mirror lock-up capture");
     }
 
     // Requires mutex_ held. True when the camera's own mirror lock-up (MLU) menu item is on. Single-widget

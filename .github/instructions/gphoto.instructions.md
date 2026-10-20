@@ -172,7 +172,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   - **The frame wait scales with the exposure.** With the body's long-exposure noise reduction on,
     the file is posted a full exposure-length after the close (the dark frame), so a fixed 15 s
     wait lost every long frame; the watchdog deadline in `start_exposure` includes that window
-    for a bulb capture. Tell users to turn "Long exposure NR" **Off** for astro use regardless:
+    for a bulb capture (and for a mirror lock-up exposure). Tell users to turn "Long exposure NR" **Off** for astro use regardless:
     it doubles the time to every frame and the dark is better taken separately. Also from the
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
@@ -200,7 +200,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   With MLU on, a Canon body answers `gp_camera_capture` only after a 60 s timeout (EOS 70D and
   250D, bench-proven), so the driver reads the state at exposure start and fires the shutter by hand.
   The state is a single-widget lookup (never a config walk, `docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`):
-  `/main/status/mirrorlock` (70D, 0/1; a range or toggle widget, read through the wrapper's
+  `/main/status/mirrorlock` (70D, 0/1; a range or text widget, read through the wrapper's
   type-aware `get_string_value`), else the read-only `/main/status/mirrorlockstatus` (250D: 0 off, 1
   on, 2 after the first press; any non-zero number is on). A body with neither widget is MLU off and
   keeps today's paths. With MLU on, the sequence is the `eosremoterelease` pair (found by name
@@ -212,8 +212,9 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   Never `gp_camera_capture` with MLU on, so the connect priming capture is skipped too (geometry is
   learned from the first exposure). A body that reports MLU on but has no usable pair fails
   `StartExposure` with `InvalidOperation` telling the user to turn mirror lock-up off in the camera
-  menu; it never stalls. The watchdog deadline adds the settle and the frame wait. Proven on the
-  rig: EOS 70D and 250D. Fields: `mirrorLockupSettleMs` (500 to 10000, default 2000).
+  menu; it never stalls. The watchdog deadline adds the settle and the frame wait. The sequence
+  was bench-proven with the gphoto2 CLI on the EOS 70D and 250D; the driver is tested on the fake
+  only so far. Fields: `mirrorLockupSettleMs` (500 to 10000, default 2000).
 - **Long-exposure noise reduction (LENR): `longExposureNR` is `camera` (default, writes nothing), `off` or `on`.**
   For `off`/`on` the driver writes `/main/capturesettings/longexpnr` once at connect, camera idle,
   with a single-widget set, matching the camera's own On/Off text without regard to case (libgphoto2
