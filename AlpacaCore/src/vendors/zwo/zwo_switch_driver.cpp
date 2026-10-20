@@ -271,7 +271,7 @@ public:
         // a racing operational call fails fast at ensure_connected() instead
         // of hitting a just-closed camera (ops here snapshot the id and call
         // the SDK without holding mutex_) — same order as the EFW/CAA/EAF
-        // siblings, per the AGENTS.md disconnect rule.
+        // siblings, per the driver-lifecycle.instructions.md disconnect rule.
         const std::optional<int> close_id = camera_id_;
         if (!camera_bound_by_id_only()) {
             camera_id_.reset();

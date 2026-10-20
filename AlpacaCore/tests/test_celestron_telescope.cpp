@@ -321,7 +321,7 @@ TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telesco
 }
 
 // open-astro#769: MoveAxis validates its arguments before the connection check
-// (AGENTS.md error precedence), so a disconnected driver answers a bad
+// (driver-lifecycle.instructions.md error precedence), so a disconnected driver answers a bad
 // argument with InvalidValue rather than NotConnected.
 TEST_CASE("Celestron Telescope Driver - MoveAxis argument errors precede NotConnected",
           "[celestron][telescope][unit]") {

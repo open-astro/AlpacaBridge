@@ -49,7 +49,7 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // I/O (and every enumeration) behind one device's transaction for no safety
 // gain.
 //
-// Lock order (AGENTS.md "driver mutex_ -> operation lock -> SDK-wrapper
+// Lock order (driver-lifecycle.instructions.md "driver mutex_ -> operation lock -> SDK-wrapper
 // mutex"): driver transition_mutex_ -> Impl::mutex_ -> this. Nothing may take Impl::mutex_ while holding it;
 // enumerate_astroasis_focusers() takes only this one.
 //

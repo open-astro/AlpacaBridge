@@ -105,7 +105,7 @@ TEST_CASE("QHY Filter Wheel Driver - Names and focus offsets configurable while 
 TEST_CASE("QHY Filter Wheel Driver - Value range validation", "[qhy][filterwheel][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel_by_index(0, 0);
 
-    // ASCOM precedence (per AGENTS.md): range validation precedes the
+    // ASCOM precedence (per driver-lifecycle.instructions.md): range validation precedes the
     // connection check. A negative position is unconditionally invalid, so it
     // is InvalidValue even while disconnected. The upper bound depends on the
     // hardware-reported slot count (unknown until connect), so an

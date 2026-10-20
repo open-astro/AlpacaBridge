@@ -219,7 +219,7 @@ public:
             start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -298,7 +298,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()
@@ -364,7 +364,7 @@ private:
         std::optional<double> temperature;  // empty: the probe did not answer
     };
 
-    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
     // poll has failed kFaultThreshold times in a row; Connected stays true.
     void throw_if_faulted() const {
         std::lock_guard<std::mutex> lock(health_mutex_);

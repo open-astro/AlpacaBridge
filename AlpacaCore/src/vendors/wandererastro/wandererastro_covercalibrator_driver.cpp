@@ -351,7 +351,7 @@ public:
         return cover_state_locked(s) == CoverState::Moving;
     }
 
-    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // Deliberately NO per-vendor get_device_state() override: per ascom-contract.instructions.md the
     // CoverCalibratorDriver base builds the DeviceState bag from these same
     // getters, DeviceState is intentionally non-atomic, and a single-lock vendor
     // override is explicitly disallowed (ASCOM doesn't require cross-property

@@ -294,7 +294,7 @@ public:
 
     void set_position(int position) override {
         // Range validation precedes the connection check (ASCOM precedence, per
-        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // driver-lifecycle.instructions.md): a negative position is unconditionally invalid, so it is
         // InvalidValue even while disconnected. The upper bound depends on
         // slot_count_ (0 until connect), so it is checked below under the lock.
         if (position < 0) {

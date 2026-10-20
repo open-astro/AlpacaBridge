@@ -195,7 +195,7 @@ public:
             sdk.open_camera(resolved_id);
             // Guard the ENTIRE remaining init: the ZWO open is ref-counted, so
             // an unclosed open on a throw is a permanent leak (the next connect
-            // bumps the count and Close never balances) — AGENTS.md connect
+            // bumps the count and Close never balances) — driver-lifecycle.instructions.md connect
             // rule, same shape as the EAF/EFW/CAA siblings.
             try {
                 sdk.init_camera(resolved_id);
@@ -249,7 +249,7 @@ public:
         // a racing operational call fails fast at its connection check instead
         // of hitting a just-closed camera, and a throwing close can't trap the
         // driver half-connected — same order as the switch/EFW/CAA/EAF
-        // siblings, per the AGENTS.md disconnect rule (issue #116).
+        // siblings, per the driver-lifecycle.instructions.md disconnect rule (issue #116).
         const std::optional<int> close_id = camera_id_;
         serial_number_.clear();
         camera_id_.reset();
@@ -1464,7 +1464,7 @@ private:
         return true;
     }
 
-    // Align UP to the SDK divisor (pad), per the AGENTS.md "Camera ROI
+    // Align UP to the SDK divisor (pad), per the ascom-contract.instructions.md "Camera ROI
     // alignment" rule: keep the client-requested geometry for the interface,
     // pad the SDK ROI so it fully COVERS the request, and stride-crop the
     // delivered frame back to the requested size (ToupTek reference
@@ -1660,7 +1660,7 @@ private:
         return control_caps_or_throw_locked(type);
     }
 
-    // Caps check, id read, and SDK call under ONE mutex_ hold (AGENTS.md
+    // Caps check, id read, and SDK call under ONE mutex_ hold (driver-lifecycle.instructions.md
     // shape (a)) — the previous shape snapshotted the id and called the SDK
     // unlocked, racing a concurrent disconnect's close (issue #116).
     long get_control_value_or_throw(ZWOControlType type) const {
@@ -1693,7 +1693,7 @@ private:
     }
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
-    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // cannot close the camera underneath the SDK call (driver-lifecycle.instructions.md shape (a)).
     // Fast register/control calls only — never blocking waits or downloads.
     // Must NOT be called with mutex_ already held (non-recursive mutex).
     template <typename Fn>

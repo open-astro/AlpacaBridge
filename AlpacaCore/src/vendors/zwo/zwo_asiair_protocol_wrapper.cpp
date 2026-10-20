@@ -203,7 +203,7 @@ public:
             ps->stop.store(false);
         }
         if (request_ != nullptr) {
-            // Preserve-power policy (AGENTS.md "Never power-cycle on
+            // Preserve-power policy (ascom-contract.instructions.md "Never power-cycle on
             // disconnect"): a PWM worker stops wherever it is in the cycle,
             // so its line may be low. Drive each PWM line to the steady level
             // of its duty before releasing -- duty > 0 stays on, duty == 0

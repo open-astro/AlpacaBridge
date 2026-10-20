@@ -196,7 +196,7 @@ public:
     // The disconnect body, shared by the explicit disconnect and the
     // stale-link reconnect. Caller holds transition_mutex_.
     void teardown_locked() {
-        // Clear driver state BEFORE the SDK close (AGENTS.md concurrency
+        // Clear driver state BEFORE the SDK close (driver-lifecycle.instructions.md concurrency
         // checklist): a throwing close must not leave the driver
         // half-connected.
         connected_.store(false);
@@ -259,7 +259,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()
@@ -357,7 +357,7 @@ private:
         }
     }
 
-    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
     // poll has failed kFaultThreshold times in a row; Connected stays true.
     void throw_if_faulted() const {
         std::lock_guard<std::mutex> lock(health_mutex_);

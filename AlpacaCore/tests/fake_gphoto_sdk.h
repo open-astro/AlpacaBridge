@@ -97,7 +97,7 @@ inline std::string unique_test_model(const std::string& base) {
 /**
  * Scripted fake for GPhotoSDK (issue #489 fault-injection seam).
  *
- * KNOWN PARITY GAPS (AGENTS.md: a fake must be the harsher of the two; keep
+ * KNOWN PARITY GAPS (testing.instructions.md: a fake must be the harsher of the two; keep
  * this list exhaustive and prefer closing a gap to documenting it):
  *  - `capture_result` defaults to an EMPTY `data` vector, where a real
  *    capture returns 20+ MB of RAW. Harmless only because FakeRawDecoder

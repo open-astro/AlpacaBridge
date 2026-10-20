@@ -586,7 +586,7 @@ public:
 
         // Disconnecting: publish disconnected before closing the SDK handle
         // so a racing operational call fails fast at its connection check
-        // instead of hitting a just-closed camera (AGENTS.md disconnect
+        // instead of hitting a just-closed camera (driver-lifecycle.instructions.md disconnect
         // rule). Exposure worker is already joined (lifecycle lock above).
         const int close_handle = handle_;
         handle_ = -1;

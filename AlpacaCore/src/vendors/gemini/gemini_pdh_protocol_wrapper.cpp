@@ -532,7 +532,7 @@ public:
     /// teardown clears the cache only after joining the reader, which can
     /// sit in a 500 ms read, and the driver's firmware getter relies on the
     /// cache being empty whenever the driver reports disconnected
-    /// (AGENTS.md) rather than consulting connected_.
+    /// (driver-lifecycle.instructions.md) rather than consulting connected_.
     void clear_firmware() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         firmware_.clear();

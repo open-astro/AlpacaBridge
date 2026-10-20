@@ -314,7 +314,7 @@ TEST_CASE("Gemini focuser - concurrent connect/disconnect/operate stress", "[gem
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
     CHECK_NOTHROW(driver->set_connected(false));
 
-    // Expected set stated explicitly (AGENTS.md, CI section). A connected
+    // Expected set stated explicitly (ci-gates.instructions.md, CI section). A connected
     // focuser's only legitimate throw is NotConnected from a racing disconnect
     // (GeminiFocuserDriver::ensure_connected(), and the wrapper's own
     // check under its lock, gemini_protocol_wrapper.cpp). move() clamps

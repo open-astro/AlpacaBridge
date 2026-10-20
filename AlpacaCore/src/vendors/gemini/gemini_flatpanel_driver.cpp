@@ -173,7 +173,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -242,7 +242,7 @@ public:
         // ASCOM ICoverCalibratorV2 requires CalibratorOn(0) to leave
         // CalibratorState == Ready. Validate the range first so an
         // out-of-range request is rejected with InvalidValue regardless of
-        // connection state (ASCOM precedence, per AGENTS.md).
+        // connection state (ASCOM precedence, per driver-lifecycle.instructions.md).
         if (brightness < 0 || brightness > kMaxBrightness) {
             throw AlpacaException("Brightness " + std::to_string(brightness) + " out of range [0, " +
                                       std::to_string(kMaxBrightness) + "]",
@@ -320,7 +320,7 @@ public:
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
-    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // Deliberately NO per-vendor get_device_state() override: per ascom-contract.instructions.md the
     // CoverCalibratorDriver base builds the DeviceState bag from these same
     // getters, and a single-lock vendor override is explicitly disallowed.
 
@@ -527,7 +527,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -762,7 +762,7 @@ public:
     }
 
     // Deliberately NO per-vendor get_device_state() override -- see
-    // GeminiFlatPanelDriver's identical comment; the same AGENTS.md rule
+    // GeminiFlatPanelDriver's identical comment; the same ascom-contract.instructions.md rule
     // applies here.
 
 private:

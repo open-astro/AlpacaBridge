@@ -613,7 +613,7 @@ private:
         if (!util::write_all(serial_fd_, cmd.c_str(), cmd.size())) {
             const int err = errno;
             // A write is as good a witness of a removed node as a read
-            // (AGENTS.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
+            // (driver-lifecycle.instructions.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }

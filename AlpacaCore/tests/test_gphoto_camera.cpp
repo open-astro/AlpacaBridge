@@ -137,8 +137,8 @@ TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][cam
     // Properties this vendor never supports (no offset register, no fast readout)
     // throw NotImplemented regardless of connection state -- distinct from the
     // NotConnected-gated properties above. The cooler members are not in this
-    // group: while disconnected they throw NotConnected first (AGENTS.md:224); the
-    // connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
+    // group: while disconnected they throw NotConnected first (driver-lifecycle.instructions.md "ASCOM contract
+    // precedence"); the connected NotImplemented is pinned in test_gphoto_fake_sdk.cpp.
     require_alpaca_error([&]() { driver->get_offset(); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->set_offset(0); }, alpacacore::AlpacaError::NotImplemented);
     require_alpaca_error([&]() { driver->get_offset_max(); }, alpacacore::AlpacaError::NotImplemented);

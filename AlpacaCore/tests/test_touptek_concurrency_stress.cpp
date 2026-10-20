@@ -89,7 +89,7 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
     // open-astro#326: one guard per call. run_lifecycle_stress wraps the WHOLE
     // callback in a single try/catch, so a storm racing a disconnect used to
     // exercise get_camera_state() and skip the other five outright. This file
-    // is the one AGENTS.md points new authors at for the overall shape, which
+    // is the one ci-gates.instructions.md points new authors at for the overall shape, which
     // is why it had the most to gain from being fixed.
     // The set REPLACES the default {NotConnected} rather than extending it.
     // InvalidOperation belongs here because this callback both starts

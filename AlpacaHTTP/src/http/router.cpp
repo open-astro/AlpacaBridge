@@ -2089,7 +2089,7 @@ void Router::warn_if_clock_undisciplined(alpacacore::AlpacaDriver& device) const
     // has_rtc() is a memory read: the probe behind it runs at startup and on
     // the server's RTC probe thread, never here (open-astro#314). It used to read
     // sysfs inline, which on a bus-attached RTC is an I2C transaction that can
-    // block for the adapter timeout, on the connect initiator AGENTS.md times
+    // block for the adapter timeout, on the connect initiator ascom-contract.instructions.md times
     // against the 1 s STANDARD target and with the connection op mutex held.
     const bool rtc = host_clock_.has_rtc();
     // enabled() alone does not mean "a client will correct it": without
@@ -3145,7 +3145,7 @@ Response Router::dispatch_device_method(
                                   + std::chrono::seconds(8);
                     // Wait on get_connecting() alone, not get_connected(): some
                     // drivers clear their connected flag at the START of teardown
-                    // (AGENTS.md: state must be cleared before a throwing SDK
+                    // (driver-lifecycle.instructions.md: state must be cleared before a throwing SDK
                     // call), so get_connected() can flip false while the
                     // disconnect task is still in flight. Gating on it here let
                     // this handler return "done" before the task actually

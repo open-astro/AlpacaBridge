@@ -25,7 +25,7 @@ namespace alpacacore::util {
 
 /**
  * The asynchronous Park flow shared by the Celestron and SynScan telescope
- * drivers (AGENTS.md, "Telescope Park / MoveAxis(axis, 0) are asynchronous
+ * drivers (ascom-contract.instructions.md, "Telescope Park / MoveAxis(axis, 0) are asynchronous
  * initiators"): dispatch the park GOTO, poll the hardware until the slew has
  * ended, wait out the settle time, stop tracking, then publish AtPark and
  * Slewing in one locked step. The driver keeps what differs between mounts

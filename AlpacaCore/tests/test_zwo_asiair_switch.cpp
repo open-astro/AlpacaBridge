@@ -350,7 +350,7 @@ TEST_CASE("ZWO ASIAIR Pro Switch Driver - Constructor rejects invalid configs",
 
 // Issue #772 (CC-15): close() stops the PWM workers wherever they are in the
 // cycle, so without a settle step a port at 50 % duty is released low about
-// half the time and the heater on it loses power at disconnect. AGENTS.md
+// half the time and the heater on it loses power at disconnect. ascom-contract.instructions.md
 // "Never power-cycle on disconnect": duty > 0 is released high, duty 0 low.
 TEST_CASE("ZWO ASIAIR Pro protocol wrapper - close releases each PWM line at its steady level",
           "[zwo][switch][asiair][unit][gpio]") {

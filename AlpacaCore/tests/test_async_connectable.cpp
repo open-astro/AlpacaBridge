@@ -16,7 +16,7 @@
 //
 // 1. get_connecting() is the only signal guaranteed to stay true for a
 //    task's entire lifetime. get_connected() is NOT safe as a completion
-//    signal: a driver following the documented AGENTS.md pattern (clear
+//    signal: a driver following the documented driver-lifecycle.instructions.md pattern (clear
 //    connected_ at the START of teardown, before a throwing SDK close) will
 //    have get_connected() read false while get_connecting() is still true.
 //    A router disconnect-completion wait that polled `get_connected() &&
@@ -67,7 +67,7 @@ public:
             std::this_thread::sleep_for(op_delay_);
             if (fail_disconnect_.load()) {
                 // Mirrors a throwing SDK close mid-teardown: connected_ is
-                // already cleared (AGENTS.md pattern) but the teardown did
+                // already cleared (driver-lifecycle.instructions.md pattern) but the teardown did
                 // not complete.
                 throw std::runtime_error("simulated teardown failure");
             }

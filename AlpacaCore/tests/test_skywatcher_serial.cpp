@@ -984,7 +984,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
 
 TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire write without sending",
           "[skywatcher][serial][linkhealth]") {
-    // open-astro#882: AGENTS.md "Cache-backed reads must track link health" —
+    // open-astro#882: driver-lifecycle.instructions.md "Cache-backed reads must track link health" —
     // value reads AND writes throw the same DriverException while latched.
     FakeSkyWatcherSerialBoard board;
     auto driver = serial_driver(board.slave_path());

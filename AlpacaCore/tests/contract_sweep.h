@@ -235,11 +235,11 @@ inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_swit
 
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
     "assumption: the factory arguments are placeholders copied from the vendor Defaults case, not a hardware run";
 inline constexpr const char* kSrcAgentsAxis =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 "
-    "tertiary not); "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis "
+    "(axes 0/1 movable, 2 tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
 inline constexpr const char* kSrcCelestronCgx =
@@ -294,8 +294,8 @@ inline ContractEntry contract_entry_zwo_switch() {
             [](int n) -> std::unique_ptr<AlpacaDriver> {
                 return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
             },
-            "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-            "descriptor have their own entries below"),
+            "protocol document: driver-lifecycle.instructions.md + ASCOM ISwitchV3; assumption: the ASIAIR switch "
+            "drivers behind the same descriptor have their own entries below"),
         DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
         "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
         "ensure_connected()");
@@ -415,7 +415,7 @@ inline ContractEntry contract_entry_ioptron_camera() {
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
         "assumption: the ioptron/camera descriptor reuses the Player One camera driver (playerone_catalog.cpp); "
-        "protocol document: AGENTS.md contract"));
+        "protocol document: driver-lifecycle.instructions.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {
     return with_playerone_actions(make_entry(
