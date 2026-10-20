@@ -82,7 +82,8 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e') {
+        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e' || chunk[0] == 'r' || chunk[0] == 'R' ||
+            chunk[0] == 'T') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -293,10 +294,60 @@ TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing af
     }
     REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
     const int reads_before = rig.st->command_count('e');
+    const int gotos_before = rig.st->command_count('r') + rig.st->command_count('R');
     rig.driver->move_axis(0, 0.5);  // waits out the held exchange, then owns the axes
     // The old body wakes behind MoveAxis; give it real time to run its tail if it were going to.
     std::this_thread::sleep_for(std::chrono::milliseconds(700));
     CHECK(rig.st->command_count('e') == reads_before);
+    CHECK(rig.st->command_count('r') + rig.st->command_count('R') == gotos_before);
+}
+
+// The ownership check and the wire send must be one step (decision 0006, "Claim"; wire turn). A status-poll exchange
+// holds the wrapper mutex while the slew body's goto queues on it with the driver lock released; AbortSlew then
+// queues its stops. A body that checked ownership before it queued must still not send its goto after AbortSlew's
+// stop. Any other order is legal: the goto before the stops, or no goto at all. The race is a lottery without a
+// wire turn (std::mutex is not FIFO), so the case repeats it.
+TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount after AbortSlew",
+          "[synscan][initiator-supersede]") {
+    constexpr int kRuns = 200;
+    int runs = 0;
+    int reordered = 0;
+    int moving_after_abort = 0;
+    Rig rig;
+    for (int run = 0; run < kRuns; ++run) {
+        rig.st->gate_l_ms.store(150);  // the next status-poll slewing query holds the wrapper mutex
+        for (int i = 0; i < 100 && rig.st->gate_l_entered.load() == 0; ++i) {
+            rig.clock.advance(std::chrono::milliseconds(1100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        if (rig.st->gate_l_entered.load() == 0) continue;
+        rig.st->gate_l_entered.store(0);
+        ++runs;
+        {
+            std::lock_guard<std::mutex> l(rig.st->command_mutex);
+            rig.st->commands.clear();
+        }
+        rig.driver->slew_to_coordinates_async(5.5, 20.0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));  // the body's goto now queues on the wrapper
+        rig.driver->abort_slew();
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        std::string order;
+        {
+            std::lock_guard<std::mutex> l(rig.st->command_mutex);
+            for (const auto& command : rig.st->commands) order += command.empty() ? '?' : command[0];
+        }
+        const auto first_stop = order.find('M');
+        const auto last_goto = order.find_last_of("rR");
+        const bool late = first_stop != std::string::npos && last_goto != std::string::npos && last_goto > first_stop;
+        if (late) ++reordered;
+        if (rig.st->goto_in_progress()) ++moving_after_abort;
+        std::printf("run %d: wire order %s, goto after AbortSlew's stop: %d, mount slewing: %d\n", run, order.c_str(),
+                    late ? 1 : 0, rig.st->goto_in_progress() ? 1 : 0);
+        std::fflush(stdout);
+    }
+    CHECK(runs > kRuns / 2);
+    CHECK(reordered == 0);
+    CHECK(moving_after_abort == 0);
 }
 
 #endif  // _WIN32
