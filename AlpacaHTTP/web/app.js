@@ -3572,7 +3572,7 @@ INDEX_FIELDS.forEach(field => {
 });
 
 // Slot-count + per-slot filter name pickers. Every filterwheel vendor config
-// gets an instance (see AGENTS.md "FilterWheel web UI" note); the factory
+// gets an instance (see http-integration.instructions.md "FilterWheel vendors — required web UI"); the factory
 // wires all events and keeps the slot rows and names textarea in sync.
 const zwoFilterwheelSlotUI = createFilterwheelSlotUI({
     countSelectId: 'filterwheel-slot-count',

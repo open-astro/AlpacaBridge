@@ -226,7 +226,7 @@ public:
     // sysfs, which on a bus-attached RTC (DS3231, PCF85063) is a real I2C
     // transaction that can block for the adapter timeout on a wedged bus --
     // about a second. This is called from warn_if_clock_undisciplined() on the
-    // ITelescopeV4 connect initiator, which AGENTS.md times against the 1 s
+    // ITelescopeV4 connect initiator, which ascom-contract.instructions.md times against the 1 s
     // STANDARD target and which holds the device connection op mutex, and from
     // the description endpoint the web UI polls. Neither may probe.
     bool has_rtc() const { return rtc_.load(std::memory_order_relaxed); }

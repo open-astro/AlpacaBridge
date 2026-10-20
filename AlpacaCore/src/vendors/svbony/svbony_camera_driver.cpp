@@ -346,7 +346,7 @@ public:
         // the SDK close so a racing operational call fails fast at its
         // connection check instead of hitting a just-closed camera, and a
         // throwing close can't trap the driver half-connected — same order as
-        // the switch/EFW siblings, per the AGENTS.md disconnect rule (#116).
+        // the switch/EFW siblings, per the driver-lifecycle.instructions.md disconnect rule (#116).
         // The exposure worker is already joined (lifecycle lock above).
         const int close_id = camera_id_;
         camera_id_ = -1;
@@ -1464,7 +1464,7 @@ private:
     }
 
     // Recompute the SDK-facing ROI from the client-requested geometry
-    // (AGENTS.md "Camera ROI alignment"): keep the requested
+    // (ascom-contract.instructions.md "Camera ROI alignment"): keep the requested
     // NumX/NumY/StartX/StartY on the Alpaca interface, pad the SDK span UP to
     // the SVBONY divisors (width%8, height%2) so no requested pixel is lost
     // (aligning DOWN dropped up to 7 right columns / 1 bottom row and
@@ -1718,7 +1718,7 @@ private:
         return control_caps_or_throw_locked(type);
     }
 
-    // Caps check, id read, and SDK call under ONE mutex_ hold (AGENTS.md
+    // Caps check, id read, and SDK call under ONE mutex_ hold (driver-lifecycle.instructions.md
     // shape (a)) — the previous shape snapshotted the id and called the SDK
     // unlocked, racing a concurrent disconnect's close (issue #116).
     long get_control_value_or_throw(SVBControlType type) const {
@@ -1773,7 +1773,7 @@ private:
     // worker is active: it may be applying deferred SDK settings or acquiring
     // a frame, and those writes must not race it.
     // Requires mutex_ held — the lock start_exposure publishes
-    // exposure_active_=true under (TOCTOU rule, AGENTS.md).
+    // exposure_active_=true under (TOCTOU rule, driver-lifecycle.instructions.md).
     void ensure_not_exposing_locked() const {
         if (exposure_active_.load() || exposure_worker_running_) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
@@ -1819,7 +1819,7 @@ private:
     }
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
-    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // cannot close the camera underneath the SDK call (driver-lifecycle.instructions.md shape (a)).
     // Fast register/control calls only — the exposure worker and the
     // duration-blocking pulse_guide keep their bare id snapshots. Must NOT
     // be called with mutex_ already held (non-recursive mutex).

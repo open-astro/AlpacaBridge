@@ -213,7 +213,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()

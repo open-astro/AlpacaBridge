@@ -233,7 +233,7 @@ public:
         // a racing operational call fails fast at ensure_connected() instead
         // of hitting a just-closed camera (ops here snapshot the id via
         // camera_id_copy() and call the SDK without holding mutex_) — same
-        // fix as the ZWO dew-heater switch, per the AGENTS.md disconnect rule.
+        // fix as the ZWO dew-heater switch, per the driver-lifecycle.instructions.md disconnect rule.
         const int close_id = camera_id_;
         camera_id_ = -1;
         elements_.clear();

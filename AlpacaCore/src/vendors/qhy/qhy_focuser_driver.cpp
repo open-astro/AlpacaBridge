@@ -105,7 +105,7 @@ public:
         return firmware_;
     }
 
-    // Connected follows the serial link (AGENTS.md, issue #445 shape; #527):
+    // Connected follows the serial link (driver-lifecycle.instructions.md, issue #445 shape; #527):
     // once a transaction has seen the port die the wrapper latches link_lost_
     // and releases the fd, so this reads false without a reconnect. Both
     // reads are lock-free; this stays a FAST-timing getter.
@@ -192,7 +192,7 @@ public:
             start_state_poll();
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser connected (firmware " + std::to_string(info.firmware) + ")");
         } else {
-            // Driver state first, port close second (AGENTS.md, issue #387): a
+            // Driver state first, port close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on a
             // closed port. disconnect() cannot throw today; the order is the
             // contract, not the current wrapper's behaviour. Clear firmware
@@ -330,7 +330,7 @@ private:
     // True while the transport is up and the poll has not declared the link lost.
     bool link_up() const { return protocol_.link_alive() && !link_lost_.load(); }
 
-    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
     // poll has failed kFaultThreshold times in a row; Connected stays true.
     void throw_if_faulted() const {
         std::lock_guard<std::mutex> lock(health_mutex_);

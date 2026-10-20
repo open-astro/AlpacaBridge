@@ -77,7 +77,7 @@ public:
     // stack object (FakeGPhotoSDK, LockedGPhotoSDK). A public virtual
     // destructor here would make `delete static_cast<GPhotoSDK*>(&...)`
     // compile against the singleton, since access for delete is checked on the
-    // static type. AGENTS.md calls this the shape to copy; ToupTek's public
+    // static type. testing.instructions.md calls this the shape to copy; ToupTek's public
     // virtual destructor predates that reasoning.
 
     /**

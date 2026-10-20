@@ -188,7 +188,7 @@ int thrown_code(const std::function<void()>& fn) {
 using Probe = std::pair<std::string, std::function<void()>>;
 
 // Out-of-range arguments that must be rejected with InvalidValue before the
-// connection check (AGENTS.md ASCOM contract precedence).
+// connection check (driver-lifecycle.instructions.md ASCOM contract precedence).
 std::vector<Probe> invalid_value_probes(AlpacaDriver& d, DeviceType type) {
     std::vector<Probe> p;
     switch (type) {
@@ -266,7 +266,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             // Write probe on the id the registry entry names (never scanned from CanWrite, which throws
             // NotConnected on most switches while disconnected and used to drop the probe silently).
             // iOptron's iMate switch 0 is a read-only pass-through that throws NotImplemented before the
-            // connection check (AGENTS.md), which is why the id is named per entry.
+            // connection check (driver-lifecycle.instructions.md), which is why the id is named per entry.
             const int writable = entry.switch_writable_id;
             p.push_back({"set_switch(writable id)", [&s, writable] { s.set_switch(writable, false); }});
             break;

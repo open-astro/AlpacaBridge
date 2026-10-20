@@ -278,7 +278,7 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
 }
 
 // open-astro#769: PulseGuide and MoveAxis validate their arguments before the
-// connection check (AGENTS.md error precedence), so a disconnected driver
+// connection check (driver-lifecycle.instructions.md error precedence), so a disconnected driver
 // answers a bad argument with InvalidValue rather than NotConnected.
 TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnected", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;

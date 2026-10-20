@@ -175,8 +175,8 @@ TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names
 
 TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler values",
           "[gphoto][camera][unit][fakesdk]") {
-    // While disconnected these throw NotConnected first (AGENTS.md:224, #658);
-    // once connected a camera without a cooler answers its own no-cooler values.
+    // While disconnected these throw NotConnected first (driver-lifecycle.instructions.md "ASCOM contract precedence",
+    // #658); once connected a camera without a cooler answers its own no-cooler values.
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_camera());

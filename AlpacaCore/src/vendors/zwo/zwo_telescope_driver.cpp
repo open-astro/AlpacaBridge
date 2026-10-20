@@ -3147,7 +3147,7 @@ private:
     std::atomic<bool> pulse_cancel_;
     // Async teardown spawned by set_connected(false) — a joinable member so
     // the destructor can join it (a detached thread touching `this` is a
-    // use-after-free if the driver dies mid-teardown; AGENTS.md rule).
+    // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
     std::thread disconnect_thread_;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) so
     // poll_thread_/pulse_thread_/disconnect_thread_ join+assign and their

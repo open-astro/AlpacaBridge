@@ -37,7 +37,7 @@
 //
 // These doubles are never connected: get_connected() is always false and
 // every operational getter throws NotConnected, matching a real driver's
-// disconnected behavior (AGENTS.md: "Every property otherwise throws
+// disconnected behavior (driver-lifecycle.instructions.md: "Every property otherwise throws
 // NotConnected when disconnected").
 
 namespace {

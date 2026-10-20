@@ -203,7 +203,7 @@ public:
             ps->stop.store(false);
         }
         if (request_ != nullptr) {
-            // Preserve-power policy (AGENTS.md "Never power-cycle on
+            // Preserve-power policy (ascom-contract.instructions.md "Never power-cycle on
             // disconnect"): a PWM worker stops wherever it is in the cycle,
             // so its line may be low. Drive each PWM line to the steady level
             // of its duty before releasing -- duty > 0 stays on, duty == 0
@@ -237,7 +237,7 @@ public:
     }
 
     // Lock-free on purpose (issue #382): the driver answers get_connected()
-    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // with this, and alpaca-http-conformance.instructions.md wants that getter cheap. open() holds mutex_
     // for its whole sequence and close() holds it for its locked phases
     // (it drops the lock to join the PWM workers), so a locked read here
     // waited behind whichever phase was running. open_ is written only

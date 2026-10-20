@@ -504,7 +504,7 @@ SVBVideoDataResult SVBSDKWrapper::get_video_data(int camera_id, std::uint8_t* bu
     // does not promise StopVideoCapture interrupts this wait, so callers use
     // a finite iWaitms and still join before close. Safe without the lock
     // because the only caller is the exposure worker, which the driver joins (under
-    // exposure_lifecycle_mutex_) before SVBCloseCamera can run (AGENTS.md
+    // exposure_lifecycle_mutex_) before SVBCloseCamera can run (driver-lifecycle.instructions.md
     // blocking-call exemption; matches ToupTek/Player One).
     const auto result = SVBGetVideoData(camera_id, buffer, buffer_size, wait_ms);
     if (result == SVB_ERROR_TIMEOUT) {
@@ -516,7 +516,7 @@ SVBVideoDataResult SVBSDKWrapper::get_video_data(int camera_id, std::uint8_t* bu
 
 void SVBSDKWrapper::pulse_guide(int camera_id, SVBGuideDirection direction, int duration_ms) {
     // Do NOT hold the wrapper mutex — SVBPulseGuide blocks for the whole
-    // pulse duration on the device (AGENTS.md blocking-call exemption), so
+    // pulse duration on the device (driver-lifecycle.instructions.md blocking-call exemption), so
     // holding the singleton lock would freeze every SDK call for the pulse.
     // The driver publishes disconnected before closing, so the worst case for
     // a racing disconnect is an SDK error on a closed id.

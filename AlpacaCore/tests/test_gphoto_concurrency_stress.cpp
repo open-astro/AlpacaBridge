@@ -59,7 +59,7 @@ TEST_CASE("GPhoto camera - concurrent connect/disconnect/operate stress", "[gpho
     // open-astro#326: one guard per call -- before this the callback stopped
     // at the first throw, so only the first operation was ever storm-tested.
     // This registration runs CONNECTED over the fake seam, so widen the
-    // expected set the way AGENTS.md requires (the ctor arg REPLACES the
+    // expected set the way ci-gates.instructions.md requires (the ctor arg REPLACES the
     // default, so NotConnected stays listed): today's four calls can only
     // throw NotConnected, but the next call added here -- set_gain
     // (InvalidValue/InvalidOperation), get_ccd_temperature

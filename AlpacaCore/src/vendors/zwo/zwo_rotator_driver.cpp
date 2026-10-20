@@ -276,7 +276,7 @@ public:
     }
 
     void set_target_position(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = normalize_angle(position);
@@ -290,7 +290,7 @@ public:
     }
 
     void move(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         status_cache_.invalidate();  // relative to the live angle, not a frame up to one TTL old
         double current = get_position();
@@ -304,7 +304,7 @@ public:
     }
 
     void move_absolute(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         double target = normalize_angle(position);
         double mechanical_target = to_mechanical_angle(target);
@@ -316,7 +316,7 @@ public:
     }
 
     void move_mechanical(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         double mechanical_target = normalize_angle(position);
         sdk_.move_mechanical(rotator_id_value(), mechanical_target);
@@ -331,7 +331,7 @@ public:
     }
 
     void sync(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         status_cache_.invalidate();  // the offset is taken against the live angle
         double mechanical = read_status().degree;

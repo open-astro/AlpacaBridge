@@ -120,7 +120,7 @@ jobs:
             echo "ADR_SCOPE_EOF"
           } >> "${GITHUB_OUTPUT}"
 
-      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc  # v1
+      - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is
