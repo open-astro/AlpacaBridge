@@ -1162,17 +1162,21 @@ public:
                 };
                 hooks.dispatch = [&] {
                     if (park_altaz) {
-                        do_slew_to_altaz_locked(park_target_second, park_target_first, &lock, &ctx);
+                        do_slew_to_altaz_locked(park_target_second, park_target_first, lock,
+                                                [&ctx] { return !slot_stopped(&ctx); });
                     } else {
-                        do_slew_to_coordinates_locked(park_target_first, park_target_second, &lock, &ctx);
+                        do_slew_to_coordinates_locked(park_target_first, park_target_second, lock,
+                                                      [&ctx] { return !slot_stopped(&ctx); });
                     }
                 };
                 hooks.poll_slewing = [&] {
                     return poll_hardware_slewing_locked(true, false, &lock, [&ctx] { return slot_stopped(&ctx); });
                 };
                 hooks.stop_tracking = [&] {
-                    without_lock(lock, [] { SynScanProtocolWrapper::instance().set_tracking_mode(0); });
-                    if (superseded()) {
+                    if (!send_in_turn(
+                            lock, [&] { return !superseded(); },
+                            [] { SynScanProtocolWrapper::instance().set_tracking_mode(0); }) ||
+                        superseded()) {
                         return;
                     }
                     set_tracking_mode_cached_locked(0);
@@ -1227,7 +1231,12 @@ public:
         if (ctx.stop_reason() == util::StopReason::Superseded) {
             return;
         }
-        const std::string stop_error = without_lock(lock, [] { return stop_park_slew_wire(); });
+        std::string stop_error;
+        if (!send_in_turn(
+                lock, [&ctx] { return ctx.stop_reason() != util::StopReason::Superseded; },
+                [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+            return;
+        }
         if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
             return;
         }
@@ -1485,8 +1494,9 @@ public:
         check_not_parked_locked("SlewToCoordinates");
         claim_slew_slot_locked();
         parking_ = false;  // a park body in flight no longer clears it: the claim ended it
-        do_slew_to_coordinates_locked(ra, dec);
         const uint64_t owner_generation = bump_motion_generation();
+        do_slew_to_coordinates_locked(ra, dec, lock,
+                                      [&] { return motion_generation_ == owner_generation && connected_; });
         // Slewing stays true from the first GOTO to the end of the last refinement pass (open-astro#880).
         const RefineScope refine_scope(*this, owner_generation, !use_precise_commands_);
         ilock.unlock();
@@ -1584,11 +1594,14 @@ public:
                     return;
                 }
                 try {
-                    // Released for the exchange: a newer initiator must not wait for this body.
-                    without_lock(lock,
-                                 [&] { SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise); });
-                    if (ctx.stop_reason() != util::StopReason::None) {
-                        return;  // superseded (or cancelled) during the exchange: the newer operation owns the state
+                    // Sent in its turn with mutex_ released: a newer initiator must not wait for this body, and the
+                    // GOTO never goes out behind the commands of the initiator that replaced the body.
+                    if (!send_in_turn(
+                            lock, [&] { return !slot_stopped(&ctx); },
+                            [&] { SynScanProtocolWrapper::instance().goto_ra_dec_raw(ra_raw, dec_raw, precise); }) ||
+                        slot_stopped(&ctx)) {
+                        return;  // superseded (or cancelled) before or during the exchange: the newer operation owns
+                                 // the state
                     }
                     // Slewing stays true across the refinement passes: the first wait ends when the handset reports
                     // the GOTO done, then the landing is read back and corrected (open-astro#880).
@@ -1717,7 +1730,7 @@ public:
         bool was_parking = false;
         std::string stop_error;
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             parked_ = false;
             was_parking = parking_;
@@ -1727,7 +1740,15 @@ public:
                 // since the park slew may still be running.
                 parking_ = false;
                 claim_slew_slot_locked();  // the park body is superseded; it is not joined
-                stop_error = stop_park_slew_locked();
+                const uint64_t owner_generation = bump_motion_generation();
+                // The stop goes out after anything the park body is committed to send, and the body sends nothing
+                // after the claim.
+                if (!send_in_turn(
+                        lock, [&] { return motion_generation_ == owner_generation && connected_; },
+                        [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+                    check_connected();
+                    stop_error = "the stop was not sent";
+                }
                 if (stop_error.empty()) {
                     set_slewing_locked(false);
                 }
@@ -1769,12 +1790,12 @@ public:
             check_not_parked_locked("MoveAxis");
         }
         pulse_ops_[axis].cancel_all_and_join();
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
         claim_slew_slot_locked();  // supersedes a slew or park body in flight; it is not joined
         parking_ = false;          // a park body no longer clears it: the claim ended it
-        bump_motion_generation();
+        const uint64_t owner_generation = bump_motion_generation();
 
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1802,12 +1823,22 @@ public:
             invalidate_readback_top_locked();  // the jog moves RA by an unknown amount
         }
         auto& protocol = SynScanProtocolWrapper::instance();
-        protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
-        if (!moving && axis == 0 && tracking_mode_cached_ > 0) {
-            // A variable-rate P slew replaces tracking on the handset, so the stop leaves the RA motor stopped;
-            // ASCOM resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked).
-            protocol.set_tracking_mode(tracking_mode_cached_);
-            set_tracking_mode_cached_locked(tracking_mode_cached_);  // written through, as AbortSlew's restore
+        // A variable-rate P slew replaces tracking on the handset, so the stop leaves the RA motor stopped; ASCOM
+        // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked).
+        const int restore_mode = !moving && axis == 0 ? tracking_mode_cached_ : 0;
+        if (!send_in_turn(
+                lock, [&] { return motion_generation_ == owner_generation && connected_; },
+                [&] {
+                    protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
+                    if (restore_mode > 0) {
+                        protocol.set_tracking_mode(restore_mode);
+                    }
+                })) {
+            check_connected();
+            return;  // overtaken before its turn (disconnect): the rate was never sent
+        }
+        if (restore_mode > 0) {
+            set_tracking_mode_cached_locked(restore_mode);  // written through, as AbortSlew's restore
         }
         last_slew_error_.clear();
         set_slewing_locked(false);
@@ -1837,15 +1868,18 @@ public:
 
     void abort_slew() override {
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        uint64_t owner_generation = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
             claim_slew_slot_locked();                    // supersedes the slew or park body; it is not joined
+            // Also ends a synchronous slew's landing nudge at once, so the stops below wait for its stop only.
+            owner_generation = bump_motion_generation();
         }
         join_pulse_bodies();
         {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
             check_not_fully_parked_locked("AbortSlew");
             // The wrapper serializes transactions, so a GOTO already in flight
@@ -1872,9 +1906,28 @@ public:
                     }
                 }
             };
-            try_stop([&protocol]() { protocol.cancel_goto(); });
-            try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });
-            try_stop([&protocol]() { protocol.move_axis_fixed_rate(1, 0); });
+            // The stops and the tracking restore go out in one wire turn: after anything an older body is committed
+            // to send, and before nothing, since a body sends nothing once the claim above is visible to it. The
+            // restore (below, the mode the handset reported) runs only when every stop was answered.
+            const int restore_mode = tracking_mode_cached_;
+            std::exception_ptr restore_error;
+            if (!send_in_turn(
+                    lock, [&] { return motion_generation_ == owner_generation && connected_; },
+                    [&] {
+                        try_stop([&protocol]() { protocol.cancel_goto(); });
+                        try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });
+                        try_stop([&protocol]() { protocol.move_axis_fixed_rate(1, 0); });
+                        if (stop_error.empty() && restore_mode > 0) {
+                            try {
+                                protocol.set_tracking_mode(restore_mode);
+                            } catch (...) {
+                                restore_error = std::current_exception();
+                            }
+                        }
+                    })) {
+                check_connected();
+                stop_error = "the stops were not sent";
+            }
             if (!stop_error.empty()) {
                 last_slew_error_ = "AbortSlew stop failed: " + stop_error;
                 // The mount may still be moving: leave Slewing and the slew state as they were.
@@ -1892,15 +1945,17 @@ public:
             position_override_until_ = util::TaskClock::clock::time_point::min();
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
-            if (tracking_mode_cached_ > 0) {
+            if (restore_mode > 0) {
                 // Stopping an RA guide pulse also stops sidereal tracking.
                 // AbortSlew owns this stop, so restore the currently
                 // requested mode only after both axes have stopped. The motion
                 // state is already clear, so a throwing write cannot leave
                 // Slewing true over stopped axes (#830).
-                protocol.set_tracking_mode(tracking_mode_cached_);
+                if (restore_error) {
+                    std::rethrow_exception(restore_error);
+                }
                 // Written through, so a poll sampled during the RA stop (tracking off) cannot publish over it.
-                set_tracking_mode_cached_locked(tracking_mode_cached_);
+                set_tracking_mode_cached_locked(restore_mode);
                 invalidate_readback_top_locked();
             }
         }
@@ -2044,7 +2099,9 @@ private:
     // Runs `fn`, a blocking call into the protocol wrapper, with mutex_ released and takes mutex_ again before it
     // returns or throws. The wrapper serialises its transactions itself, so a body that held mutex_ across the
     // exchange would make every getter and every newer initiator wait for the old body (decision 0006, "Claim").
-    // After it returns the caller checks it still owns the slew state before it touches any flag.
+    // A motion command goes through send_in_turn(), which orders it behind earlier senders and checks ownership at
+    // its turn; a read may call this directly. After it returns the caller checks it still owns the slew state
+    // before it touches any flag.
     template <typename Fn>
     static auto without_lock(std::unique_lock<std::mutex>& lock, Fn&& fn) -> decltype(fn()) {
         struct Relock {
@@ -2053,6 +2110,52 @@ private:
         } relock{lock};
         lock.unlock();
         return fn();
+    }
+
+    // The ordered wire turn (decision 0006, "Claim"). Every motion command, from a body or an initiator, takes a
+    // ticket, waits for its turn, checks it still owns its operation and only then sends; its commands go out in
+    // ticket order. A newer owner claims the slot before it takes its ticket, so its commands always follow
+    // anything an older owner is committed to send, and an older owner that finds the claim at its turn sends
+    // nothing. A check made before the wait and a send made after it would leave a gap in which std::mutex, which is
+    // not FIFO, can put the old command behind the new owner's. Getters and the status poll take no ticket.
+    // The constructor runs with `lock` (mutex_) held: it takes the ticket, releases `lock` to wait (nobody waits for
+    // a turn while holding mutex_, and the holder of a turn may need mutex_), and returns with the turn and `lock`
+    // both held. The destructor passes the turn on, on every path. Lock order: turn, mutex_, wrapper mutex.
+    class WireTurn {
+    public:
+        WireTurn(SynScanTelescopeDriver& driver, std::unique_lock<std::mutex>& lock) : driver_(driver) {
+            std::unique_lock<std::mutex> turn_lock(driver_.turn_mutex_);
+            const uint64_t ticket = driver_.turn_next_++;
+            lock.unlock();
+            driver_.turn_cv_.wait(turn_lock, [&] { return driver_.turn_serving_ == ticket; });
+            turn_lock.unlock();
+            lock.lock();
+        }
+        ~WireTurn() {
+            {
+                std::lock_guard<std::mutex> turn_lock(driver_.turn_mutex_);
+                ++driver_.turn_serving_;
+            }
+            driver_.turn_cv_.notify_all();
+        }
+        WireTurn(const WireTurn&) = delete;
+        WireTurn& operator=(const WireTurn&) = delete;
+
+    private:
+        SynScanTelescopeDriver& driver_;
+    };
+
+    // One command in its turn: takes the ticket, waits, and sends `fn` with mutex_ released only while `owns()`
+    // (evaluated at the turn, under mutex_) still holds. Returns whether it sent. `lock` is held on entry and on
+    // return or throw.
+    template <typename Owns, typename Fn>
+    bool send_in_turn(std::unique_lock<std::mutex>& lock, Owns&& owns, Fn&& fn) {
+        WireTurn turn(*this, lock);
+        if (!owns()) {
+            return false;
+        }
+        without_lock(lock, std::forward<Fn>(fn));
+        return true;
     }
 
     // Call without mutex_ held. Starts `body` on the slew slot. The initiator
@@ -2069,10 +2172,10 @@ private:
         try {
             slew_.start(std::move(body));
         } catch (...) {
-            std::lock_guard<std::mutex> lock(mutex_);
+            std::unique_lock<std::mutex> lock(mutex_);
             rollback_locked();
             if (displaced && connected_) {
-                stop_after_refused_start_locked();
+                stop_after_refused_start_locked(lock);
             }
             throw;
         }
@@ -2081,8 +2184,13 @@ private:
     // AbortSlew's stop and published state, for a refused start that cancelled
     // a body in flight. A failed stop leaves Slewing as it was: the mount may
     // still be moving.
-    void stop_after_refused_start_locked() {
-        const std::string stop_error = stop_park_slew_locked();
+    void stop_after_refused_start_locked(std::unique_lock<std::mutex>& lock) {
+        std::string stop_error;
+        if (!send_in_turn(
+                lock, [this] { return static_cast<bool>(connected_); },
+                [&stop_error] { stop_error = stop_park_slew_wire(); })) {
+            return;
+        }
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
@@ -2394,8 +2502,7 @@ private:
     bool nudge_axis_locked(std::unique_lock<std::mutex>& lock, int axis, double delta_arcsec, uint64_t owner_generation,
                            util::OperationContext* ctx) {
         auto& protocol = SynScanProtocolWrapper::instance();
-        // Every exchange below runs with mutex_ released; after each, a body that was overtaken returns and leaves
-        // the axes to the operation that replaced it.
+        // Every exchange below runs with mutex_ released. The move start and its stop share one wire turn (below).
         const double rate_deg_per_sec = axis == 0 ? guide_rate_.ra : guide_rate_.dec;
         const double rate_arcsec_per_sec = rate_deg_per_sec * 3600.0;
         if (rate_arcsec_per_sec <= 0.0) {
@@ -2419,11 +2526,17 @@ private:
                 signed_rate = -signed_rate;
             }
         }
-        without_lock(lock, [&] { protocol.move_axis_variable_rate(axis, signed_rate); });
+        // The wire turn is kept from the start command to the stop: the move can then never end without its stop, and
+        // a newer initiator's commands, queued behind it, follow the stop. A newer initiator claims before it takes
+        // its ticket and so wakes the wait below at once (the slot's wait_for() or motion_cv_), which bounds the hold
+        // to the wake-up plus the stop exchanges. The move is the one thing this body commands that it must undo
+        // itself, so the stop is sent even when the body was overtaken meanwhile.
+        WireTurn turn(*this, lock);
         if (lost_ownership_locked(owner_generation, ctx)) {
             check_connected();
-            return false;  // the newer operation commanded the axes itself; ending this move would end its motion
+            return false;  // nothing was started: the newer operation commands the axes itself
         }
+        without_lock(lock, [&] { protocol.move_axis_variable_rate(axis, signed_rate); });
         bool keep = true;
         const auto move_time = std::chrono::milliseconds(static_cast<int>(seconds * 1000.0));
         if (ctx != nullptr) {
@@ -2434,12 +2547,6 @@ private:
             // The wait releases mutex_ while parked; every initiator that bumps motion_generation_ signals
             // motion_cv_, so a superseded synchronous nudge returns at once instead of sleeping out move_time.
             clock_.wait_for(lock, motion_cv_, move_time, [&] { return motion_generation_ != owner_generation; });
-        }
-        if (motion_generation_ != owner_generation) {
-            // A newer initiator (AbortSlew, MoveAxis, a slew, park, disconnect) has commanded the axes itself and
-            // owns them now; ending this move would end its motion.
-            check_connected();
-            return false;
         }
         std::string stop_error;
         bool stopped = false;
@@ -2458,16 +2565,12 @@ private:
             } catch (const std::exception& e) {
                 stop_error = e.what();
             }
-            if (motion_generation_ != owner_generation) {
-                check_connected();
-                return false;  // overtaken during the stop: do not retry over the newer operation's motion
-            }
         }
         if (!stopped) {
             throw AlpacaException("Landing move stop failed on axis " + std::to_string(axis) + ": " + stop_error);
         }
         check_connected();
-        return keep && motion_generation_ == owner_generation;
+        return keep && !lost_ownership_locked(owner_generation, ctx);
     }
 
     // ── Snapshot-served state (decision 0010, SynScan adoption) ──────────────
@@ -3172,11 +3275,15 @@ private:
         return SynScanProtocolWrapper::instance().get_location();
     }
 
-    // A body passes its lock and context: the GOTO exchange then runs with mutex_ released, and a body superseded
-    // meanwhile leaves the target and the flags to the operation that replaced it.
-    void do_slew_to_coordinates_locked(double ra, double dec, std::unique_lock<std::mutex>* release = nullptr,
-                                       util::OperationContext* ctx = nullptr) {
+    // The GOTO is sent in its wire turn with mutex_ released (`lock` is held on entry and on return). `owns` says the
+    // caller still owns the slew, at the start and again at the turn: a caller superseded meanwhile sends nothing and
+    // leaves the target and the flags to the operation that replaced it.
+    template <typename Owns>
+    void do_slew_to_coordinates_locked(double ra, double dec, std::unique_lock<std::mutex>& lock, Owns&& owns) {
         validate_ra_dec(ra, dec, "SlewToCoordinates");
+        if (!owns()) {
+            return;
+        }
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t ra_raw = encode_ra_raw(ra, bits);
@@ -3190,13 +3297,9 @@ private:
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
         position_override_until_ = util::TaskClock::clock::time_point::min();
         guide_position_valid_ = false;
-        if (release != nullptr) {
-            without_lock(*release, [&] { protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_); });
-            if (slot_stopped(ctx)) {
-                return;
-            }
-        } else {
-            protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_);
+        if (!send_in_turn(lock, owns, [&] { protocol.goto_ra_dec_raw(ra_raw, dec_raw, use_precise_commands_); }) ||
+            !owns()) {
+            return;
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -3208,8 +3311,11 @@ private:
         at_home_ = false;
     }
 
-    void do_slew_to_altaz_locked(double altitude, double azimuth, std::unique_lock<std::mutex>* release = nullptr,
-                                 util::OperationContext* ctx = nullptr) {
+    template <typename Owns>
+    void do_slew_to_altaz_locked(double altitude, double azimuth, std::unique_lock<std::mutex>& lock, Owns&& owns) {
+        if (!owns()) {
+            return;
+        }
         auto& protocol = SynScanProtocolWrapper::instance();
         int bits = use_precise_commands_ ? 24 : 16;
         uint32_t az_raw = encode_angle(azimuth, bits);
@@ -3220,13 +3326,9 @@ private:
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
         position_override_until_ = util::TaskClock::clock::time_point::min();
         guide_position_valid_ = false;
-        if (release != nullptr) {
-            without_lock(*release, [&] { protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_); });
-            if (slot_stopped(ctx)) {
-                return;
-            }
-        } else {
-            protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_);
+        if (!send_in_turn(lock, owns, [&] { protocol.goto_alt_az_raw(az_raw, alt_raw, use_precise_commands_); }) ||
+            !owns()) {
+            return;
         }
         parked_ = false;
         at_home_ = false;
@@ -3425,8 +3527,11 @@ private:
                 guide_position_valid_ = false;
                 set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
-                without_lock(lock,
-                             [&] { protocol.goto_ra_dec_raw(encode_ra_raw(ra, 24), encode_angle(dec, 24), true); });
+                if (!send_in_turn(
+                        lock, [&] { return !lost_ownership_locked(owner_generation, ctx); },
+                        [&] { protocol.goto_ra_dec_raw(encode_ra_raw(ra, 24), encode_angle(dec, 24), true); })) {
+                    return false;
+                }
                 if (!wait_for_slew_complete(lock, owner_generation, ctx)) {
                     return false;
                 }
@@ -3454,9 +3559,13 @@ private:
                 aim_dec = std::clamp(aim_dec + dec_error_degrees, -90.0, 90.0);
                 set_slewing_locked(true);
                 slew_force_until_ = clock_.now() + kRefineStartForce;
-                without_lock(lock, [&] {
-                    protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
-                });
+                if (!send_in_turn(
+                        lock, [&] { return !lost_ownership_locked(owner_generation, ctx); },
+                        [&] {
+                            protocol.goto_ra_dec_raw(encode_ra_raw(aim_ra, 24), encode_angle(aim_dec, 24), true);
+                        })) {
+                    return false;
+                }
                 if (!wait_for_slew_complete(lock, owner_generation, ctx)) {
                     return false;
                 }
@@ -3642,6 +3751,11 @@ private:
     // released compares it to learn it was superseded (Sky-Watcher shape, #832).
     uint64_t motion_generation_ = 0;
     std::condition_variable motion_cv_;  // signalled by bump_motion_generation(); ends a synchronous landing nudge
+    // The ordered wire turn (see WireTurn). A leaf mutex: held only to move the two counters or to wait on the cv.
+    std::mutex turn_mutex_;
+    std::condition_variable turn_cv_;
+    uint64_t turn_next_ = 0;     // next ticket to hand out
+    uint64_t turn_serving_ = 0;  // ticket whose sender may send now
     double park_ra_hours_ = 0.0;
     double park_dec_degrees_ = 0.0;
     double park_azimuth_degrees_ = 0.0;
