@@ -3159,9 +3159,10 @@ private:
     // get_tracking()).
     //
     // Atomic rather than moving the reads under mutex_ deliberately: these are
-    // capability getters that alpaca-http-conformance.instructions.md wants cheap, and mutex_ is
-    // held across the whole blocking connect handshake, so locking them would
-    // park a polling client for the duration -- the issue #130 shape.
+    // capability getters a polling client calls, and mutex_ is held across the
+    // whole blocking connect handshake, so locking them would park that client
+    // for the duration -- the issue #130 shape (alpaca-http-conformance.instructions.md
+    // states the rule for get_connected()).
     std::atomic<bool> has_autoguider_port_{false};
 
     mutable double pg_hold_ra_hours_ = 0.0;
