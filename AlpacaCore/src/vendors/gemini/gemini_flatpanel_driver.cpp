@@ -337,6 +337,12 @@ private:
 
     void publish_calibrator(int brightness, bool engaged) {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        // set_connected(false) stores false and then clears this state under
+        // the same lock, so a command that finished during a disconnect must
+        // not write over the cleared state.
+        if (!connected_.load()) {
+            return;
+        }
         commanded_brightness_ = brightness;
         calibrator_engaged_ = engaged;
     }

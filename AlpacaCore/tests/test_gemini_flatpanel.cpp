@@ -405,7 +405,7 @@ TEST_CASE("Gemini Flat Panel Lite - Brightness and CalibratorState do not wait f
 
     SECTION("CalibratorOn in flight") {
         panel.set_reply_delay(">L#", milliseconds(300));
-        std::thread caller([&] { driver->calibrator_on(40); });
+        std::jthread caller([&] { driver->calibrator_on(40); });
         REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -420,7 +420,7 @@ TEST_CASE("Gemini Flat Panel Lite - Brightness and CalibratorState do not wait f
     SECTION("CalibratorOff in flight") {
         driver->calibrator_on(40);
         panel.set_reply_delay(">D#", milliseconds(300));
-        std::thread caller([&] { driver->calibrator_off(); });
+        std::jthread caller([&] { driver->calibrator_off(); });
         REQUIRE(slot_wait_until([&] { return panel.count(">D#") == 1; }, milliseconds(1000)));
 
         const auto t0 = std::chrono::steady_clock::now();
@@ -450,7 +450,7 @@ TEST_CASE("Gemini Flat Panel Lite - set_connected(false) returns promptly with a
     FakeGeminiFlatPanel panel;
     auto driver = connect_lite(panel);
     panel.set_reply_delay(">L#", milliseconds(300));
-    std::thread caller([&] {
+    std::jthread caller([&] {
         try {
             driver->calibrator_on(40);
         } catch (const std::exception&) {
@@ -463,4 +463,22 @@ TEST_CASE("Gemini Flat Panel Lite - set_connected(false) returns promptly with a
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
     CHECK_FALSE(driver->get_connected());
     caller.join();
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a command finishing during a disconnect does not republish its state",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    panel.set_reply_delay(">L#", milliseconds(300));
+    std::jthread caller([&] { driver->calibrator_on(40); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+    driver->set_connected(false);
+    caller.join();
+
+    // A failing seed read leaves the cleared state in place on reconnect.
+    panel.set_reply_override(">S", kOverlongReply);
+    driver->set_connected(true);
+    CHECK(driver->get_brightness() == 0);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Off);
 }
