@@ -73,7 +73,9 @@ author must do. Read the docstring before changing a gate.
   blocking-`get_connected()` drivers, name them; and keep every `std::regex` in `router.cpp` `static`.
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
-  (`-DNDEBUG`) nightly, off the PR path.
+  (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job also installs the `.deb` it
+  builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does on
+  every PR, so a nightly `.deb` that fails the check is never published.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
