@@ -3229,6 +3229,20 @@ int main() {
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 1);
         remove_device(router, "gphoto", "camera", 9620);
+
+        // Mirror lock-up settle and long-exposure NR survive the save (ADR 0004 catalog fields).
+        const auto cfg_mlu = roundtrip_config(router,
+                                              {{"vendor", "gphoto"},
+                                               {"deviceType", "camera"},
+                                               {"deviceNumber", 9621},
+                                               {"cameraIndex", 1},
+                                               {"mirrorLockupSettleMs", 3500},
+                                               {"longExposureNR", "on"}},
+                                              "Camera", 9621);
+        EXPECT(cfg_mlu.is_object() && !cfg_mlu.empty());
+        EXPECT(cfg_mlu.value("mirrorLockupSettleMs", -1) == 3500);
+        EXPECT(cfg_mlu.value("longExposureNR", "") == "on");
+        remove_device(router, "gphoto", "camera", 9621);
     }
 #endif
 
@@ -5112,6 +5126,9 @@ int main() {
 #endif
 #ifdef ALPACACORE_ENABLE_GPHOTO
         add("gphoto", "camera", "Camera", "", R"({"cameraIndex":1,"cameraId":"x"})", R"({"cameraIndex":1})");
+        add("gphoto", "camera", "Camera", "MLU and LENR",
+            R"({"cameraIndex":1,"mirrorLockupSettleMs":3500,"longExposureNR":"on","bogusKey":1})",
+            R"({"cameraIndex":1,"mirrorLockupSettleMs":3500,"longExposureNR":"on"})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK

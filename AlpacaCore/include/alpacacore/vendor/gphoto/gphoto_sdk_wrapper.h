@@ -115,7 +115,9 @@ public:
     virtual bool get_toggle_value(int handle, const std::string& name) = 0;
     virtual void set_toggle_value(int handle, const std::string& name, bool on) = 0;
 
-    /// Text widgets (rarely needed; kept for completeness/diagnostics).
+    /// Text widgets, and the type-agnostic read of any widget as text: a range widget reads as its number
+    /// ("1", not "1.000000") and a toggle as "0"/"1". The mirror lock-up widgets (`mirrorlock`,
+    /// `mirrorlockstatus`) are read this way because their type differs by body.
     virtual std::string get_text_value(int handle, const std::string& name) = 0;
 
     /// Trigger a normal (non-bulb) capture and download the resulting file.

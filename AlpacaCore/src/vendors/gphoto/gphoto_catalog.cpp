@@ -16,6 +16,8 @@
 
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
+#include <chrono>
+
 #include "../../catalog/builtin_descriptors.h"
 #include "gphoto_fields.h"
 
@@ -25,7 +27,11 @@ void register_gphoto_factory(DeviceCatalog& catalog) {
     Factory factory;
     factory.key = DeviceKey{"gphoto", DeviceType::Camera};
     factory.create = [](const DeviceConfig& config, int device_number) {
-        return vendor::gphoto::create_gphoto_camera(device_number, static_cast<int>(config.get(kGphotoCameraIndex)));
+        vendor::gphoto::GPhotoOptions options;
+        options.mirror_lockup_settle = std::chrono::milliseconds(config.get(kGphotoMirrorLockupSettleMs));
+        options.long_exposure_nr = config.get(kGphotoLongExposureNr);
+        return vendor::gphoto::create_gphoto_camera(device_number, static_cast<int>(config.get(kGphotoCameraIndex)),
+                                                    options);
     };
     catalog.add(std::move(factory));
 }
