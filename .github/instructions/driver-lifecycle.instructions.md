@@ -113,7 +113,7 @@ vendor-agnostic; do them in the driver from the start.
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
-  underneath it. In a converted driver `set_connected(false)` clears state under `mutex_`, then takes
+  underneath it. In a converted driver `set_connected(false)` clears state under `mutex_`, releases it, then takes
   the I/O lock (a snapshot-then-call op-lock, in a driver that has one) across the
   close, **and** the operation re-checks `ensure_connected()`/`!handle_` under
   that lock before the SDK call. A snapshot-then-call gap with no re-check is a
