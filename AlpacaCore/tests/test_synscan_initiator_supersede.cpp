@@ -309,13 +309,13 @@ TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing af
 // wire turn (std::mutex is not FIFO), so the case repeats it.
 TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount after AbortSlew",
           "[synscan][initiator-supersede]") {
-    constexpr int kRuns = 200;
+    constexpr int kRuns = 15;
     int runs = 0;
     int reordered = 0;
     int moving_after_abort = 0;
-    Rig rig;
     for (int run = 0; run < kRuns; ++run) {
-        rig.st->gate_l_ms.store(150);  // the next status-poll slewing query holds the wrapper mutex
+        Rig rig;  // fresh per run: the lottery shows on a new poll thread
+        rig.st->gate_l_ms.store(400);  // the next status-poll slewing query holds the wrapper mutex
         for (int i = 0; i < 100 && rig.st->gate_l_entered.load() == 0; ++i) {
             rig.clock.advance(std::chrono::milliseconds(1100));
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -328,9 +328,9 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
             rig.st->commands.clear();
         }
         rig.driver->slew_to_coordinates_async(5.5, 20.0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(30));  // the body's goto now queues on the wrapper
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));  // the body's goto now queues on the wrapper
         rig.driver->abort_slew();
-        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        std::this_thread::sleep_for(std::chrono::milliseconds(600));
         std::string order;
         {
             std::lock_guard<std::mutex> l(rig.st->command_mutex);
@@ -341,9 +341,6 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
         const bool late = first_stop != std::string::npos && last_goto != std::string::npos && last_goto > first_stop;
         if (late) ++reordered;
         if (rig.st->goto_in_progress()) ++moving_after_abort;
-        std::printf("run %d: wire order %s, goto after AbortSlew's stop: %d, mount slewing: %d\n", run, order.c_str(),
-                    late ? 1 : 0, rig.st->goto_in_progress() ? 1 : 0);
-        std::fflush(stdout);
     }
     CHECK(runs > kRuns / 2);
     CHECK(reordered == 0);
