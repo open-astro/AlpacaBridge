@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **The instruction-structure check now verifies every `#fragment` in the Markdown it scans** (`scripts/check_instruction_structure.py`, issue #1388): a relative link to a `.md` file, and a same-file `(#anchor)` link, must name a heading that exists; before, only links into or out of `docs/decisions/` were checked. Two self-test mutations (a renamed target heading, a broken same-file anchor) failed before the fix. No link in the tree was broken.
