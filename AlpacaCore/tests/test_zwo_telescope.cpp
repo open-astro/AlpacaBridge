@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "getter_stall_probe.h"
 #include "sidereal_time_check.h"
 
 #ifndef _WIN32
@@ -556,5 +557,157 @@ TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
+}
+#endif
+
+#ifndef _WIN32
+namespace {
+
+// A mount that answers ":GVP" (mount info) and ":SMGE" (site) only after kHoldOpen, once armed, and
+// reports when such a request is in flight. Every other request gets the dumb "0#" reply.
+struct SlowMount {
+    std::atomic<bool> hold_info{false};
+    std::atomic<bool> hold_site{false};
+    std::atomic<bool> info_entered{false};
+    std::atomic<bool> site_entered{false};
+
+    alpacacore::test::FakeMountServer::Responder responder() {
+        return [this](const std::string& chunk) -> std::string {
+            if (chunk.find(":GVP") != std::string::npos) {
+                if (hold_info.load()) {
+                    info_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                return "AM5#";
+            }
+            if (chunk.find(":SMGE") != std::string::npos) {
+                if (hold_site.load()) {
+                    site_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                return "1";
+            }
+            if (chunk.find(":SMTI") != std::string::npos) {
+                return "1";
+            }
+            if (chunk.find(":GAT") != std::string::npos) {
+                return "1#";
+            }
+            return "0#";
+        };
+    }
+};
+
+alpacacore::vendor::zwo::ConnectionInfo slow_mount_connection(const alpacacore::test::FakeMountServer& server) {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 2000;
+    return conn;
+}
+
+}  // namespace
+
+// Decision 0016: Name and UniqueID need no device access, so a connect that is mid-handshake must not park them.
+// Falsified by: zwo_telescope_driver.cpp set_connected(true) holding mutex_ across protocol.get_mount_info()
+// (get_name() then waits the whole 300 ms reply).
+TEST_CASE("ZWO Mount Telescope Driver - Name and UniqueID answer while a connect is mid-handshake",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.hold_info = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.info_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(driver->get_connecting());  // the reply is still pending, so the timings above are not vacuous
+
+    REQUIRE(wait_until_connected(*driver));
+    CHECK(driver->get_name().rfind("ZWO AM5", 0) == 0);
+    CHECK(driver->get_unique_id().rfind("ZWO_MOUNT_AM5", 0) == 0);
+    driver->set_connected(false);
+}
+
+// A getter that is not connected yet must not run a live exchange in the middle of the handshake.
+// Falsified by: zwo_telescope_driver.cpp check_connected() reading connected_ alone (RightAscension then passes
+// the check mid-handshake and issues its own serial exchange before Connected reports true).
+TEST_CASE("ZWO Mount Telescope Driver - A getter mid-handshake reports NotConnected like Connected does",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.hold_info = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.info_entered));
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+
+    REQUIRE(wait_until_connected(*driver));
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_telescope_driver.cpp set_site_latitude()/set_site_longitude() holding mutex_ across
+// protocol.set_site_info() (get_name() then waits the 300 ms reply).
+TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in flight",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+
+    mount.hold_site = true;
+    std::thread writer([&] {
+        try {
+            driver->set_site_longitude(151.215297);
+            driver->set_site_latitude(-33.856784);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.site_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_aperture_diameter(); }) < kGetterBudget);
+
+    writer.join();
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_telescope_driver.cpp set_connected(false) joining the teardown inline behind the exchange in
+// flight (the call then takes the whole reply time plus the serial timeout instead of returning).
+TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange is in flight",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+
+    mount.hold_info = true;
+    std::thread worker([&] {
+        try {
+            (void)driver->command_string(":GVP", false);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.info_entered));
+
+    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    worker.join();
+    CHECK_FALSE(driver->get_connected());
 }
 #endif
