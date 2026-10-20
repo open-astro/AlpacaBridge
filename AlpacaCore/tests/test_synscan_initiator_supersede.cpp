@@ -11,8 +11,15 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Motion initiators and a goto body blocked in one exchange, SynScan (decision 0006, "Claim"): a new initiator
-// replaces the body in flight and returns without waiting for it, instead of cancelling and joining it.
-// The fake holds the first goto command, so the body is inside one exchange when the second initiator is called.
+// replaces the body in flight instead of cancelling and joining it. The fake holds the first goto command, so the
+// body is inside one exchange when the second initiator is called.
+//
+// The protocol wrapper holds its own mutex across each exchange, so an initiator that sends a command of its own
+// (MoveAxis, AbortSlew, Unpark during a Park) waits out the one exchange in flight whatever the driver does. What it
+// must not wait for is the old body: its driver lock, its tail, its later exchanges. Those initiators are checked by
+// a state getter that sends nothing and answers while the exchange is held (the body holds no driver lock across it),
+// and by returning soon after the hold ends. The two initiators that send nothing during a slew (SlewToCoordinatesAsync,
+// Park) must return inside the hold.
 
 #ifndef _WIN32
 
@@ -49,6 +56,9 @@ struct FakeSynScanState {
     std::atomic<int> gate_ms{0};  // >0: the next goto command is held this long before it is answered
     std::atomic<Clock::rep> gate_entered{0};
     std::atomic<Clock::rep> gate_left{0};
+    std::atomic<bool> report_slewing{false};  // true: slewing queries answer "slewing" whatever the fake clock says
+    std::atomic<int> gate_l_ms{0};  // >0: the next slewing query is held this long, then answered "not slewing"
+    std::atomic<Clock::rep> gate_l_entered{0};
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -72,7 +82,7 @@ struct FakeSynScanState {
 alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared_ptr<FakeSynScanState>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
-        if (chunk[0] == 'P' || chunk[0] == 'M') {
+        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'e') {
             st->record(chunk);
         }
         switch (chunk[0]) {
@@ -98,8 +108,15 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 st->goto_count.fetch_add(1);
                 return "#";
             }
-            case 'L':
-                return st->goto_in_progress() ? "1#" : "0#";
+            case 'L': {
+                const int hold = st->gate_l_ms.exchange(0);
+                if (hold > 0) {
+                    st->gate_l_entered.store(Clock::now().time_since_epoch().count());
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                    return "0#";
+                }
+                return st->report_slewing.load() || st->goto_in_progress() ? "1#" : "0#";
+            }
             case 'M':  // cancel goto
                 st->goto_stopped.store(true);
                 return "#";
@@ -162,15 +179,28 @@ long ms_since(Clock::time_point t0) {
 
 constexpr int kHoldMs = 2500;
 
-long time_second_initiator(const char* name, const std::function<void(alpacacore::TelescopeDriver&)>& first,
-                           const std::function<void(alpacacore::TelescopeDriver&)>& second) {
+struct Timing {
+    long probe_ms = -1;      // a getter that sends nothing, called while the old body's exchange is held
+    long took_ms = -1;       // the second initiator
+    long past_hold_ms = -1;  // the second initiator's return after the hold ended; -1 when it returned inside the hold
+};
+
+Timing time_second_initiator(const char* name, const std::function<void(alpacacore::TelescopeDriver&)>& first,
+                             const std::function<void(alpacacore::TelescopeDriver&)>& second) {
     Rig rig;
     rig.st->gate_ms.store(kHoldMs);
     first(*rig.driver);
     REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
     const auto entered = Clock::time_point(Clock::duration(rig.st->gate_entered.load()));
+    Timing timing;
+    // AtPark takes the driver lock and sends nothing: it answers only if the body does not hold the lock across its
+    // exchange.
+    const auto probe_t0 = Clock::now();
+    (void)rig.driver->get_at_park();
+    timing.probe_ms = ms_since(probe_t0);
     const long into_hold = ms_since(entered);
     std::atomic<long> took{-1};
+    std::atomic<long> past_hold{-1};
     std::atomic<bool> threw{false};
     std::thread t([&] {
         const auto t0 = Clock::now();
@@ -179,48 +209,96 @@ long time_second_initiator(const char* name, const std::function<void(alpacacore
         } catch (...) {
             threw = true;
         }
-        took = ms_since(t0);
+        const auto returned = Clock::now();
+        took = std::chrono::duration_cast<std::chrono::milliseconds>(returned - t0).count();
+        const auto left = rig.st->gate_left.load();
+        if (left != 0) {
+            past_hold = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            returned - Clock::time_point(Clock::duration(left)))
+                            .count();
+        }
     });
     t.join();
-    const bool hold_over = rig.st->gate_left.load() != 0;
+    timing.took_ms = took.load();
+    timing.past_hold_ms = past_hold.load();
     std::printf(
-        "initiator %-16s hold=%d ms, called %ld ms into the hold, returned after %ld ms, hold over at return=%d, "
-        "threw=%d\n",
-        name, kHoldMs, into_hold, took.load(), hold_over ? 1 : 0, threw.load() ? 1 : 0);
+        "initiator %-16s hold=%d ms, probe answered after %ld ms, called %ld ms into the hold, returned after %ld ms "
+        "(%ld ms past the hold end), threw=%d\n",
+        name, kHoldMs, timing.probe_ms, into_hold, timing.took_ms, timing.past_hold_ms, threw.load() ? 1 : 0);
     std::fflush(stdout);
-    return took.load();
+    return timing;
 }
+
+// A wire-sending initiator may wait out the one exchange in flight (the margin covers its own few commands on a slow
+// or sanitized runner), never the old body.
+constexpr long kPastHoldMarginMs = 2000;
 
 }  // namespace
 
 TEST_CASE("SynScan initiator supersede - SlewToCoordinatesAsync during a blocked goto exchange",
           "[synscan][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->slew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
-              [](auto& d) { d.slew_to_coordinates_async(6.5, 25.0); }) < kHoldMs / 2);
+    const auto timing = time_second_initiator(
+        "slew->slew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+        [](auto& d) { d.slew_to_coordinates_async(6.5, 25.0); });
+    CHECK(timing.probe_ms < kHoldMs / 2);
+    CHECK(timing.took_ms < kHoldMs / 2);
 }
 
 TEST_CASE("SynScan initiator supersede - MoveAxis during a blocked goto exchange", "[synscan][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->MoveAxis", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
-              [](auto& d) { d.move_axis(0, 0.5); }) < kHoldMs / 2);
+    const auto timing = time_second_initiator(
+        "slew->MoveAxis", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+        [](auto& d) { d.move_axis(0, 0.5); });
+    CHECK(timing.probe_ms < kHoldMs / 2);
+    CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
 
 TEST_CASE("SynScan initiator supersede - AbortSlew during a blocked goto exchange", "[synscan][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
-              [](auto& d) { d.abort_slew(); }) < kHoldMs / 2);
+    const auto timing = time_second_initiator(
+        "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+        [](auto& d) { d.abort_slew(); });
+    CHECK(timing.probe_ms < kHoldMs / 2);
+    CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
 
 TEST_CASE("SynScan initiator supersede - Unpark during a Park whose goto exchange is blocked",
           "[synscan][initiator-supersede]") {
-    CHECK(time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); }) < kHoldMs / 2);
+    const auto timing =
+        time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); });
+    CHECK(timing.probe_ms < kHoldMs / 2);
+    CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
 
 TEST_CASE("SynScan initiator supersede - Park during a blocked goto exchange", "[synscan][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->Park", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); }) <
-          kHoldMs / 2);
+    const auto timing = time_second_initiator(
+        "slew->Park", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); });
+    CHECK(timing.probe_ms < kHoldMs / 2);
+    CHECK(timing.took_ms < kHoldMs / 2);
+}
+
+// The old body is inside its second slewing query (held) when MoveAxis replaces it. The query then answers "not
+// slewing", the one answer that would take the body to its tail (clear Slewing, publish a measurement). A superseded
+// body must send nothing after the exchange: the handset position read ('e') is what the tail would send. The status
+// poll is parked on the fake clock, so it sends no 'e' of its own while the clock stands still.
+TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing after its held exchange",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    rig.st->report_slewing.store(true);
+    // The initiator publishes an 8 s Slewing window during which the body asks the handset nothing: step past it.
+    rig.clock.advance(std::chrono::seconds(9));
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));  // the body polls once and sleeps 250 ms again
+    rig.st->gate_l_ms.store(kHoldMs);
+    for (int i = 0; i < 3 && rig.st->gate_l_entered.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        rig.clock.advance(std::chrono::milliseconds(260));
+    }
+    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
+    const int reads_before = rig.st->command_count('e');
+    rig.driver->move_axis(0, 0.5);  // waits out the held exchange, then owns the axes
+    // The old body wakes behind MoveAxis; give it real time to run its tail if it were going to.
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(rig.st->command_count('e') == reads_before);
 }
 
 #endif  // _WIN32
