@@ -314,7 +314,8 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
     int reordered = 0;
     int moving_after_abort = 0;
     for (int run = 0; run < kRuns; ++run) {
-        Rig rig;  // fresh per run: the lottery shows on a new poll thread
+        // Fresh rig per run: the lottery shows on a new poll thread.
+        Rig rig;
         rig.st->gate_l_ms.store(400);  // the next status-poll slewing query holds the wrapper mutex
         for (int i = 0; i < 100 && rig.st->gate_l_entered.load() == 0; ++i) {
             rig.clock.advance(std::chrono::milliseconds(1100));
