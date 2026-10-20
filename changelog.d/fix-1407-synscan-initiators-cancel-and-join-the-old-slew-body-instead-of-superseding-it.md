@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan motion initiators no longer wait for the old slew**, SynScan telescope driver, issue #1407. A new slew, Park, Unpark, MoveAxis or AbortSlew used to cancel and join the slew body in flight, so it waited for a serial exchange blocked until its timeout; it now supersedes the body and returns, and the body leaves every flag, the target and the axes alone once it is superseded. The slew, Park and landing bodies release the driver lock around each handset exchange, so a state getter such as `AtPark` answers while a GOTO exchange is held. MoveAxis, AbortSlew and Unpark during a Park still wait for the one exchange in flight, because the protocol wrapper serialises exchanges. Covered by `AlpacaCore/tests/test_synscan_initiator_supersede.cpp`.
