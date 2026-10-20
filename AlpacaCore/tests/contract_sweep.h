@@ -91,6 +91,7 @@
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -509,6 +510,18 @@ inline ContractEntry contract_entry_celestron_cgx_telescope() {
     entry.can_move_axis = {false, false, false};
     return entry;
 }
+inline ContractEntry contract_entry_celestron_focuser() {
+    auto entry = make_entry(
+        "celestron_focuser", "celestron", "focuser", DeviceType::Focuser,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::celestron::create_celestron_focuser(n, "/dev/ttyUSB0");
+        },
+        kSrcAgents);
+    // Action list read from celestron_focuser_driver.cpp get_supported_actions() (assumption: not
+    // checked against a hardware run).
+    entry.actions = {"Calibrate", "AbortCalibration", "CalibrationStatus"};
+    return entry;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -769,7 +782,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_focuser)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -901,6 +914,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
     {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
+    {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},

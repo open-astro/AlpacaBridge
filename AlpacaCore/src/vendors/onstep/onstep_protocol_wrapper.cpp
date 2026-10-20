@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -432,6 +433,29 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
 }
 #endif
 
+// Never destroyed: the wrapper singleton can disconnect from its destructor at
+// exit, after function-local statics built later than it are gone.
+std::mutex& link_loss_hook_mutex() {
+    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory)
+    return *m;
+}
+
+std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
+    static auto* hook = new std::function<void(detail::LinkLossHookPoint)>;  // NOLINT(cppcoreguidelines-owning-memory)
+    return *hook;
+}
+
+void run_link_loss_hook(detail::LinkLossHookPoint point) {
+    std::function<void(detail::LinkLossHookPoint)> hook;
+    {
+        std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+        hook = link_loss_hook();
+    }
+    if (hook) {
+        hook(point);
+    }
+}
+
 }  // namespace
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
@@ -599,15 +623,22 @@ public:
         if (!connected_) {
             return;
         }
-        // Published first, so link_alive() never reports a closing fd as live.
-        connected_ = false;
+        {
+            // Down, node cleared and generation bumped in one step, before the
+            // port closes: a link_alive() that took its snapshot before this
+            // cannot record a loss after it (open-astro#1289). connected_ is
+            // published first, so link_alive() never reports a closing fd as live.
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            connected_ = false;
+            link_path_.clear();
+            ++link_generation_;
+        }
+        run_link_loss_hook(detail::LinkLossHookPoint::DisconnectBeforeClose);
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
-        std::lock_guard<std::mutex> id_lock(link_id_mutex_);
-        link_path_.clear();
     }
 
     // ── Link loss (decision 0009, #1241) ──
@@ -628,8 +659,11 @@ public:
             return false;
         }
         bool present = true;
+        std::uint64_t generation = 0;
+        std::string path;
         {
             std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            generation = link_generation_;
             if (!link_path_.empty()) {
                 struct stat st {};
                 if (::stat(link_path_.c_str(), &st) != 0) {
@@ -640,18 +674,32 @@ public:
                     present = st.st_dev == link_dev_ && st.st_ino == link_ino_;
                 }
             }
+            if (!present) {
+                path = link_path_;  // for the loss text; copied only when it is needed
+            }
         }
         if (present) {
             mark_alive();
             return connected_;
         }
-        note_loss("the adapter at " + link_path_snapshot() + " was removed or re-enumerated");
+        run_link_loss_hook(detail::LinkLossHookPoint::AliveBeforeRecord);
+        // Nothing holds mutex_ here, so a Disconnect or a reconnect can have
+        // run since the stat(). Record the loss only for the link that was
+        // checked: otherwise a deliberate Disconnect would leave a loss (and
+        // the next Connect would send the #521 stops), or a relink would see
+        // its fresh link marked lost and closed (open-astro#1289).
+        if (!note_loss_if_current(generation, "the adapter at " + path + " was removed or re-enumerated")) {
+            return connected_ && !link_lost_;
+        }
+        run_link_loss_hook(detail::LinkLossHookPoint::AliveBeforeClose);
         // Best effort: an exchange in progress will find the loss itself.
+        // Re-checked under the lock: a relink may have opened a fresh link
+        // since the record, and a successful connect clears the loss.
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-        if (lock.owns_lock()) {
+        if (lock.owns_lock() && connected_ && link_lost_) {
             disconnect_locked();
         }
-        return false;
+        return connected_ && !link_lost_;
     }
 
     std::string link_lost_reason() const {
@@ -1133,6 +1181,7 @@ private:
             link_path_ = port_path;
             link_dev_ = st.st_dev;
             link_ino_ = st.st_ino;
+            ++link_generation_;
         }
 
         return true;
@@ -1320,17 +1369,39 @@ private:
         return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
     }
 
-    std::string link_path_snapshot() const {
-        std::lock_guard<std::mutex> id_lock(link_id_mutex_);
-        return link_path_;
-    }
-
     // Marks the link lost once: the first detection keeps its reason and stamp.
     void note_loss(const std::string& reason) {
+        if (record_loss(reason)) {
+            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+        }
+    }
+
+    // note_loss() for a loss found with no mutex_ held: records it only while
+    // the link it was found on is still the current one. The generation check
+    // and the record share link_id_mutex_, which connect and disconnect take
+    // to change the node, so neither can slip in between (open-astro#1289).
+    // False when the link changed and nothing was recorded.
+    bool note_loss_if_current(std::uint64_t generation, const std::string& reason) {
+        bool recorded = false;
+        {
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            if (generation != link_generation_) {
+                return false;
+            }
+            recorded = record_loss(reason);
+        }
+        if (recorded) {
+            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+        }
+        return true;
+    }
+
+    // The state half of note_loss(): true when this call marked the link lost.
+    bool record_loss(const std::string& reason) {
         {
             std::lock_guard<std::mutex> lock(loss_mutex_);
             if (link_lost_) {
-                return;
+                return false;
             }
             lost_reason_ = reason;
             link_lost_ = true;
@@ -1341,7 +1412,7 @@ private:
         }
         (void)link_lost_at_.consume();  // an older, unclaimed loss is superseded by this one
         link_lost_at_.note(util::default_task_clock().now());
-        ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+        return true;
     }
 
     // The last time the link was confirmed present (connect, a live
@@ -1408,10 +1479,13 @@ private:
     util::LinkLostStamp link_lost_at_;
     std::atomic<std::int64_t> last_alive_ns_{0};
     std::optional<std::chrono::steady_clock::time_point> alive_before_loss_;  // under loss_mutex_
-    mutable std::mutex link_id_mutex_;                                        // leaf: the node recorded at connect
+    // The node recorded at connect. Taken before loss_mutex_ and the
+    // link_lost_at_ stamp's mutex (note_loss_if_current), never after them.
+    mutable std::mutex link_id_mutex_;
     std::string link_path_;
     dev_t link_dev_{};
     ino_t link_ino_{};
+    std::uint64_t link_generation_ = 0;  // under link_id_mutex_: bumped when the node is recorded or cleared
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     int serial_fd_;
@@ -1508,5 +1582,12 @@ std::string OnStepProtocolWrapper::send_command(const std::string& command, bool
 void OnStepProtocolWrapper::send_command_blind(const std::string& command) { pimpl_->send_command_blind(command); }
 
 void OnStepProtocolWrapper::flush_input() { pimpl_->flush_input(); }
+
+namespace detail {
+void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
+    std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+    link_loss_hook() = std::move(hook);
+}
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

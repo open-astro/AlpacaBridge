@@ -39,6 +39,16 @@
   },
   {
     "vendor": "celestron",
+    "deviceType": "focuser",
+    "displayName": "Celestron Focus Motor",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_CELESTRON",
+    "fields": [
+      {"key": "portPath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath"}
+    ]
+  },
+  {
+    "vendor": "celestron",
     "deviceType": "telescope",
     "displayName": "Celestron",
     "available": true,

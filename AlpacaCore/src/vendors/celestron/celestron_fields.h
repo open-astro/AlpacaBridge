@@ -12,7 +12,7 @@
 
 #pragma once
 
-// Celestron telescope catalog field declarations, shared by celestron_schema.cpp
+// Celestron telescope and focuser catalog field declarations, shared by celestron_schema.cpp
 // (no vendor header) and celestron_catalog.cpp (the factory, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -80,6 +80,16 @@ inline const std::vector<FieldRef>& celestron_telescope_fields() {
         kCelestronTcpPort.ref(),           kCelestronResponseTimeoutMs.ref(), kCelestronAlignmentMode.ref(),
         kCelestronSiteLatitude.ref(),      kCelestronSiteLongitude.ref(),     kCelestronSiteElevation.ref(),
         kCelestronSyncTimeOnConnect.ref(), kCelestronApertureDiameter.ref(),  kCelestronFocalLength.ref()};
+    return fields;
+}
+
+// Celestron Focus Motor on its own USB port (issue #896): an explicit port
+// only, no auto-detect (the motor's USB descriptors are not verified yet).
+inline const Field<std::string> kCelestronFocuserPortPath{
+    .key = "portPath", .default_value = "", .role = Role::PortPath};
+
+inline const std::vector<FieldRef>& celestron_focuser_fields() {
+    static const std::vector<FieldRef> fields{kCelestronFocuserPortPath.ref()};
     return fields;
 }
 

@@ -76,7 +76,7 @@
                         -->
                         <option value="altair">Altair</option>
                         <option value="astroasis">Astroasis</option>
-                        <option value="celestron">Celestron NexStar</option>
+                        <option value="celestron">Celestron</option>
                         <option value="gemini">Gemini</option>
                         <option value="gphoto">DSLR / Mirrorless</option>
                         <option value="ioptron">iOptron</option>
@@ -575,6 +575,17 @@
 
                 <!-- Celestron NexStar Telescope Configuration -->
                 <div id="celestron-config" class="vendor-config" style="display: none;">
+                  <div id="celestron-focuser-config" style="display: none;">
+                    <h3>Celestron Focus Motor Configuration</h3>
+                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you run the driver's Calibrate action (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
+                    <div class="form-group">
+                        <label for="celestron-focuser-port-path">Serial Port:</label>
+                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/ttyUSB0">
+                        <small>Required. A /dev/serial/by-id/ path keeps working when other USB devices are plugged in.</small>
+                    </div>
+                  </div>
+
+                  <div id="celestron-telescope-config">
                     <h3>Celestron Telescope Configuration</h3>
 
                     <div class="form-group">
@@ -662,6 +673,7 @@
                         <input type="number" id="celestron-focal-length" name="celestronFocalLength" min="0" step="1" placeholder="2032">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
                 </div>
 
                 <!-- Bisque (Paramount / TheSkyX) Telescope Configuration -->

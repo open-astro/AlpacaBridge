@@ -44,6 +44,18 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - The slew Tracking gate reads TheSkyX live, writes the result through, and falls back to the frame's value when that read fails. When the frame never knew Tracking, the gate treats it as off, where the Tracking getter throws.
 - Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies.
 
+### Other adopters
+
+These drivers also serve their polled telemetry from a snapshot. Their per-driver choices (period, `max_age`, what is served, what stale means) are owned by their instruction files, not by this record.
+
+| Driver | Issue | Poll period | Owner of the details |
+| --- | --- | --- | --- |
+| Gemini focuser | #1229 | 250 ms | [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
+| QHY Q-Focuser | #1310 | 250 ms | [QHY instructions](../../.github/instructions/qhy.instructions.md) |
+| Astroasis focuser | #1327 | 100 ms | [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
+| SynScan telescope | #1247 | 1 s | [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
+| Celestron focus motor | #1320 | 250 ms | [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+
 ## Alternatives rejected
 
 - **Extend `TtlStatusCache`.** Different ownership of the fetch (see point 6).

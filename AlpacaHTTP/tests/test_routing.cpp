@@ -4930,6 +4930,11 @@ int main() {
         reject({{"vendor", "bisque"}, {"deviceType", "telescope"}, {"deviceNumber", 9647}, {"host", ""}},
                "Host is required for Bisque/TheSkyX connection");
 #endif
+#ifdef ALPACACORE_ENABLE_CELESTRON
+        // The focus motor has no auto-detect, so the API refuses it without a port (issue #896).
+        reject({{"vendor", "celestron"}, {"deviceType", "focuser"}, {"deviceNumber", 9648}, {"portPath", ""}},
+               "Serial port path is required for the Celestron focus motor");
+#endif
     }
 
 #endif
@@ -5264,6 +5269,10 @@ int main() {
         add("celestron", "telescope", "Telescope", "alignmentMode non-string",
             R"({"connectionType":"auto","mountIndex":1,"alignmentMode":2})",
             R"({"connectionType":"auto","mountIndex":1})");
+        // Focus motor on its own USB port (issue #896): portPath is its only field.
+        add("celestron", "focuser", "Focuser", "",
+            R"({"portPath":"/dev/ttyUSB-focus","baudRate":9600,"connectionType":"serial"})",
+            R"({"portPath":"/dev/ttyUSB-focus"})");
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -7951,7 +7960,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 39);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 40);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build

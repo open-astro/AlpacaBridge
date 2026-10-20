@@ -151,7 +151,11 @@ it is never reachable through `router.cpp` or the web UI.
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
   no poll thread, and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
-  lost.
+  lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
+  still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that
+  lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
+  a Disconnect bumps the generation before it closes the port; the close that follows a recorded loss
+  re-checks under `mutex_` that the link is still connected and still lost (#1289).
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
   `Tracking` reads false, after the parked check and coordinate validation and before any target or

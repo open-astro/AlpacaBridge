@@ -1088,6 +1088,9 @@ function startEditDevice(device) {
         if (onstepConnectionTypeEl) {
             onstepConnectionTypeEl.dispatchEvent(new Event('change'));
         }
+    } else if (vendor === 'celestron' && deviceType === 'focuser') {
+        setFormValue('celestron-focuser-port-path', config.portPath);
+        updateCelestronDeviceFields();
     } else if (vendor === 'celestron') {
         const protocol = config.protocol || 'nexstar';
         setFormValue('celestron-protocol', protocol);
@@ -3000,8 +3003,10 @@ function updateVendorOptions() {
     }
     const celestronOption = vendorSelect.querySelector('option[value="celestron"]');
     if (celestronOption) {
-        celestronOption.disabled = !isTelescope;
-        celestronOption.hidden = !isTelescope;
+        // Celestron provides the mount (telescope) and the focus motor (issue #896).
+        const celestronAllowed = isTelescope || isFocuser;
+        celestronOption.disabled = !celestronAllowed;
+        celestronOption.hidden = !celestronAllowed;
     }
     const onstepOption = vendorSelect.querySelector('option[value="onstep"]');
     if (onstepOption) {
@@ -3095,7 +3100,7 @@ function updateVendorOptions() {
     if (!isTelescope && vendorSelect.value === 'skywatcher') {
         vendorSelect.value = '';
     }
-    if (!isTelescope && vendorSelect.value === 'celestron') {
+    if (!isTelescope && !isFocuser && vendorSelect.value === 'celestron') {
         vendorSelect.value = '';
     }
     if (!isTelescope && vendorSelect.value === 'onstep') {
@@ -3158,6 +3163,7 @@ document.getElementById('vendor').addEventListener('change', function() {
     } else if (vendor === 'celestron') {
         document.getElementById('celestron-config').style.display = 'block';
         updateCelestronConnectionFields();
+        updateCelestronDeviceFields();
     } else if (vendor === 'onstep') {
         document.getElementById('onstep-config').style.display = 'block';
     } else if (vendor === 'bisque') {
@@ -3410,6 +3416,20 @@ if (onstepConnectionType) {
 
 const celestronConnectionType = document.getElementById('celestron-connection-type');
 const celestronProtocol = document.getElementById('celestron-protocol');
+// Celestron covers the mount (telescope) and the focus motor (focuser, issue
+// #896) from one vendor config block; show the sub-section for Device Type.
+function updateCelestronDeviceFields() {
+    const focuserSection = document.getElementById('celestron-focuser-config');
+    const telescopeSection = document.getElementById('celestron-telescope-config');
+    if (!focuserSection || !telescopeSection) {
+        return;
+    }
+    const deviceTypeSelect = document.getElementById('device-type');
+    const isFocuser = deviceTypeSelect && normalizeDeviceType(deviceTypeSelect.value) === 'focuser';
+    focuserSection.style.display = isFocuser ? 'block' : 'none';
+    telescopeSection.style.display = isFocuser ? 'none' : 'block';
+}
+
 function updateCelestronConnectionFields() {
     const directUsb = celestronProtocol && celestronProtocol.value === 'cgx-aux';
     const nexstarOnly = document.getElementById('celestron-nexstar-only');
@@ -4304,6 +4324,13 @@ document.getElementById('device-form').addEventListener('submit', async function
         // "auto" needs no connection fields - port is discovered at startup
 
         if (!applyOpticsMm(formData, deviceData, 'onstepApertureDiameter', 'onstepFocalLength')) {
+            return;
+        }
+    } else if (deviceData.vendor === 'celestron' && normalizeDeviceType(deviceData.deviceType) === 'focuser') {
+        // Focus motor's own USB port: fixed 9600 baud, explicit port only (issue #896).
+        deviceData.portPath = (formData.get('celestronFocuserPortPath') || '').trim();
+        if (!deviceData.portPath) {
+            alert('A serial port is required for the Celestron focus motor.');
             return;
         }
     } else if (deviceData.vendor === 'celestron') {

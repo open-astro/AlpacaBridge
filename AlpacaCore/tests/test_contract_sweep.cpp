@@ -64,10 +64,12 @@
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 
 #include "fake_celestron_cgx_mount.h"
+#include "fake_celestron_focuser.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
@@ -985,6 +987,34 @@ Tier2Host tier2_host_celestron_cgx_telescope() {
         err::InvalidOperation};
     return host;
 }
+
+// FakeCelestronFocuser over a pty (recipe of test_celestron_focuser.cpp, issue #896).
+Tier2Host tier2_host_celestron_focuser() {
+    Tier2Host h{"celestron_focuser",
+                "celestron",
+                "focuser",
+                "fake_celestron_focuser.h",
+                DeviceType::Focuser,
+                "celestron_focuser",
+                {},
+                false,
+                {},
+                "",
+                "The fake answers every AUX frame at once and has no hold knob; Connecting may complete before "
+                "its first poll (fake_celestron_focuser.h)"};
+    h.connectable = [](bool) {
+        auto fake = std::make_shared<alpacacore::test::FakeCelestronFocuser>();
+        return host_over(fake, [](const alpacacore::test::FakeCelestronFocuser& f) -> std::unique_ptr<AlpacaDriver> {
+            return alpacacore::vendor::celestron::create_celestron_focuser(0, f.slave_path());
+        });
+    };
+    h.failing = []() {
+        Hosted hosted;
+        hosted.driver = alpacacore::vendor::celestron::create_celestron_focuser(0, kAbsentPort);
+        return hosted;
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
@@ -1714,7 +1744,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL)
+#define CS2_CELESTRON(X) X(celestron_telescope, TEL) X(celestron_cgx_telescope, TEL) X(celestron_focuser, NPR)
 #else
 #define CS2_CELESTRON(X)
 #endif

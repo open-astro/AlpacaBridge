@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <functional>
 #include <mutex>
@@ -48,6 +49,7 @@ namespace {
 using alpacacore::vendor::onstep::ConnectionInfo;
 using alpacacore::vendor::onstep::ConnectionType;
 using alpacacore::vendor::onstep::OnStepProtocolWrapper;
+using alpacacore::vendor::onstep::detail::LinkLossHookPoint;
 
 // A minimal OnStepX behind a pseudo-terminal: answers the LX200 commands the
 // driver's connect and position reads send, and records every command.
@@ -252,6 +254,11 @@ struct WindowReset {
     }
 };
 
+// Clears the link_alive() test hook on every way out of a case.
+struct LossHookReset {
+    ~LossHookReset() { alpacacore::vendor::onstep::detail::set_link_loss_hook(nullptr); }
+};
+
 }  // namespace
 
 TEST_CASE("OnStep link loss - Connected drops when the adapter is pulled with no client I/O",
@@ -373,6 +380,151 @@ TEST_CASE("OnStep link loss - Connected stays false through the relink's warm-up
     REQUIRE_FALSE(driver->get_connecting());
     CHECK(driver->get_connected());
     driver->set_connected(false);
+}
+
+// #1289 item 3: link_alive() checks the node with no mutex_ held. A Disconnect
+// that lands between the stat() and the record must not leave a loss behind,
+// or the next Connect sends the #521 stops to a mount nobody lost.
+TEST_CASE("OnStep link loss - a Disconnect during the node check records no loss", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    LossHookReset hook_reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+
+    link.remove();  // the node is gone, so the next check finds a loss
+    bool hook_ran = false;
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeRecord && !hook_ran) {
+            hook_ran = true;
+            protocol.disconnect();  // the client's deliberate Disconnect
+        }
+    });
+    CHECK_FALSE(protocol.link_alive());
+    REQUIRE(hook_ran);
+    CHECK(protocol.link_lost_reason().empty());
+    CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+    CHECK_FALSE(protocol.consume_last_alive_before_loss().has_value());
+}
+
+// The same race with the Disconnect still in progress: it has marked the link
+// down but not yet closed the port when link_alive() goes to record. The
+// snapshot link_alive() took before it must not match by then.
+TEST_CASE("OnStep link loss - a Disconnect still closing the port records no loss", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    LossHookReset hook_reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+    link.remove();
+
+    std::mutex m;
+    std::condition_variable cv;
+    bool disconnect_paused = false;
+    bool release_disconnect = false;
+    std::thread disconnector;
+    JoinOnExit join{disconnector};
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeRecord && !disconnector.joinable()) {
+            // link_alive() has its snapshot; start a Disconnect and wait until
+            // it is between marking the link down and closing the port.
+            disconnector = std::thread([&] { protocol.disconnect(); });
+            std::unique_lock<std::mutex> lock(m);
+            cv.wait_for(lock, std::chrono::seconds(5), [&] { return disconnect_paused; });
+        } else if (point == LinkLossHookPoint::DisconnectBeforeClose) {
+            std::unique_lock<std::mutex> lock(m);
+            disconnect_paused = true;
+            cv.notify_all();
+            cv.wait_for(lock, std::chrono::seconds(5), [&] { return release_disconnect; });
+        }
+    });
+    CHECK_FALSE(protocol.link_alive());
+    {
+        std::lock_guard<std::mutex> lock(m);
+        REQUIRE(disconnect_paused);
+        release_disconnect = true;
+    }
+    cv.notify_all();
+    disconnector.join();
+    CHECK(protocol.link_lost_reason().empty());
+    CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+    CHECK_FALSE(protocol.consume_last_alive_before_loss().has_value());
+}
+
+// #1289 item 3, the relink half: a reconnect to the replugged adapter that
+// lands in the same window must not see its new link marked lost and closed.
+TEST_CASE("OnStep link loss - a reconnect during the node check keeps the new link", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    LossHookReset hook_reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+
+    FakeOnStepSerialMount replugged;
+    first.sever_link();
+    link.repoint(replugged.slave_path());
+    bool hook_ran = false;
+    bool reconnected = false;
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeRecord && !hook_ran) {
+            hook_ran = true;
+            protocol.disconnect();
+            reconnected = protocol.connect(serial_info(link));
+        }
+    });
+    // Checked the old node; the relink ran inside. The call reports the link
+    // that is current now, which is the fresh one.
+    CHECK(protocol.link_alive());
+    REQUIRE(hook_ran);
+    REQUIRE(reconnected);
+    alpacacore::vendor::onstep::detail::set_link_loss_hook(nullptr);
+    CHECK(protocol.link_lost_reason().empty());
+    CHECK(protocol.is_connected());
+    CHECK(protocol.link_alive());
+    CHECK_NOTHROW((void)protocol.send_command(":GVP#"));
+    CHECK(replugged.received(":GVP#"));
+}
+
+// The relink can also land after the loss is recorded and before link_alive()
+// closes the port: the close must not take the fresh link down with it.
+TEST_CASE("OnStep link loss - a reconnect after the loss is recorded keeps the new link",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    LossHookReset hook_reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    FakeOnStepSerialMount first;
+    PortLink link(first.slave_path());
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+
+    FakeOnStepSerialMount replugged;
+    first.sever_link();
+    link.repoint(replugged.slave_path());
+    bool hook_ran = false;
+    bool reconnected = false;
+    alpacacore::vendor::onstep::detail::set_link_loss_hook([&](LinkLossHookPoint point) {
+        if (point == LinkLossHookPoint::AliveBeforeClose && !hook_ran) {
+            hook_ran = true;
+            protocol.disconnect();
+            reconnected = protocol.connect(serial_info(link));
+        }
+    });
+    // The old link was lost and recorded; the call reports the fresh link that
+    // replaced it before the close.
+    CHECK(protocol.link_alive());
+    REQUIRE(hook_ran);
+    REQUIRE(reconnected);
+    alpacacore::vendor::onstep::detail::set_link_loss_hook(nullptr);
+    CHECK(protocol.is_connected());
+    CHECK(protocol.link_alive());
+    CHECK_NOTHROW((void)protocol.send_command(":GVP#"));
+    CHECK(replugged.received(":GVP#"));
 }
 
 TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outage", "[onstep][serial][connected]") {

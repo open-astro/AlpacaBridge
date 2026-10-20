@@ -1,5 +1,6 @@
 # Celestron vendor support
-# NexStar uses HC serial/TCP; CGX/CGX-L direct USB uses the AUX serial protocol.
+# NexStar uses HC serial/TCP; CGX/CGX-L direct USB and the focus motor's own
+# USB port use the AUX serial protocol.
 # No SDK required - uses standard platform serial/socket APIs
 
 if(ALPACACORE_ENABLE_CELESTRON)
@@ -10,6 +11,7 @@ if(ALPACACORE_ENABLE_CELESTRON)
         celestron_cgx_protocol.cpp
         celestron_cgx_protocol_wrapper.cpp
         celestron_cgx_telescope_driver.cpp
+        celestron_focuser_driver.cpp
         celestron_protocol_wrapper.cpp
         celestron_telescope_driver.cpp
         celestron_catalog.cpp

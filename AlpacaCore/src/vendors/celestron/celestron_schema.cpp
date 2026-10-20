@@ -10,7 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// The Celestron telescope schema. No vendor header: compiles in every build
+// The Celestron telescope and focus motor schemas. No vendor header: compiles in every build
 // (including vendors-OFF). The display name's first word is the router's
 // vendor_label(), so it keeps "Celestron support not enabled ..." as the arm
 // spelled it.
@@ -97,6 +97,22 @@ NormalizeResult normalize_celestron(const DeviceConfig& in, Source source) {
     return result;
 }
 
+// The focus motor has no auto-detect, so it needs its port (issue #896). A saved
+// entry without one is kept and warned about, as the telescope does (#380).
+NormalizeResult normalize_celestron_focuser(const DeviceConfig& in, Source source) {
+    NormalizeResult result;
+    result.config = in;
+    if (in.get(kCelestronFocuserPortPath).empty()) {
+        const char* message = "Serial port path is required for the Celestron focus motor";
+        if (source == Source::Api) {
+            result.rejection = message;
+        } else {
+            result.warnings.emplace_back(message);
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
 void register_celestron_schema(DeviceCatalog& catalog) {
@@ -107,6 +123,14 @@ void register_celestron_schema(DeviceCatalog& catalog) {
     schema.fields = celestron_telescope_fields();
     schema.normalize = normalize_celestron;
     catalog.add(std::move(schema));
+
+    Schema focuser;
+    focuser.key = DeviceKey{"celestron", DeviceType::Focuser};
+    focuser.display_name = "Celestron Focus Motor";
+    focuser.build_option = "ALPACACORE_ENABLE_CELESTRON";
+    focuser.fields = celestron_focuser_fields();
+    focuser.normalize = normalize_celestron_focuser;
+    catalog.add(std::move(focuser));
 }
 
 }  // namespace alpacacore::catalog

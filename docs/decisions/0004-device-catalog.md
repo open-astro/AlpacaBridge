@@ -22,7 +22,7 @@ Catalog in AlpacaHTTP, with JSON there and a typed struct and factory per device
 
 ## Consequences
 
-The router's registration and sanitize arms, and its vendor includes, go away one vendor at a time; until the last vendor moves, the router consults the catalog first and falls back to its arm chain. Every vendor's config round-trip cases exist before its descriptor lands, so a move that changes normalization shows as a diff. #508 inconsistencies are pinned as documented behaviour during the move and fixed after it, failing test first. Router tests that today call `registry.register_device` directly gain a test descriptor with a stub driver, which is a new seam. Adding a device becomes one descriptor pair beside its driver.
+The router's registration and sanitize arms, and its vendor includes, went away one vendor at a time; every vendor has moved, `AlpacaHTTP/src/http/router.cpp` includes no vendor header, and the layering gate holds the count at zero (`MAX_ALPACAHTTP_VENDOR_INCLUDES` in `scripts/check_layering.py`). Every vendor's config round-trip cases exist before its descriptor lands, so a move that changes normalization shows as a diff. #508 inconsistencies are pinned as documented behaviour during the move and fixed after it, failing test first. Router tests that today call `registry.register_device` directly gain a test descriptor with a stub driver, which is a new seam. Adding a device becomes one descriptor pair beside its driver.
 
 ## Links
 
