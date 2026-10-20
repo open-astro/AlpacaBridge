@@ -54,7 +54,7 @@ Each line is a summary; the linked topic file holds the rule and its history.
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md)).
 - Never `.detach()` a thread that touches `this`; join every thread before members die.
 - Getters never wait on device I/O: `mutex_` is a short state lock, never held across
-  an SDK call, serial exchange or connect handshake; one per-link I/O lock serialises the
+  an SDK call (except the camera `with_camera`/`with_handle` calls below), serial exchange or connect handshake; one per-link I/O lock serialises the
   wire. Lock order in a converted driver: `transition_mutex_` → I/O lock → `mutex_` (leaf) →
   SDK-wrapper mutex (the `StateSnapshot` and slot mutexes are leaves under `mutex_`); cameras and unconverted drivers keep `mutex_` → operation lock →
   SDK-wrapper mutex. Cameras keep `with_camera`/`with_handle` over short SDK calls until a stall is measured

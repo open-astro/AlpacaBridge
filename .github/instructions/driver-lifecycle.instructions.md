@@ -97,7 +97,8 @@ vendor-agnostic; do them in the driver from the start.
 **Handles, locks & disconnect — the #1 source of use-after-close bugs**
 - **Getters never wait on device I/O** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md)).
   The driver `mutex_` is a short state lock and is never held across an SDK call, a
-  serial exchange, a connect handshake or a move. Device transactions run under one
+  serial exchange, a connect handshake or a move (the camera `with_camera`/`with_handle`
+  calls over short SDK calls are the exception, below). Device transactions run under one
   per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache` or
   protocol wrapper that already serialises the wire). The `StateSnapshot` mutex is not
   an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
@@ -112,7 +113,7 @@ vendor-agnostic; do them in the driver from the start.
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
-  underneath it. `set_connected(false)` clears state under `mutex_`, then takes
+  underneath it. In a converted driver `set_connected(false)` clears state under `mutex_`, then takes
   the I/O lock (a snapshot-then-call op-lock, in a driver that has one) across the
   close, **and** the operation re-checks `ensure_connected()`/`!handle_` under
   that lock before the SDK call. A snapshot-then-call gap with no re-check is a
