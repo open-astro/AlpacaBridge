@@ -70,20 +70,7 @@ Accepted by the board on 2026-09-30; they bind as part of this record.
 
 ### Reviewer check for any new route or persisted config field
 
-A change passes only when every line holds, or the exception is written in the change:
-
-- State change is never a GET (the Wi-Fi scan, R4, is the documented exception).
-- The origin guard covers the route on the path that reaches the driver, not only on the wrong-verb path.
-- A change that answers a CORS preflight, adds an Access-Control-* header or handles OPTIONS must pass every driver-reaching PUT through the origin guard in the same PR.
-- The body and every string field have a byte bound; integers are range-checked before a narrowing cast, so nothing wraps.
-- A URL field accepts only `http` and `https` and has a size cap.
-  The update check URL `update_packages_url` (`server:` key in the YAML config and env `ALPACAHTTP_UPDATE_PACKAGES_URL`, not settable over HTTP; `update_release_notes_url` and `update_release_url` are the same kind) meets the scheme line at fetch time: libcurl is limited to `http,https` for the request and every redirect (`CURLOPT_PROTOCOLS_STR` and `CURLOPT_REDIR_PROTOCOLS_STR` in `AlpacaHTTP/src/util/software_update.cpp`) and the response to 8 MiB (`CURLOPT_MAXFILESIZE_LARGE`). The URL string itself has no length cap; only the operator writes it.
-- Paths and GPIO chip and line fields are validated or behind an explicit opt-in.
-- A hardware-safety override is opt-in and off by default.
-- No credential in a client-facing error, including `LastConnectError`.
-- A failure a client can trigger is not logged at WARNING or above.
-- Memory per request is bounded by a stated constant.
-- JSON output survives non-UTF-8 input (replace handler, or reject at parse).
+A change passes only when every rule in the Rules section below holds, or the exception is written in the change.
 
 ### Known gaps (open)
 
@@ -111,7 +98,26 @@ A change passes only when every line holds, or the exception is written in the c
 | NS-13 | Discovery, Management API | fixed | the discovery non-Alpaca datagram and the unmatched setup path log at DEBUG, the path cut to 256 bytes (issue #740) |
 | NS-14 | several | open | split into separate low-severity changes: HTTP framing from parsed headers; strict URL decoding; config clamps and join-on-every-path for discovery, shutdown and restart; input length and count bounds; PulseGuide range; clock-step log pruning; atomic config writes; streamed log download. Four NS-14 items are the accepted risks R1 to R4. |
 
-When a finding lands, set its row to `fixed` in the same change.
+When a finding lands, set its row to `fixed` in the same change (rule 12).
+
+## Rules
+
+The reviewer check, for any new route or persisted config field. Each rule names where it applies and what checks it.
+
+1. A state change is never a GET; the Wi-Fi scan (R4) is the documented exception. Scope: `AlpacaHTTP/src/**`. Checked by: review.
+2. The origin guard covers a route on the path that reaches the driver, not only on the wrong-verb path. Scope: `AlpacaHTTP/src/http/router.cpp`. Checked by: review.
+3. A change that answers a CORS preflight, adds an `Access-Control-*` header or handles OPTIONS passes every driver-reaching PUT through the origin guard in the same PR. Scope: `AlpacaHTTP/src/**`. Checked by: review.
+4. The body and every string field have a byte bound, and integers are range-checked before a narrowing cast, so nothing wraps. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/catalog/*.cpp`. Checked by: review.
+5. A URL field a client can set accepts only `http` and `https` and has a size cap; an operator-only URL (the update URLs below) meets the scheme part at fetch time. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
+6. Paths and GPIO chip and line fields are validated or behind an explicit opt-in. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
+7. A hardware-safety override is opt-in and off by default. Scope: `AlpacaCore/src/vendors/**`, `AlpacaHTTP/src/**`. Checked by: review.
+8. No credential appears in a client-facing error, including `LastConnectError`. Scope: `AlpacaCore/src/vendors/**`, `AlpacaHTTP/src/**`. Checked by: review.
+9. A failure a client can trigger is not logged at WARNING or above. Scope: `AlpacaHTTP/src/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
+10. Memory per request is bounded by a stated constant. Scope: `AlpacaHTTP/src/**`. Checked by: review.
+11. JSON output survives non-UTF-8 input (a replace handler, or a reject at parse). Scope: `AlpacaHTTP/src/**`. Checked by: review.
+12. A change that lands a finding sets its row in the finding map to `fixed`. Scope: `docs/decisions/0007-lan-surface-threat-model.md`. Checked by: review.
+
+The update check URL `update_packages_url` (`server:` key in the YAML config and env `ALPACAHTTP_UPDATE_PACKAGES_URL`, not settable over HTTP; `update_release_notes_url` and `update_release_url` are the same kind) meets the scheme line at fetch time: libcurl is limited to `http,https` for the request and every redirect (`CURLOPT_PROTOCOLS_STR` and `CURLOPT_REDIR_PROTOCOLS_STR` in `AlpacaHTTP/src/util/software_update.cpp`) and the response to 8 MiB (`CURLOPT_MAXFILESIZE_LARGE`). The URL string itself has no length cap; only the operator writes it.
 
 ## Alternatives rejected
 

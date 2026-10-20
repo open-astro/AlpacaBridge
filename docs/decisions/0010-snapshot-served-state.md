@@ -16,7 +16,7 @@ A driver's getters and `DeviceState` each ask the device, or read driver fields 
 6. **Design.** A standalone type that takes a `TaskClock`, not an extension of `TtlStatusCache`: that cache fetches inside `get()` under its lock and ties validity to a TTL and link health, while the snapshot is fed by a separate poll and must never hold its lock across device I/O. Link health stays with the existing helpers.
 7. **Slice scope.** The utility, this record and fake-clock tests (`tests/test_state_snapshot.cpp`). No driver is moved in that slice; Sky-Watcher is the first (see Sky-Watcher adoption). ConformU not re-run.
 
-## Sky-Watcher adoption
+### Sky-Watcher adoption
 
 The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). These points are decided for it; accepted after the rig ConformU pass: EQM-35 Pro, full Telescope suite, 2026-10-11, 0 errors, 0 issues, 0 timing violations (`AlpacaCore/conformu/SkyWatcher/EQM-35 Pro/Linux-arm64.txt`).
 
@@ -28,7 +28,7 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
    - *Lost*, [decision 0009](0009-link-loss-and-relink-policy.md) unchanged: `util::kLinkStalenessBound` of latched fault, or transport-gone evidence at once. Lost: the getters and setters throw `NotConnected`, `Connected` reads false, `DeviceState` is the empty list, `link_lost_at` is stamped (serial and UDP), the poll body ends and the frame is dropped. A frame older than the bound with no latch (a poll that stopped answering the clock) is lost too, but nothing ends its poll body or drops it then: a Connect relinks, stamps `link_lost_at` at the moment the frame crossed the bound, and drops the frame. Faulted (latched, younger than the bound): the getters throw the `DriverException` with the fault text, `Connected` stays true.
    - Rejected: a 200 ms `NotConnected` bound (decision 0009 alternative B: it drops `Connected` on any Wi-Fi hiccup) and a single bound for both (it cannot be both under 250 ms and at least twice the link latency). Reverse: revert the slice; the getters return to per-call reads.
 
-### Celestron telescope adoption (#1337)
+#### Celestron telescope adoption (#1337)
 
 - One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, slewing flag, and every fourth tick alt-az, pier side and tracking mode. The sample and site exchanges run without the driver `mutex_` and the frame is published under it; the FindHome completion check is the exception and runs under `mutex_`, so on a dead link during FindHome the getters wait behind it for one exchange timeout per tick. `kSnapshotMaxAge` is 3 s and stale is served, never refused.
 - Served from the frame: RightAscension, Declination, Altitude, Azimuth, Slewing, SideOfPier, Tracking, AtHome while homing, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache and its stamps are gone. Control-path reads (SetPark, Park, the slew loops) measure directly and write through.
@@ -36,7 +36,7 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - The site read the poll does for a mount whose connect-time read failed (retried every 30 s, so a link whose location never reads still samples on most full ticks) stores its result only while no client write has made the site valid.
 - Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies; a tick ends at its first failed exchange (the FindHome completion check, the location read, the Slewing and RA/Dec exchange, then each slow field), so a Disconnect waits for one exchange timeout. The one exception is the tick on which the third FindHome check fails: it stops the mount first (up to three stop exchanges under `mutex_`, kept for safety), so on a dead link that tick can wait longer.
 
-### Bisque telescope adoption (#1367)
+#### Bisque telescope adoption (#1367)
 
 - One status poll per connection, 1 s start to start, fills `StateSnapshot<PolledFrame>`: equatorial pair, alt-az, side of pier and Tracking. Served from the frame: RightAscension, Declination, Altitude, Azimuth, SideOfPier, Tracking, DeviceState (`TimeStamp` is `measured_at`). The 2 s position cache (`kPositionCacheTtl`) and its stamps are gone.
 - Slewing stays control-path state (`slewing_cached_`): the poll asks `IsSlewComplete` only for an async slew past its 8 s force window with no `SlewToCoordinates` wait running, and clears Slewing in the same step as the landed frame.
@@ -44,17 +44,17 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 - The slew Tracking gate reads TheSkyX live, writes the result through, and falls back to the frame's value when that read fails. When the frame never knew Tracking, the gate treats it as off, where the Tracking getter throws.
 - Lost link: [decision 0009](0009-link-loss-and-relink-policy.md) applies.
 
-### Other adopters
 
-These drivers also serve their polled telemetry from a snapshot. Their per-driver choices (period, `max_age`, what is served, what stale means) are owned by their instruction files, not by this record.
+## Rules
 
-| Driver | Issue | Poll period | Owner of the details |
-| --- | --- | --- | --- |
-| Gemini focuser | #1229 | 250 ms | [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
-| QHY Q-Focuser | #1310 | 250 ms | [QHY instructions](../../.github/instructions/qhy.instructions.md) |
-| Astroasis focuser | #1327 | 100 ms | [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
-| SynScan telescope | #1247 | 1 s | [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
-| Celestron focus motor | #1320 | 250 ms | [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. In a driver whose Adoption row is adopted, getters for polled telemetry read the `util::StateSnapshot` and never touch the device. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review; the roster by `scripts/check_docs_drift.py` check 23.
+2. A client write goes through `write()` and leaves `measured_at` at the last publish. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/state_snapshot.h`. Checked by: `AlpacaCore/tests/test_state_snapshot.cpp`.
+3. A poll takes `begin_poll()` before it samples, and a write or `reset()` after that drops its publish. Scope: `AlpacaCore/include/alpacacore/util/state_snapshot.h`, `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_state_snapshot.cpp`.
+4. The snapshot mutex is never held across device I/O, and a `write()` callback does no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
+5. A telescope that serves `DeviceState` from the snapshot stamps `TimeStamp` with `measured_at` through `device_state_age()`. Scope: `AlpacaCore/include/alpacacore/telescope_driver.h`, `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_snapshot.cpp`, review.
+6. Each adopter states per getter what a stale frame means, in its instruction file; stale alone never refuses. Scope: `.github/instructions/*.instructions.md`. Checked by: review.
 
 ## Alternatives rejected
 
@@ -71,6 +71,27 @@ Delete the header and its test. No driver depends on it until a later slice move
 - Getters for polled telemetry answer from memory and carry their age; each driver that moves onto the snapshot states per getter what stale means.
 - A client that writes at least once per poll period keeps every poll's frame dropped, so the frame ages and reads stale; that is intended, because the device was not measured.
 - A write before the first publish is lost (point 3); drivers that need it set it through the device or hold it outside the snapshot.
+
+## Adoption
+
+The roster of drivers that serve polled telemetry from a snapshot. The sections above record the Sky-Watcher, Celestron and Bisque choices; each other driver's per-getter choices are owned by its instruction file. `scripts/check_docs_drift.py` check 23 holds the roster to the code.
+
+Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
+Symbol: `StateSnapshot`
+
+| Driver | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- |
+| Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #1011 | 100 ms; Sky-Watcher adoption above |
+| Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
+| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
+| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
+| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
+| QHY Q-Focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
+| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
+| Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
+| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
+| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | — | |
 
 ## Links
 

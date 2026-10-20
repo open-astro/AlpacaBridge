@@ -864,6 +864,14 @@ jobs:
         # silently degrading the gate to its floor.
         run: python3 scripts/check_docs_drift.py --self-test
 
+      - name: Self-test the decision-record gate scripts
+        # check_adr_authorization.py runs from the default branch in
+        # decision-records.yml and check_adr_scope.py in pr-body.yml and the
+        # review bot; a broken copy would otherwise reach main first.
+        run: |
+          python3 scripts/check_adr_authorization.py --self-test
+          python3 scripts/check_adr_scope.py --self-test
+
       - name: Check docs/config for self-inconsistency
         # Catches drift between the repo's own docs and its actual config
         # that nothing previously caught automatically. The script's module

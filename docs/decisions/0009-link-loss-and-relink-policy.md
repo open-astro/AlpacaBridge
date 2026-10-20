@@ -28,6 +28,16 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 | Gemini | `>H#` identity string (exact compare) | Rejects a different Gemini product, not a second unit | planned follow-up |
 | QHY | JSON version handshake (Q-Focuser), slot-count check (CFW3) | No per-unit identity | planned follow-up |
 
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. A faulted link keeps `Connected` true and makes reads and writes throw `DriverException` with the fault text from `get_link_fault()`; the next good reply clears it. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, review.
+2. A link is lost at once on positive evidence that the transport is gone, and when a fault has stood past `util::kLinkStalenessBound`; a driver never sets a bound shorter than its own latch threshold. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/link_health.h`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, `AlpacaCore/tests/test_onstep_link_loss.cpp`, review.
+3. While lost: `Connected` reads false, operations throw `NotConnected`, `DeviceState` is the empty list, the transport is closed and the loss time is stamped once. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
+4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
+5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
+
 ## Alternatives rejected
 
 - **A: `Connected` stays true for ever and the client decides** (the old latch doc comment). The #445 rig evidence shows clients never learn the mount is gone.
@@ -35,28 +45,39 @@ A driver's link can fail in two ways a client cannot tell apart from `Connected`
 - **C: autonomous reconnect.** A mount relinked without its client can move unsupervised (#521), and ASCOM leaves connection to the client.
 - **D: an identity gate on all five drivers in this slice.** Too large (point 6).
 
+## Consequences
+
+- On an adopted driver a client sees `Connected` false within `util::kLinkStalenessBound` of a device going silent, and reconnects itself; a drop shorter than the bound only faults.
+- A driver not yet adopted keeps `Connected` true while faulted (Adoption table).
+- A reconnect after a loss re-runs the connect probe, which does not tell two units of one model apart (point 6).
+
 ## How to reverse
 
 Revert the PR. The bound is one constant, so "never lost by silence" is a one-line change back to the previous behaviour.
 
 ## Adoption
 
-| Driver family | Behaviour today | Owner |
-| --- | --- | --- |
-| Sky-Watcher (serial, UDP) | Decision applied | this record |
-| WandererAstro (cover, filter wheel, box, rotator) | Stream latch; `Connected` stays true | planned follow-up |
-| Gemini PDH, flat panel, focuser | Polled latch; `Connected` stays true | planned follow-up |
-| iOptron mount, iEAF, iEFW, iMate | `device_faulted_`; `Connected` stays true | planned follow-up |
-| QHY Q-Focuser | `link_lost_` latch on the next transaction (#527); applied with the state snapshot (#1310): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault | #1310 |
-| OnStep (serial) | Applied: node check, fd errors, relink; the #521 window is timed from the last time the link was seen alive to the end of the reconnect (see the OnStep instructions) | #1241 |
-| Celestron telescope (NexStar) | Applied with the state snapshot (#1337): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters `NotConnected`, `DeviceState` empty); no `LinkLostStamp` (no #521 consumer) | #1337 |
-| SynScan telescope | Applied with the state snapshot (#1247): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters and setters `NotConnected`, `DeviceState` empty, transport closed); no `LinkLostStamp` (no #521 consumer) | #1247 |
-| Celestron CGX | No latch; transport errors only | planned follow-up |
-| Bisque | Applied with the state snapshot (#1367): three failed status ticks latch a fault (`Connected` stays true, the getters refuse), a fault that has stood for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released); a tick that waits behind a guide or FindHome holding the socket is not a failed tick (the wait on the wrapper has no timeout of its own; only a failed exchange counts) | #1367 |
-| Astroasis focuser | Applied with the state snapshot (#1327): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault; a removed hidraw node is found by the bound, not at once | #1327 |
-| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One) | SDK error on the next call | planned follow-up |
-| GPhoto camera | A failed exposure is reported by `ImageReady`/`ImageArray` (`CameraState` stays Idle); a camera gone from the USB bus mid-exposure reports `Connected` false; no automatic reopen (#1064, #1204) | planned follow-up |
-| WeeWX | HTTP fetch staleness | planned follow-up |
+`scripts/check_docs_drift.py` check 23 holds this roster to the code: a driver that names `kLinkStalenessBound` needs a row. OnStep applies the transport-gone half of point 2 only, so its row checks that half's symbol.
+
+Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
+Symbol: `kLinkStalenessBound`
+
+| Driver | Symbol | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Sky-Watcher (serial, UDP) |  | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #970 | Decision applied |
+| WandererAstro (cover, filter wheel, box, rotator) |  | — | planned | — | Stream latch; `Connected` stays true |
+| Gemini PDH, flat panel, focuser |  | — | planned | — | Polled latch; `Connected` stays true |
+| iOptron mount, iEAF, iEFW, iMate |  | — | planned | — | `device_faulted_`; `Connected` stays true |
+| QHY Q-Focuser |  | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | `link_lost_` latch on the next transaction (#527); applied with the state snapshot (#1310): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault |
+| OnStep (serial) | `consume_link_lost_at` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | partial | #1241, #1414 | Applied: node check, fd errors, relink; the #521 window is timed from the last time the link was seen alive to the end of the reconnect (see the OnStep instructions); no fault latch or staleness bound yet |
+| Celestron telescope (NexStar) |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | Applied with the state snapshot (#1337): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters `NotConnected`, `DeviceState` empty); no `LinkLostStamp` (no #521 consumer) |
+| SynScan telescope |  | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | Applied with the state snapshot (#1247): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters and setters `NotConnected`, `DeviceState` empty, transport closed); no `LinkLostStamp` (no #521 consumer) |
+| Celestron CGX |  | — | planned | — | No latch; transport errors only |
+| Bisque |  | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | Applied with the state snapshot (#1367): three failed status ticks latch a fault (`Connected` stays true, the getters refuse), a fault that has stood for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released); a tick that waits behind a guide or FindHome holding the socket is not a failed tick (the wait on the wrapper has no timeout of its own; only a failed exchange counts) |
+| Astroasis focuser |  | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | Applied with the state snapshot (#1327): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault; a removed hidraw node is found by the bound, not at once |
+| Camera, filter wheel and focuser SDK drivers (ZWO, QHY, SVBONY, ToupTek, Player One) |  | — | planned | — | SDK error on the next call |
+| GPhoto camera |  | — | planned | — | A failed exposure is reported by `ImageReady`/`ImageArray` (`CameraState` stays Idle); a camera gone from the USB bus mid-exposure reports `Connected` false; no automatic reopen (#1064, #1204) |
+| WeeWX |  | — | planned | — | HTTP fetch staleness |
 
 Drivers adopt this record in their own later changes; the telescope state-snapshot slices apply point 3 when they land.
 

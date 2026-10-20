@@ -1,0 +1,5 @@
+### Changed
+- **Decision records carry checkable Rules and Adoption rosters** (docs, `docs/decisions/`): every record gains a `## Rules` section of numbered rules, each naming its scope and what checks it. The rosters of decisions 0005, 0006, 0009, 0010, 0014 and 0015 move into `## Adoption` tables, and the module rows in `docs/architecture.md` point at them instead of keeping their own lists. Decision 0007's reviewer check is now its Rules section, decision 0009 gains a Consequences section, and decision 0006 rule 3 allows an initiator to refuse instead of superseding. `docs/decisions/README.md` describes both sections.
+
+### Added (tooling)
+- **Decision record checks** (`scripts/check_docs_drift.py` checks 22 and 23): check 22 holds every record to the README shape (status line, section order, Rules lines with tracked-file scopes, a gap-free index). Check 23 compares each Adoption table with the code in both directions. Check 7 now also resolves a comment that cites a record by number only. `scripts/check_instruction_structure.py` fails a link into or out of a decision record that names a heading that does not exist. All three have self-test fixtures.

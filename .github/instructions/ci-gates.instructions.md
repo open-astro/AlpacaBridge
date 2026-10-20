@@ -40,6 +40,13 @@ author must do. Read the docstring before changing a gate.
   `.github/PULL_REQUEST_TEMPLATE.md` with real content and the Checklist items kept. Both read the
   body only through `env: PR_BODY` (never in a `run:` line) and run locally with `PR_BODY_FILE`.
   A merge-down PR skips `falsified-by`; `scripts/merge_down.py` decides it (`docs/beta-channel.md`).
+  `decision-records` (`scripts/check_adr_scope.py`) needs the `## Decision records` section to name
+  every record in `docs/decisions/` the PR changes.
+- **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
+  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <head sha>`
+  comment; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
+  review bot gets the in-scope rules from `scripts/check_adr_scope.py --list`, run from the base branch.
+  See `docs/decisions/README.md` ("Changing a record").
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
 - **Layering** (`scripts/check_layering.py`, gate 2f): the vendor-include baselines in the script
   only go down; the PR that deletes includes lowers them. It also enforces CMake rules L1-L3
@@ -55,7 +62,10 @@ author must do. Read the docstring before changing a gate.
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
   a description in parentheses in the roster bullet above; a new `SUPPORTED-DRIVERS.md` vendor
   heading needs its README brand item, the recounted brand word and a
-  `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; keep `SUPPORTED-DRIVERS.md`'s
+  `SUPPORTED_HEADING_TO_README_BRAND` entry in the same PR; give a new decision record the
+  sections and Rules lines `docs/decisions/README.md` describes, and add an Adoption row when a
+  driver starts naming a module's symbol (`TaskClock`, `AsyncOperation`, `StateSnapshot`,
+  `kLinkStalenessBound`, `UtcOffset`, a `Locked*` decorator) (checks 22 and 23); keep `SUPPORTED-DRIVERS.md`'s
   `## Updated` date no older than the README badge date; give each workflow cache a key prefix no
   other key starts with; keep `AGENTS.md` under its 15,000-byte budget; keep every error-code
   value written in `AGENTS.md`, the ascom-contract and testing instructions or `driver-build.md`

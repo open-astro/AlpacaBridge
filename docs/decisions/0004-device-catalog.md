@@ -16,6 +16,16 @@ AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor 
 
 API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router's `reject_invalid_config()` did (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
 
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. Each (vendor, device) declares its config fields once, in a descriptor pair in the vendor directory, and the schema half includes no vendor header. Scope: `AlpacaCore/src/vendors/*/*_schema.cpp`, `AlpacaCore/src/vendors/*/*_catalog.cpp`. Checked by: `scripts/check_layering.py`.
+2. AlpacaHTTP includes no vendor header and builds no driver outside the catalog. Scope: `AlpacaHTTP/src/**`, `AlpacaHTTP/include/**`. Checked by: `scripts/check_layering.py` (`MAX_ALPACAHTTP_VENDOR_INCLUDES` is 0).
+3. AlpacaCore holds no JSON type; AlpacaHTTP bridges JSON to the typed config in one place. Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review ([decision 0013](0013-designs-to-avoid.md), section 4).
+4. A config from the API is rejected on validation failure; a persisted config is normalized with a warning and stays registered. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
+5. Sanitize keeps every declared non-secret field and drops every `Secret` field. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
+
 ## Alternatives rejected
 
 Catalog in AlpacaHTTP, with JSON there and a typed struct and factory per device in AlpacaCore: the field list would exist twice in code and once in the UI, and adding a device would still touch both libraries. Catalog in AlpacaCore using nlohmann::json directly: best locality, but `AlpacaCore/include/alpacacore/alpaca_json.h` states that AlpacaCore holds no JSON and nothing under AlpacaCore includes nlohmann today, so this would add a transport dependency for one consumer. A JSON Schema for the endpoint, and a generic form renderer in the UI: the form layout stays hand-written, and a drift check compares its field names and roles to the catalog. A separate vendor build manifest module: the schema/factory split already answers "known key, build option, compiled?"; generating CMake or packaging tables from it waits for a second consumer.

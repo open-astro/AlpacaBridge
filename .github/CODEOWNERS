@@ -1,0 +1,13 @@
+# Code owners. A change to a path below needs an approving review from one of
+# its owners, other than the PR's author, when the "Decision records" ruleset
+# requires code-owner review (docs/decisions/README.md, "Changing a record").
+# A maintainer may bypass that ruleset.
+
+# The decision records are the rules the decision-record gate enforces.
+/docs/decisions/ @diegopereiran @joeytroy
+
+# The gate itself, so it cannot be weakened without the same review.
+/.github/CODEOWNERS @diegopereiran @joeytroy
+/.github/workflows/decision-records.yml @diegopereiran @joeytroy
+/scripts/check_adr_authorization.py @diegopereiran @joeytroy
+/scripts/check_adr_scope.py @diegopereiran @joeytroy

@@ -73,6 +73,8 @@ Each line is a summary; the linked topic file holds the rule and its history.
   ([packaging-release](.github/instructions/packaging-release.instructions.md#changelog-fragments-one-file-per-pr)).
 - Use the AlpacaCore logging sink, never ad-hoc stdout/stderr, and `AlpacaException`
   for error paths.
+- A change must agree with the Rules of every decision record it falls under; a change
+  to a record needs a collaborator's authorization ([decisions](docs/decisions/README.md)).
 
 ## Repository Structure and Build Output
 

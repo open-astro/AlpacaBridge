@@ -45,6 +45,18 @@
 
 -
 
+## Decision records
+
+<!--
+  Required. Name, by number, every decision record in docs/decisions/ this
+  pull request implements, changes or adopts (for example "0005: adds the
+  ZWO telescope Adoption row"), or write "None". A PR that edits a record
+  must name it here (decision-records job), and a collaborator must comment
+  `ADR authorized <head sha>` before it can merge.
+-->
+
+-
+
 ## Verification
 
 <!--

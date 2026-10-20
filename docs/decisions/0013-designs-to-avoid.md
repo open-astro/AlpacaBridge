@@ -4,11 +4,11 @@ Status: accepted
 
 ## Context
 
-The deep-module migration (catalog, task clock, operation slot, state snapshot, SDK seams) replaces repeated hand-written code with a few small modules that each hide one concern. Six shapes keep coming back in design talk because they look like the next step. Each would give back the locality those modules bought. This record writes down why each is rejected and what to do instead, so a review can point here and a new proposal has to answer the reasons.
+The deep-module migration (catalog, task clock, operation slot, state snapshot, SDK seams) replaces repeated hand-written code with a few small modules that each hide one concern. Seven shapes keep coming back in design talk because they look like the next step. Each would give back the locality those modules bought. This record writes down why each is rejected and what to do instead, so a review can point here and a new proposal has to answer the reasons.
 
 ## Decision
 
-Do not build any of the six designs below. Each section says what it is, why it is rejected and what to do instead.
+Do not build any of the seven designs below. Each section says what it is, why it is rejected and what to do instead.
 
 ### 1. A universal `VendorAdapter`
 
@@ -58,6 +58,28 @@ Why rejected: the base interfaces exist (`dome_driver.h`, `safetymonitor_driver.
 
 Instead: write the first Dome or SafetyMonitor driver for a named device, through the usual three layers, with a catalog descriptor and a fake for tests ([testing](../../.github/instructions/testing.instructions.md)). Extract a shared helper only when a second device shows what is common. Shutter control belongs to the Dome interface; do not add a separate device type (`AGENTS.md`, Out of Scope Guardrails).
 
+### 7. A production `ByteChannel`
+
+What it is: an abstract byte-stream interface between every serial or socket protocol wrapper and its file descriptor, so that tests replace the transport in process instead of through a pseudo-terminal or a fake server.
+
+Why rejected: the serial and socket wrappers are already tested end to end through pty fakes (`PtyPair` and `pty_write_bounded()` in `AlpacaCore/tests/fake_pty_write.h`) and fake servers, which exercise the real `termios`, `poll()` and timeout code a `ByteChannel` would bypass. The pty fakes' known failure, a worker that hangs in a blocking `write()` (#424), was fixed in the fakes with a bounded, non-blocking write (PR #443, which fixed #424), and their pty setup has one owner, `PtyPair` (#387); no production layer was added. A `ByteChannel` would put a second I/O path into every wrapper for a test-only need.
+
+Instead: keep pty fakes and fake servers for serial and socket drivers, and the per-library seams of [decision 0015](0015-sdk-seams.md) for vendor SDKs. Fix a flaky pty fake in the fake.
+
+Reopen when: pty timing is still the source of test flakes after the fakes are fixed. Then write a record that supersedes this section, with the flake evidence.
+
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. No universal `VendorAdapter` interface across vendors (section 1). Scope: `AlpacaCore/include/alpacacore/**`, `AlpacaCore/src/**`. Checked by: review.
+2. No universal telescope driver parameterised by protocol (section 2). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
+3. No vendor protocol class derived from another vendor's (section 3). Scope: `AlpacaCore/include/alpacacore/vendor/**`, `AlpacaCore/src/vendors/**`. Checked by: review.
+4. No JSON type in AlpacaCore (section 4). Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review.
+5. No base class per shared helper; `AsyncConnectable` is the only one (section 5). Scope: `AlpacaCore/include/alpacacore/**`. Checked by: review.
+6. No shared Dome or SafetyMonitor implementation before a named device needs it (section 6). Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
+7. No production `ByteChannel` between the serial and socket wrappers and their file descriptors (section 7). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review.
+
 ## Alternatives rejected
 
 - **Allow each design behind a feature flag or for one pilot vendor.** The cost is paid in review and in the lock order, not in the flag; a pilot becomes the precedent.
@@ -71,5 +93,5 @@ Instead: write the first Dome or SafetyMonitor driver for a named device, throug
 
 ## Links
 
-- [Device catalog](0004-device-catalog.md), [Task clock](0005-task-clock.md), [Async operation ownership](0006-async-operation-ownership.md), [Snapshot-served state](0010-snapshot-served-state.md)
+- [Device catalog](0004-device-catalog.md), [Task clock](0005-task-clock.md), [Async operation ownership](0006-async-operation-ownership.md), [Snapshot-served state](0010-snapshot-served-state.md), [SDK seams](0015-sdk-seams.md)
 - Upstream issue [#1381](https://github.com/open-astro/AlpacaBridge/issues/1381)

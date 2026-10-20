@@ -170,6 +170,24 @@ Checks:
      weeks after the #523 split because every cross-vendor lesson was appended
      to it. Shared rules go in the topic files under .github/instructions/ and
      AGENTS.md carries a one-line pointer.
+ 22. Every decision record in docs/decisions/ has the shape README.md there
+     describes: an NNNN-<slug>.md name with no gap in the numbers, a
+     `Status:` line on line 3 (a superseded record names a record that
+     exists), the sections Context, Decision, Rules, Alternatives rejected,
+     Consequences and Links in that order (Adoption and How to reverse may sit
+     between them; a superseded record needs no Rules), numbered Rules lines
+     that end `Scope: `glob`. Checked by: <check>.` with every glob matching a
+     tracked file, and an index that lists every record once, in order. The
+     planned decision-record gate reads these sections, so a record it cannot
+     parse would pass every pull request.
+ 23. Every `## Adoption` table agrees with the code, both ways: every file
+     the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
+     line, every scanned file) has a row; a Symbol column overrides the symbol
+     per row and a blank cell falls back to the `Symbol:` line; comments are blanked before matching; an adopted or partial row's
+     source names its symbol; a planned row's source does not; a partial row names
+     the issue that finishes it. The rosters were prose in five places and
+     three disagreed with the code (PR #1410). Check 7 also resolves a
+     comment that cites a record by number only (`docs/decisions/0008`).
 """
 
 import glob
@@ -1071,6 +1089,9 @@ def check_agents_md_paths_exist(root=ROOT):
 
 
 MEMORY_COMMENT_PATH_RE = re.compile(r"\bdocs/(?:failures|decisions)/[A-Za-z0-9._-]+\.md\b")
+# A comment may cite a record by number only (`docs/decisions/0008`, PR #1410 audit):
+# the number must name exactly one record.
+MEMORY_COMMENT_ID_RE = re.compile(r"\bdocs/(failures|decisions)/(\d{4})(?!-|\w|\.\w)")
 FIRST_PARTY_COMMENT_EXTENSIONS = {".cpp", ".h", ".js", ".py", ".sh"}
 # The real tree has ~330 candidate files; the self-test fixture has a handful.
 MIN_MEMORY_COMMENT_FILES = 5
@@ -1106,6 +1127,11 @@ def check_memory_comment_paths_exist(root=ROOT):
                 for reference in MEMORY_COMMENT_PATH_RE.findall(line):
                     if not (root / reference).is_file():
                         failures.append("%s:%d references a missing memory record: %s" % (rel, lineno, reference))
+                for directory, number in MEMORY_COMMENT_ID_RE.findall(line):
+                    hits = list((root / "docs" / directory).glob(number + "-*.md"))
+                    if len(hits) != 1:
+                        failures.append("%s:%d cites docs/%s/%s, which names %d records (expected 1)"
+                                        % (rel, lineno, directory, number, len(hits)))
     # Floor, like the other gates: a renamed component directory or a wrong
     # root would otherwise read nothing and report a clean pass.
     if scanned < MIN_MEMORY_COMMENT_FILES:
@@ -2220,6 +2246,248 @@ def check_agents_md_size(root=ROOT):
     return _agents_md_size_findings(len(path.read_bytes()))
 
 
+# --- checks 22 and 23: decision records ---------------------------------------
+#
+# The decision records in docs/decisions/ are what the planned decision-record
+# gate compares a pull request against, so their shape has to be machine
+# readable and their adoption rosters have to agree with the code. Before
+# these checks the rosters lived in prose in five places and three of them
+# disagreed with the code (PR #1410).
+
+DECISION_DIR = "docs/decisions"
+DECISION_FILE_RE = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
+DECISION_STATUS_RE = re.compile(r"^Status: (proposed|accepted|superseded by (\d{4}))$")
+DECISION_SECTIONS = ("Context", "Decision", "Rules", "Alternatives rejected", "Consequences", "Links")
+# Sections a record may add between the required ones; anything else is a typo
+# or a new convention that README.md has to describe first.
+DECISION_OPTIONAL_SECTIONS = ("Adoption", "How to reverse")
+DECISION_RULE_RE = re.compile(
+    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+)\.$")
+DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)$", re.M)
+ADOPTION_STATES = ("adopted", "partial", "planned")
+ISSUE_REF_RE = re.compile(r"#\d+")
+CODE_SPAN_ONLY_RE = re.compile(r"`([^`]+)`")
+
+
+def _glob_match(path, pattern):
+    # One glob rule for the repo: a single star stays inside one directory,
+    # ** crosses them. The instruction-structure check owns it.
+    from check_instruction_structure import matches
+    return matches(path, pattern)
+
+
+def _decision_sections(text):
+    """[(title, body)] for every `## ` section, in order."""
+    sections = []
+    current = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            current = [line[3:].strip(), []]
+            sections.append(current)
+        elif current is not None:
+            current[1].append(line)
+    return [(title, "\n".join(body)) for title, body in sections]
+
+
+def _decision_record_findings(records, readme, tracked):
+    """records: {file name: text}; readme: docs/decisions/README.md text;
+    tracked: repo-relative paths the Rules scope globs are matched against."""
+    findings = []
+    numbers = []
+    for name in sorted(records):
+        text = records[name]
+        m = DECISION_FILE_RE.match(name)
+        if not m:
+            findings.append("%s/%s: the name is not NNNN-<lowercase-slug>.md" % (DECISION_DIR, name))
+            continue
+        numbers.append(int(m.group(1)))
+        lines = text.splitlines()
+        where = "%s/%s" % (DECISION_DIR, name)
+        if not lines or not lines[0].startswith("# "):
+            findings.append("%s: the first line is not a `# ` title" % where)
+        status = DECISION_STATUS_RE.match(lines[2]) if len(lines) > 2 else None
+        if not status:
+            findings.append("%s: line 3 is not `Status: proposed`, `Status: accepted` or "
+                            "`Status: superseded by NNNN`" % where)
+            continue
+        if status.group(2) and not any(n.startswith(status.group(2) + "-") for n in records):
+            findings.append("%s: superseded by %s, which does not exist" % (where, status.group(2)))
+        sections = _decision_sections(text)
+        titles = [t for t, _ in sections]
+        unknown = [t for t in titles if t not in DECISION_SECTIONS + DECISION_OPTIONAL_SECTIONS]
+        for t in unknown:
+            findings.append("%s: unknown section `## %s` (README.md lists the allowed ones)" % (where, t))
+        required = [t for t in DECISION_SECTIONS if not (t == "Rules" and status.group(2))]
+        present = [t for t in titles if t in required]
+        for t in required:
+            if t not in titles:
+                findings.append("%s: missing section `## %s`" % (where, t))
+        if present != [t for t in required if t in present]:
+            findings.append("%s: sections are out of order; expected %s" % (where, ", ".join(required)))
+        for t in set(titles):
+            if titles.count(t) > 1:
+                findings.append("%s: section `## %s` appears %d times" % (where, t, titles.count(t)))
+        rules = dict(sections).get("Rules")
+        if rules is None:
+            continue
+        expected = 1
+        for line in rules.splitlines():
+            if not re.match(r"^\d+\. ", line):
+                continue
+            rule = DECISION_RULE_RE.match(line)
+            if not rule:
+                findings.append("%s: rule line does not end `Scope: `glob`[, `glob`]. Checked by: <check>.`: %s"
+                                % (where, line[:80]))
+                expected += 1
+                continue
+            if int(rule.group("n")) != expected:
+                findings.append("%s: rule %s is out of sequence (expected %d)" % (where, rule.group("n"), expected))
+            expected = int(rule.group("n")) + 1
+            for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
+                if not any(_glob_match(p, glob_pattern) for p in tracked):
+                    findings.append("%s: rule %s scope `%s` matches no tracked file"
+                                    % (where, rule.group("n"), glob_pattern))
+        if expected == 1:
+            findings.append("%s: `## Rules` has no numbered rule" % where)
+    numbers.sort()
+    if numbers and numbers != list(range(1, len(numbers) + 1)):
+        findings.append("%s: record numbers are not 0001..%04d with no gap or repeat: %s"
+                        % (DECISION_DIR, len(numbers), ", ".join("%04d" % n for n in numbers)))
+    indexed = DECISION_INDEX_LINK_RE.findall(readme)
+    record_names = sorted(n for n in records if DECISION_FILE_RE.match(n))
+    if indexed != record_names:
+        missing = sorted(set(record_names) - set(indexed))
+        extra = sorted(set(indexed) - set(record_names))
+        detail = []
+        if missing:
+            detail.append("not indexed: " + ", ".join(missing))
+        if extra:
+            detail.append("indexed but absent: " + ", ".join(extra))
+        if not detail:
+            detail.append("index order differs from the record numbers")
+        findings.append("%s/README.md: the index does not list every record once, in order (%s)"
+                        % (DECISION_DIR, "; ".join(detail)))
+    return findings
+
+
+def check_decision_records(root=ROOT):
+    directory = Path(root) / DECISION_DIR
+    records = {p.name: p.read_text(encoding="utf-8", errors="replace")
+               for p in directory.glob("*.md") if p.name != "README.md"}
+    if not records:
+        return ["%s holds no decision record: the directory moved or the glob regressed" % DECISION_DIR]
+    tracked, _ = _tracked_paths(Path(root))
+    return _decision_record_findings(records, read("%s/README.md" % DECISION_DIR, Path(root)), tracked)
+
+
+def _adoption_findings(where, body, files):
+    """One record's `## Adoption` section against the files it names.
+
+    files: {repo path: text} for every tracked file (the Scan glob and the
+    Source cells are resolved against it). Comments are blanked before a
+    symbol is matched, so a comment that names one is not adoption."""
+    findings = []
+    code = {}
+
+    def code_of(path):
+        if path not in code:
+            code[path] = _strip_comments(files[path])
+        return code[path]
+
+    scan = re.search(r"^Scan: `([^`]+)`$", body, re.M)
+    symbol = re.search(r"^Symbol: `([^`]+)`$", body, re.M)
+    if not scan:
+        return ["%s: `## Adoption` has no `Scan: `glob`` line" % where]
+    table = [l for l in body.splitlines() if l.startswith("|")]
+    if len(table) < 3:
+        return ["%s: `## Adoption` has no table rows" % where]
+    header = [c.strip() for c in table[0].strip("|").split("|")]
+    for column in ("Driver", "Source", "State", "Issue"):
+        if column not in header:
+            return ["%s: the Adoption table has no `%s` column" % (where, column)]
+    if not symbol and "Symbol" not in header:
+        return ["%s: `## Adoption` names no `Symbol: `name`` line and has no Symbol column" % where]
+    listed = set()
+    for row in table[2:]:
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        if len(cells) != len(header):
+            findings.append("%s: Adoption row has %d cells, the header %d: %s" % (where, len(cells), len(header), row[:60]))
+            continue
+        cell = dict(zip(header, cells))
+        name = cell["Driver"]
+        state = cell["State"]
+        row_symbol = CODE_SPAN_ONLY_RE.findall(cell.get("Symbol", ""))
+        word = row_symbol[0] if row_symbol else (symbol.group(1) if symbol else None)
+        if not word:
+            findings.append("%s: Adoption row %s has no symbol" % (where, name))
+            continue
+        if state not in ADOPTION_STATES:
+            findings.append("%s: Adoption row %s has state %r; use one of %s"
+                            % (where, name, state, ", ".join(ADOPTION_STATES)))
+            continue
+        if state == "partial" and not ISSUE_REF_RE.search(cell["Issue"]):
+            findings.append("%s: Adoption row %s is partial but names no issue that finishes it" % (where, name))
+        sources = CODE_SPAN_ONLY_RE.findall(cell["Source"])
+        if not sources:
+            if state != "planned" or cell["Source"] not in ("—", "-"):
+                findings.append("%s: Adoption row %s names no source file (only a planned row may say —)"
+                                % (where, name))
+            continue
+        pattern = re.compile(r"\b%s\b" % re.escape(word))
+        uses = False
+        for source in sources:
+            listed.add(source)
+            if source not in files:
+                findings.append("%s: Adoption row %s names %s, which is not a tracked AlpacaCore/ or AlpacaHTTP/ "
+                                ".cpp or .h file (the files check 23 reads)" % (where, name, source))
+                continue
+            uses = uses or bool(pattern.search(code_of(source)))
+        if state in ("adopted", "partial") and not uses:
+            findings.append("%s: Adoption row %s is %s but no source names `%s`" % (where, name, state, word))
+        if state == "planned" and uses:
+            findings.append("%s: Adoption row %s is planned but its source already names `%s`; "
+                            "mark it partial or adopted" % (where, name, word))
+    scanned = [p for p in files if _glob_match(p, scan.group(1))]
+    if not scanned:
+        findings.append("%s: Adoption scan `%s` matches no tracked file" % (where, scan.group(1)))
+    for path in sorted(scanned):
+        if path in listed:
+            continue
+        if symbol and not re.search(r"\b%s\b" % re.escape(symbol.group(1)), code_of(path)):
+            continue
+        findings.append("%s: %s %s but has no Adoption row"
+                        % (where, path, ("names `%s`" % symbol.group(1)) if symbol else "is in the scan"))
+    return findings
+
+
+def check_decision_adoption(root=ROOT):
+    root = Path(root)
+    tracked, _ = _tracked_paths(root)
+    files = {}
+    for path in tracked:
+        if path.startswith(("AlpacaCore/", "AlpacaHTTP/")) and not path.startswith("AlpacaCore/external/") \
+                and path.endswith((".cpp", ".h")):
+            full = root / path
+            if full.is_file():
+                files[path] = full.read_text(encoding="utf-8", errors="replace")
+    findings = []
+    adopting = 0
+    for record in sorted((root / DECISION_DIR).glob("0*.md")):
+        body = dict(_decision_sections(record.read_text(encoding="utf-8", errors="replace"))).get("Adoption")
+        if body is None:
+            continue
+        adopting += 1
+        findings.extend(_adoption_findings("%s/%s" % (DECISION_DIR, record.name), body, files))
+    if adopting < MIN_ADOPTION_RECORDS:
+        findings.append("only %d decision record(s) carry an Adoption section (floor %d): a section was renamed "
+                        "or the parser regressed" % (adopting, MIN_ADOPTION_RECORDS))
+    return findings
+
+
+# Records 0005, 0006, 0009, 0010, 0014 and 0015 carry an Adoption table.
+MIN_ADOPTION_RECORDS = 6
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2243,6 +2511,8 @@ CHECKS = [
     ("Vendored shared libraries are not committed twice", check_vendored_so_not_duplicated),
     ("Cache restore-keys prefixes match only their own caches", check_cache_restore_prefixes_distinct),
     ("AGENTS.md stays within its size budget", check_agents_md_size),
+    ("Decision records follow the README shape (status, sections, Rules lines, index)", check_decision_records),
+    ("Decision record Adoption tables match the code", check_decision_adoption),
 ]
 
 
@@ -2389,6 +2659,11 @@ def self_test():
     check("memory references are found in source comments",
           MEMORY_COMMENT_PATH_RE.findall("// See docs/decisions/0001-example.md") ==
           ["docs/decisions/0001-example.md"])
+    check("memory comment ids: a bare record number is read, a full file name is not",
+          MEMORY_COMMENT_ID_RE.findall("// (docs/decisions/0008).") == [("decisions", "0008")]
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008-x.md") == []
+          and MEMORY_COMMENT_ID_RE.findall("// see docs/decisions/0008.") == [("decisions", "0008")]
+          and MEMORY_COMMENT_ID_RE.findall("// docs/decisions/0008.md") == [])
 
     # check_memory_comment_paths_exist over a fixture tree. The root lives
     # under a directory named "build-fixture": the checkout's own ancestors
@@ -3063,6 +3338,101 @@ def self_test():
     f = _agents_md_size_findings(AGENTS_MD_MAX_BYTES + 1)
     check("agents size: one byte over the budget is reported with the size",
           len(f) == 1 and str(AGENTS_MD_MAX_BYTES + 1) in f[0])
+
+    # checks 22 and 23: decision record shape and Adoption rosters (literal fixtures).
+    good_record = (
+        "# Example\n\nStatus: accepted\n\n## Context\n\nc\n\n## Decision\n\nd\n\n## Rules\n\nintro\n\n"
+        "1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n"
+        "## Alternatives rejected\n\na\n\n## Consequences\n\nq\n\n## Links\n\nl\n")
+    good_index = "- [Example](0001-example.md)\n- [Second](0002-second.md)\n"
+    tracked_fixture = ["src/a.cpp", "src/b.cpp", "docs/x.md"]
+
+    def records(first=good_record, second=good_record, index=good_index, extra=None):
+        recs = {"0001-example.md": first, "0002-second.md": second}
+        recs.update(extra or {})
+        return _decision_record_findings(recs, index, tracked_fixture)
+
+    check("decision records: the baseline fixture is clean", records() == [])
+    f = records(first=good_record.replace("## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+                                          "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
+    check("decision records: a missing Rules section is reported", any("missing section `## Rules`" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: approved"))
+    check("decision records: an unknown status is reported", any("line 3" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0009"))
+    check("decision records: a supersede target that does not exist is reported", any("0009, which does not exist" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
+    check("decision records: a superseded record needs no Rules section", f == [])
+    f = records(first=good_record.replace(" Checked by: review.", "."))
+    check("decision records: a rule with no `Checked by:` is reported", any("rule line does not end" in x for x in f))
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `src/missing.cpp`"))
+    check("decision records: a scope that matches no tracked file is reported", any("matches no tracked file" in x for x in f))
+    f = records(first=good_record.replace("2. Do another.", "3. Do another."))
+    check("decision records: a gap in rule numbers is reported", any("out of sequence" in x for x in f))
+    f = records(first=good_record.replace("## Consequences", "## Notes"))
+    check("decision records: an unknown section is reported", any("unknown section `## Notes`" in x for x in f))
+    f = records(first=good_record.replace("## Alternatives rejected\n\na\n\n## Consequences\n\nq\n\n",
+                                          "## Consequences\n\nq\n\n## Alternatives rejected\n\na\n\n"))
+    check("decision records: sections out of order are reported", any("out of order" in x for x in f))
+    f = records(index="- [Example](0001-example.md)\n")
+    check("decision records: a record missing from the README index is reported", any("not indexed: 0002-second.md" in x for x in f))
+    f = records(extra={"0004-gap.md": good_record}, index=good_index + "- [Gap](0004-gap.md)\n")
+    check("decision records: a gap in record numbers is reported", any("no gap or repeat" in x for x in f))
+
+    adoption_body = (
+        "\nScan: `src/*_driver.cpp`\nSymbol: `Clock`\n\n| Driver | Source | State | Issue | Notes |\n"
+        "| --- | --- | --- | --- | --- |\n"
+        "| A | `src/a_driver.cpp` | adopted | #1 | |\n"
+        "| B | `src/b_driver.cpp` | partial | #2 | |\n"
+        "| C | `src/c_driver.cpp` | planned | — | |\n"
+        "| D | — | planned | — | |\n")
+    adoption_files = {"src/a_driver.cpp": "Clock c;", "src/b_driver.cpp": "util::Clock& x;",
+                      "src/c_driver.cpp": "nothing", "src/z_helper.cpp": "Clock c;"}
+
+    def adoption(body=adoption_body, files=None):
+        return _adoption_findings("rec", body, adoption_files if files is None else files)
+
+    check("adoption: the baseline fixture is clean", adoption() == [])
+    f = adoption(files=dict(adoption_files, **{"src/e_driver.cpp": "Clock c;"}))
+    check("adoption: a scanned file that names the symbol with no row is reported", any("src/e_driver.cpp" in x and "no Adoption row" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "nothing"}))
+    check("adoption: an adopted row whose source lacks the symbol is reported", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "Clock c;"}))
+    check("adoption: a planned row whose source already uses the symbol is reported", any("row C is planned" in x for x in f))
+    f = adoption(body=adoption_body.replace("| partial | #2 |", "| partial | — |"))
+    check("adoption: a partial row with no issue is reported", any("row B is partial" in x for x in f))
+    f = adoption(body=adoption_body.replace("`src/c_driver.cpp`", "`src/gone_driver.cpp`"))
+    check("adoption: a source that is not tracked is reported", any("not a tracked AlpacaCore/ or AlpacaHTTP/" in x for x in f))
+    f = adoption(body=adoption_body.replace("| adopted |", "| done |"))
+    check("adoption: an unknown state is reported", any("state 'done'" in x for x in f))
+    f = adoption(body=adoption_body.replace("Scan: `src/*_driver.cpp`\n", ""))
+    check("adoption: a missing Scan line is reported", any("no `Scan:" in x for x in f))
+    f = adoption(body=adoption_body.replace("| D | — | adopted", "| D | — | adopted").replace("| D | — | planned", "| D | — | adopted"))
+    check("adoption: only a planned row may omit its source", any("row D names no source" in x for x in f))
+    per_row = ("\nScan: `t/locked_*.h`\n\n| Driver | Symbol | Source | State | Issue |\n| --- | --- | --- | --- | --- |\n"
+               "| X | `XSDK` | `t/locked_x.h` | adopted | #1 |\n")
+    f = _adoption_findings("rec", per_row, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
+    check("adoption: with per-row symbols, every scanned file needs a row", any("t/locked_y.h" in x for x in f))
+    f = _adoption_findings("rec", per_row, {"t/locked_x.h": "class L : public XSDK"})
+    check("adoption: a per-row symbol fixture with every file listed is clean", f == [])
+    both = per_row.replace("\n\n| Driver", "\nSymbol: `XSDK`\n\n| Driver")
+    f = _adoption_findings("rec", both, {"t/locked_x.h": "class L : public XSDK", "t/locked_y.h": "class M : public YSDK"})
+    check("adoption: with a Symbol line, a Symbol column overrides per row and an unrelated scanned file needs no row",
+          f == [])
+    mixed = ("\nScan: `src/*_driver.cpp`\nSymbol: `Clock`\n\n| Driver | Symbol | Source | State | Issue |\n"
+             "| --- | --- | --- | --- | --- |\n| A |  | `src/a_driver.cpp` | adopted | #1 |\n"
+             "| B | `Other` | `src/b_driver.cpp` | adopted | #2 |\n")
+    mixed_files = {"src/a_driver.cpp": "Clock c;", "src/b_driver.cpp": "Other o;", "src/c_driver.cpp": "nothing"}
+    check("adoption: a blank Symbol cell uses the Symbol line, and a file naming neither needs no row",
+          _adoption_findings("rec", mixed, mixed_files) == [])
+    f = _adoption_findings("rec", mixed, dict(mixed_files, **{"src/a_driver.cpp": "Other o;"}))
+    check("adoption: a blank Symbol cell is checked against the Symbol line", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "// Clock is not used here\nint x;"}))
+    check("adoption: a symbol named only in a comment does not count as adoption", any("row A is adopted" in x for x in f))
+    f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
+    check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()

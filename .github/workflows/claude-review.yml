@@ -91,6 +91,35 @@ jobs:
           fi
           git status --short
 
+      # Which decision-record rules the diff falls under, computed by the base
+      # branch's scripts over the base branch's records (restored above), so a
+      # PR cannot change what it is checked against. Only lines of the form
+      # `NNNN-slug.md: rules 1, 2` reach the prompt.
+      - name: List the decision-record rules in scope
+        id: adr_scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          base_tree="${RUNNER_TEMP}/adr-base"
+          rm -rf "${base_tree}" && mkdir -p "${base_tree}"
+          records="none (the scope could not be computed; read docs/decisions/ directly)"
+          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null \
+              && git archive "${BASE_SHA}" scripts docs/decisions | tar -x -C "${base_tree}" \
+              && [ -f "${base_tree}/scripts/check_adr_scope.py" ]; then
+            listed="$(gh pr diff "${PR_NUMBER}" --repo "${REPO}" --name-only \
+              | python3 -I "${base_tree}/scripts/check_adr_scope.py" --list --root "${base_tree}" \
+              | grep -E '^[0-9]{4}-[a-z0-9-]+\.md: rules [0-9, ]+$' || true)"
+            records="${listed:-none}"
+          fi
+          {
+            echo "records<<ADR_SCOPE_EOF"
+            echo "${records}"
+            echo "ADR_SCOPE_EOF"
+          } >> "${GITHUB_OUTPUT}"
+
       - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
@@ -149,6 +178,15 @@ jobs:
             - A vendor driver that reimplements a mechanism the instructions say
               lives in one place (connection-thread lifecycle: inherit
               AsyncConnectable, never a driver-local connection_thread_).
+            - A changed line that breaks a decision-record rule the diff falls
+              under. The records and rule numbers in scope are listed under
+              DECISION RECORDS IN SCOPE below; read each listed rule in
+              docs/decisions/ (the base branch's copy) and cite the record
+              file and rule number. A rule with "Checked by: review" is yours
+              to check. An Adoption row that a change makes wrong is a defect
+              too. A PR that changes a record is checked against the base
+              copy; the change to the rule itself needs a reason in the PR
+              description, not a defect.
             Each defect names the file, the line, and the input or scenario
             that shows it, so the builder can reproduce it before fixing.
 
@@ -160,6 +198,9 @@ jobs:
             from the changed lines, is a NOTE that says "pre-existing, open an
             issue", unless the PR's change is what makes it reachable. Skip
             style and formatting; linters and clang-format handle those.
+
+            DECISION RECORDS IN SCOPE:
+            ${{ steps.adr_scope.outputs.records }}
 
             Review the lines this PR changes, what they directly call, the
             call sites of anything whose signature or contract this PR

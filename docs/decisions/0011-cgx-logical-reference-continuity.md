@@ -22,6 +22,16 @@ hemisphere established by FindHome. AbortSlew/Unpark transfer cleanup to a joine
 stop worker; completion and failures remain observable rather than being declared
 idle at dispatch.
 
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. The CGX driver keeps its exclusive fd across a successful logical disconnect, and retains calibration only in the same transport session with matching identity and firmware and settled encoder checkpoints within two counts. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+2. A session error invalidates calibration, even when recovery reuses the fd. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+3. Connect never homes or relabels; a fresh driver or a failed continuity check needs an explicit FindHome. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+4. An idle site change never reverses the mechanical hemisphere set by FindHome. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_celestron_cgx_geometry.cpp`, review.
+5. AbortSlew and Unpark hand cleanup to a joined stop worker, and completion or failure stays observable instead of reading idle at dispatch. Scope: `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp`. Checked by: review.
+
 ## Alternatives rejected
 
 - Always discard a reference on logical disconnect: breaks the pre-homed

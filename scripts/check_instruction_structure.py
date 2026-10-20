@@ -48,6 +48,22 @@ def matches(path, pattern):
     return re.fullmatch(expression, path) is not None
 
 
+def heading_anchors(text):
+    """GitHub's anchors for every Markdown heading in `text`: lower case, every
+    character that is not a letter, digit, space, hyphen or underscore dropped,
+    spaces turned into hyphens, and -1, -2 ... appended to repeats."""
+    anchors, seen = set(), {}
+    for line in FENCED_BLOCK_RE.sub('', text).splitlines():
+        m = re.match(r'^#{1,6} +(.+?) *#*$', line)
+        if not m:
+            continue
+        slug = re.sub(r'[^\w\- ]', '', m.group(1).strip().lower()).replace(' ', '-')
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else '%s-%d' % (slug, count))
+    return anchors
+
+
 def check(root=ROOT):
     failures = []
     def require(ok, message):
@@ -133,6 +149,16 @@ def check(root=ROOT):
                 distinct_targets[path.name].add(file)
             require((path.parent / file).exists(), '%s: broken relative link %s'
                     % (path.relative_to(root).as_posix(), target))
+            # A link into or out of a decision record that names a heading must
+            # name one that exists: the decision-record gate follows these links
+            # to the rule owners, and a renamed heading broke one silently (#1412).
+            fragment = target.split('#', 1)[1] if '#' in target else ''
+            target_path = (path.parent / file).resolve()
+            decisions_dir = (root / 'docs/decisions').resolve()
+            in_decisions = path.resolve().parent == decisions_dir or target_path.parent == decisions_dir
+            if fragment and in_decisions and file.endswith('.md') and target_path.is_file():
+                require(unquote(fragment) in heading_anchors(target_path.read_text(encoding="utf-8", errors="replace")),
+                        '%s: link %s names a heading that does not exist' % (path.relative_to(root).as_posix(), target))
     for name, floor in ROOT_DOCUMENT_LINK_FLOORS.items():
         require(len(distinct_targets[name]) >= floor,
                 'only %d distinct relative link/src target(s) found in %s (floor %d): the file is missing, '
@@ -173,6 +199,15 @@ def self_test():
             path.write_text(original)
         # A broken link is reported with its repo-relative path: two files
         # named README.md (or two records with one name) must be told apart.
+        assert 'hardware-free-driver-tests-via-the-sdk-seam--extend' in heading_anchors(
+            '### Hardware-free driver tests via the SDK seam — extend\n'), 'heading_anchors slug rule regressed'
+        assert 'a-1' in heading_anchors('## A\n## A\n'), 'heading_anchors does not number repeats'
+        anchor_probe = root / 'docs/decisions/zz-anchor.md'
+        anchor_probe.write_text('[x](../../.github/instructions/gemini.instructions.md#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        anchor_probe.unlink()
+        assert any('zz-anchor.md' in f and 'no-such-heading' in f for f in new_findings), \
+            'A decision-record link to a missing heading escaped the anchor check'
         broken = root / 'docs/decisions/zz-broken-link.md'
         broken.write_text('[gone](missing-target.md)\n')
         new_findings = set(check(root)) - baseline

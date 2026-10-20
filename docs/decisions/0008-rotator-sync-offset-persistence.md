@@ -16,6 +16,14 @@ One helper, `alpacacore::util::RotatorSyncOffsetStore` (`AlpacaCore/include/alpa
 - AlpacaCore has no JSON library, so the helper reads and writes only a flat object of numbers.
 - Tests set the path with `RotatorSyncOffsetStore::set_default_path()` and restore it; factory signatures do not change.
 
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. A rotator `Sync` saves its offset through `util::RotatorSyncOffsetStore`, keyed by `get_unique_id()`, and Connect loads it. Scope: `AlpacaCore/src/vendors/wandererastro/wandererastro_rotator_driver.cpp`, `AlpacaCore/src/vendors/zwo/zwo_rotator_driver.cpp`. Checked by: `AlpacaCore/tests/test_rotator_sync_offset_store.cpp`, review.
+2. A storage failure logs a WARNING and never fails `Sync` or Connect; a missing or corrupt file reads as 0. Scope: `AlpacaCore/src/core/util/rotator_sync_offset_store.cpp`. Checked by: `AlpacaCore/tests/test_rotator_sync_offset_store.cpp`.
+3. The offset never passes through the device config or the router. Scope: `AlpacaHTTP/src/http/router.cpp`. Checked by: review.
+
 ## Alternatives rejected
 
 - A field in the device config (`registered_devices.json`): the offset would pass through the router, `sanitize_device_config` and a config write on every `Sync`, and mixes a runtime calibration with user settings.
