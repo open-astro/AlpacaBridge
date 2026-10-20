@@ -141,24 +141,28 @@ def check(root=ROOT):
         # for the spaces in model names.
         text = FENCED_BLOCK_RE.sub('', path.read_text(encoding="utf-8", errors="replace"))
         targets = MARKDOWN_LINK_TARGET_RE.findall(text) + HTML_SRC_TARGET_RE.findall(text)
+        rel_path = path.relative_to(root).as_posix()
         for target in targets:
-            if target.startswith(('#', 'http:', 'https:', 'mailto:')):
+            if target.startswith(('http:', 'https:', 'mailto:')):
+                continue
+            fragment = unquote(target.split('#', 1)[1]) if '#' in target else ''
+            if target.startswith('#'):
+                # A same-file link must name one of the document's own headings.
+                require(not fragment or fragment in heading_anchors(text),
+                        '%s: link %s names a heading that does not exist' % (rel_path, target))
                 continue
             file = unquote(target.split('#', 1)[0])
             if path.parent == root and path.name in distinct_targets:
                 distinct_targets[path.name].add(file)
             require((path.parent / file).exists(), '%s: broken relative link %s'
                     % (path.relative_to(root).as_posix(), target))
-            # A link into or out of a decision record that names a heading must
-            # name one that exists: the decision-record gate follows these links
-            # to the rule owners, and a renamed heading broke one silently (#1412).
-            fragment = target.split('#', 1)[1] if '#' in target else ''
-            target_path = (path.parent / file).resolve()
-            decisions_dir = (root / 'docs/decisions').resolve()
-            in_decisions = path.resolve().parent == decisions_dir or target_path.parent == decisions_dir
-            if fragment and in_decisions and file.endswith('.md') and target_path.is_file():
-                require(unquote(fragment) in heading_anchors(target_path.read_text(encoding="utf-8", errors="replace")),
-                        '%s: link %s names a heading that does not exist' % (path.relative_to(root).as_posix(), target))
+            # A link to a Markdown file that names a heading must name one that
+            # exists: renamed headings broke cross-file anchors silently (#1388;
+            # #1412 first checked the decision records).
+            target_path = path.parent / file
+            if fragment and file.endswith('.md') and target_path.is_file():
+                require(fragment in heading_anchors(target_path.read_text(encoding="utf-8", errors="replace")),
+                        '%s: link %s names a heading that does not exist' % (rel_path, target))
     for name, floor in ROOT_DOCUMENT_LINK_FLOORS.items():
         require(len(distinct_targets[name]) >= floor,
                 'only %d distinct relative link/src target(s) found in %s (floor %d): the file is missing, '
@@ -208,6 +212,34 @@ def self_test():
         anchor_probe.unlink()
         assert any('zz-anchor.md' in f and 'no-such-heading' in f for f in new_findings), \
             'A decision-record link to a missing heading escaped the anchor check'
+        # Any document's link fragment is checked (#1388), not only the decision
+        # records': rename a heading a cross-file link targets, and break a
+        # same-file (#anchor) link.
+        probe = root / 'docs/failures/zz-anchor-probe.md'
+        probe.write_text('[x](../../.github/instructions/gemini.instructions.md#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        assert any('zz-anchor-probe.md' in f and 'no-such-heading' in f for f in new_findings), \
+            'A cross-file link to a missing heading outside docs/decisions escaped the anchor check'
+        probe.write_text('# Real\n[ok](#real) [bad](#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        probe.write_text('# Real\n[ok](#real)\n')
+        assert not (set(check(root)) - baseline), 'A same-file link to an existing heading was reported'
+        probe.unlink()
+        assert any('zz-anchor-probe.md' in f and '#no-such-heading' in f for f in new_findings), \
+            'A same-file (#anchor) link to a missing heading escaped the anchor check'
+        index = root / 'docs/architecture.md'
+        original = index.read_text(encoding="utf-8", errors="replace")
+        link = re.search(r'\]\(([^)#\s]+\.md)#([^)\s]+)\)', original)
+        assert link, 'docs/architecture.md has no cross-file anchor link for the rename mutation'
+        target = (index.parent / link[1]).resolve()
+        assert target.is_file() and root in target.parents, 'rename mutation target is not in the fixture'
+        target_text = target.read_text(encoding="utf-8", errors="replace")
+        target.write_text(re.sub(r'^(#{1,6} )', r'\1Renamed ', target_text, flags=re.M))
+        renamed = set(check(root)) - baseline
+        target.write_text(target_text)
+        assert any('docs/architecture.md' in f and 'names a heading that does not exist' in f
+                   for f in renamed), \
+            'Renaming the headings a cross-file link targets escaped the anchor check'
         broken = root / 'docs/decisions/zz-broken-link.md'
         broken.write_text('[gone](missing-target.md)\n')
         new_findings = set(check(root)) - baseline
