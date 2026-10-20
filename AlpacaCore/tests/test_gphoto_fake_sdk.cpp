@@ -1131,11 +1131,12 @@ TEST_CASE("GPhoto camera fake - MLU off keeps the single capture path", "[gphoto
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
     const int captures_after_connect = count_calls(fake, "capture_and_download");
+    const int reads_after_connect = count_calls(fake, "get_text_value");
     driver->start_exposure(0.01, true);
     wait_for_exposure_to_finish(*driver);
 
     CHECK(driver->get_image_ready() == true);
-    CHECK(count_calls(fake, "get_text_value") >= 1);  // MLU was read, and read as off
+    CHECK(count_calls(fake, "get_text_value") > reads_after_connect);  // StartExposure read MLU, and read it as off
     CHECK(count_calls(fake, "capture_and_download") == captures_after_connect + 1);
     CHECK(fake.remote_release_history.empty());
     CHECK(fake.bulb_file_polls == 0);
@@ -1417,8 +1418,8 @@ TEST_CASE("GPhoto camera fake - longExposureNR matches the camera's choice text 
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     auto cam = make_camera();
-    cam.choices["longexpnr"] = {"on", "off"};
-    cam.choice_value["longexpnr"] = "off";
+    cam.choices["longexpnr"] = {"ON", "OFF"};
+    cam.choice_value["longexpnr"] = "OFF";
     fake.cameras.push_back(cam);
     FakeRawDecoder decoder;
 
@@ -1428,7 +1429,7 @@ TEST_CASE("GPhoto camera fake - longExposureNR matches the camera's choice text 
                                                                    alpacacore::util::default_task_clock(), options);
     driver->set_connected(true);
     REQUIRE(fake.choice_write_history["longexpnr"].size() == 1);
-    CHECK(fake.choice_write_history["longexpnr"].front() == "on");
+    CHECK(fake.choice_write_history["longexpnr"].front() == "ON");
 
     driver->set_connected(false);
 }
@@ -1442,11 +1443,13 @@ TEST_CASE("GPhoto camera fake - longExposureNR camera writes nothing", "[gphoto]
     fake.cameras.push_back(cam);
     FakeRawDecoder decoder;
 
+    GPhotoWarnCapture warnings;
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);  // default: "camera"
     driver->set_connected(true);
 
     CHECK(fake.choice_write_history.count("longexpnr") == 0);
     CHECK(fake.cameras[0].choice_value["longexpnr"] == "On");
+    CHECK(warnings.count_containing("long-exposure NR") == 0);  // "camera" is not a request, so nothing to warn about
 
     driver->set_connected(false);
 }
