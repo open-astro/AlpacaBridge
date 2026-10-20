@@ -18,8 +18,8 @@
 // (MoveAxis, AbortSlew, Unpark during a Park) waits out the one exchange in flight whatever the driver does. What it
 // must not wait for is the old body: its driver lock, its tail, its later exchanges. Those initiators are checked by
 // a state getter that sends nothing and answers while the exchange is held (the body holds no driver lock across it),
-// and by returning soon after the hold ends. The two initiators that send nothing during a slew (SlewToCoordinatesAsync,
-// Park) must return inside the hold.
+// and by returning soon after the hold ends. The two initiators that send nothing during a slew
+// (SlewToCoordinatesAsync, Park) must return inside the hold.
 
 #ifndef _WIN32
 
@@ -213,8 +213,8 @@ Timing time_second_initiator(const char* name, const std::function<void(alpacaco
         took = std::chrono::duration_cast<std::chrono::milliseconds>(returned - t0).count();
         const auto left = rig.st->gate_left.load();
         if (left != 0) {
-            past_hold = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            returned - Clock::time_point(Clock::duration(left)))
+            past_hold = std::chrono::duration_cast<std::chrono::milliseconds>(returned -
+                                                                              Clock::time_point(Clock::duration(left)))
                             .count();
         }
     });
@@ -254,16 +254,14 @@ TEST_CASE("SynScan initiator supersede - MoveAxis during a blocked goto exchange
 
 TEST_CASE("SynScan initiator supersede - AbortSlew during a blocked goto exchange", "[synscan][initiator-supersede]") {
     const auto timing = time_second_initiator(
-        "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
-        [](auto& d) { d.abort_slew(); });
+        "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.abort_slew(); });
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
 
 TEST_CASE("SynScan initiator supersede - Unpark during a Park whose goto exchange is blocked",
           "[synscan][initiator-supersede]") {
-    const auto timing =
-        time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); });
+    const auto timing = time_second_initiator("park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); });
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.past_hold_ms < kPastHoldMarginMs);
 }
