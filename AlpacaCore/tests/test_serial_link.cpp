@@ -15,14 +15,17 @@
 
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <future>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -37,6 +40,38 @@ using alpacacore::util::SerialPortClaim;
 using alpacacore::util::SerialPortHolder;
 using alpacacore::util::tty_read;
 using alpacacore::util::tty_write_all;
+
+// Test-binary-only interposer for tcsetattr (issue #1439): forwards to the real
+// one, but parks a call on the latched fd until the test releases it, standing
+// in for a wedged USB-serial adapter. Every other fd passes straight through.
+namespace {
+struct TcsetattrLatch {
+    std::mutex m;
+    std::condition_variable cv;
+    int fd = -1;  // -1: disarmed
+    bool entered = false;
+    bool released = false;
+};
+TcsetattrLatch& tcsetattr_latch() {
+    static auto* l = new TcsetattrLatch();
+    return *l;
+}
+}  // namespace
+
+extern "C" int tcsetattr(int fd, int optional_actions, const struct termios* tio) __THROW {
+    using Fn = int (*)(int, int, const struct termios*);
+    static const Fn real = reinterpret_cast<Fn>(dlsym(RTLD_NEXT, "tcsetattr"));
+    auto& l = tcsetattr_latch();
+    {
+        std::unique_lock<std::mutex> lock(l.m);
+        if (l.fd == fd) {
+            l.entered = true;
+            l.cv.notify_all();
+            l.cv.wait(lock, [&] { return l.released; });
+        }
+    }
+    return real(fd, optional_actions, tio);
+}
 
 namespace {
 
@@ -296,4 +331,72 @@ TEST_CASE("Serial link - a retune of VMIN/VTIME alone is put back too", "[serial
     CHECK(now.c_cc[VMIN] == 0);
     CHECK(cfgetospeed(&now) == B19200);
     CHECK_FALSE(alpacacore::util::restore_serial_line_settings(link.fd()));  // nothing left to restore
+}
+
+TEST_CASE("Serial link - a stalled line restore on one port does not block close or open on another",
+          "[serial][serial_link][issue1439]") {
+    alpacacore::test::PtyPair pty_a("link-stall-a");
+    alpacacore::test::PtyPair pty_b("link-stall-b");
+    alpacacore::test::PtyPair pty_c("link-stall-c");
+    auto link_a = SerialLink::open(pty_a.slave_path(), SerialClaimKind::Link, "OnStep", raw_19200);
+    auto link_b = SerialLink::open(pty_b.slave_path(), SerialClaimKind::Link, "WandererRotator", raw_19200);
+    REQUIRE(link_a);
+    REQUIRE(link_b);
+
+    // Another program retunes A, so the restore on A reaches tcsetattr().
+    struct termios tty {};
+    REQUIRE(tcgetattr(pty_a.keepalive_fd(), &tty) == 0);
+    cfsetispeed(&tty, B9600);
+    cfsetospeed(&tty, B9600);
+    REQUIRE(tcsetattr(pty_a.keepalive_fd(), TCSANOW, &tty) == 0);
+
+    auto& latch = tcsetattr_latch();
+    {
+        std::lock_guard<std::mutex> lock(latch.m);
+        latch.fd = link_a.fd();
+        latch.entered = false;
+        latch.released = false;
+    }
+    auto release = [&] {
+        std::lock_guard<std::mutex> lock(latch.m);
+        latch.released = true;
+        latch.fd = -1;
+        latch.cv.notify_all();
+    };
+
+    const int fd_a = link_a.fd();
+    auto restoring =
+        std::async(std::launch::async, [fd_a] { return alpacacore::util::restore_serial_line_settings(fd_a); });
+    {
+        std::unique_lock<std::mutex> lock(latch.m);
+        const bool in = latch.cv.wait_for(lock, std::chrono::seconds(5), [&] { return latch.entered; });
+        if (!in) {
+            lock.unlock();
+            release();
+            restoring.wait();
+            FAIL("restore on A never reached tcsetattr");
+        }
+    }
+
+    const auto bound = std::chrono::milliseconds(500);
+    auto closing = std::async(std::launch::async, [&] { link_b.close(); });
+    const bool close_done = closing.wait_for(bound) == std::future_status::ready;
+
+    auto opening = std::async(std::launch::async, [&] {
+        return SerialLink::open(pty_c.slave_path(), SerialClaimKind::Link, "Gemini PDH", raw_19200);
+    });
+    const bool open_done = opening.wait_for(bound) == std::future_status::ready;
+
+    release();  // never leave the red path hanging
+    CHECK(restoring.get());
+    closing.wait();
+    auto link_c = opening.get();
+
+    CHECK(close_done);  // B.close() must not wait for A's tcsetattr
+    CHECK(open_done);   // open + apply on C must not wait for it either
+    CHECK(link_c);
+
+    struct termios now {};
+    REQUIRE(tcgetattr(pty_a.keepalive_fd(), &now) == 0);
+    CHECK(cfgetospeed(&now) == B19200);
 }
