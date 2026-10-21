@@ -1116,7 +1116,7 @@ public:
                 park_target_first = park_ra_hours_;
                 park_target_second = park_dec_degrees_;
             } else {
-                if (!site_info_valid_) {
+                if (!site_info_valid_ && !slew_.running()) {  // no `w` queued behind a body's exchange
                     ensure_site_info_cached_locked();
                 }
                 // An hour angle is saved only while a site is known, so a
@@ -3123,8 +3123,12 @@ private:
     // stop restores the mode the handset held at the start and not the one cached at connect: the keypad can change
     // it in between. A motion that starts while another RA motion runs keeps the mode the first one captured.
     void refresh_tracking_mode_locked() const {
-        // A body that owns the slew slot is an RA motion in progress: its answer comes from the driver, never from a
-        // handset exchange queued behind the body's own (an initiator must not wait for the old body).
+        // A body that owns the slew slot is an RA motion in progress: its answer comes from the driver (before the
+        // first read, the polled mode), never from a handset exchange queued behind the body's own (an initiator must
+        // not wait for the old body).
+        if (!tracking_mode_valid_ && slew_.running()) {
+            seed_tracking_mode_from_frame_locked();
+        }
         if (tracking_mode_valid_ && (slew_.running() || ra_motion_active_locked())) {
             return;
         }
@@ -3134,11 +3138,7 @@ private:
         } catch (...) {
             // A failed read keeps what the driver knew: before the first read that is the polled mode.
             if (!tracking_mode_valid_) {
-                const auto reading = snapshot_.read();
-                if (reading && reading->value.tracking_mode >= 0) {
-                    tracking_mode_cached_ = reading->value.tracking_mode;
-                    tracking_mode_valid_ = true;
-                }
+                seed_tracking_mode_from_frame_locked();
             }
             throw;
         }
@@ -3151,6 +3151,14 @@ private:
             tracking_mode_cached_ = mode;
         }
         tracking_mode_valid_ = true;
+    }
+
+    void seed_tracking_mode_from_frame_locked() const {
+        const auto reading = snapshot_.read();
+        if (reading && reading->value.tracking_mode >= 0) {
+            tracking_mode_cached_ = reading->value.tracking_mode;
+            tracking_mode_valid_ = true;
+        }
     }
 
     bool get_tracking_locked() const {
@@ -3240,9 +3248,9 @@ private:
         site_info_valid_ = true;
     }
 
-    // Saves the current RA/Dec as the park target, as main did for every mount.
+    // Saves the current RA/Dec as the park target, as main did for every mount; the polled one while a body runs.
     void store_legacy_park_position_locked() {
-        const auto equatorial = measure_equatorial_locked();
+        const auto equatorial = slew_.running() ? served_equatorial_or_measure_locked() : measure_equatorial_locked();
         park_alignment_mode_ = AlignmentMode::GermanPolar;
         park_ra_uses_hour_angle_ = false;
         park_ra_hours_ = equatorial.first;
@@ -3266,7 +3274,7 @@ private:
             park_altitude_degrees_ = altaz.second;
             park_ra_uses_hour_angle_ = false;
         } else {
-            if (!site_info_valid_) {
+            if (!site_info_valid_ && !slew_.running()) {  // no `w` queued behind a body's exchange
                 ensure_site_info_cached_locked();
             }
             if (!site_info_valid_) {
