@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Decision 0016: getters never wait on device I/O** (issue #1390): new decision record setting the per-link I/O lock, the converted-driver lock order `transition_mutex_` → I/O lock → `mutex_` → SDK-wrapper mutex, and the camera exception; AGENTS.md, the driver lifecycle instructions and decisions 0010 and 0013 now point to it. No code changes; drivers convert one family per PR under issue #295.

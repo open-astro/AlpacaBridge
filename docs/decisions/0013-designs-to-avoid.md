@@ -46,7 +46,7 @@ Instead: describe configs as typed structs with field roles in the catalog descr
 
 What it is: a new base class for each piece of shared behaviour (a polling base, a cache base, a link-health base, a park base) that drivers inherit.
 
-Why rejected: a driver then inherits several bases, each with its own virtual hooks, lifetime and locking, and the lock order in `AGENTS.md` (driver `mutex_`, operation lock, SDK-wrapper mutex) is hard to keep. `AsyncConnectable` is the one inheritance exception, kept because the connect thread lifecycle must live in one place and needs the driver's own destructor ordering ([driver-lifecycle](../../.github/instructions/driver-lifecycle.instructions.md)). Everything else the migration produced is a value a driver owns: `util::AsyncOperation` slot, `StateSnapshot<T>`, `TaskClock`.
+Why rejected: a driver then inherits several bases, each with its own virtual hooks, lifetime and locking, and the lock order set by [decision 0016](0016-getters-never-wait-on-device-io.md) is hard to keep. `AsyncConnectable` is the one inheritance exception, kept because the connect thread lifecycle must live in one place and needs the driver's own destructor ordering ([driver-lifecycle](../../.github/instructions/driver-lifecycle.instructions.md)). Everything else the migration produced is a value a driver owns: `util::AsyncOperation` slot, `StateSnapshot<T>`, `TaskClock`.
 
 Instead: compose. A driver holds the helper as a member, constructs it with the injected clock, and joins it before its other members die. A helper that needs a callback takes a function, not a virtual override.
 

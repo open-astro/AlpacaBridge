@@ -150,6 +150,9 @@ public:
                 effective.serial_port = port.port_path;
             }
 
+            // I/O lock across the whole handshake + state seed (order:
+            // transition_mutex_ -> io_mutex_ -> state_mutex_).
+            std::lock_guard<std::mutex> io(io_mutex_);
             std::string firmware = protocol_.connect(effective);
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -184,7 +187,18 @@ public:
                 firmware_.clear();
             }
             connected_.store(false);
-            protocol_.disconnect();
+            {
+                // Published state is cleared first, under the short state
+                // lock; the I/O lock then covers the close, so it waits only
+                // for an exchange already on the wire.
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                commanded_brightness_ = 0;
+                calibrator_engaged_ = false;
+            }
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                protocol_.disconnect();
+            }
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
     }
@@ -249,41 +263,31 @@ public:
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        const int prev_brightness = commanded_brightness_;
-        const bool prev_engaged = calibrator_engaged_;
-        commanded_brightness_ = brightness;
-        calibrator_engaged_ = true;
-        try {
-            // Matches the vendor app's own ON sequence (button_toggle_Click):
-            // light on, then set the level -- sent back-to-back with no
-            // inter-command delay (confirmed from the decompiled IL).
-            protocol_.light_on();
-            protocol_.set_brightness(brightness);
-        } catch (...) {
-            commanded_brightness_ = prev_brightness;
-            calibrator_engaged_ = prev_engaged;
-            throw;
-        }
+        // io_mutex_ (not just the wrapper's per-command lock) keeps the
+        // light_on + set_brightness pair atomic against a concurrent
+        // CalibratorOff. state_mutex_ is taken only to publish the result, so
+        // Brightness / CalibratorState never wait for the serial reply
+        // (decision 0016). The state is published after the commands succeed,
+        // so a throwing command leaves the previous state untouched.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // Matches the vendor app's own ON sequence (button_toggle_Click):
+        // light on, then set the level -- sent back-to-back with no
+        // inter-command delay (confirmed from the decompiled IL).
+        protocol_.light_on();
+        protocol_.set_brightness(brightness);
+        publish_calibrator(brightness, true);
     }
 
     void calibrator_off() override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        const int prev_brightness = commanded_brightness_;
-        const bool prev_engaged = calibrator_engaged_;
-        commanded_brightness_ = 0;
-        calibrator_engaged_ = false;
-        try {
-            // Matches the vendor app's OFF sequence: light off, then zero the
-            // level.
-            protocol_.light_off();
-            protocol_.set_brightness(0);
-        } catch (...) {
-            commanded_brightness_ = prev_brightness;
-            calibrator_engaged_ = prev_engaged;
-            throw;
-        }
+        // Same locking as calibrator_on(): I/O lock across the pair, state
+        // published after success.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // Matches the vendor app's OFF sequence: light off, then zero the
+        // level.
+        protocol_.light_off();
+        protocol_.set_brightness(0);
+        publish_calibrator(0, false);
     }
 
     void set_brightness(int brightness) override {
@@ -331,12 +335,25 @@ private:
         }
     }
 
+    void publish_calibrator(int brightness, bool engaged) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // set_connected(false) stores false and then clears this state under
+        // the same lock, so a command that finished during a disconnect must
+        // not write over the cleared state.
+        if (!connected_.load()) {
+            return;
+        }
+        commanded_brightness_ = brightness;
+        calibrator_engaged_ = engaged;
+    }
+
     int device_number_;
     FlatPanelConnectionConfig config_;
     std::atomic<bool> connected_;
     GeminiFlatPanelProtocolWrapper protocol_;
 
-    mutable std::mutex state_mutex_;
+    std::mutex io_mutex_;             // serialises multi-command wire sequences; never taken by a getter
+    mutable std::mutex state_mutex_;  // leaf: published brightness/state only, never held across protocol_ calls
     int commanded_brightness_ = 0;
     bool calibrator_engaged_ = false;
 
