@@ -152,13 +152,13 @@ sw::ConnectionInfo endpoint(FakeSkyWatcherSerialBoard& board) {
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board) {
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     return driver;
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount) {
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     return driver;
 }
@@ -198,9 +198,9 @@ constexpr std::size_t kPollerWaiter = 1;
 constexpr auto kClockStep = std::chrono::milliseconds(50);
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount, FakeTaskClock& clock,
-                                                              double site_latitude_deg = 39.7392,
-                                                              double site_longitude_deg = -104.9903,
-                                                              double site_elevation_m = 1609.0) {
+                                                              double site_latitude_deg = 51.477833,
+                                                              double site_longitude_deg = -0.0015,
+                                                              double site_elevation_m = 42.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site_latitude_deg, site_longitude_deg,
                                                   site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
@@ -208,9 +208,9 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board, FakeTaskClock& clock,
-                                                              double site_latitude_deg = 39.7392,
-                                                              double site_longitude_deg = -104.9903,
-                                                              double site_elevation_m = 1609.0) {
+                                                              double site_latitude_deg = 51.477833,
+                                                              double site_longitude_deg = -0.0015,
+                                                              double site_elevation_m = 42.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(board), site_latitude_deg, site_longitude_deg,
                                                   site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
@@ -404,7 +404,7 @@ static void check_ahead_landing_held(double site_latitude, double site_longitude
 
 TEST_CASE("SkyWatcher async - an ahead landing is held for the sky, not re-goto'd or left ahead (#1019)",
           "[skywatcher][async]") {
-    check_ahead_landing_held(39.7392, -104.9903, 1609.0);
+    check_ahead_landing_held(51.477833, -0.0015, 42.0);
 }
 
 TEST_CASE("SkyWatcher async - an ahead landing is held for the sky south of the equator too (#1019)",
@@ -2459,7 +2459,7 @@ TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[sky
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0, {}, {}, clock);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0, {}, {}, clock);
     driver->set_connected(true);
 
     const double before = mount.axis_degrees(1);
@@ -2486,7 +2486,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the R
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0, {}, {}, clock);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, 150.0000, 80.0, {}, {}, clock);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -2561,7 +2561,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2577,7 +2577,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     // it is in flight, so the setter takes its busy-axis skip.
     driver->pulse_guide(2, 1200);                                     // East, 1.2 s
     REQUIRE(advance_through(clock, std::chrono::milliseconds(200)));  // the hold is parked on the clock
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     // Once the pulse has restored tracking, the axis must be running the way
     // the NEW hemisphere wants. With the dispatch-time capture it keeps the
@@ -2605,7 +2605,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2621,7 +2621,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     // still tracking, so the setter must re-apply it rather than skip.
     driver->pulse_guide(0, 1200);                                     // North, 1.2 s
     REQUIRE(advance_through(clock, std::chrono::milliseconds(200)));  // the hold is parked on the clock
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     // RA reverses immediately -- it is not the pulse's axis, so there is
     // nothing to wait for. Checked again after the pulse ends to prove the
@@ -2661,7 +2661,7 @@ TEST_CASE("SkyWatcher - a RightAscensionRate write during a long East pulse surv
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2704,7 +2704,7 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2745,7 +2745,7 @@ TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, n
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     REQUIRE_FALSE(mount.axis_running(2));
@@ -2785,7 +2785,7 @@ TEST_CASE("SkyWatcher - a RightAscensionRate write during a DEC pulse is applied
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2824,7 +2824,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2838,7 +2838,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 
     driver->move_axis(1, 0.5);  // Dec axis nudge, degrees/sec
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     const double mid_drift = ra_drift();
     REQUIRE(std::abs(mid_drift) > 0.0);
@@ -3009,7 +3009,7 @@ TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and
     FakeTaskClock clock;  // the mount runs on it; the driver stays on the wall clock
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -5168,7 +5168,7 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
         }
     });
 
-    auto second = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0,
+    auto second = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0,
                                                   std::make_unique<LongOutageWrapper>(clock), {}, clock);
     const auto started = clock.now();
     REQUIRE(call_on_clock(clock, [&] { second->set_connected(true); }, std::chrono::milliseconds(20000)));

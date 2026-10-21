@@ -210,8 +210,8 @@ TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope
     // site it is InvalidOperation (decision 0019); once the site is set it is
     // a valid hour value even when disconnected.
     require_alpaca_error([&] { (void)driver->get_sidereal_time(); }, alpacacore::AlpacaError::InvalidOperation);
-    driver->set_site_latitude(39.7392);
-    driver->set_site_longitude(-104.9903);
+    driver->set_site_latitude(51.477833);
+    driver->set_site_longitude(-0.0015);
     double lst = driver->get_sidereal_time();
     CHECK(lst >= 0.0);
     CHECK(lst < 24.0);

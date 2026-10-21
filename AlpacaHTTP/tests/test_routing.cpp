@@ -3670,18 +3670,18 @@ int main() {
                                            {"connectionType", "serial"},
                                            {"portPath", "/dev/ttyUSB6"},
                                            {"baudRate", 9600},
-                                           {"siteLatitude", 39.7392},
-                                           {"siteLongitude", -104.9903},
-                                           {"siteElevation", 1609.0},
+                                           {"siteLatitude", 51.477833},
+                                           {"siteLongitude", -0.0015},
+                                           {"siteElevation", 42.0},
                                            {"mountIndex", 1}},
                                           "Telescope", 9617);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("connectionType", "") == "serial");
         EXPECT(cfg.value("portPath", "") == "/dev/ttyUSB6");
         EXPECT(cfg.value("baudRate", -1) == 9600);
-        EXPECT(cfg.value("siteLatitude", 0.0) == 39.7392);
-        EXPECT(cfg.value("siteLongitude", 0.0) == -104.9903);
-        EXPECT(cfg.value("siteElevation", 0.0) == 1609.0);
+        EXPECT(cfg.value("siteLatitude", 0.0) == 51.477833);
+        EXPECT(cfg.value("siteLongitude", 0.0) == -0.0015);
+        EXPECT(cfg.value("siteElevation", 0.0) == 42.0);
         EXPECT(cfg.value("mountIndex", -1) == 1);
         remove_device(router, "skywatcher", "telescope", 9617);
     }
@@ -3720,8 +3720,8 @@ int main() {
                                            {"connectionType", "network"},
                                            {"host", "192.168.4.1"},
                                            {"udpPort", 11880},
-                                           {"siteLatitude", 39.7392},
-                                           {"siteLongitude", -104.9903},
+                                           {"siteLatitude", 51.477833},
+                                           {"siteLongitude", -0.0015},
                                            {"minAltitudeDeg", 15.0},
                                            {"meridianLimitMinutes", 30.0}},
                                           "Telescope", 9662);
@@ -3740,8 +3740,8 @@ int main() {
                                            {"connectionType", "network"},
                                            {"host", "192.168.4.1"},
                                            {"udpPort", 11880},
-                                           {"siteLatitude", 39.7392},
-                                           {"siteLongitude", -104.9903},
+                                           {"siteLatitude", 51.477833},
+                                           {"siteLongitude", -0.0015},
                                            {"minAltitudeDeg", nullptr},
                                            {"meridianLimitMinutes", nullptr}},
                                           "Telescope", 9663);
@@ -3757,8 +3757,8 @@ int main() {
                                            {"deviceNumber", 9664},
                                            {"connectionType", "serial"},
                                            {"portPath", "/dev/ttyUSB6"},
-                                           {"siteLatitude", 39.7392},
-                                           {"siteLongitude", -104.9903},
+                                           {"siteLatitude", 51.477833},
+                                           {"siteLongitude", -0.0015},
                                            {"minAltitudeDeg", 12.5}},
                                           "Telescope", 9664);
         EXPECT(one.is_object() && !one.empty());
@@ -3769,9 +3769,9 @@ int main() {
         // Range: the API (not only the form) rejects a floor outside
         // -90..90 and a meridian limit outside 0..360, and takes the bounds.
         const auto limits_body = [](int number, const char* key, double value) {
-            return nlohmann::json{{"vendor", "skywatcher"},      {"deviceType", "telescope"},  {"deviceNumber", number},
-                                  {"connectionType", "network"}, {"host", "192.168.4.1"},      {"udpPort", 11880},
-                                  {"siteLatitude", 39.7392},     {"siteLongitude", -104.9903}, {key, value}};
+            return nlohmann::json{{"vendor", "skywatcher"},      {"deviceType", "telescope"}, {"deviceNumber", number},
+                                  {"connectionType", "network"}, {"host", "192.168.4.1"},     {"udpPort", 11880},
+                                  {"siteLatitude", 51.477833},   {"siteLongitude", -0.0015},  {key, value}};
         };
         const auto rejected = [&](int number, const char* key, double value) {
             const auto response =
@@ -3807,8 +3807,8 @@ int main() {
                                                {"connectionType", "network"},
                                                {"host", "192.168.4.1"},
                                                {"udpPort", 11880},
-                                               {"siteLatitude", 39.7392},
-                                               {"siteLongitude", -104.9903},
+                                               {"siteLatitude", 51.477833},
+                                               {"siteLongitude", -0.0015},
                                                {"decAxisSense", sense}},
                                               "Telescope", number);
             EXPECT(cfg.is_object() && !cfg.empty());
@@ -3816,9 +3816,9 @@ int main() {
             remove_device(router, "skywatcher", "telescope", number);
         }
         const nlohmann::json bogus{
-            {"vendor", "skywatcher"},      {"deviceType", "telescope"},  {"deviceNumber", 9669},
-            {"connectionType", "network"}, {"host", "192.168.4.1"},      {"udpPort", 11880},
-            {"siteLatitude", 39.7392},     {"siteLongitude", -104.9903}, {"decAxisSense", "bogus"}};
+            {"vendor", "skywatcher"},      {"deviceType", "telescope"}, {"deviceNumber", 9669},
+            {"connectionType", "network"}, {"host", "192.168.4.1"},     {"udpPort", 11880},
+            {"siteLatitude", 51.477833},   {"siteLongitude", -0.0015},  {"decAxisSense", "bogus"}};
         const auto response = route_request(router, "POST", "/management/v1/configuredevice", bogus.dump());
         const auto json = nlohmann::json::parse(response.body(), nullptr, false);
         EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
@@ -4058,8 +4058,8 @@ int main() {
         // the value for this session), and the persisted entry is unchanged.
         nlohmann::json surveyed = learner;
         surveyed["deviceNumber"] = 9641;
-        surveyed["siteLatitude"] = 39.7392;
-        surveyed["siteLongitude"] = -104.9903;
+        surveyed["siteLatitude"] = 51.477833;
+        surveyed["siteLongitude"] = -0.0015;
         surveyed["learnSiteFromClient"] = false;
         {
             const auto ok = route_request(router, "POST", "/management/v1/configuredevice", surveyed.dump());
@@ -4071,7 +4071,7 @@ int main() {
         {
             const auto cfg = site_config(9641);
             EXPECT(cfg.is_object() && cfg.value("learnSiteFromClient", true) == false);
-            EXPECT(std::fabs(cfg.value("siteLatitude", 0.0) - 39.7392) < 1e-9);
+            EXPECT(std::fabs(cfg.value("siteLatitude", 0.0) - 51.477833) < 1e-9);
             EXPECT(!cfg.contains("siteElevation"));
             const auto resp = route_request(router, "GET", "/api/v1/telescope/9641/sitelatitude?ClientID=1");
             const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
@@ -4510,14 +4510,14 @@ int main() {
                            {"connectionType", "serial"},
                            {"portPath", "/dev/ttyUSB8"},
                            {"baudRate", 9600},
-                           {"siteLatitude", 39.7392}});
+                           {"siteLatitude", 51.477833}});
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9632},
                            {"connectionType", "serial"},
                            {"portPath", "/dev/ttyUSB9"},
                            {"baudRate", 9600},
-                           {"siteLongitude", -104.9903}});
+                           {"siteLongitude", -0.0015}});
         std::filesystem::create_directories(persisted.parent_path());
         {
             std::ofstream out(persisted, std::ios::trunc);
@@ -4636,23 +4636,23 @@ int main() {
                            {"connectionType", "serial"},
                            {"portPath", ""},
                            {"baudRate", 9600},
-                           {"siteLatitude", 39.7392},
-                           {"siteLongitude", -104.9903}});
+                           {"siteLatitude", 51.477833},
+                           {"siteLongitude", -0.0015}});
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9641},
                            {"connectionType", "network"},
                            {"host", ""},
-                           {"siteLatitude", 39.7392},
-                           {"siteLongitude", -104.9903}});
+                           {"siteLatitude", 51.477833},
+                           {"siteLongitude", -0.0015}});
         entries.push_back({{"vendor", "skywatcher"},
                            {"deviceType", "telescope"},
                            {"deviceNumber", 9642},
                            {"connectionType", "carrier-pigeon"},
                            {"portPath", "/dev/ttyUSB8"},
                            {"baudRate", 9600},
-                           {"siteLatitude", 39.7392},
-                           {"siteLongitude", -104.9903}});
+                           {"siteLatitude", 51.477833},
+                           {"siteLongitude", -0.0015}});
 #ifdef ALPACACORE_ENABLE_ZWO
         // An entry with no connectionType key: the off-UI path (hand-edited,
         // or written by a non-web-UI client, since the form always sets the
@@ -4820,8 +4820,8 @@ int main() {
         const nlohmann::json base = {{"vendor", "skywatcher"},
                                      {"deviceType", "telescope"},
                                      {"deviceNumber", 9643},
-                                     {"siteLatitude", 39.7392},
-                                     {"siteLongitude", -104.9903}};
+                                     {"siteLatitude", 51.477833},
+                                     {"siteLongitude", -0.0015}};
         const auto reject = [&router](nlohmann::json body, const std::string& expected) {
             const auto response = route_request(router, "POST", "/management/v1/configuredevice", body.dump());
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
@@ -4949,8 +4949,8 @@ int main() {
         };
         // Vendor-agnostic tail that sanitize_device_config copies for every vendor.
         const char* const kTail =
-            R"("responseTimeoutMs":4000,"apertureDiameter":0.2,"focalLength":1.0,"siteLatitude":39.7392,)"
-            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"learnSiteFromClient":true,"syncTimeOnConnect":false)";
+            R"("responseTimeoutMs":4000,"apertureDiameter":0.2,"focalLength":1.0,"siteLatitude":51.477833,)"
+            R"("siteLongitude":-0.0015,"siteElevation":42.0,"learnSiteFromClient":true,"syncTimeOnConnect":false)";
         const auto with_tail = [&](const std::string& base) {
             return std::string("{") + base + (base.empty() ? "" : ",") + kTail + "}";
         };
@@ -5139,18 +5139,18 @@ int main() {
         // and a network config keeps portPath. tcpPort is not a Sky-Watcher
         // field and still drops.
         add("skywatcher", "telescope", "Telescope", "serial",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
-            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})",
-            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":39.7392,)"
-            R"("siteLongitude":-104.9903,"siteElevation":1609.0,"mountIndex":1,"host":"h","udpPort":1})");
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":51.477833,)"
+            R"("siteLongitude":-0.0015,"siteElevation":42.0,"mountIndex":1,"host":"h","udpPort":1})",
+            R"({"connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600,"siteLatitude":51.477833,)"
+            R"("siteLongitude":-0.0015,"siteElevation":42.0,"mountIndex":1,"host":"h","udpPort":1})");
         add("skywatcher", "telescope", "Telescope", "network",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
             R"("siteLongitude":151.21,"portPath":"/dev/x","tcpPort":1})",
             R"({"connectionType":"network","host":"192.168.4.1","udpPort":11880,"siteLatitude":-33.87,)"
             R"("siteLongitude":151.21,"portPath":"/dev/x"})");
         add("skywatcher", "telescope", "Telescope", "auto",
-            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})",
-            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":39.7392,"siteLongitude":-104.9903})");  // #659
+            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":51.477833,"siteLongitude":-0.0015})",
+            R"({"connectionType":"auto","mountIndex":1,"siteLatitude":51.477833,"siteLongitude":-0.0015})");  // #659
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
@@ -5367,7 +5367,7 @@ int main() {
             bool catalog;
         };
         std::vector<Mount> mounts;
-        const char* const kSite = R"("siteLatitude":39.7392,"siteLongitude":-104.9903)";
+        const char* const kSite = R"("siteLatitude":51.477833,"siteLongitude":-0.0015)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
         mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
@@ -7498,7 +7498,7 @@ int main() {
             router,
             nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
                                   R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.5,)"
-                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                                  R"("siteLatitude":51.477833,"siteLongitude":-0.0015})"),
             "Telescope");
         EXPECT(!fractional.ok);
         EXPECT(fractional.message.find("baudRate") != std::string::npos);
@@ -7509,7 +7509,7 @@ int main() {
             api_attempt(router,
                         nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
                                               R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":true,)"
-                                              R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                                              R"("siteLatitude":51.477833,"siteLongitude":-0.0015})"),
                         "Telescope");
         EXPECT(!boolean.ok);
         EXPECT(boolean.message == "Device config field 'baudRate' must be a whole number (got true)");
@@ -7518,7 +7518,7 @@ int main() {
             router,
             nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
                                   R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":"9600",)"
-                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                                  R"("siteLatitude":51.477833,"siteLongitude":-0.0015})"),
             "Telescope");
         EXPECT(!text.ok);
         EXPECT(text.message == "Device config field 'baudRate' has the wrong type (got string)");
@@ -7527,7 +7527,7 @@ int main() {
             router,
             nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope","deviceNumber":9259,)"
                                   R"("connectionType":"serial","portPath":"/dev/ttyUSB6","baudRate":9600.0,)"
-                                  R"("siteLatitude":39.7392,"siteLongitude":-104.9903})"),
+                                  R"("siteLatitude":51.477833,"siteLongitude":-0.0015})"),
             "Telescope");
         EXPECT(whole.ok);
         EXPECT(whole.config.value("baudRate", -1) == 9600);
@@ -8611,8 +8611,8 @@ int main() {
         const auto off = api_attempt(router,
                                      nlohmann::json::parse(R"({"vendor":"skywatcher","deviceType":"telescope",)"
                                                            R"("deviceNumber":9258,"connectionType":"serial",)"
-                                                           R"("portPath":"/dev/ttyUSB6","siteLatitude":39.7392,)"
-                                                           R"("siteLongitude":-104.9903})"),
+                                                           R"("portPath":"/dev/ttyUSB6","siteLatitude":51.477833,)"
+                                                           R"("siteLongitude":-0.0015})"),
                                      "Telescope");
         EXPECT(!off.ok);
         EXPECT(off.message == "SkyWatcher support not enabled. Rebuild with -DALPACACORE_ENABLE_SKYWATCHER=ON");

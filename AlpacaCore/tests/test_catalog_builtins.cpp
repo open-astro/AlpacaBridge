@@ -853,8 +853,8 @@ DeviceConfig skywatcher_serial_with_site() {
     config.set("connectionType", std::string{"serial"});
     config.set("portPath", std::string{"/dev/ttyUSB8"});
     config.set("baudRate", std::int64_t{9600});
-    config.set("siteLatitude", 39.7392);
-    config.set("siteLongitude", -104.9903);
+    config.set("siteLatitude", 51.477833);
+    config.set("siteLongitude", -0.0015);
     return config;
 }
 
@@ -1068,8 +1068,8 @@ TEST_CASE(
     // read as serial AND warned about for the missing port, as the arm did.
     DeviceConfig no_port;
     no_port.set("connectionType", std::string{"carrier-pigeon"});
-    no_port.set("siteLatitude", 39.7392);
-    no_port.set("siteLongitude", -104.9903);
+    no_port.set("siteLatitude", 51.477833);
+    no_port.set("siteLongitude", -0.0015);
     const auto persisted = catalog.normalize(kSkyWatcherKey, no_port, Source::Persisted);
     CHECK_FALSE(persisted.rejection.has_value());
     CHECK(any_contains(persisted.warnings, "has connectionType \"carrier-pigeon\""));
@@ -1098,8 +1098,8 @@ TEST_CASE("Builtin catalog - SkyWatcher normalize refuses an empty endpoint and 
         DeviceConfig config;
         config.set("connectionType", std::string{c.type});
         if (c.set_empty) config.set(c.endpoint_key, std::string{});
-        config.set("siteLatitude", 39.7392);
-        config.set("siteLongitude", -104.9903);
+        config.set("siteLatitude", 51.477833);
+        config.set("siteLongitude", -0.0015);
 
         // Rule 6, Api: the arm's exact text.
         const auto api = catalog.normalize(kSkyWatcherKey, config, Source::Api);
@@ -1243,9 +1243,9 @@ TEST_CASE("Builtin catalog - SkyWatcher sanitize keeps every declared field what
         config.set("host", std::string{"192.168.4.1"});
         config.set("udpPort", std::int64_t{11880});
         config.set("responseTimeoutMs", std::int64_t{4000});
-        config.set("siteLatitude", 39.7392);
-        config.set("siteLongitude", -104.9903);
-        config.set("siteElevation", 1609.0);
+        config.set("siteLatitude", 51.477833);
+        config.set("siteLongitude", -0.0015);
+        config.set("siteElevation", 42.0);
         config.set("apertureDiameter", 0.2);
         config.set("focalLength", 1.0);
         config.set("tcpPort", std::int64_t{1});
@@ -1357,8 +1357,8 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
         config.set("connectionType", std::string{"network"});
         config.set("host", std::string{"192.0.2.1"});  // TEST-NET-1: never routable
         config.set("udpPort", std::int64_t{11880});
-        config.set("siteLatitude", 39.7392);
-        config.set("siteLongitude", -104.9903);
+        config.set("siteLatitude", 51.477833);
+        config.set("siteLongitude", -0.0015);
         std::unique_ptr<AlpacaDriver> driver;
         REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, 10));
         REQUIRE(driver != nullptr);
@@ -1375,9 +1375,9 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
         DeviceConfig config;
         config.set("connectionType", std::string{type});
         config.set("mountIndex", std::int64_t{3});
-        config.set("siteLatitude", 39.7392);
-        config.set("siteLongitude", -104.9903);
-        config.set("siteElevation", 1609.0);
+        config.set("siteLatitude", 51.477833);
+        config.set("siteLongitude", -0.0015);
+        config.set("siteElevation", 42.0);
         std::unique_ptr<AlpacaDriver> driver;
         REQUIRE_NOTHROW(driver = catalog.create(kSkyWatcherKey, config, 11));
         REQUIRE(driver != nullptr);
@@ -1385,9 +1385,9 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory passes the values through an
         CHECK_FALSE(driver->get_connected());
         auto* telescope = dynamic_cast<TelescopeDriver*>(driver.get());
         REQUIRE(telescope != nullptr);
-        CHECK(telescope->get_site_latitude() == 39.7392);
-        CHECK(telescope->get_site_longitude() == -104.9903);
-        CHECK(telescope->get_site_elevation() == 1609.0);
+        CHECK(telescope->get_site_latitude() == 51.477833);
+        CHECK(telescope->get_site_longitude() == -0.0015);
+        CHECK(telescope->get_site_elevation() == 42.0);
     }
 }
 
@@ -1415,8 +1415,8 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
         DeviceConfig config;
         config.set("connectionType", std::string{"serial"});
         config.set("portPath", std::string{"/dev/ttyUSB-skywatcher-none"});
-        if (c.latitude) config.set("siteLatitude", 39.7392);
-        if (c.longitude) config.set("siteLongitude", -104.9903);
+        if (c.latitude) config.set("siteLatitude", 51.477833);
+        if (c.longitude) config.set("siteLongitude", -0.0015);
         const int number = device_number++;
         const std::string expected = "Persisted Sky-Watcher telescope " + std::to_string(number) + " has no " +
                                      c.missing + "; it connects but refuses to point until the site is set. " +
