@@ -89,6 +89,7 @@ This document lists all hardware vendors and device types that are verified to w
 | iCAM178M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM178M/) |
 | iCAM462C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM462C/) |
 | iCAM464C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM464C/) |
+| iGuider (guide camera) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iGuider/) |
 
 <details>
 <summary><strong>iOptron Camera Driver Notes</strong></summary>
@@ -98,6 +99,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
 - **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
 - **USB link health matters**: a marginal cable/port shows up as `libusb: error [op_set_configuration] failed, error -1 errno 71` in the server log, and the camera then answers with a -300 CCDTemperature, fails PulseGuide (`POASetConfig(bool): operation failed`) and never delivers a frame before dropping off the bus. Re-seat the camera on a direct USB 3 port with a known-good cable; the driver is not at fault. Cold ConformU processes on the Pi show ~0.1-0.16 s first-use marks on enum-typed members (CameraState, SensorType); these are ConformU-side JIT, not the driver, and a warm re-run in the same session is clean.
+- **iGuider guide camera**: a separate driver, chosen as vendor **iOptron iGuider** (not iOptron) in the web UI. The iGuider 1 (USB `0130:1466`, 1280x960 mono, 3.75 um) is a UVC camera driven over Linux V4L2 with no vendor SDK; the service user needs the `video` group, which the `.deb` grants. Exposures run 0.01 to 3.5 s in the camera's 12 fixed steps (StartExposure rounds to the nearest; LastExposureDuration reports the step), Gain 0 to 13, software subframes, no binning or cooling, and no ST-4 port, so guide pulses go to the mount. The camera streams from connect to disconnect, so the first exposure after an exposure change waits out up to three frames at the old setting (from 3.5 s down to 0.01 s, about 10 s once). An optional device path (`/dev/v4l/by-id/...` survives a replug) pins one camera; blank finds the first iGuider.
+- **iGuider validated**: ConformU 4.5.2 on an iGuider 1 (`bcdDevice` 1.00) on a Raspberry Pi CM4 rig (Debian 13 arm64, kernel uvcvideo, camera behind a USB 2.0 hub), 2026-10-21: 0 errors, 0 issues, all members within timing targets (slowest DeviceState, 0.021 s). A VMware arm64 VM could not stream it (its virtual EHCI controller drops the isochronous video), so test on real USB.
 - **Verified OS/Architecture**: Linux arm64 (Raspberry Pi).
 
 </details>

@@ -150,6 +150,9 @@ if(TARGET alpacacore_ioptron)
         test_ioptron_ieaf_focuser_deferred_connect.cpp)
     # Serial-port ownership of the mount, iEAF and iEFW links (issue #1202).
     list(APPEND TEST_SOURCES test_ioptron_serial_ownership.cpp)
+    # iGuider guide camera (UVC over V4L2) and its [stress] registration, over
+    # FakeIGuiderV4L2.
+    list(APPEND TEST_SOURCES test_ioptron_iguider_camera.cpp test_ioptron_iguider_concurrency_stress.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)

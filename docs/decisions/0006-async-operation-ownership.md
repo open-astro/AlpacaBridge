@@ -69,6 +69,7 @@ Symbol: `AsyncOperation`
 | Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
 | Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | MoveAxis re-send body |
+| iOptron iGuider camera | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | — | four raw `std::thread` members today |
 
 ## Links

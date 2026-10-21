@@ -66,6 +66,7 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -383,6 +384,13 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
         "ioptron_filterwheel", "ioptron", "filterwheel", DeviceType::FilterWheel,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iefw_filterwheel_by_index(n, 0); },
         kSrcAgents);
+}
+// The iGuider guide camera has its own catalog vendor ("iguider") but is an
+// iOptron driver built under the iOptron flag (GUARD_OVERRIDE in the gate).
+inline ContractEntry contract_entry_iguider_camera() {
+    return make_entry(
+        "iguider_camera", "iguider", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iguider_camera(n); }, kSrcAgents);
 }
 #endif
 
@@ -752,7 +760,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel)
+#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel) X(iguider_camera)
 #else
 #define CS_IOPTRON(X)
 #endif
@@ -919,6 +927,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro

@@ -91,10 +91,13 @@
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 
+#include "fake_iguider_v4l2.h"
 #include "fake_ioptron_ieaf.h"
 #include "fake_ioptron_mount.h"
+#include "locked_iguider_v4l2.h"
 #endif
 #ifdef ALPACACORE_ENABLE_GEMINI
 #include <alpacacore/vendor/gemini/gemini_flatpanel_driver.h>
@@ -1177,6 +1180,39 @@ Tier2Host tier2_host_ioptron_focuser() {
     };
     return h;
 }
+// FakeIGuiderV4L2 behind LockedIGuiderV4L2 (recipe of test_ioptron_iguider_camera.cpp), both in one holder: the
+// driver keeps a reference to the seam.
+struct IGuiderV4L2Hold {
+    alpacacore::test::FakeIGuiderV4L2 fake;
+    alpacacore::test::LockedIGuiderV4L2 v4l2{fake};
+};
+
+Tier2Host tier2_host_iguider_camera() {
+    Tier2Host h{"iguider_camera",
+                "iguider",
+                "camera",
+                "fake_iguider_v4l2.h",
+                DeviceType::Camera,
+                "iguider_camera",
+                {},
+                true,
+                {},
+                ""};
+    const auto make = [](IGuiderV4L2Hold& s) -> std::unique_ptr<AlpacaDriver> {
+        return alpacacore::vendor::ioptron::create_iguider_camera(0, "", s.v4l2);
+    };
+    h.connectable = [make](bool hold) {
+        auto s = std::make_shared<IGuiderV4L2Hold>();
+        if (hold) s->fake.open_delay = kHold;  // fake_iguider_v4l2.h: the explicit open() hook
+        return host_over(s, make);
+    };
+    h.failing = [make]() {
+        auto s = std::make_shared<IGuiderV4L2Hold>();
+        s->fake.devices.clear();  // no iGuider attached: the connect fails at the scan
+        return host_over(s, make);
+    };
+    return h;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ASTROASIS
@@ -1764,7 +1800,7 @@ Tier2Host tier2_host_wandererastro_switch() {
 #define CS2_SKYWATCHER(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR)
+#define CS2_IOPTRON(X) X(ioptron_telescope, TEL) X(ioptron_focuser, NPR) X(iguider_camera, CAM)
 #else
 #define CS2_IOPTRON(X)
 #endif
@@ -1933,6 +1969,7 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
     CS2_ENABLED("ioptron")
+    CS2_ENABLED("iguider")  // the iGuider camera's own catalog vendor, built by the iOptron option
 #endif
 #ifdef ALPACACORE_ENABLE_ASTROASIS
     CS2_ENABLED("astroasis")

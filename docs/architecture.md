@@ -111,7 +111,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | SVBONY | Camera | SDK wrapper | Production |
 | Altair | Camera (ToupTek OEM: the ToupTek camera driver over libaltaircam, sharing `ToupcamFamilySDK` with ToupTek) | SDK wrapper | Production |
 | ToupTek | Camera (incl. cooled + High Full Well), Focuser (AAF), FilterWheel (AFW-M), Switch (camera thermal: dew heater + fan; StellaVita power) | SDK + protocol wrapper | Production |
-| iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper) | Protocol wrapper (+ Player One SDK wrapper for iCAM) | Production |
+| iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper; iGuider guide camera, UVC over V4L2) | Protocol wrapper (+ Player One SDK wrapper for iCAM, V4L2 wrapper for iGuider) | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, EQ-class boards e.g. EQM-35 Pro, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
 | Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX), Focuser (focus motor on its own USB port) | Protocol wrapper | Production (CGX-L direct USB untested) |

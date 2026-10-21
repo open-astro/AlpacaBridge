@@ -66,6 +66,7 @@ ALLOWLIST: dict[tuple[str, str], str] = {}
 # Pairs the router builds under another vendor's build flag.
 GUARD_OVERRIDE = {
     ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (playerone_catalog.cpp)
+    ("iguider", "camera"): "IOPTRON",  # the iOptron iGuider guide camera's own catalog vendor (ioptron_catalog.cpp)
 }
 
 # (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every

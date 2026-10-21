@@ -22,6 +22,12 @@ case "$1" in
             usermod -aG dialout alpacabridge || true
         fi
 
+        # Grant video membership for V4L2 cameras (the iOptron iGuider is a UVC
+        # camera at /dev/video*, root:video 0660 on Debian).
+        if getent group video > /dev/null 2>&1; then
+            usermod -aG video alpacabridge || true
+        fi
+
         # NOTE: the service user is deliberately NOT enrolled in the `input`
         # group (it grants read access to keyboards/mice — a keylogging
         # surface). USB HID astronomy devices (ZWO focusers, filter wheels)
