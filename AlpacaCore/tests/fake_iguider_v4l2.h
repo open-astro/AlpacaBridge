@@ -26,7 +26,8 @@
 // Thread rules: the seam methods are not locked here; wrap the fake in
 // LockedIGuiderV4L2 wherever a driver runs on it (locked_iguider_v4l2.h). The
 // knobs a test turns while the driver's stream worker runs (stall, unplug,
-// open delay) and the counters it reads are atomics.
+// open delay) and the counters it reads are atomics; close_delay, like
+// open_delay, is set before the driver connects.
 //
 // KNOWN PARITY GAPS (the fake against uvcvideo on the iGuider):
 //  * Frames arrive every frame_interval() (5 ms by default) whatever the
@@ -79,6 +80,10 @@ public:
     std::atomic<bool> unplugged{false};
     /// Explicit hook (decision 0015, point 5): open() sleeps this long.
     std::chrono::milliseconds open_delay{0};
+    /// Explicit hook (decision 0015, point 5): close() sleeps this long before
+    /// it counts the close, so a test can hold open the window between the
+    /// driver publishing a lost link and the transport actually closing (#1487).
+    std::chrono::milliseconds close_delay{0};
     std::chrono::milliseconds frame_interval{5};
     /// Atomic: this many reads return no frame at once, as the wrapper does for
     /// an incomplete or error-flagged buffer (it drops it without waiting).
@@ -134,6 +139,7 @@ public:
 
     void close(int handle) override {
         if (handle != kHandle || !open_) return;  // unknown handles are ignored, as by the wrapper
+        if (close_delay.count() > 0) std::this_thread::sleep_for(close_delay);
         streaming_ = false;
         open_ = false;
         ++closes;
