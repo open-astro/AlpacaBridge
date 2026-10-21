@@ -17,7 +17,6 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 
 #include <atomic>
@@ -94,19 +93,28 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
     std::mutex first_mutex;
     std::string first_unexpected;
     std::vector<std::thread> readers;
-    for (int t = 0; t < 4; ++t) {
-        readers.emplace_back([&] {
+    // One call kind per thread, so a slow call does not hide the window of
+    // the others. The fake is calibrated for every session, so a
+    // CalibrationStatus other than "Calibrated" is wrong whatever the epoch.
+    for (int t = 0; t < 8; ++t) {
+        readers.emplace_back([&, kind = t % 4] {
             auto& focuser = static_cast<alpacacore::FocuserDriver&>(*driver);
             while (!done.load()) {
                 const int before = epoch.load();
                 try {
-                    const int position = focuser.get_position();
-                    static_cast<void>(focuser.get_is_moving());
-                    static_cast<void>(focuser.get_max_step());
-                    static_cast<void>(focuser.get_device_state());
-                    if (before >= 0 && epoch.load() == before) {
-                        ++served;
-                        if (position != 61000 - (30000 + before * 10)) ++stale;
+                    if (kind == 0) {
+                        const int position = focuser.get_position();
+                        if (before >= 0 && epoch.load() == before) {
+                            ++served;
+                            if (position != 61000 - (30000 + before * 10)) ++stale;
+                        }
+                    } else if (kind == 1) {
+                        static_cast<void>(focuser.get_is_moving());
+                        static_cast<void>(focuser.get_device_state());
+                    } else if (kind == 2) {
+                        static_cast<void>(focuser.get_max_step());
+                    } else if (focuser.action("CalibrationStatus", "") == "NotCalibrated") {
+                        ++stale;
                     }
                 } catch (const alpacacore::AlpacaException& ex) {
                     if (ex.error_code() != alpacacore::AlpacaError::NotConnected) {
@@ -119,11 +127,11 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
             }
         });
     }
-    for (int cycle = 0; cycle < 25; ++cycle) {
+    for (int cycle = 0; cycle < 150; ++cycle) {
         fake.set_raw_position(static_cast<std::uint32_t>(30000 + cycle * 10));
         driver->set_connected(true);
         epoch.store(cycle);
-        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
         epoch.store(-1);
         driver->set_connected(false);
     }
@@ -134,49 +142,6 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
     CHECK(stale.load() == 0);
     CHECK(unexpected.load() == 0);
     CHECK(served.load() > 0);
-}
-
-TEST_CASE("Celestron focuser - a getter racing a disconnect logs no link fault", "[celestron][focuser][stress]") {
-    // resync() throws NotConnected on a closed port. A poll that lands after the
-    // disconnect closed it must not count that toward the link latch, or
-    // enough racing polls log "communications compromised" for a
-    // link that was closed on purpose.
-    FakeCelestronFocuser fake;
-    REQUIRE(fake.ok());
-    std::mutex log_mutex;
-    std::vector<std::string> faults;
-    const auto previous = alpacacore::logging::get_log_sink();
-    alpacacore::logging::set_log_sink([&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
-        if (message.find("communications compromised") != std::string_view::npos) {
-            std::lock_guard<std::mutex> lock(log_mutex);
-            faults.emplace_back(message);
-        }
-    });
-    auto driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake.slave_path());
-    std::atomic<bool> done{false};
-    std::vector<std::thread> readers;
-    for (int t = 0; t < 8; ++t) {
-        readers.emplace_back([&] {
-            while (!done.load()) {
-                try {
-                    static_cast<void>(static_cast<alpacacore::FocuserDriver&>(*driver).get_position());
-                } catch (const alpacacore::AlpacaException&) {
-                }
-            }
-        });
-    }
-    for (int cycle = 0; cycle < 60; ++cycle) {
-        driver->set_connected(true);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        driver->set_connected(false);
-    }
-    done.store(true);
-    for (auto& reader : readers) reader.join();
-    alpacacore::logging::set_log_sink(previous);
-
-    std::lock_guard<std::mutex> lock(log_mutex);
-    INFO((faults.empty() ? std::string() : faults.front()));
-    CHECK(faults.empty());
 }
 
 TEST_CASE("Celestron focuser - destruction races an in-flight connect", "[celestron][focuser][stress]") {

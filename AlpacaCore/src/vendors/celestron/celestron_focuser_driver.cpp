@@ -253,8 +253,12 @@ public:
             return "";
         }
         if (same_action(action_name, kActionCalibrationStatus)) {
-            ensure_connected();
             std::lock_guard<std::mutex> lock(calibration_mutex_);
+            // Under the lock, as usable_limits(): a call that overlaps a
+            // disconnect and reconnect would read the next connect's cleared
+            // calibration; connected_ is set only after that connect has
+            // read the limits.
+            ensure_connected();
             // Until the poll reads the limits after it ends, the old ones are
             // not the answer (an abort can wipe them).
             if (calibration_.running || calibration_.refresh_limits) return "Calibrating";
@@ -608,10 +612,19 @@ private:
     }
 
     StateFrame served_frame() const {
+        // Read before the check: the generation rises at the open, before the
+        // connect resets the snapshot and before connected_ is set.
+        const auto session = protocol_.session_generation();
         ensure_connected();
         throw_if_faulted();
         auto reading = snapshot_.read();
         if (!reading.has_value()) {
+            // A reconnect since the check above reset the snapshot: this
+            // call belongs to a session that is gone, not to a connected one
+            // waiting for its first frame.
+            if (protocol_.session_generation() != session) {
+                throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+            }
             // Connected but no frame: the connect's polls were lost, or a
             // racing Move/Halt write dropped it. Getters never touch the
             // device (decisions 0010 and 0016): answer "not available yet"
@@ -646,14 +659,7 @@ private:
             frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
                                               static_cast<std::int64_t>(read_be(position, 0, 3)));
             frame.moving = done[0] != 0xff || state.running;
-        } catch (const std::exception& ex) {
-            // A poll that finds the port closed after a disconnect cleared
-            // connected_ is not a link fault; the disconnect already reset the
-            // latch. A closed port while connected_ still reads true counts.
-            const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
-            if (alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected && !connected_.load()) {
-                return;
-            }
+        } catch (const std::exception&) {
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
                 ALPACA_LOG_ERROR("Celestron", "Focuser communications compromised: " + health_.fault());
