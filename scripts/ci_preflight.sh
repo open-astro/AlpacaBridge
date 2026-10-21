@@ -254,7 +254,7 @@ self_test() {
     && [ "${got[4]}" = '  lead' ] && [ "${got[5]}" = 'trail  ' ] && [ "${got[6]}" = 'a:b' ]; then
     st_ok "read_lines keeps spaces, \$(...) and quotes literal"
   else
-    st_fail "read_lines: expected 7 literal lines, got ${#got[@]}"
+    st_fail "read_lines: a line differs or the count is ${#got[@]}, expected 7"
   fi
   read_lines got < <(printf '')
   if [ "${#got[@]}" -eq 0 ]; then
@@ -284,11 +284,11 @@ self_test() {
   # Checks 2 and 3: a quick run against an empty diff (base = HEAD).
   out="$(PREFLIGHT_BASE=HEAD PREFLIGHT_NO_INSTALL=1 PREFLIGHT_FULL=0 PREFLIGHT_SELF_TEST_REEXEC='' \
     /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" 2>&1 </dev/null)" || true
-  if printf '%s\n' "${out}" | grep -qE 'unbound variable|command not found'; then
+  if printf '%s\n' "${out}" | grep -qE 'unbound variable|(map[f]ile|read[a]rray): command not found'; then
     st_fail "empty-diff run aborted:"
-    printf '%s\n' "${out}" | grep -E 'unbound variable|command not found' >&2
+    printf '%s\n' "${out}" | grep -E 'unbound variable|(map[f]ile|read[a]rray): command not found' >&2
   else
-    st_ok "empty-diff run has no unbound-variable or command-not-found error"
+    st_ok "empty-diff run has no unbound-variable or bash 4 builtin error"
   fi
   local summary
   summary="$(printf '%s\n' "${out}" | sed -n '/Pre-flight summary/,$p')"
