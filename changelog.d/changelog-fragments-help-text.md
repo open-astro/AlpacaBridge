@@ -1,2 +1,0 @@
-### Fixed (tooling)
-- **`scripts/changelog_fragments.py --help` explains every option**: each mode (`--check`, `--preview`, `--bump`, `--release`, `--self-test`) now says what it does, under a "mode (exactly one)" heading; `--changelog`, `--fragments`, `--version` and `--date` show a value name and their default; the usage line wraps at the terminal width; and the help ends with a pointer to `changelog.d/README.md`. Behaviour is unchanged.
