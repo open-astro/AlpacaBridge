@@ -103,6 +103,8 @@ struct LandingOffsetHandset {
     std::atomic<bool> southern{false};
     // The `m` reply: 50 is an EQ mount (GermanPolar); 128..159 and 160 are Alt-Az.
     std::atomic<int> model_id{50};
+    // The tracking mode the last `T` wrote, which `t` reports: 1 (on) until the first write.
+    std::atomic<int> tracking_mode{1};
     // RA motor: westward speed in arcsec/s (sidereal while tracking, 0 stopped), integrated into ra_raw.
     std::mutex ra_motor_mutex;
     double ra_westward_arcsec_per_s = kSiderealArcsecPerSec;
@@ -293,12 +295,13 @@ alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<Lan
                 return "#";
             }
             case 'T':
+                st->tracking_mode.store(chunk.size() > 1 ? static_cast<unsigned char>(chunk[1]) : 0);
                 st->set_ra_motor(chunk.size() > 1 && chunk[1] != 0 ? kSiderealArcsecPerSec : 0.0, false);
                 return "#";
             case 'm':
                 return std::string(1, static_cast<char>(st->model_id.load())) + "#";
-            case 't':  // tracking mode read: sidereal tracking on
-                return std::string(1, '\x01') + "#";
+            case 't':  // tracking mode read
+                return std::string(1, static_cast<char>(st->tracking_mode.load())) + "#";
             case 'w': {
                 std::string location(8, '\0');
                 if (st->southern.load()) {
@@ -1019,6 +1022,118 @@ TEST_CASE("SynScan initiator supersede - MoveAxis on the axis of a long landing 
     REQUIRE_NOTHROW(n.driver->move_axis(1, 0.0));
     CHECK(n.st->axis_counts_per_s[1].load() == 0.0);  // no axis is left moving
     n.driver->set_connected(false);
+}
+
+namespace {
+
+// A tracking write: `T` and the mode byte (0 is off).
+bool is_tracking_write(const std::string& command) { return command.size() >= 2 && command[0] == 'T'; }
+// An RA landing move's start: `P` variable rate (3) on the RA motor (16) at a non-zero rate.
+bool is_ra_rate_start(const std::string& command) {
+    return command.size() >= 8 && command[0] == 'P' && command[1] == 3 && command[2] == 16 &&
+           (command[4] != 0 || command[5] != 0);
+}
+
+}  // namespace
+
+// Tracking is not a motion owner: it claims nothing and the landing goes on, but its `T` waits for the wire turn
+// the RA landing move keeps until its stop. On an equatorial mount that stop is the tracking restore `T<mode>`, so a
+// write sent during the move would reach the handset first and the restore would turn tracking back on while
+// Tracking reads false (decision 0006, "Claim").
+TEST_CASE("SynScan initiator supersede - Tracking off during a long RA landing move goes out after its restore",
+          "[synscan][initiator-supersede][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->ra_offset_counts.store(150);  // 11.6" off: one timed RA move of several seconds at 2"/s
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const auto deadline = clock.now() + std::chrono::seconds(40);
+    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+        step_virtual(clock);
+    }
+    REQUIRE(st->nudge_starts.load() == 1);
+    const auto started = st->wire_log();
+    const auto start = std::find_if(started.begin(), started.end(), is_ra_rate_start);
+    REQUIRE(start != started.end());
+    const auto move_start = static_cast<std::ptrdiff_t>(start - started.begin());
+
+    std::promise<void> done;
+    auto returned = done.get_future();
+    std::thread writer([&] {
+        try {
+            driver->set_tracking(false);
+            done.set_value();
+        } catch (...) {
+            done.set_exception(std::current_exception());
+        }
+    });
+    // Virtual time stands still, so the move does not end and the write waits for its turn.
+    CHECK(returned.wait_for(std::chrono::milliseconds(300)) == std::future_status::timeout);
+    const auto release_by = Clock::now() + std::chrono::seconds(30);
+    while (returned.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready && Clock::now() < release_by) {
+        step_virtual(clock);  // the move ends, its restore goes out, then the write
+    }
+    const bool wrote = returned.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+    if (!wrote) {
+        driver->set_connected(false);  // ends the move so the writer can be joined
+    }
+    writer.join();
+    REQUIRE(wrote);
+    CHECK_NOTHROW(returned.get());
+    // Let the landing finish; it goes on with tracking off.
+    const auto settle_by = clock.now() + std::chrono::seconds(60);
+    while (driver->get_slewing() && clock.now() < settle_by) {
+        step_virtual(clock);
+    }
+    CHECK_FALSE(driver->get_slewing());
+
+    const auto wire = st->wire_log();
+    std::string order;
+    for (const auto& command : wire) order += command.empty() ? '?' : command[0];
+    INFO("wire order " << order);
+    std::vector<int> modes;  // every tracking write after the move's start, in wire order
+    for (auto it = wire.begin() + move_start + 1; it != wire.end(); ++it) {
+        if (is_tracking_write(*it)) modes.push_back(static_cast<unsigned char>((*it)[1]));
+    }
+    REQUIRE(modes.size() >= 2);
+    CHECK(modes[0] != 0);      // the move's stop: the tracking restore
+    CHECK(modes.back() == 0);  // the client's write goes out after it and is the last tracking write
+    CHECK(std::count(modes.begin(), modes.end(), 0) == 1);
+    CHECK(st->ra_motor_speed() == 0.0);  // the handset is not tracking
+    CHECK(st->tracking_mode.load() == 0);
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+// With no motion in flight the turn is free: the write goes out at once and is the same `T` as before.
+TEST_CASE("SynScan initiator supersede - a Tracking write while idle sends its T at once",
+          "[synscan][initiator-supersede][goto-landing]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    for (const bool on : {false, true}) {
+        INFO("Tracking " << on);
+        const auto before = st->wire_log().size();
+        const auto t0 = Clock::now();
+        REQUIRE_NOTHROW(driver->set_tracking(on));
+        CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count() < 500);
+        const auto wire = st->wire_log();
+        REQUIRE(wire.size() == before + 1);
+        // 2: equatorial tracking (model 50 is an EQ mount), in either hemisphere.
+        CHECK(wire.back() == (on ? std::string("T\x02", 2) : std::string("T\x00", 2)));
+        CHECK(st->tracking_mode.load() == (on ? 2 : 0));
+        CHECK(driver->get_tracking() == on);
+    }
+    driver->set_connected(false);
 }
 
 TEST_CASE(

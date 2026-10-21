@@ -747,13 +747,19 @@ public:
         return mode != 0;
     }
 
+    // The `T` goes out in its wire turn (decision 0006, "Claim"), after the stop and tracking restore of any motion
+    // owner queued before it, so the requested mode is the one the handset keeps. It claims nothing: a slew or a
+    // landing in flight goes on. Its wait: none while idle; during a landing move, the rest of that move (at most
+    // kNudgeMaxSeconds) plus its stop, up to three exchanges of response_timeout_ms each; otherwise the one command
+    // in flight.
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
         auto& protocol = SynScanProtocolWrapper::instance();
+        int mode = 0;
         if (tracking) {
             const AlignmentMode alignment = alignment_mode_locked();
             if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
@@ -764,13 +770,16 @@ public:
             }
             // SynScan "T" modes (protocol v3.3): 1 = Alt/Az, 2 = equatorial in either hemisphere, 3 = PEC. The
             // handset applies its own site; 3 is not "EQ south" as it is on a Celestron.
-            const int mode = alignment == AlignmentMode::AltAz ? 1 : 2;
-            protocol.set_tracking_mode(mode);
-            set_tracking_mode_cached_locked(mode);
-        } else {
-            protocol.set_tracking_mode(0);
-            set_tracking_mode_cached_locked(0);
+            mode = alignment == AlignmentMode::AltAz ? 1 : 2;
         }
+        // The cache is written after the send: a motion owner ahead in the queue restores the mode it found.
+        if (!send_in_turn(
+                lock, [this] { return connected_ && !link_lost_.load(); },
+                [&protocol, mode] { protocol.set_tracking_mode(mode); })) {
+            check_connected();
+            return;
+        }
+        set_tracking_mode_cached_locked(mode);
         tracking_mode_valid_ = true;
         invalidate_readback_tick_locked();
     }
@@ -2117,7 +2126,9 @@ private:
     // ticket order. A newer owner claims the slot before it takes its ticket, so its commands always follow
     // anything an older owner is committed to send, and an older owner that finds the claim at its turn sends
     // nothing. A check made before the wait and a send made after it would leave a gap in which std::mutex, which is
-    // not FIFO, can put the old command behind the new owner's. Getters and the status poll take no ticket.
+    // not FIFO, can put the old command behind the new owner's. The Tracking write takes a ticket too, without
+    // claiming (set_tracking()): its `T` must not land between a stop and its tracking restore. Getters and the status
+    // poll take no ticket.
     // The constructor runs with `lock` (mutex_) held: it takes the ticket, releases `lock` to wait (nobody waits for
     // a turn while holding mutex_, and the holder of a turn may need mutex_), and returns with the turn and `lock`
     // both held. The destructor passes the turn on, on every path. Lock order: turn, mutex_, wrapper mutex.
