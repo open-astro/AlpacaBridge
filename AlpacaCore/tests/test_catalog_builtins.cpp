@@ -2279,7 +2279,12 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices av
     REQUIRE(focuser_serial_driver != nullptr);
     // MaxStep needs a connection (ASCOM IFocuserV4); the port above never opens, so the configured
     // value is not readable here and the disconnected read is the check.
-    CHECK_THROWS_AS(dynamic_cast<FocuserDriver&>(*focuser_serial_driver).get_max_step(), AlpacaException);
+    try {
+        (void)dynamic_cast<FocuserDriver&>(*focuser_serial_driver).get_max_step();
+        FAIL("MaxStep must refuse a read while disconnected");
+    } catch (const AlpacaException& e) {
+        CHECK(e.error_code() == AlpacaError::NotConnected);
+    }
 
     // A saved config normalize could only warn about is refused here, never
     // built into a wheel that would auto-probe (it DTR-resets every CP210x).
