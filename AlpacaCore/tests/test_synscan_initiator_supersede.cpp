@@ -309,8 +309,8 @@ TEST_CASE("SynScan initiator supersede - a superseded slew body sends nothing af
 // wrapper with the driver lock released, and AbortSlew queues its stops right behind them. A body that checked
 // ownership before it queued must still not send its goto after AbortSlew's stop. Any other order is legal: the goto
 // before the stops, or no goto at all. Without a wire turn the order is up to which waiter the wrapper mutex wakes
-// first (std::mutex is not FIFO), so the case runs short trials on one rig; without the turn about one in sixteen
-// reorders.
+// first (std::mutex is not FIFO), so the case runs short trials on one rig. Without the turn about one trial in a
+// hundred reorders and the case fails in roughly one run in six: it catches a regression by repetition, not every run.
 TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount after AbortSlew",
           "[synscan][initiator-supersede]") {
     constexpr int kTrials = 16;
