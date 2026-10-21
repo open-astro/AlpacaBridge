@@ -730,8 +730,9 @@ Hosted connected_host(const Tier2Host& h) {
 }
 
 // The ASCOM type of each DeviceState member, per device type, from the Platform 7 interface docs: the
-// DeviceState member list of ITelescopeV4, ICameraV4, IFocuserV4, IRotatorV4, IFilterWheelV3,
-// ICoverCalibratorV2 and ISwitchV3 (ascom-standards.org Platform 7 interface reference). DeviceStateValue holds
+// DeviceState section of each interface page at https://ascom-standards.org/newdocs/ (ITelescopeV4,
+// ICameraV4, IFocuserV4, IRotatorV4, IFilterWheelV3, ICoverCalibratorV2, ISwitchV3), whose member lists
+// the rows below follow. DeviceStateValue holds
 // the alternative that goes out as JSON, so the held alternative is what is compared. Only device types with
 // a tier-2 host are listed; a new tier-2 device type needs a row here. Switch members carry a switch id
 // suffix ("GetSwitch3"), stripped before the lookup.
