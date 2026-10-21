@@ -15,6 +15,7 @@
 #include <alpacacore/vendor/zwo/zwo_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <stdexcept>
@@ -25,6 +26,7 @@
 
 #include "catch2_compat.h"
 #include "fake_zwo_eaf_sdk.h"
+#include "getter_stall_probe.h"
 
 namespace {
 
@@ -317,7 +319,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step equal to the stored on
     CHECK(driver->get_max_step() == 60000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() calling
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() calling
 // sdk.set_max_step(id, 64000) when no max step is configured (set_max_step_calls 1, not 0).
 TEST_CASE("ZWO EAF Focuser Driver - Without a configured max step the stored value is left alone",
           "[zwo][focuser][unit][fake-sdk]") {
@@ -351,7 +353,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured 
 }
 
 // Falsified by: zwo_focuser_driver.cpp set_connected() skipping
-// apply_configured_max_step_locked() (MaxStep stays 0, set_max_step_calls 0).
+// apply_configured_max_step() (MaxStep stays 0, set_max_step_calls 0).
 TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max step of 0",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
@@ -365,7 +367,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max s
     CHECK(driver->get_max_step() == 50000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() throwing
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() throwing
 // (or writing the unclamped value) instead of clamping to step_range_.
 TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step range is clamped to it",
           "[zwo][focuser][unit][fake-sdk]") {
@@ -384,7 +386,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step 
     CHECK(warnings[0].find("1000") != std::string::npos);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() clamping
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() clamping
 // without the "step_range_ > 0" guard (an unavailable range clamps to 0, writing 0).
 TEST_CASE("ZWO EAF Focuser Driver - An unavailable step range does not refuse a configured max step",
           "[zwo][focuser][unit][fake-sdk]") {
@@ -395,4 +397,151 @@ TEST_CASE("ZWO EAF Focuser Driver - An unavailable step range does not refuse a 
 
     CHECK(sdk.set_max_step_calls == 1);
     CHECK(driver->get_max_step() == 40000);
+}
+
+// Decision 0016: Name and UniqueID need no device access, so a connect that holds the SDK open must not park them.
+// Falsified by: zwo_focuser_driver.cpp set_connected(true) holding mutex_ across open_focuser() (get_name() then
+// waits the whole 300 ms open).
+TEST_CASE("ZWO EAF Focuser Driver - Name and UniqueID answer while a connect holds the SDK open",
+          "[zwo][focuser][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeEAFSDK sdk;
+    sdk.open_delay = kHoldOpen;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+
+    driver->connect();
+    REQUIRE(wait_for_flag(sdk.open_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
+
+    REQUIRE(wait_until_connected(*driver));
+    CHECK(driver->get_name() == "EAF");
+    CHECK(driver->get_unique_id() == "ZWO_EAF_SN_EAF-SN-1");
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_focuser_driver.cpp get_max_step() or get_max_increment() taking io_mutex_ (the cached read then
+// waits the 300 ms status refill).
+TEST_CASE("ZWO EAF Focuser Driver - Identity and limits answer while a status read is in flight",
+          "[zwo][focuser][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.read_delay = kHoldOpen;
+
+    std::thread reader([&] {
+        try {
+            (void)driver->get_position();
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.read_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(time_call([&] { CHECK(driver->get_max_step() == 60000); }) < kGetterBudget);
+    CHECK(time_call([&] { CHECK(driver->get_max_increment() == 1000); }) < kGetterBudget);
+    CHECK(sdk.busy.load() > 0);  // the refill is still in flight
+
+    reader.join();
+    driver->set_connected(false);
+}
+
+// A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
+// Falsified by: zwo_focuser_driver.cpp set_connected(false) calling close_focuser() without io_mutex_, or move()
+// reading the id and then calling the SDK without it (closed_while_busy is set).
+TEST_CASE("ZWO EAF Focuser Driver - A disconnect waits for the exchange in flight instead of closing under it",
+          "[zwo][focuser][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    std::thread worker;
+    SECTION("a status read") {
+        sdk.read_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                (void)driver->get_position();
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.read_entered));
+    }
+    SECTION("a move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move(100);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a halt") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->halt();
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+
+    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    worker.join();
+    CHECK_FALSE(sdk.closed_while_busy.load());
+    CHECK_FALSE(driver->get_connected());
+    CHECK(sdk.close_calls == 1);
+}
+
+// A disconnect that wins the I/O lock while status reads queue behind a move is not a link failure: every reader
+// gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
+// Falsified by: zwo_focuser_driver.cpp read_status() throwing NotConnected inside the cache refill instead of
+// returning the closed frame (the third queued reader then gets DriverException "communications compromised").
+TEST_CASE("ZWO EAF Focuser Driver - A disconnect during queued status reads is not a link failure",
+          "[zwo][focuser][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.move_delay = kHoldOpen;
+    std::thread mover([&] {
+        try {
+            driver->move(100);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.move_entered));
+
+    constexpr int kReaders = 8;
+    std::atomic<int> not_connected{0};
+    std::atomic<int> other{0};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaders; ++i) {
+        readers.emplace_back([&] {
+            try {
+                (void)driver->get_position();
+                ++other;
+            } catch (const alpacacore::AlpacaException& e) {
+                (e.error_code() == alpacacore::AlpacaError::NotConnected ? not_connected : other)++;
+            } catch (const std::exception&) {
+                ++other;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // every reader is parked on the move
+    driver->set_connected(false);
+    mover.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(other.load() == 0);
+    CHECK(not_connected.load() == kReaders);
 }

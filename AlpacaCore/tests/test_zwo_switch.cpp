@@ -25,6 +25,7 @@
 #include "../src/vendors/zwo/zwo_fields.h"
 #include "catch2_compat.h"
 #include "fake_zwo_sdk.h"
+#include "getter_stall_probe.h"
 
 namespace {
 
@@ -209,7 +210,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - a dead link is not served from the cac
     CHECK(driver->get_switch_value(0) == 40.0);
 }
 
-// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, index into the list (cameras[index]) instead of
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id, index into the list (cameras[index]) instead of
 // matching slot_index
 TEST_CASE("ZWO Dew Heater Switch Driver - an index binds the SDK slot, not the list position", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
@@ -250,7 +251,7 @@ void add_mini_and_pro(FakeDewSdk& sdk, bool mini_has_heater) {
 
 }  // namespace
 
-// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, call list_dew_heater_cameras before the
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id, call list_dew_heater_cameras before the
 // camera_bound_by_id_only() return
 TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without touching other cameras",
           "[zwo][switch][unit]") {
@@ -268,7 +269,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without to
     CHECK(touched.count(9) == 1);
 }
 
-// Falsified by: zwo_switch_driver.cpp load_dew_caps_locked, skip the lazy listing for an id-only binding
+// Falsified by: zwo_switch_driver.cpp find_dew_caps, skip the lazy listing for an id-only binding
 TEST_CASE("ZWO Dew Heater Switch Driver - an id-only camera with no heater names the one that has it",
           "[zwo][switch][unit]") {
     FakeDewSdk sdk;
@@ -346,4 +347,140 @@ TEST_CASE("ZWO dew heater binding - a serial wins over cameraId and a bare camer
     CHECK_FALSE(automatic.camera_id.has_value());
     CHECK(automatic.camera_index == alpacacore::util::kAutoThermalCamera);
     CHECK(automatic.serial.empty());
+}
+
+// Decision 0016: UniqueID needs no device access, so a connect that holds the SDK open must not park it.
+// (GetSwitchName throws NotConnected until the connect publishes, so it is timed once connected below.)
+// Falsified by: zwo_switch_driver.cpp set_connected(true) holding mutex_ across open_camera() (get_unique_id() then
+// waits the whole 300 ms open).
+TEST_CASE("ZWO Dew Heater Switch Driver - Name and UniqueID answer while a connect holds the SDK open",
+          "[zwo][switch][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeDewSdk sdk;
+    sdk.open_delay_ms = static_cast<int>(kHoldOpen.count());
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+
+    driver->connect();
+    REQUIRE(wait_for_flag(sdk.open_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
+
+    REQUIRE(wait_until_connected(*driver));
+    CHECK(driver->get_unique_id() == "ZWO_DEW_SN_FAKE1");
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_switch_driver.cpp get_switch_name() or get_unique_id() taking io_mutex_ (the cached read then
+// waits the 300 ms status refill).
+TEST_CASE("ZWO Dew Heater Switch Driver - Identity and names answer while a status read is in flight",
+          "[zwo][switch][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+    sdk.read_delay_ms = static_cast<int>(kHoldOpen.count());
+
+    std::thread reader([&] {
+        try {
+            (void)driver->get_switch_value(0);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.read_entered));
+
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(time_call([&] { CHECK(driver->get_switch_name(0) == "DewHeater"); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_switch_description(0); }) < kGetterBudget);
+    CHECK(time_call([&] { CHECK(driver->get_max_switch_value(0) == 100.0); }) < kGetterBudget);
+    CHECK(sdk.busy.load() > 0);  // the refill is still in flight
+
+    reader.join();
+    driver->set_connected(false);
+}
+
+// A disconnect must wait for the exchange in flight, never close the camera under it (the I/O lock).
+// Falsified by: zwo_switch_driver.cpp set_connected(false) calling close_camera() without io_mutex_, or
+// set_switch_value() reading the id and then calling the SDK without it (closed_while_busy is set).
+TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect waits for the exchange in flight instead of closing under it",
+          "[zwo][switch][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+
+    std::thread worker;
+    SECTION("a status read") {
+        sdk.read_delay_ms = static_cast<int>(kHoldOpen.count());
+        worker = std::thread([&] {
+            try {
+                (void)driver->get_switch_value(0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.read_entered));
+    }
+    SECTION("a write") {
+        sdk.write_delay_ms = static_cast<int>(kHoldOpen.count());
+        worker = std::thread([&] {
+            try {
+                driver->set_switch_value(0, 20.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.write_entered));
+    }
+
+    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    worker.join();
+    CHECK_FALSE(sdk.closed_while_busy.load());
+    CHECK_FALSE(driver->get_connected());
+}
+
+// A disconnect that wins the I/O lock while status reads queue behind a write is not a link failure: every reader
+// gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
+// Falsified by: zwo_switch_driver.cpp read_status() throwing NotConnected inside the cache refill instead of returning
+// the closed frame (the third queued reader then gets DriverException "communications compromised").
+TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect during queued status reads is not a link failure",
+          "[zwo][switch][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    FakeDewSdk sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(0, 3, sdk);
+    driver->set_connected(true);
+
+    sdk.write_delay_ms = static_cast<int>(kHoldOpen.count());
+    std::thread mover([&] {
+        try {
+            driver->set_switch_value(0, 20.0);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.write_entered));
+
+    constexpr int kReaders = 8;
+    std::atomic<int> not_connected{0};
+    std::atomic<int> other{0};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaders; ++i) {
+        readers.emplace_back([&] {
+            try {
+                (void)driver->get_switch_value(0);
+                ++other;
+            } catch (const alpacacore::AlpacaException& e) {
+                (e.error_code() == alpacacore::AlpacaError::NotConnected ? not_connected : other)++;
+            } catch (const std::exception&) {
+                ++other;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // every reader is parked on the write
+    driver->set_connected(false);
+    mover.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(other.load() == 0);
+    CHECK(not_connected.load() == kReaders);
 }

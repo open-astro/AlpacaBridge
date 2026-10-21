@@ -125,7 +125,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
+        // below runs under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -142,33 +144,19 @@ public:
 
         auto& sdk = sdk_;
         if (connected) {
-            int resolved_id = resolve_focuser_id_locked();
-            sdk.open_focuser(resolved_id);
-            try {
-                refresh_focuser_info_locked(resolved_id);
-                // Static members are read once here, so the getters never go back to the device.
-                max_step_ = sdk.get_max_step(resolved_id);
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const int resolved_id = resolve_focuser_id();
+                sdk.open_focuser(resolved_id);
                 try {
-                    step_range_ = sdk.get_step_range(resolved_id);
-                } catch (const std::exception&) {
-                    step_range_ = 0;  // unavailable: MaxIncrement falls back to MaxStep
+                    publish_connect_state(resolved_id);
+                } catch (...) {
+                    sdk.close_focuser(resolved_id);
+                    throw;
                 }
-                apply_configured_max_step_locked(sdk, resolved_id);
-                if (max_step_ <= 0) {
-                    // Connects as before the Max Step setting existed: every Move fails the range check.
-                    ALPACA_LOG_WARN("ZWO", "EAF reports max step 0 and no Max Step is configured");
-                }
-                status_cache_.reset();
-                try {
-                    serial_number_ = sdk.get_serial_number(resolved_id);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "EAF serial number unavailable: " + std::string(e.what()));
-                    serial_number_.clear();
-                }
-            } catch (...) {
-                sdk.close_focuser(resolved_id);
-                throw;
             }
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
+            status_cache_.reset();
             connected_.store(true);
             return;
         }
@@ -176,18 +164,24 @@ public:
         // Clear driver state before the SDK close: if the close throws (e.g.
         // device unplugged) the error still surfaces, but the driver must not
         // stay half-connected.
-        const std::optional<int> close_id = focuser_id_;
-        max_step_ = 0;
-        step_range_ = 0;
-        status_cache_.reset();
-        if (focuser_index_.has_value()) {
-            focuser_id_.reset();
-            focuser_info_ = {};
-            focuser_info_valid_ = false;
-            serial_number_.clear();
+        std::optional<int> close_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = focuser_id_;
+            max_step_.store(0);
+            step_range_.store(0);
+            if (focuser_index_.has_value()) {
+                focuser_id_.reset();
+                focuser_info_ = {};
+                focuser_info_valid_ = false;
+                serial_number_.clear();
+            }
+            connected_.store(false);
         }
-        connected_.store(false);
+        status_cache_.reset();
         if (close_id.has_value()) {
+            // Waits for an exchange in flight: the handle is never closed under one.
+            std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_focuser(close_id.value());
         }
     }
@@ -225,17 +219,17 @@ public:
 
     int get_max_step() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        return max_step_;
+        return max_step_.load();
     }
 
     int get_max_increment() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (step_range_ > 0) {
-            return step_range_ > max_step_ ? max_step_ : step_range_;
+        const int max_step = max_step_.load();
+        const int step_range = step_range_.load();
+        if (step_range > 0) {
+            return step_range > max_step ? max_step : step_range;
         }
-        return max_step_;
+        return max_step;
     }
 
     int get_position() const override { return read_status().position; }
@@ -279,7 +273,12 @@ public:
 
     void halt() override {
         ensure_connected();
-        sdk_.stop(focuser_id_value());
+        {
+            // Waits for a status refill in flight (the I/O lock is not preemptible); the stop follows at once.
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
+            sdk_.stop(focuser_id_value());
+        }
         status_cache_.invalidate();
     }
 
@@ -289,34 +288,77 @@ public:
         if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range", AlpacaError::InvalidValue);
         }
-        sdk_.move(focuser_id_value(), position);
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
+            sdk_.move(focuser_id_value(), position);
+        }
         status_cache_.invalidate();
     }
 
 private:
-    // Writes the configured max step to the unit when it differs from the stored one, and
-    // adopts it. Caller holds mutex_ and has read max_step_ and step_range_. A value above
-    // the unit's step range is clamped to it; an unavailable range (0) is no bound.
-    void apply_configured_max_step_locked(ZWOEAFSDK& sdk, int focuser_id) {
+    // Reads the unit's static members once, writes the configured max step when it differs from the
+    // stored one, and publishes the connect-time state: info, serial, then the atomics. Caller holds
+    // io_mutex_ and not mutex_ (the state lock is taken for the short publish only).
+    void publish_connect_state(int focuser_id) {
+        ZWOEAFFocuserInfo info;
+        if (!sdk_.get_focuser_info_by_id(focuser_id, info)) {
+            throw AlpacaException("Failed to read focuser info", AlpacaError::DriverException);
+        }
+        // Static members are read once here, so the getters never go back to the device.
+        int max_step = sdk_.get_max_step(focuser_id);
+        int step_range = 0;  // unavailable: MaxIncrement falls back to MaxStep
+        try {
+            step_range = sdk_.get_step_range(focuser_id);
+        } catch (const std::exception& e) {
+            // Optional: MaxIncrement falls back to MaxStep when the unit does not report a range.
+            ALPACA_LOG_DEBUG("ZWO", "EAF step range unavailable: " + std::string(e.what()));
+        }
+        max_step = apply_configured_max_step(focuser_id, max_step, step_range);
+        if (max_step <= 0) {
+            // Connects as before the Max Step setting existed: every Move fails the range check.
+            ALPACA_LOG_WARN("ZWO", "EAF reports max step 0 and no Max Step is configured");
+        }
+        std::string serial;
+        try {
+            serial = sdk_.get_serial_number(focuser_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "EAF serial number unavailable: " + std::string(e.what()));
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            focuser_info_ = info;
+            focuser_info_valid_ = true;
+            serial_number_ = serial;
+        }
+        max_step_.store(max_step);
+        step_range_.store(step_range);
+    }
+
+    // Writes the configured max step to the unit when it differs from the stored one and returns the
+    // value to adopt. A value above the unit's step range is clamped to it; an unavailable range (0) is
+    // no bound. Caller holds io_mutex_.
+    int apply_configured_max_step(int focuser_id, int stored_max_step, int step_range) {
         if (!configured_max_step_.has_value()) {
-            return;
+            return stored_max_step;
         }
         int wanted = *configured_max_step_;
-        if (step_range_ > 0 && wanted > step_range_) {
+        if (step_range > 0 && wanted > step_range) {
             ALPACA_LOG_WARN("ZWO", "EAF configured Max Step " + std::to_string(wanted) + " is above the step range " +
-                                       std::to_string(step_range_) + "; using " + std::to_string(step_range_));
-            wanted = step_range_;
+                                       std::to_string(step_range) + "; using " + std::to_string(step_range));
+            wanted = step_range;
         }
-        if (wanted == max_step_) {
-            return;
+        if (wanted == stored_max_step) {
+            return stored_max_step;
         }
-        sdk.set_max_step(focuser_id, wanted);
-        max_step_ = wanted;
+        sdk_.set_max_step(focuser_id, wanted);
         ALPACA_LOG_INFO("ZWO", "EAF max step set to " + std::to_string(wanted));
+        return wanted;
     }
 
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
+        bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
         bool moving{};
         int position{};
         std::optional<double> temperature;                         // absent when the SDK would not report it
@@ -329,10 +371,17 @@ private:
     Status read_status() const {
         ensure_connected();
         const int id = focuser_id_value();
-        // The refill runs under the cache's own mutex and must not take mutex_
-        // (lock order: driver mutex_ before the cache mutex).
-        return status_cache_.get([this, id] {
+        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
+        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
+        Status status = status_cache_.get([this, id] {
+            std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
             fresh.moving = sdk_.is_moving(id);
             fresh.position = sdk_.get_position(id);
             try {
@@ -347,6 +396,10 @@ private:
             }
             return fresh;
         });
+        if (status.closed) {
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        return status;
     }
 
     void ensure_connected() const {
@@ -355,7 +408,8 @@ private:
         }
     }
 
-    int resolve_focuser_id_locked() {
+    // Caller holds io_mutex_ (the enumeration is a device call); the id and info publish under mutex_.
+    int resolve_focuser_id() {
         if (focuser_index_.has_value()) {
             auto focusers = sdk_.enumerate_focusers();
             if (focusers.empty()) {
@@ -369,27 +423,19 @@ private:
                 throw AlpacaException("Focuser index not found", AlpacaError::InvalidValue);
             }
             const auto& info = focusers[static_cast<std::size_t>(index)];
+            std::lock_guard<std::mutex> lock(mutex_);
             focuser_id_ = info.focuser_id;
             focuser_info_ = info;
             focuser_info_valid_ = true;
-            return focuser_id_.value();
+            return info.focuser_id;
         }
 
+        std::lock_guard<std::mutex> lock(mutex_);
         if (focuser_id_.has_value()) {
             return focuser_id_.value();
         }
 
         throw AlpacaException("Focuser ID not specified", AlpacaError::InvalidValue);
-    }
-
-    void refresh_focuser_info_locked(int focuser_id) {
-        ZWOEAFFocuserInfo info;
-        if (sdk_.get_focuser_info_by_id(focuser_id, info)) {
-            focuser_info_ = info;
-            focuser_info_valid_ = true;
-            return;
-        }
-        throw AlpacaException("Failed to read focuser info", AlpacaError::DriverException);
     }
 
     int focuser_id_value() const {
@@ -408,9 +454,17 @@ private:
     ZWOEAFFocuserInfo focuser_info_;
     bool focuser_info_valid_;
     const std::optional<int> configured_max_step_;  // config "maxStep"; unset = leave the stored value
-    int max_step_{0};
-    int step_range_{0};
+    // Published at the end of connect and read lock-free by MaxStep/MaxIncrement (decision 0016).
+    std::atomic<int> max_step_{0};
+    std::atomic<int> step_range_{0};
     std::atomic<bool> connected_;
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
+    // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
+    // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
+    // device transactions (connect, close, move, halt, the status refill). Never take the cache mutex
+    // (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     mutable util::TtlStatusCache<Status> status_cache_;
 };
