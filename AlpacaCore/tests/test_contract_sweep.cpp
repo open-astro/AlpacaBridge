@@ -513,7 +513,9 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 
 // Filter wheels while disconnected (AGENTS.md "FilterWheel semantics"): every name is non-empty, and a names
 // write and an offsets write are accepted and read back. One case over all filter wheel entries; it is
-// registered once, not per entry, because the registry macro carries no device-type kind.
+// registered once, not per entry, because the registry macro carries no device-type kind. Most drivers size
+// their name and offset vectors only at connect, so a fresh disconnected read is empty: the non-empty-name loop
+// then checks nothing, and the write legs use a fixed five-slot list so the read-back is not `{} == {}`.
 [[maybe_unused]] void case_filterwheel_names_offsets_disconnected(const ContractEntry& e) {
     INFO(e.id);
     auto d = e.make(0);
@@ -527,12 +529,14 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
         CHECK_FALSE(n.empty());
     }
     std::vector<std::string> written = names;
+    written.resize(names.empty() ? 5 : names.size());
     for (std::size_t i = 0; i < written.size(); ++i) written[i] = "Sweep " + std::to_string(i + 1);
     CHECK(thrown_code([&] { f.set_names(written); }) == -1);
     CHECK(f.get_names() == written);
     std::vector<int> offsets;
     CHECK(thrown_code([&] { offsets = f.get_focus_offsets(); }) == -1);
     std::vector<int> written_offsets = offsets;
+    written_offsets.resize(offsets.empty() ? 5 : offsets.size());
     for (std::size_t i = 0; i < written_offsets.size(); ++i) written_offsets[i] = static_cast<int>(10 * (i + 1));
     CHECK(thrown_code([&] { f.set_focus_offsets(written_offsets); }) == -1);
     CHECK(f.get_focus_offsets() == written_offsets);
