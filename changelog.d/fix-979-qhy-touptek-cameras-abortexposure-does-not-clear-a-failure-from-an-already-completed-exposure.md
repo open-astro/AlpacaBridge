@@ -1,2 +1,0 @@
-### Fixed
-- **QHY and ToupTek cameras: AbortExposure (and ToupTek StopExposure, which shares its code) now clears a failure from an exposure that already completed** (issue #979): before, `ImageReady` and `ImageArray` kept raising the old failure until the next `StartExposure`; after an abort the camera is back to no-image and idle. Covered by `AbortExposure clears a failure from a completed exposure` in `test_qhy_camera.cpp` and `test_touptek_camera.cpp`.

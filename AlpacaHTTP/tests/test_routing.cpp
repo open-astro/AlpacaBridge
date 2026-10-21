@@ -9431,6 +9431,112 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Switch, kSchemaDevice);
     }
 
+    {
+        // case: a JSON integer parameter that is not a whole int is InvalidValue in every dispatcher (#1476)
+        // The query and form paths already refuse "0.5" and values outside int
+        // (parse_int_value); the JSON-body path truncated 0.5 to 0 and wrapped
+        // 2^32 to 0, so a stub that accepts 0 answered success.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        constexpr int kNum = 9476;
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::SwitchStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FocuserStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CoverCalibratorStub>(kNum)));
+        alpacahttp::Router router;
+        struct Probe {
+            const char* path;
+            const char* param;
+        };
+        const Probe probes[] = {
+            {"/api/v1/telescope/9476/slewsettletime", "SlewSettleTime"},
+            {"/api/v1/camera/9476/gain", "Gain"},
+            {"/api/v1/switch/9476/setswitchvalue", "Id"},
+            {"/api/v1/filterwheel/9476/position", "Position"},
+            {"/api/v1/focuser/9476/move", "Position"},
+            {"/api/v1/covercalibrator/9476/calibratoron", "Brightness"},
+        };
+        std::vector<std::string> wrong;  // every probe that did not answer as expected, printed before the EXPECT
+        for (const auto& probe : probes) {
+            for (const char* bad : {"0.5", "4294967296", "-2147483649"}) {
+                const std::string body = std::string("{\"") + probe.param + "\":" + bad + ",\"Value\":0}";
+                const auto response = route_request(router, "PUT", probe.path, body);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                const int error = json.is_discarded() ? -2 : json.value("ErrorNumber", -1);
+                if (response.status_code() != 200 || error != 0x401) {
+                    wrong.push_back(std::string(probe.path) + " " + probe.param + "=" + bad + " -> HTTP " +
+                                    std::to_string(response.status_code()) + " ErrorNumber " + std::to_string(error));
+                }
+            }
+            // A whole number written as 0.0 stays accepted, as the query path accepts "0".
+            const std::string whole = std::string("{\"") + probe.param + "\":0.0,\"Value\":0}";
+            const auto ok =
+                nlohmann::json::parse(route_request(router, "PUT", probe.path, whole).body(), nullptr, false);
+            if (ok.is_discarded() || ok.value("ErrorNumber", -1) == 0x401) {
+                wrong.push_back(std::string(probe.path) + " " + probe.param + "=0.0 refused as InvalidValue");
+            }
+        }
+        for (const auto& line : wrong) std::cerr << "  " << line << "\n";
+        EXPECT(wrong.empty());
+        // A known method with its parameter missing is the same answer: 200 + InvalidValue (#1476).
+        const auto missing = route_request(router, "PUT", "/api/v1/focuser/9476/move", "{\"ClientID\":1}");
+        EXPECT(missing.status_code() == 200);
+        const auto missing_json = nlohmann::json::parse(missing.body(), nullptr, false);
+        EXPECT(!missing_json.is_discarded() && missing_json.value("ErrorNumber", -1) == 0x401);
+        EXPECT(missing_json.value("ErrorMessage", "").find("Missing parameter: Position") != std::string::npos);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Switch, kNum);
+        registry.unregister_device(alpacacore::DeviceType::FilterWheel, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Focuser, kNum);
+        registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, kNum);
+    }
+    {
+        // case: apiversions and configureddevices refuse a verb other than GET with 405 (#1486)
+        alpacahttp::Router router;
+        for (const std::string path :
+             {"/management/apiversions", "/management/v1/configureddevices", "/management/configureddevices"}) {
+            EXPECT(route_request(router, "GET", path).status_code() == 200);
+            for (const char* verb : {"PUT", "POST", "DELETE"}) {
+                const auto response = route_request(router, verb, path, "{}");
+                EXPECT(response.status_code() == 405);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+            }
+        }
+    }
+    {
+        // case: a description write the server cannot interpret is refused with 400 (#1476)
+        // Missing body, bad JSON, no known property and an invalid field value
+        // join the AllowedHosts and self-lockout refusals at 400 (ADR 0007).
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const std::string path = "/management/v1/description";
+        struct Bad {
+            const char* body;
+            int error;
+        };
+        const Bad cases[] = {
+            {"", 0x402},
+            {"not json", 0x401},
+            {"{}", 0x402},
+            {"{\"HostCheckEnabled\":\"maybe\"}", 0x401},
+            {"{\"Location\":42}", 0x401},
+            {"{\"ProfileName\":null}", 0x401},
+            {"{\"profile_name\":[]}", 0x401},
+        };
+        for (const char* verb : {"PUT", "POST"}) {
+            for (const auto& bad : cases) {
+                const auto response = route_request(router, verb, path, bad.body);
+                EXPECT(response.status_code() == 400);
+                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+                EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == bad.error);
+            }
+        }
+        EXPECT(route_request(router, "GET", path).status_code() == 200);
+    }
+
     std::cout << "All routing tests passed!\n";
     return 0;
 }

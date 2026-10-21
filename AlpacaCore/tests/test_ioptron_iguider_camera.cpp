@@ -420,6 +420,7 @@ TEST_CASE("iOptron iGuider Camera Driver - A stalled stream latches a link fault
 
 TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera is a lost link", "[ioptron][iguider][camera][unit]") {
     Rig rig;
+    rig.fake.close_delay = std::chrono::milliseconds(200);  // hold the publish-then-close window open (#1487)
     auto& c = *rig.camera;
     c.set_connected(true);
 
@@ -427,7 +428,8 @@ TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera is a lost link", 
     // ENODEV on the fd is a loss at once, not a fault (decision 0009, point 2a).
     REQUIRE(wait_until([&] { return !c.get_connected(); }));
     CHECK(c.get_link_fault().find("No such device") != std::string::npos);  // kept until Connect or Disconnect
-    CHECK(rig.fake.open_handles() == 0);                                    // the transport is closed
+    // The loss is published before the worker closes the fd (state before close), so wait for it (#1487).
+    CHECK(wait_until([&] { return rig.fake.open_handles() == 0; }));  // the transport is closed
     CHECK(c.get_device_state().empty());
     require_alpaca_error([&] { (void)c.get_camera_state(); }, AlpacaError::NotConnected);
     require_alpaca_error([&] { (void)c.get_camera_x_size(); }, AlpacaError::NotConnected);
@@ -457,6 +459,7 @@ TEST_CASE("iOptron iGuider Camera Driver - A fault standing past the staleness b
           "[ioptron][iguider][camera][unit]") {
     alpacacore::test::FakeTaskClock clock;
     Rig rig("", clock);
+    rig.fake.close_delay = std::chrono::milliseconds(200);  // hold the publish-then-close window open (#1487)
     auto& c = *rig.camera;
     c.set_connected(true);
     REQUIRE(rig.fake.wait_for_frames(3, std::chrono::seconds(2)));
@@ -469,7 +472,7 @@ TEST_CASE("iOptron iGuider Camera Driver - A fault standing past the staleness b
     clock.advance(alpacacore::util::kLinkStalenessBound);
     REQUIRE(wait_until([&] { return !c.get_connected(); }));
     CHECK(c.get_link_fault().find("no frame") != std::string::npos);
-    CHECK(rig.fake.open_handles() == 0);
+    CHECK(wait_until([&] { return rig.fake.open_handles() == 0; }));  // closed after the loss is published (#1487)
     CHECK(c.get_device_state().empty());
 }
 

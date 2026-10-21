@@ -98,6 +98,16 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### Action names are case-insensitive (all drivers with actions)
+
+ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: the
+`ActionName` parameter of `Action()` is case-insensitive, and the names in
+`SupportedActions` may use any casing. Match the requested name against the supported
+list without regard to case, in `action()` and in `can_action()` alike, and throw
+`ActionNotImplemented` only when no supported name matches. The two drivers with
+actions already do this: the Player One camera (`to_lower_copy`) and the Celestron
+focuser (`same_action`). A new driver with actions does the same.
+
 ### Camera ROI alignment (all camera vendors)
 
 Every camera SDK constrains ROI geometry, and the pattern is the same everywhere:

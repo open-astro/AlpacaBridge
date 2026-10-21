@@ -1,0 +1,3 @@
+### Changed (docs)
+
+- **Agent instructions and the ASCOM Alpaca skill record ASCOM rules they left out** (docs, issue #1479): the shared ASCOM contract instructions add that `Action` names are case-insensitive; the driver lifecycle instructions credit the ~5 s `Disconnect()` budget to ConformU rather than to every ASCOM client; the skill's device API catalog adds the `DeviceState` empty-list and `TimeStamp` rules, the rotator sync-offset persistence rule, `SiderealTime` being derived from the mount's `UTCDate` source, and `AbortSlew` being non-blocking in ITelescopeV4 with `ParkedException` while parked. Docs only, no behaviour change.
