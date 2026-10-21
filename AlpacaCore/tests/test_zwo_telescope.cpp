@@ -568,8 +568,10 @@ namespace {
 struct SlowMount {
     std::atomic<bool> hold_info{false};
     std::atomic<bool> hold_site{false};
+    std::atomic<bool> hold_site_read{false};
     std::atomic<bool> info_entered{false};
     std::atomic<bool> site_entered{false};
+    std::atomic<bool> site_read_entered{false};
 
     alpacacore::test::FakeMountServer::Responder responder() {
         return [this](const std::string& chunk) -> std::string {
@@ -579,6 +581,15 @@ struct SlowMount {
                     std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
                 }
                 return "AM5#";
+            }
+            if (chunk.find(":GMGE") != std::string::npos) {
+                if (hold_site_read.load()) {
+                    site_read_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                // Unreadable until armed, so the connect leaves the site unset and the refresh must read it back.
+                // Armed: -33.856784 / 151.215297 as the mount's degrees*minutes:seconds pair.
+                return hold_site_read.load() ? "-33*51:24&+151*12:55#" : "0#";
             }
             if (chunk.find(":SMGE") != std::string::npos) {
                 if (hold_site.load()) {
@@ -682,6 +693,42 @@ TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in fl
     CHECK(time_call([&] { (void)driver->get_aperture_diameter(); }) < kGetterBudget);
 
     writer.join();
+    driver->set_connected(false);
+}
+
+// A site write that lands while the connect refresh is reading the site back must survive that read-back.
+// Falsified by: zwo_telescope_driver.cpp apply_or_load_site_info() running without site_write_mutex_ (the
+// :GMGE reply then overwrites the latitude the setter just published, and SiteLatitude reads -33.9).
+TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site read-back is kept",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+    driver->set_site_longitude(151.215297);
+
+    mount.hold_site_read = true;
+    std::thread refresh([&] {
+        try {
+            driver->set_connected(true);  // already connected: the refresh path reads the site back
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.site_read_entered));
+    std::thread writer([&] {
+        try {
+            driver->set_site_latitude(51.477833);
+        } catch (const std::exception&) {
+        }
+    });
+    refresh.join();
+    writer.join();
+    mount.hold_site_read = false;
+
+    CHECK(driver->get_site_latitude() == 51.477833);
     driver->set_connected(false);
 }
 

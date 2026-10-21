@@ -536,6 +536,9 @@ public:
             pulse_generation_.store(0);
         };
         auto apply_or_load_site_info = [&]() {
+            // Held across the whole send and read-back, so a setter's write lands before or after this
+            // exchange and the read-back never overwrites it.
+            std::lock_guard<std::mutex> site_write(site_write_mutex_);
             std::optional<double> pending_latitude;
             std::optional<double> pending_longitude;
             bool coords_valid = false;
@@ -609,17 +612,21 @@ public:
             }
 
             const auto now = std::chrono::system_clock::now();
-            std::optional<SiteInfo> site;
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (site_coords_valid_) {
-                    site = SiteInfo{};
-                    site->latitude_degrees = site_latitude_deg_;
-                    site->longitude_degrees = site_longitude_deg_;
+                // Snapshot and send under the site write lock, so a concurrent setter's value is not re-sent stale.
+                std::lock_guard<std::mutex> site_write(site_write_mutex_);
+                std::optional<SiteInfo> site;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (site_coords_valid_) {
+                        site = SiteInfo{};
+                        site->latitude_degrees = site_latitude_deg_;
+                        site->longitude_degrees = site_longitude_deg_;
+                    }
                 }
-            }
-            if (site.has_value()) {
-                protocol.set_site_info(site.value());
+                if (site.has_value()) {
+                    protocol.set_site_info(site.value());
+                }
             }
 
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
@@ -2659,7 +2666,7 @@ private:
 
     void reset_position_offsets() {
         // Signal cancellation first so the pulse thread's reconciliation read
-        // (which holds mutex_) can exit early, avoiding lock contention.
+        // (which runs outside mutex_) can exit early, avoiding lock contention.
         pulse_cancel_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -3129,8 +3136,9 @@ private:
     std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
-    // Serialises the site latitude/longitude setters across their serial write; no getter takes it. Taken
-    // before mutex_ and the protocol wrapper's mutex.
+    // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
+    // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
+    // wrapper's mutex, then mutex_.
     std::mutex site_write_mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
