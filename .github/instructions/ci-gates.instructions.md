@@ -95,7 +95,8 @@ author must do. Read the docstring before changing a gate.
   up to 45 waiting for CI, then up to 45 for the review) is outlasted by the 95-minute verdict poll in
   `/pr-checker` and `/submit-pr`; a poll timeout is a re-poll.
 - **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) runs every gate that
-  needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2.
+  needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2
+  (`ci_preflight.sh --self-test`, a step in the ShellCheck job, guards that: issue #1453).
   The build and test gates (both `run_all_tests.sh` passes, clang-tidy, ASan+UBSan) run
   only with `PREFLIGHT_FULL=1` and are reported `[SKIP]` otherwise: CI runs them on every PR, and
   the review waits for them. In a full run the ASan+UBSan pass is on by default (issue #588;

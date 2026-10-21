@@ -23,7 +23,7 @@
 #   package-deb    build the .deb in debian:trixie, install it, run
 #                  scripts/check_bundled_gphoto.sh (bundled libgphoto2 loader path)
 #   unicode        scan sources for Trojan-Source / invisible Unicode
-#   shellcheck     lint the project's shell scripts
+#   shellcheck     lint the project's shell scripts; run ci_preflight.sh --self-test
 #   javascript     node --check AND node --test the hand-written web UI JavaScript
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
@@ -1106,6 +1106,9 @@ jobs:
           done
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
+
+      - name: ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
+        run: ./scripts/ci_preflight.sh --self-test
 
   javascript:
     name: JavaScript syntax + unit tests
