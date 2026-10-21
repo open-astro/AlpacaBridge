@@ -84,7 +84,7 @@ public:
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override { return "QHY CFW3"; }
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
-    std::string get_unique_id() const override { return "QHY_CFW3_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "QHY_CFW3_" + std::to_string(device_number_); }
     std::string get_description() const override { return "QHY CFW3 filter wheel driver (USB)"; }
     std::string get_driver_info() const override { return "AlpacaCore QHY CFW3 Filter Wheel Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }

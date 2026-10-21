@@ -68,7 +68,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (wheel_info_valid_ && !wheel_info_.serial_number.empty()) {
             return "PlayerOne_PW_SN_" + wheel_info_.serial_number;

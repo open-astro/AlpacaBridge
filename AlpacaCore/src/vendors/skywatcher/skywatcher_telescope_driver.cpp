@@ -404,7 +404,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
-    std::string get_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "Sky-Watcher Motor Controller Mount Driver"; }
 

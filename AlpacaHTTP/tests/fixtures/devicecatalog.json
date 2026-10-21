@@ -492,8 +492,7 @@
       {"key": "cameraIndex", "type": "int", "default": -1, "required": false, "secret": false, "role": "EnumerationIndex"},
       {"key": "cameraId", "type": "int", "default": -1, "required": false, "secret": false, "role": "DeviceId"},
       {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
-      {"key": "cameraName", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
-      {"key": "uniqueId", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
+      {"key": "cameraName", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
     ]
   },
   {

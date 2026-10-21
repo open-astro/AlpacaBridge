@@ -252,7 +252,7 @@ function resetDeviceForm() {
     // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
     // Hidden inputs keep script-set values through form.reset().
-    for (const id of ['zwo-camera-serial', 'zwo-camera-name', 'zwo-camera-unique-id',
+    for (const id of ['zwo-camera-serial', 'zwo-camera-name',
         'zwo-camera-loaded-index', 'zwo-camera-loaded-id']) {
         setFormValue(id, '');
     }
@@ -845,6 +845,7 @@ function setEditMode(isEditing) {
             delete form.dataset.originalDeviceType;
             delete form.dataset.originalDeviceNumber;
             delete form.dataset.originalVendor;
+            delete form.dataset.originalUniqueId;
             const deviceNumberInput = document.getElementById('device-number');
             if (deviceNumberInput) {
                 delete deviceNumberInput.dataset.userModified;
@@ -863,7 +864,7 @@ function setEditMode(isEditing) {
     }
 }
 
-// The serial, model name and UniqueID the server learned for a ZWO camera
+// The serial and model name the server learned for a ZWO camera
 // (#914). An edit removes the entry and adds it again, so the form resends
 // them; only while the index and id are the ones the form loaded. A changed
 // index or id points the entry at another body, which then learns its own.
@@ -888,7 +889,6 @@ function zwoCameraIdentityFields(formData) {
     const pairs = [
         ['serialNumber', 'zwoCameraSerial'],
         ['cameraName', 'zwoCameraName'],
-        ['uniqueId', 'zwoCameraUniqueId'],
     ];
     for (const [key, name] of pairs) {
         const value = formData.get(name);
@@ -1420,7 +1420,6 @@ function startEditDevice(device) {
     const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
     setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
     setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
-    setFormValue('zwo-camera-unique-id', keepZwoIdentity ? config.uniqueId : '');
     setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
     setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
     setFormValue('filterwheel-index', config.filterwheelIndex);
@@ -1523,6 +1522,9 @@ function startEditDevice(device) {
         form.dataset.originalDeviceType = deviceType;
         form.dataset.originalDeviceNumber = String(device.DeviceNumber);
         form.dataset.originalVendor = vendor;
+        // Decision 0018: an edit removes the entry and adds it again, so it sends
+        // the device's GUID back to keep its UniqueID (and a rotator's offset).
+        form.dataset.originalUniqueId = typeof config.uniqueId === 'string' ? config.uniqueId : '';
     }
 
     // Switch to the Configure tab without resetting the form we just populated.
@@ -4880,6 +4882,9 @@ document.getElementById('device-form').addEventListener('submit', async function
 
     try {
         const isEditing = this.dataset.editing === 'true';
+        if (isEditing && this.dataset.originalUniqueId) {
+            deviceData.uniqueId = this.dataset.originalUniqueId;
+        }
         if (isEditing) {
             const originalDeviceType = this.dataset.originalDeviceType || deviceData.deviceType;
             const originalDeviceNumber = Number.parseInt(this.dataset.originalDeviceNumber, 10);

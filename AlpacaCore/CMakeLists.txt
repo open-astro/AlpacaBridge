@@ -90,6 +90,7 @@ set(ALPACACORE_CORE_SOURCES
     src/core/util/host_clock.cpp
     src/core/util/units.cpp
     src/core/util/rotator_sync_offset_store.cpp
+    src/core/util/unique_id.cpp
     src/core/util/thermal_camera_choice.cpp
     src/catalog/device_config.cpp
     src/catalog/device_catalog.cpp

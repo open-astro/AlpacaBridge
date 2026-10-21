@@ -1,0 +1,14 @@
+### Breaking changes
+
+- **Every configured device reports a new UniqueID once, after the upgrade** (AlpacaHTTP router, AlpacaCore drivers, issue #1471). The `UniqueID` in `/management/v1/configureddevices` is now a GUID stored with each device, so it no longer collides between two AlpacaBridge hosts or changes when a device is renumbered. The first start assigns one to every saved device and writes the device file once; ZWO cameras' `ZWO_UID_` values are replaced too. A rotator's Sync offset moves to the new ID during that first start (a ZWO CAA's serial-keyed one at its first connect). **After upgrading:** a client that remembers devices by UniqueID (an imaging program's equipment profile) sees each device as new once and must be pointed at it again. A script that edits a device by removing and re-adding it should send the stored `uniqueId` back to keep it, as the web UI does.
+- **A rotator Sync that cannot save its offset now fails** (WandererAstro and ZWO CAA rotators, issue #1473): it throws `DriverException` and keeps the previous offset, where it used to log a warning and lose the offset on the next restart. **After upgrading:** make sure the service can write `config/rotator_sync_offsets.json`.
+
+### Fixed
+
+- **UniqueID is a persisted GUID per configured device** (AlpacaHTTP router, AlpacaCore, issue #1471, decision 0018): the router keeps the GUID across edits and renumbering, assigns it to the driver, and lists a device that failed to load with it. The 43 drivers no longer build the ID from a device number, index or serial; `get_unique_id()` returns the assigned GUID and each driver keeps only a `fallback_unique_id()` for unit tests. For the upgrade, see Breaking changes.
+- **A removed rotator's Sync offset is cleared** (AlpacaHTTP router, issue #1473, decision 0008): the next start drops the offset of every rotator no longer configured, so a new rotator at the same number starts at its mechanical position. An offset saved under a device-number ID before the upgrade moves only to the rotator configured on that number at the upgrade, never to one added later. For the Sync failure, see Breaking changes.
+- **Two `configuredevice` calls sending the same GUID no longer both keep it** (AlpacaHTTP router, issue #1471): a GUID one call has chosen is reserved until that call stores its entry, so a concurrent call mints a new one. Configuring a stored entry's own number again keeps the GUID it sends back.
+
+### Changed (docs)
+
+- **Decisions 0008 and 0018 and the instructions describe the GUID as built** (docs, issues #1471, #1473): decision 0018 is accepted; decision 0008 records the GUID key, when an old offset moves and the prune at start; the ASCOM contract instructions add the UniqueID rule; the ZWO instructions drop the camera's own `uniqueId`; the GPhoto instructions name the device-number ID as the fallback.

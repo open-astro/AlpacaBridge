@@ -413,7 +413,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         // Review PR #485 round 4: camera_info_.port (the libgphoto2 USB bus
         // path, e.g. "usb:001,005") is not a stable identity -- it changes
         // across an unplug/replug (the bus device number increments) and

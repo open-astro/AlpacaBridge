@@ -239,9 +239,7 @@ public:
         return DeviceType::Telescope;
     }
 
-    std::string get_unique_id() const override {
-        return "Celestron_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "Celestron_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Celestron NexStar Mount Driver";

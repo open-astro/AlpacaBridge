@@ -98,6 +98,20 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### UniqueID is the router's persisted GUID (all drivers)
+
+A driver does not build its `UniqueID`. The router assigns each configured device the version 4
+UUID stored in its config entry (`uniqueId`) through `AlpacaDriver::assign_unique_id()` before it
+registers the driver, and the base class's non-virtual `get_unique_id()` returns it. A new driver
+implements only `fallback_unique_id()`, which answers for a driver a unit test builds directly; never
+key persistent state on the fallback. A driver that keys state on its ID (the rotator Sync offset)
+reads `get_unique_id()`, or `assigned_unique_id()` while holding its own mutex. State saved under an
+older ID built from a device number or SDK index moves in an `adopt_legacy_state()` override, which
+the router calls only at the start that gives the entry its first GUID, never at connect: a device
+configured later on the same number must not inherit it. State under an older ID that names the
+hardware (a serial) may move at connect. Both use `RotatorSyncOffsetStore::load_or_adopt()` or its
+equivalent. The reasons are in [decision 0018](../../docs/decisions/0018-persisted-unique-id.md).
+
 ### Action names are case-insensitive (all drivers with actions)
 
 ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: the

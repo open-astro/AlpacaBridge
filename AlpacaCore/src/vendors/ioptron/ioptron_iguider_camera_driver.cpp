@@ -184,7 +184,7 @@ public:
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override { return "iOptron iGuider"; }
     DeviceType get_device_type() const override { return DeviceType::Camera; }
-    std::string get_unique_id() const override { return "IOPTRON_IGUIDER_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "IOPTRON_IGUIDER_" + std::to_string(device_number_); }
     std::string get_description() const override { return "iOptron iGuider guide camera"; }
     std::string get_driver_info() const override { return "AlpacaCore iOptron iGuider Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
