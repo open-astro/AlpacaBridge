@@ -32,6 +32,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -39,11 +40,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
@@ -116,6 +119,17 @@ struct LandingOffsetHandset {
         ra_motor_since = task_clock.now();
     }
     std::atomic<Clock::rep> last_nudge_stop_at{0};
+    // The motion commands (P, M, T, r) in the order they reached the handset.
+    std::mutex wire_mutex;
+    std::vector<std::string> wire;
+    void record_wire(const std::string& chunk) {
+        std::lock_guard<std::mutex> lock(wire_mutex);
+        wire.push_back(chunk);
+    }
+    std::vector<std::string> wire_log() {
+        std::lock_guard<std::mutex> lock(wire_mutex);
+        return wire;
+    }
     std::array<std::atomic<double>, 2> axis_counts_per_s{};
     std::array<std::atomic<Clock::rep>, 2> axis_move_started{};
 
@@ -181,6 +195,9 @@ std::string hex24(uint32_t raw) {
 alpacacore::test::FakeMountServer::Responder responder(const std::shared_ptr<LandingOffsetHandset>& st) {
     return [st](const std::string& chunk) -> std::string {
         if (chunk.empty()) return "0#";
+        if (chunk[0] == 'P' || chunk[0] == 'M' || chunk[0] == 'T' || chunk[0] == 'r') {
+            st->record_wire(chunk);
+        }
         switch (chunk[0]) {
             case 'K':
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
@@ -870,6 +887,138 @@ TEST_CASE(
     caller.join();
     CHECK(st->nudge_count.load() == 1);  // AbortSlew stopped the move; the woken nudge did not stop it again
     driver->set_connected(false);
+}
+
+namespace {
+
+// A Dec landing move's commands: `P` variable rate (3) on the Dec motor (17); a zero rate is a stop.
+bool is_dec_rate(const std::string& command) {
+    return command.size() >= 8 && command[0] == 'P' && command[1] == 3 && command[2] == 17;
+}
+bool is_dec_rate_stop(const std::string& command) { return is_dec_rate(command) && command[4] == 0 && command[5] == 0; }
+
+// An async slew whose landing ends with one long Dec move (11.6" at 2"/s, about 6 s), started and not yet stopped.
+// The landing move keeps the wire turn from its start to its stop (decision 0006, "Claim"); a newer initiator that
+// claims wakes the move wait at once, so it waits for the move's stop exchange, not for the move.
+struct LongDecNudge {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<LandingOffsetHandset> st = std::make_shared<LandingOffsetHandset>();
+    std::unique_ptr<alpacacore::test::FakeMountServer> server;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    std::size_t nudge_start = 0;  // the move's start in the wire log
+    LongDecNudge() {
+        st->attach(clock);
+        st->ra_offset_counts.store(0);        // RA lands on target
+        st->dec_offset_script[0].store(150);  // Dec lands 11.6" off: inside a timed move's reach
+        st->dec_scripted.store(true);
+        server = std::make_unique<alpacacore::test::FakeMountServer>(responder(st));
+        REQUIRE(server->ok());
+        driver = make_driver(server->port(), clock);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+        const auto deadline = clock.now() + std::chrono::seconds(40);
+        while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+            step_virtual(clock);
+        }
+        REQUIRE(st->nudge_starts.load() == 1);
+        const auto wire = st->wire_log();
+        const auto start = std::find_if(wire.begin(), wire.end(), [](const auto& command) {
+            return is_dec_rate(command) && !is_dec_rate_stop(command);
+        });
+        REQUIRE(start != wire.end());
+        nudge_start = static_cast<std::size_t>(start - wire.begin());
+    }
+
+    // Runs `initiator` on its own thread with virtual time standing still, so the move's remaining seconds never
+    // come: an initiator that waited for them would not return. Returns its real-time latency in ms (-1: it did not
+    // return within 3 s), then releases it so the thread can join.
+    long time_initiator(const std::function<void()>& initiator) {
+        std::promise<void> done;
+        auto returned = done.get_future();
+        std::atomic<long> took_ms{-1};
+        std::thread caller([&] {
+            const auto t0 = Clock::now();
+            try {
+                initiator();
+                took_ms.store(static_cast<long>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count()));
+                done.set_value();
+            } catch (...) {
+                done.set_exception(std::current_exception());
+            }
+        });
+        const bool in_time = returned.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+        while (returned.wait_for(std::chrono::milliseconds(5)) != std::future_status::ready) {
+            clock.advance(std::chrono::seconds(10));  // release the initiator so the thread can join
+        }
+        caller.join();
+        CHECK_NOTHROW(returned.get());
+        std::printf("initiator during a landing move returned after %ld ms\n", took_ms.load());
+        std::fflush(stdout);
+        return in_time ? took_ms.load() : -1;
+    }
+};
+
+// One stop exchange plus a margin, with the fake's instant answers.
+constexpr long kWaiterBoundMs = 500;
+
+}  // namespace
+
+TEST_CASE("SynScan initiator supersede - AbortSlew during a long landing move waits for its stop only",
+          "[synscan][initiator-supersede][goto-landing]") {
+    LongDecNudge n;
+    const long took = n.time_initiator([&] { n.driver->abort_slew(); });
+    CHECK(took >= 0);
+    CHECK(took < kWaiterBoundMs);
+    advance_idle(n.clock, std::chrono::milliseconds(600));
+    const auto wire = n.st->wire_log();
+    std::string order;
+    for (const auto& command : wire) order += command.empty() ? '?' : command[0];
+    INFO("wire order " << order);
+    // The move's stop goes out before AbortSlew's stops (its `M` first).
+    const auto stop = std::find_if(wire.begin() + static_cast<std::ptrdiff_t>(n.nudge_start) + 1, wire.end(),
+                                   [](const auto& command) { return is_dec_rate_stop(command); });
+    const auto abort_m = std::find_if(wire.begin() + static_cast<std::ptrdiff_t>(n.nudge_start) + 1, wire.end(),
+                                      [](const auto& command) { return command[0] == 'M'; });
+    REQUIRE(stop != wire.end());
+    REQUIRE(abort_m != wire.end());
+    CHECK(stop < abort_m);
+    CHECK(n.st->nudge_count.load() == 1);  // the move was ended once, by its own stop
+    // No axis moves: Dec is stopped and RA tracks at the sidereal rate (AbortSlew's tracking restore).
+    CHECK(n.st->axis_counts_per_s[1].load() == 0.0);
+    CHECK(n.st->ra_motor_speed() == kSiderealArcsecPerSec);
+    CHECK_FALSE(n.driver->get_slewing());
+    n.driver->set_connected(false);
+}
+
+TEST_CASE("SynScan initiator supersede - MoveAxis on the axis of a long landing move waits for its stop only",
+          "[synscan][initiator-supersede][goto-landing]") {
+    LongDecNudge n;
+    const long took = n.time_initiator([&] { n.driver->move_axis(1, 0.1); });
+    CHECK(took >= 0);
+    CHECK(took < kWaiterBoundMs);
+    advance_idle(n.clock, std::chrono::milliseconds(600));
+    const auto wire = n.st->wire_log();
+    std::string order;
+    for (const auto& command : wire) order += command.empty() ? '?' : command[0];
+    INFO("wire order " << order);
+    // After the move's start: its stop, then MoveAxis's rate, and no stop after that rate.
+    const auto first = wire.begin() + static_cast<std::ptrdiff_t>(n.nudge_start) + 1;
+    const auto stop = std::find_if(first, wire.end(), [](const auto& command) { return is_dec_rate_stop(command); });
+    const auto jog = std::find_if(
+        first, wire.end(), [](const auto& command) { return is_dec_rate(command) && !is_dec_rate_stop(command); });
+    REQUIRE(stop != wire.end());
+    REQUIRE(jog != wire.end());
+    CHECK(stop < jog);
+    CHECK(std::none_of(jog, wire.end(), [](const auto& command) { return is_dec_rate_stop(command); }));
+    // The landing move's stop did not end the jog: Dec runs at the MoveAxis rate (0.1 deg/s, 360"/s), far above the
+    // landing move's 2"/s.
+    CHECK(n.st->axis_counts_per_s[1].load() > 100.0 * kCountsPerArcsec);
+    CHECK(n.driver->get_slewing());
+    REQUIRE_NOTHROW(n.driver->move_axis(1, 0.0));
+    CHECK(n.st->axis_counts_per_s[1].load() == 0.0);  // no axis is left moving
+    n.driver->set_connected(false);
 }
 
 TEST_CASE(
