@@ -1,0 +1,3 @@
+### Added (tests)
+
+- **Contract sweep cases for snapshot rule 6** (AlpacaCore tests, issue #1443): every driver whose ADR 0010 Adoption row is `adopted` (Sky-Watcher, Celestron telescope and focuser, Bisque, SynScan, Gemini focuser, QHY Q-Focuser, Astroasis) is connected over its fake on a fake clock; a frame older than its `max_age` and younger than `util::kLinkStalenessBound` still serves every snapshot getter with its earlier value, and past the bound the getters stop serving. A guard case reads the ADR table and fails when an `adopted` row has no entry in `kSnapshotAdopterRoster` or no hook. Rule 6 of `docs/decisions/0010-snapshot-served-state.md` now names `AlpacaCore/tests/test_contract_sweep.cpp` as its check, next to review.
