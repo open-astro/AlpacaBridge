@@ -646,6 +646,17 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
     return '';
 }
 
+// Saved-config keys the device card's settings list leaves out: the card shows
+// them in its own rows (type, number, vendor, and the Unique ID row for the
+// GUID stored as `uniqueId`, decision 0018) or derives them (aperture area
+// and focal length).
+const HIDDEN_DEVICE_SETTING_KEYS = new Set(['vendor', 'deviceType', 'deviceNumber', 'uniqueId',
+    'apertureDiameter', 'focalLength']);
+
+function deviceSettingShown(key) {
+    return !HIDDEN_DEVICE_SETTING_KEYS.has(key);
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -655,5 +666,6 @@ if (typeof module !== 'undefined' && module.exports) {
                         HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
-                        thermalCameraOptions, thermalCameraSelection, thermalCameraHint };
+                        thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
+                        deviceSettingShown };
 }

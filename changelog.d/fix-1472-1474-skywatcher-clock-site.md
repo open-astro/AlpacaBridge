@@ -7,6 +7,7 @@
 
 - **Sky-Watcher `SiderealTime` follows `UTCDate`** (issue #1472, decision 0001): `UTCDate`, `SiderealTime` and pointing read one time source, so a client can explain `SiderealTime` from its own `UTCDate` and `SiteLongitude` reads, as the ASCOM Telescope interface requires. A host that gains NTP after a write moves all three to its clock together.
 - **A Sky-Watcher mount connects without a site** (issue #1474, decision 0019): a client that connects first and writes its site after can now connect. Until both coordinates are known, every member that depends on them (`RightAscension`, `Declination`, `Altitude`, `Azimuth`, `SiderealTime`, `SideOfPier`, `DestinationSideOfPier`, the slews and syncs, `Tracking=true`, `MoveAxis`, `PulseGuide`, `RightAscensionRate`, `DeclinationRate`) throws `InvalidOperation` naming what to set, and the connect sends the mount nothing that depends on the hemisphere. Writing the second coordinate makes the mount usable without a reconnect.
+- **The web UI shows each device's Unique ID once** (web UI, issue #1471): since the GUID is stored in the device config as `uniqueId`, the device card listed it a second time as a "Unique Id" setting under the Unique ID row. The settings list now leaves it out.
 
 ### Changed (docs)
 
