@@ -27,7 +27,9 @@ them collaborator/write access; the `safe-to-review` label stays the per-PR trus
 
 The bot reviews only a head whose CI build and test jobs passed: the job's first step
 ("Wait for the CI build and test jobs", which owns the list) waits up to 45 minutes for them
-and fails before the agent runs when one is red, so a red push costs no review. The step
+and fails before the agent runs when one is red, so a red push costs no review. Only `success`
+is green: a waited-for job that is skipped, neutral or ends any other way counts as red, so a
+`needs:` or `if:` that skips one cannot let the review run on a red head. The step
 matches those jobs' `name:` in `ci.yml`, so renaming one means updating the list in the same
 PR (the step fails at once with "never reported" otherwise).
 `/pr-checker` and `/submit-pr` read that failure as poll exit `4` (CI red: fix and push) or
@@ -88,8 +90,8 @@ author must do. Read the docstring before changing a gate.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
-  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (75 min:
-  up to 45 waiting for CI, then the review) is outlasted by the 80-minute verdict poll in
+  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (90 min:
+  up to 45 waiting for CI, then up to 45 for the review) is outlasted by the 95-minute verdict poll in
   `/pr-checker` and `/submit-pr`; a poll timeout is a re-poll.
 - **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) runs every gate that
   needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2.
