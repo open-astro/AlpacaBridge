@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/async_connectable.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
@@ -24,7 +25,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 namespace alpacacore::vendor::qhy {
@@ -49,10 +49,13 @@ constexpr const char* kLogTag = "QHY";
  * failed async operation, so the driver neither logs and reports done nor
  * invents a slot with a live read.
  *
- * The goto's arrival wait (about 1 s per slot travelled) runs on a joinable
- * member thread so the Position PUT returns within the STANDARD budget;
- * disconnect and the destructor cancel and join it (driver-lifecycle.instructions.md: never detach
- * a thread that touches `this`).
+ * The goto's arrival wait (about 1 s per slot travelled) runs in a
+ * util::AsyncOperation slot (decision 0006) so the Position PUT returns within
+ * the STANDARD budget; disconnect and the destructor cancel and join it
+ * (driver-lifecycle.instructions.md: never detach a thread that touches
+ * `this`). The driver refuses a second goto while one is in flight, so the
+ * slot never supersedes a body; the failure is kept in move_failure_, not the
+ * slot's last failure, because a reconnect clears it without a start.
  */
 class QhyCfw3FilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
 public:
@@ -77,7 +80,7 @@ public:
                 ALPACA_LOG_WARN(kLogTag, "Error during QHYCFW3 destruction: " + std::string(e.what()));
             }
         }
-        // A move worker can outlive connected_ (a failed move after a link
+        // A move body can outlive connected_ (a failed move after a link
         // loss): join it regardless so no thread touches a destroyed member.
         cancel_and_join_move();
     }
@@ -207,7 +210,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         // -1 while a goto is in flight: the wheel is silent until it arrives,
-        // and the worker publishes the arrival slot into the cache.
+        // and the move body publishes the arrival slot into the cache.
         if (pending_target_.has_value()) return -1;
         if (move_failure_.has_value()) throw AlpacaException(*move_failure_, AlpacaError::DriverException);
         if (position_cache_.has_value()) return position_cache_.value();
@@ -225,47 +228,59 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
-        // Lock order: move_thread_mutex_ -> mutex_ (see the member comment).
-        // The handle lock is taken here, before the state lock, so this
-        // check+join+spawn is atomic against a concurrent set_position() AND
-        // against teardown's cancel+join, and never waits on the handle lock
-        // while holding mutex_ (the worker's publish path needs mutex_).
-        std::lock_guard<std::mutex> handle_lock(move_thread_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Re-assert under the locks: teardown_locked() stores connected_ false
-        // BEFORE it takes the handle lock to cancel and join, so a goto that
-        // passed ensure_connected() a moment ago must not spawn a worker for a
-        // wheel that is being disconnected (it would report NotConnected from
-        // the worker, or worse, run a real move after a reconnect).
-        ensure_connected();
-        if (!slot_count_valid_ || slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        // Lock order: move_start_mutex_ -> mutex_ (see the member comment).
+        // The initiator lock is taken here, before the state lock, so the
+        // claim + start below is atomic against a concurrent set_position()
+        // AND against teardown's cancel+join, and never waits on it while
+        // holding mutex_ (the body's publish path needs mutex_).
+        std::lock_guard<std::mutex> initiator_lock(move_start_mutex_);
+        std::optional<int> previous_position;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Re-assert under the locks: teardown_locked() stores connected_
+            // false BEFORE it takes the initiator lock to cancel and join, so a
+            // goto that passed ensure_connected() a moment ago must not start a
+            // body for a wheel that is being disconnected (it would report
+            // NotConnected from the body, or worse, run a real move after a
+            // reconnect).
+            ensure_connected();
+            if (!slot_count_valid_ || slot_count_ <= 0) {
+                throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+            }
+            if (position >= slot_count_) {
+                throw AlpacaException(
+                    "Filter position out of range (wheel has " + std::to_string(slot_count_) + " slots)",
+                    AlpacaError::InvalidValue);
+            }
+            if (pending_target_.has_value()) {
+                // The wire carries one goto at a time and the wheel answers only
+                // on arrival; a second goto mid-move would be read as a stray byte.
+                throw AlpacaException("Filter wheel is moving", AlpacaError::InvalidOperation);
+            }
+            if (position_cache_.has_value() && position_cache_.value() == position) {
+                // Already there. The firmware would answer at once (201409+), but
+                // pre-201409 firmware stays silent on a same-slot goto and the
+                // wait would run to its timeout; skipping the wire is right for both.
+                return;
+            }
+            previous_position = position_cache_;
+            position_cache_.reset();
+            move_failure_.reset();
+            pending_target_ = position;
+            move_cancel_.store(false);
         }
-        if (position >= slot_count_) {
-            throw AlpacaException("Filter position out of range (wheel has " + std::to_string(slot_count_) + " slots)",
-                                  AlpacaError::InvalidValue);
+        // ADR 0006 rule 4: start() runs without mutex_. The previous body has
+        // cleared pending_target_ as its last action (it may not have returned
+        // yet; start() moves it to the stale list and never waits for it).
+        try {
+            move_op_.start([this, position](util::OperationContext&) { run_move(position); });
+        } catch (...) {
+            // No body runs: undo the claim so Position does not read -1 forever.
+            std::lock_guard<std::mutex> lock(mutex_);
+            position_cache_ = previous_position;
+            pending_target_.reset();
+            throw;
         }
-        if (pending_target_.has_value()) {
-            // The wire carries one goto at a time and the wheel answers only
-            // on arrival; a second goto mid-move would be read as a stray byte.
-            throw AlpacaException("Filter wheel is moving", AlpacaError::InvalidOperation);
-        }
-        if (position_cache_.has_value() && position_cache_.value() == position) {
-            // Already there. The firmware would answer at once (201409+), but
-            // pre-201409 firmware stays silent on a same-slot goto and the
-            // wait would run to its timeout; skipping the wire is right for both.
-            return;
-        }
-        // The previous worker has finished (pending_target_ is empty and it
-        // clears that flag as its last action under mutex_, which it has
-        // therefore already released), so this join only waits for the
-        // thread to exit and cannot deadlock on mutex_.
-        if (move_thread_.joinable()) move_thread_.join();
-        position_cache_.reset();
-        move_failure_.reset();
-        pending_target_ = position;
-        move_cancel_.store(false);
-        move_thread_ = std::thread([this, position] { run_move(position); });
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -298,9 +313,9 @@ public:
     }
 
 private:
-    // Worker body: block on the arrival reply, then publish. Everything that
-    // can throw is caught here -- an escaping exception on a std::thread is
-    // std::terminate for the whole server.
+    // Slot body: block on the arrival reply, then publish. Everything that
+    // can throw is caught here and kept as move_failure_ (not the slot's last
+    // failure: teardown clears it without a start).
     void run_move(int target) {
         try {
             const int arrived = protocol_.goto_slot(target, move_cancel_);
@@ -319,20 +334,22 @@ private:
         }
     }
 
-    // Caller must NOT hold mutex_: the worker takes it to publish its result
+    // Caller must NOT hold mutex_: the body takes it to publish its result
     // on the way out, so a join under mutex_ would deadlock.
     void cancel_and_join_move() {
-        std::lock_guard<std::mutex> handle_lock(move_thread_mutex_);
-        // Stored UNDER the handle lock (PR #536 review): set_position() clears
-        // this flag and spawns its worker under the same lock, so a store made
-        // before taking it could be wiped by a set_position() that slipped in
-        // between, and the join below would then sit out the whole move.
+        std::lock_guard<std::mutex> initiator_lock(move_start_mutex_);
+        // Stored UNDER the initiator lock (PR #536 review): set_position()
+        // clears this flag and starts its body under the same lock, so a store
+        // made before taking it could be wiped by a set_position() that slipped
+        // in between, and the join below would then sit out the whole move.
+        // The slot's cancel does not wake a body blocked in the serial read;
+        // this flag does.
         move_cancel_.store(true);
-        if (move_thread_.joinable()) move_thread_.join();
+        move_op_.cancel_all_and_join();
     }
 
     // Disconnect body shared by the explicit disconnect and the stale-link
-    // reconnect. Caller holds transition_mutex_ and NOT mutex_ (the worker's
+    // reconnect. Caller holds transition_mutex_ and NOT mutex_ (the body's
     // publish path takes mutex_). Driver state first, port close second, so a
     // throwing close cannot leave the driver reporting connected on a closed
     // port.
@@ -342,7 +359,7 @@ private:
             firmware_.clear();
         }
         connected_.store(false);
-        // Cancel wakes the worker out of its read slice; the wheel finishes
+        // Cancel wakes the body out of its read slice; the wheel finishes
         // the move on its own and the next connect's NOW reports where it is.
         cancel_and_join_move();
         protocol_.disconnect();
@@ -445,22 +462,28 @@ private:
     // Settled slot; empty while a goto is in flight or after a failed move.
     std::optional<int> position_cache_;
     // Text of the last goto's failure, raised by Position until the next
-    // Position PUT or a reconnect (set by the worker, cleared by set_position()
+    // Position PUT or a reconnect (set by the body, cleared by set_position()
     // and teardown_locked(), which every reconnect runs).
     std::optional<std::string> move_failure_;
-    // Commanded slot while a goto is in flight; cleared by the worker.
+    // Commanded slot while a goto is in flight; cleared by the body.
     std::optional<int> pending_target_;
 
-    // Joinable arrival-wait worker (never detached) and its cancel flag. The
-    // std::thread handle itself is shared state: set_position() assigns it,
-    // teardown and the destructor join it, so it has its own mutex. Lock
-    // order everywhere: transition_mutex_ -> move_thread_mutex_ -> mutex_ ->
-    // wrapper mutex; the worker takes only the wrapper mutex (inside
-    // goto_slot) and then mutex_ (to publish), never move_thread_mutex_, so
-    // joining under move_thread_mutex_ cannot wait on itself.
-    std::mutex move_thread_mutex_;
-    std::thread move_thread_;
+    // Initiator lock and the body's cancel flag (goto_slot polls an atomic;
+    // the slot's cancel does not wake a read). set_position() claims the move
+    // and starts the body, and teardown cancels and joins it, each under
+    // move_start_mutex_, so a disconnect cannot land between a claim and its
+    // start. Lock order everywhere: transition_mutex_ -> move_start_mutex_ ->
+    // mutex_ -> wrapper mutex; the body takes only the wrapper mutex (inside
+    // goto_slot) and then mutex_ (to publish), never move_start_mutex_, so the
+    // join under it cannot wait on itself. start() and the join run without
+    // mutex_ (ADR 0006 rule 4).
+    std::mutex move_start_mutex_;
     std::atomic<bool> move_cancel_{false};
+    // Declared last: destroyed first, joining the body before any member it
+    // touches goes away. The driver refuses a second goto while one is in
+    // flight, so the generation is this slot's alone.
+    util::OperationGeneration move_generation_;
+    util::AsyncOperation move_op_{"QHY CFW3 move", move_generation_};
 };
 
 std::unique_ptr<FilterWheelDriver> create_qhy_cfw3_filterwheel(int device_number, const std::string& serial_port,

@@ -321,7 +321,7 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Disconnect during a move cancels the w
     driver->set_position(6);
     CHECK(driver->get_position() == -1);
     const auto start = std::chrono::steady_clock::now();
-    driver->set_connected(false);  // must not wait the full travel, and must not leave the worker running
+    driver->set_connected(false);  // must not wait the full travel, and must not leave the move body running
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(1500));
     CHECK_FALSE(driver->get_connected());
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
