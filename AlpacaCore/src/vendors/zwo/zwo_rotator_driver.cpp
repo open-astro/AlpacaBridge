@@ -280,6 +280,7 @@ public:
 
     void halt() override {
         ensure_connected();
+        // Waits for a status refill in flight (the I/O lock is not preemptible); the stop follows at once.
         with_io([&](int id) { sdk_.stop(id); });
         status_cache_.invalidate();
     }

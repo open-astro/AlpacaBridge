@@ -15,12 +15,14 @@
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
 #include <stdexcept>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_zwo_caa_sdk.h"
@@ -538,4 +540,52 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in fligh
     CHECK_FALSE(sdk.closed_while_busy.load());
     CHECK_FALSE(driver->get_connected());
     CHECK(sdk.close_calls == 1);
+}
+
+// A disconnect that wins the I/O lock while status reads queue behind a write is not a link failure: every reader
+// gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
+// Falsified by: zwo_rotator_driver.cpp read_status() throwing NotConnected inside the cache refill instead of returning the closed
+// frame (the third queued reader then gets DriverException "communications compromised").
+TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is not a link failure",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.move_delay = kHoldOpen;
+    std::thread mover([&] {
+        try {
+            driver->move_absolute(90.0);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.move_entered));
+
+    constexpr int kReaders = 8;
+    std::atomic<int> not_connected{0};
+    std::atomic<int> other{0};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaders; ++i) {
+        readers.emplace_back([&] {
+            try {
+                (void)driver->get_is_moving();
+                ++other;
+            } catch (const alpacacore::AlpacaException& e) {
+                (e.error_code() == alpacacore::AlpacaError::NotConnected ? not_connected : other)++;
+            } catch (const std::exception&) {
+                ++other;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // every reader is parked on the write
+    driver->set_connected(false);
+    mover.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(other.load() == 0);
+    CHECK(not_connected.load() == kReaders);
 }
