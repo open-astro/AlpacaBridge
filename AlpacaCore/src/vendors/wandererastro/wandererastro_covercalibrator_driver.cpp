@@ -228,7 +228,10 @@ public:
 
     // --- CoverCalibrator interface: calibrator ---
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();

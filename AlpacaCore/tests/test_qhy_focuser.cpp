@@ -97,8 +97,9 @@ TEST_CASE("QHY Q-Focuser Driver - Defaults", "[qhy][focuser][unit]") {
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "QHY Q-Focuser");
     CHECK(driver->get_absolute() == true);
-    CHECK(driver->get_max_step() == 64000);
-    CHECK(driver->get_max_increment() == 64000);
+    // MaxStep and MaxIncrement are properties: a disconnected read refuses (issue #1478).
+    require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_device_firmware().has_value() == false);
 }
 
@@ -349,8 +350,9 @@ TEST_CASE("QHY Q-Focuser Driver - lost link drops Connected and reconnects", "[q
     CHECK(driver->get_connected() == false);
     require_alpaca_error([&]() { driver->get_temperature(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->move(1200); }, alpacacore::AlpacaError::NotConnected);
-    // Static metadata keeps answering.
-    CHECK(driver->get_max_step() > 0);
+    // A lost link refuses MaxStep and MaxIncrement too (ADR 0009: every member throws NotConnected).
+    require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
 
     // Connected=true against the dead link is a reconnect attempt, not a
     // no-op: the unplugged port's link is gone, so the open fails and throws.

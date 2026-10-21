@@ -2271,11 +2271,10 @@ int main() {
         }
         EXPECT(found_cover);
 
-        // MaxBrightness is a static capability and reports without hardware.
+        // MaxBrightness is a property: the registered cover is not connected, so the read answers NotConnected.
         const auto maxbright_response = route_request(router, "GET", "/api/v1/covercalibrator/9401/maxbrightness");
         const auto maxbright_json = nlohmann::json::parse(maxbright_response.body());
-        EXPECT(maxbright_json.value("ErrorNumber", -1) == 0);
-        EXPECT(maxbright_json.value("Value", -1) == 255);
+        EXPECT(maxbright_json.value("ErrorNumber", -1) == 0x407);
 
         nlohmann::json remove_body = {
             {"vendor", "wandererastro"}, {"deviceType", "covercalibrator"}, {"deviceNumber", 9401}};

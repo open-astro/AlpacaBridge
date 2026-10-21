@@ -654,6 +654,7 @@ public:
     }
     
     double get_declination_rate() const override {
+        check_connected();
         // iOptron doesn't support getting Dec rate directly
         // Return 0 (not available)
         return 0.0;
@@ -766,6 +767,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
+        check_connected();
         // ASCOM RightAscensionRate is an OFFSET from sidereal tracking, in
         // seconds of RA per sidereal second — NOT the absolute tracking rate in
         // arcsec/sec. The driver never applies an RA-rate offset, so this is
