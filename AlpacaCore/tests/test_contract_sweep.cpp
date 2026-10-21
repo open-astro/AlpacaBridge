@@ -41,6 +41,7 @@
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -726,6 +727,115 @@ Hosted connected_host(const Tier2Host& h) {
     const bool has_timestamp =
         std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) { return s.name == "TimeStamp"; });
     CHECK(has_timestamp);
+}
+
+// The ASCOM type of each DeviceState member, per device type, from the Platform 7 interface docs: the
+// DeviceState section of each interface page at https://ascom-standards.org/newdocs/ (ITelescopeV4,
+// ICameraV4, IFocuserV4, IRotatorV4, IFilterWheelV3, ICoverCalibratorV2, ISwitchV3), whose member lists
+// the rows below follow. DeviceStateValue holds
+// the alternative that goes out as JSON, so the held alternative is what is compared. Only device types with
+// a tier-2 host are listed; a new tier-2 device type needs a row here. Switch members carry a switch id
+// suffix ("GetSwitch3"), stripped before the lookup.
+enum class StateType { Bool, Int, Double, String };
+
+const char* state_type_name(StateType t) {
+    switch (t) {
+        case StateType::Bool:
+            return "bool";
+        case StateType::Int:
+            return "std::int32_t";
+        case StateType::Double:
+            return "double";
+        case StateType::String:
+            return "std::string";
+    }
+    return "?";
+}
+
+bool state_value_has_type(const alpacacore::DeviceStateValue& v, StateType t) {
+    switch (t) {
+        case StateType::Bool:
+            return std::holds_alternative<bool>(v);
+        case StateType::Int:
+            return std::holds_alternative<std::int32_t>(v);
+        case StateType::Double:
+            return std::holds_alternative<double>(v);
+        case StateType::String:
+            return std::holds_alternative<std::string>(v);
+    }
+    return false;
+}
+
+const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type) {
+    using T = StateType;
+    static const std::map<DeviceType, std::map<std::string, StateType>> table = {
+        {DeviceType::Camera,
+         {{"CameraState", T::Int},
+          {"CCDTemperature", T::Double},
+          {"CoolerPower", T::Double},
+          {"HeatSinkTemperature", T::Double},
+          {"ImageReady", T::Bool},
+          {"IsPulseGuiding", T::Bool},
+          {"PercentCompleted", T::Int},
+          {"TimeStamp", T::String}}},
+        {DeviceType::Telescope,
+         {{"Altitude", T::Double},
+          {"AtHome", T::Bool},
+          {"AtPark", T::Bool},
+          {"Azimuth", T::Double},
+          {"Declination", T::Double},
+          {"IsPulseGuiding", T::Bool},
+          {"RightAscension", T::Double},
+          {"SideOfPier", T::Int},
+          {"SiderealTime", T::Double},
+          {"Slewing", T::Bool},
+          {"Tracking", T::Bool},
+          {"UTCDate", T::String},
+          {"TimeStamp", T::String}}},
+        {DeviceType::Focuser,
+         {{"IsMoving", T::Bool}, {"Position", T::Int}, {"Temperature", T::Double}, {"TimeStamp", T::String}}},
+        {DeviceType::Rotator,
+         {{"IsMoving", T::Bool}, {"MechanicalPosition", T::Double}, {"Position", T::Double}, {"TimeStamp", T::String}}},
+        {DeviceType::FilterWheel, {{"Position", T::Int}, {"TimeStamp", T::String}}},
+        {DeviceType::CoverCalibrator,
+         {{"Brightness", T::Int},
+          {"CalibratorState", T::Int},
+          {"CalibratorChanging", T::Bool},
+          {"CoverState", T::Int},
+          {"CoverMoving", T::Bool},
+          {"TimeStamp", T::String}}},
+        {DeviceType::Switch,
+         {{"GetSwitch", T::Bool},
+          {"GetSwitchValue", T::Double},
+          {"StateChangeComplete", T::Bool},
+          {"TimeStamp", T::String}}},
+    };
+    const auto it = table.find(type);
+    return it == table.end() ? nullptr : &it->second;
+}
+
+// Case 4b. Every connected DeviceState entry carries the ASCOM member's JSON type (an integer member emitted as
+// a double reaches the client as "0.0", which ConformU cannot coerce), and a member the table does not know
+// for the device type fails, so a new member needs a type entry above.
+[[maybe_unused]] void case_t2_device_state_value_types(const Tier2Host& h) {
+    Hosted hosted = connected_host(h);
+    const auto* members = ascom_device_state_types(h.type);
+    REQUIRE(members != nullptr);
+    const auto state = hosted.driver->get_device_state();
+    REQUIRE_FALSE(state.empty());
+    for (const auto& entry : state) {
+        INFO(h.id << " " << entry.name);
+        std::string key = entry.name;
+        if (h.type == DeviceType::Switch) {
+            while (!key.empty() && std::isdigit(static_cast<unsigned char>(key.back()))) {
+                key.pop_back();
+            }
+        }
+        const auto it = members->find(key);
+        REQUIRE(it != members->end());
+        INFO("expected " << state_type_name(it->second));
+        CHECK(state_value_has_type(entry.value, it->second));
+    }
 }
 
 // Case 5, camera rows only. ImageArray before any exposure is the ICameraV4 InvalidOperation, flagged
@@ -1908,6 +2018,8 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
 #define CS2_STATE(id, kind) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
+#define CS2_STATE_TYPES(id, kind) \
+    CS2_CASE(id, "DeviceState value types match the ASCOM members", case_t2_device_state_value_types)
 // Target flags: telescopes only. InvalidValue: every kind except NPR and CAM.
 #define CS2_TARGETS(id, kind) CS2_TARGETS_##kind(id)
 #define CS2_TARGETS_TEL(id) CS2_CASE(id, "target flags until set", case_t2_target_flags)
@@ -1931,6 +2043,7 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_INVALID)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE_TYPES)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
 #endif
 
