@@ -515,6 +515,7 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
 // write and an offsets write are accepted and read back. One case over all filter wheel entries; it is
 // registered once, not per entry, because the registry macro carries no device-type kind.
 [[maybe_unused]] void case_filterwheel_names_offsets_disconnected(const ContractEntry& e) {
+    INFO(e.id);
     auto d = e.make(0);
     REQUIRE(d != nullptr);
     auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*d);
@@ -767,8 +768,8 @@ Hosted connected_host(const Tier2Host& h) {
 // hold (kSerialBoardHold, 150 ms), so a hook that waits for the handshake exceeds it on every row that holds.
 constexpr std::chrono::milliseconds kHookBound{100};
 
-// Case 5. get_device_firmware() and get_device_sdk_version() are cheap: they return at once while a connect is
-// in flight, and never throw while disconnected.
+// Firmware and SDK hooks. get_device_firmware() and get_device_sdk_version() are cheap: they return at once while a
+// connect is in flight, and never throw while disconnected.
 [[maybe_unused]] void case_t2_firmware_sdk_hooks(const Tier2Host& h) {
     INFO(h.id << " over " << h.fake_header);
     {
@@ -806,8 +807,8 @@ constexpr std::chrono::milliseconds kHookBound{100};
     REQUIRE_FALSE(hosted.driver->get_connecting());
 }
 
-// Case 6, telescope rows only. MoveAxis(axis, 0) and Park are asynchronous initiators: each returns well under
-// ConformU's 1 s STANDARD target (AGENTS.md "Telescope Park / MoveAxis(axis, 0)"). MoveAxis runs on one
+// Asynchronous initiators, telescope rows only. MoveAxis(axis, 0) and Park are asynchronous initiators: each returns
+// well under ConformU's 1 s STANDARD target (AGENTS.md "Telescope Park / MoveAxis(axis, 0)"). MoveAxis runs on one
 // connected host and Park on another, so a driver that is parked does not turn the MoveAxis leg into a fast
 // InvalidWhileParked throw; each call must also return without throwing.
 constexpr std::chrono::milliseconds kInitiatorBound{1000};
@@ -1272,9 +1273,9 @@ Tier2Host tier2_host_synscan_telescope() {
                                         return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
                                     });
     h.park_unavailable =
-        "FakeMountServer::default_responder() does not answer the SynScan position and site queries, so park() "
-        "fails with an unspecified error before it can start the slew (fake_mount_server.h, "
-        "synscan_telescope_driver.cpp park())";
+        "FakeMountServer::default_responder() does not answer the SynScan position read (the driver logs 'Invalid "
+        "SynScan RA/Dec response'), so park() throws DriverException before it can start the slew "
+        "(fake_mount_server.h, synscan_telescope_driver.cpp park())";
     return h;
 }
 #endif
