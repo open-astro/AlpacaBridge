@@ -34,6 +34,8 @@
 // The kFakeConnectableRoster at the bottom lists the drivers that can connect to
 // an in-process fake; scripts/check_docs_drift.py pins it to the fake_*.h files on
 // disk in both directions.
+// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; the snapshot
+// cases and their roster guard in test_contract_sweep.cpp hold it to that table.
 
 #pragma once
 

@@ -2223,13 +2223,20 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 // connect's frame publish, hold the device so no newer frame comes, and move the task clock.
 //  - Past the snapshot max_age (largest is 3 s, Celestron telescope) and under util::kLinkStalenessBound (30 s)
 //    with no fault latched: Connected stays true, no link fault is reported, every snapshot-served getter
-//    still returns the value it returned before, and DeviceState still lists the frame.
-//  - Past the bound (decision 0009): every one of the same getters throws NotConnected, Connected reads
-//    false and DeviceState is empty.
-// How the frame is held differs by backend and each hook says where it comes from: a telescope with a poll
-// pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted so a single woken poll
-// fails, which stays under every latch threshold. The roster is kSnapshotAdopterRoster (contract_sweep.h);
-// the guard case at the end reads the ADR table and holds it, and the hooks, to that roster.
+//    still returns the value it returned before (within kSnapshotValueMargin), and DeviceState still lists
+//    the frame.
+//  - Past the bound (decision 0009), where the adopter has a lost-link stage: every one of the same getters
+//    throws NotConnected, Connected reads false and DeviceState is empty. The Gemini focuser and the Celestron
+//    focus motor have none (SnapshotRig::no_lost_link_stage): their getters keep throwing the latched fault's
+//    DriverException and Connected stays true.
+// How the frame is held differs by backend and each rig says where it comes from: a telescope with a poll
+// pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
+// so the one poll the clock step wakes fails, which stays under every latch threshold.
+// The loss case fails kSnapshotLatchPolls polls (a latch needs three where an adopter has one), then passes the
+// bound: SynScan, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
+// and Astroasis also from the age of the frame.
+// The roster is kSnapshotAdopterRoster (contract_sweep.h); the guard case at the end reads the ADR table and
+// holds it, and the hooks, to that roster.
 #ifndef _WIN32
 namespace {
 
@@ -2237,9 +2244,9 @@ using alpacacore::test::FakeTaskClock;
 namespace snap_chrono = std::chrono;
 
 constexpr snap_chrono::seconds kSnapshotStaleStep{10};  // above every max_age (<= 3 s), far under the 30 s bound
-// Loss (decision 0009) is a latched fault that has stood for util::kLinkStalenessBound: the poll fails on each
-// of kSnapshotLatchPolls one-second steps (every adopter latches after three failed polls), then the clock
-// passes the bound.
+// Loss (decision 0009) is a latched fault that has stood for util::kLinkStalenessBound, or (Sky-Watcher, QHY,
+// Astroasis) a frame that old: the poll fails on each of kSnapshotLatchPolls one-second steps (the adopters with
+// a latch threshold use three), then the clock passes the bound.
 constexpr int kSnapshotLatchPolls = 4;
 constexpr snap_chrono::seconds kSnapshotLostStep{31};
 static_assert(kSnapshotStaleStep < alpacacore::util::kLinkStalenessBound);
@@ -2259,7 +2266,7 @@ struct SnapshotRig {
     std::function<void()> lose_link;
     // Optional: one direct poll tick after the clock passed the bound, for backends whose loss is noticed there.
     std::function<void()> tick;
-    // Getter names left out, each with the reason (an ADR or instruction-file sentence).
+    // Getter names left out; the rig that fills it says why next to the assignment.
     std::vector<std::string> left_out;
     // Non-null when the adopter has no lost-link stage yet, so a latched fault past the bound stays a fault
     // (Connected true, getters DriverException) instead of NotConnected; the text says where that is decided.
@@ -2543,7 +2550,8 @@ std::unique_ptr<SnapshotRig> snapshot_rig_celestron_focuser() {
     rig.await_poll();
     rig.hold_frame = [fake] { fake->set_muted(true); };
     rig.no_lost_link_stage =
-        "decision 0009 roster has no Celestron focus motor row: its polled latch keeps Connected true today";
+        "no decision or instruction file defines the Celestron focus motor past the bound; its polled latch keeps "
+        "Connected true today (celestron_focuser_driver.cpp throw_if_faulted)";
     return rig_owner;
 }
 #endif
@@ -2680,7 +2688,7 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     CHECK(snapshot_has_time_stamp(*rig.driver));
 }
 
-[[maybe_unused]] void snapshot_lost_throws_not_connected(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+[[maybe_unused]] void snapshot_past_bound_stops_serving(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
     REQUIRE(rig.driver != nullptr);
     (void)snapshot_baseline(rig, getters);
     if (rig.lose_link) {
@@ -2726,7 +2734,7 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     TEST_CASE("Contract sweep snapshot - " #id " - past the link-loss bound the getters stop serving the frame", \
               "[contract][snapshot][" #id "]") {                                                                 \
         auto rig_owner = snapshot_rig_##id();                                                                    \
-        snapshot_lost_throws_not_connected(*rig_owner, getters);                                                 \
+        snapshot_past_bound_stops_serving(*rig_owner, getters);                                                  \
     }
 CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_CASE)
 #undef CS3_CASE
