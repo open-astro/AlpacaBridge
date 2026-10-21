@@ -19,9 +19,11 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
@@ -45,8 +47,11 @@ namespace alpacacore::vendor::qhy {
 namespace {
 
 constexpr const char* kLogTag = "QHY";
+// Operator-facing owner name for the serial-port registry (#1202), shared by
+// the probe and the connected link so the auto-detect scan can tell a
+// connected (or held) QHYCFW3 from another vendor's device.
+constexpr const char* kSerialOwner = "QHY CFW3 filter wheel";
 constexpr int kFirmwareReplyLen = 8;  // "yyyymmdd"
-constexpr int kReadPollMs = 10;
 // Replies carry no terminator, so a multi-byte reply (VRS) is complete when
 // the line goes quiet. At 9600 baud a byte takes ~1 ms; 50 ms of silence is
 // a comfortable end-of-reply mark and far below the arrival wait it paces.
@@ -68,36 +73,18 @@ std::string printable(const std::string& raw) {
 }
 
 #ifndef _WIN32
-bool configure_tty(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) return false;
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 0;  // read() returns at once; read_reply() paces with poll()
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) return false;
-    // Opened O_NONBLOCK so open() cannot hang on a half-enumerated node; the
-    // port must not stay that way (the Q-Focuser lesson: a non-blocking USB
-    // serial port can answer the first write() with EAGAIN).
-    return util::clear_nonblocking(fd);
-}
+// 9600 8N1 raw. HUPCL is left as the port has it: the wheel resets on the
+// DTR edge of the OPEN, and clearing HUPCL did not prevent that (see
+// connect()). The fd stays non-blocking (SerialLink); reads go through
+// util::tty_read() and writes through util::tty_write_all(), which waits out
+// an EAGAIN on an idle USB endpoint instead of failing (the Q-Focuser lesson).
+void configure_tty(struct termios& tty) { util::make_raw_8n1(tty, B9600); }
 
 // Read up to `max_len` bytes: wait up to `first_byte_ms` for the first byte,
 // then keep collecting until `max_len` is reached or the line has been idle
-// for kReplyIdleMs. Sets link_dead when the port is gone (POLLHUP/POLLERR/
-// POLLNVAL with nothing to read, EOF, or EIO/ENXIO/ENODEV/EBADF) so the caller
-// fails the transaction at once instead of re-polling to the deadline.
+// for kReplyIdleMs. Sets link_dead when the port is gone (a hangup, EOF, or
+// EIO/ENXIO/ENODEV/EBADF) so the caller fails the transaction at once instead
+// of re-polling to the deadline.
 std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& link_dead) {
     link_dead = false;
     std::string buf;
@@ -106,28 +93,13 @@ std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& lin
         const auto now = std::chrono::steady_clock::now();
         if (now >= deadline) break;
         const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        struct pollfd pfd {};
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        const int r = poll(&pfd, 1, static_cast<int>(remaining < kReadPollMs ? remaining : kReadPollMs));
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EBADF) link_dead = true;
-            return buf;
-        }
-        if (r == 0) continue;
-        if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 && (pfd.revents & POLLIN) == 0) {
-            link_dead = true;
-            return buf;
-        }
         char ch = 0;
-        const ssize_t n = read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        if (n == 0) {
-            link_dead = true;
-            return buf;
-        }
+        // Bounded by poll() on the non-blocking fd: a retune to VMIN=1 by
+        // another program cannot park this read (#1202). A hangup reads as
+        // -1/EIO, never as a quiet 0.
+        const ssize_t n = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
+        if (n == 0) continue;  // nothing within the window; the deadline check ends the loop
         if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
             if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF) link_dead = true;
             return buf;
         }
@@ -178,31 +150,34 @@ std::optional<int> cfw3_parse_slot(char reply) {
 
 // Probe one port: open, sit out the boot, ask MXP then NOW. VRS is read too
 // but optional. Returns true only when both single-character replies parse.
+// The probe claim (#1202) is held for exactly the probe: a port a connected
+// device holds is refused before it is opened (DEBUG log, "not found").
 static bool probe_port(const std::string& port_path, int boot_timeout_ms, Cfw3DeviceInfo& info) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) return false;
-    if (!configure_tty(fd)) {
-        close(fd);
+    std::string error;
+    util::SerialLink link =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_tty, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG(kLogTag, "Not probing " + port_path + " for QHYCFW3: " + error);
         return false;
     }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
     bool link_dead = false;
     const auto boot = wait_for_boot_byte(fd, boot_timeout_ms, link_dead);
     if (link_dead) {
-        close(fd);
         return false;
     }
     auto ask = [&](const char* cmd, std::size_t max_len) -> std::string {
         tcflush(fd, TCIFLUSH);
-        if (!util::write_all(fd, cmd, std::char_traits<char>::length(cmd))) return {};
+        if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) return {};
         tcdrain(fd);
         return read_reply(fd, 3000, max_len, link_dead);
     };
     const std::string vrs = ask("VRS", kFirmwareReplyLen);
     const std::string mxp = link_dead ? std::string() : ask("MXP", 1);
     const std::string now = link_dead ? std::string() : ask("NOW", 1);
-    close(fd);
+    link.close();
     if (mxp.size() != 1 || now.size() != 1) return false;
     const auto slots = cfw3_parse_slot(mxp[0]);
     const auto pos = cfw3_parse_slot(now[0]);
@@ -242,8 +217,29 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
     struct Candidate {
         std::string path;
         std::string name;
+        bool sibling = false;  // held by a connected (or held-open) QHYCFW3: listed, never probed
     };
     std::vector<Candidate> candidates;
+
+    // #1202: a port another vendor's connected device holds is never opened
+    // (the probe DTR-resets whatever is behind it). A port another QHYCFW3
+    // holds -- connected, or disconnected with its fd held to skip the boot
+    // -- is not probed either but keeps its place in the scan order, so the
+    // auto-detect index of every other wheel stays stable; a driver that
+    // picks it is refused by its link claim, which names the holder.
+    auto add_candidate = [&candidates](const std::string& resolved, const std::string& name) {
+        switch (util::serial_candidate_use(resolved, kSerialOwner)) {
+            case util::SerialCandidateUse::HeldByOther:
+                ALPACA_LOG_DEBUG(kLogTag, "Skipping " + resolved + ": held by another connected device");
+                return;
+            case util::SerialCandidateUse::HeldBySibling:
+                candidates.push_back({resolved, name, true});
+                return;
+            case util::SerialCandidateUse::Free:
+                candidates.push_back({resolved, name, false});
+                return;
+        }
+    };
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
@@ -259,9 +255,8 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
             std::error_code canon_ec;
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
-            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
             probed.insert(resolved);
-            candidates.push_back({resolved, name});
+            add_candidate(resolved, name);
         }
     }
 
@@ -275,14 +270,15 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
         std::string resolved = std::filesystem::canonical(port, canon_ec).string();
         if (canon_ec) continue;
         if (probed.count(resolved) != 0) continue;
-        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
         if (!raw_port_looks_like_cfw3_candidate(resolved)) continue;
         probed.insert(resolved);
-        candidates.push_back({resolved, ""});
+        add_candidate(resolved, "");
     }
 
-    if (!candidates.empty()) {
-        ALPACA_LOG_WARN(kLogTag, "Probing " + std::to_string(candidates.size()) +
+    const auto to_probe = static_cast<std::size_t>(
+        std::count_if(candidates.begin(), candidates.end(), [](const Candidate& c) { return !c.sibling; }));
+    if (to_probe != 0) {
+        ALPACA_LOG_WARN(kLogTag, "Probing " + std::to_string(to_probe) +
                                      " CP210x port(s) for a QHYCFW3; opening a port resets the device behind "
                                      "it and a wheel takes ~17 s to home");
     }
@@ -294,14 +290,20 @@ std::vector<Cfw3PortInfo> enumerate_cfw3_ports(int boot_timeout_ms) {
     workers.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& c = candidates[i];
+        if (c.sibling) continue;
         ALPACA_LOG_INFO(kLogTag, "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for QHYCFW3...");
         workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path, boot_timeout_ms, infos[i]) ? 1 : 0; });
     }
     for (auto& w : workers) w.join();
 
     for (std::size_t i = 0; i < candidates.size(); ++i) {
-        if (!found[i]) continue;
         const auto& c = candidates[i];
+        if (c.sibling) {
+            ALPACA_LOG_DEBUG(kLogTag, "Not probing " + c.path + ": another QHYCFW3 holds it");
+            results.push_back({c.path, c.name, Cfw3DeviceInfo{}});
+            continue;
+        }
+        if (!found[i]) continue;
         ALPACA_LOG_INFO(kLogTag, "Found QHYCFW3 on " + c.path + " (" + std::to_string(infos[i].slot_count) +
                                      " slots, firmware " + (infos[i].firmware.empty() ? "unknown" : infos[i].firmware) +
                                      ")");
@@ -335,7 +337,7 @@ public:
         // port skips straight to the handshake (~10 ms). A different port, a
         // link loss (which released the fd) or a failed handshake (which
         // closes it) reopens and pays the boot again.
-        const bool held = serial_fd_ >= 0 && opened_port_config_ == config.serial_port;
+        const bool held = link_.is_open() && opened_port_config_ == config.serial_port;
         config_ = config;
         link_lost_.store(false);
         if (!held) {
@@ -517,49 +519,34 @@ private:
         }
     }
 
+    // Claim, open, lock and configure the port (#1202). A port another
+    // connected device holds is refused before it is opened, and the reason
+    // (naming the holder) is the connect refusal the client sees. The link,
+    // and with it the registry claim and TIOCEXCL, is held across logical
+    // disconnects exactly as the fd is (see connect()).
     void open_port_locked() {
 #ifndef _WIN32
-        std::error_code canon_ec;
-        std::string resolved = std::filesystem::canonical(config_.serial_port, canon_ec).string();
-        if (canon_ec) resolved = config_.serial_port;
-        if (!util::try_mark_serial_port_open(resolved)) {
-            throw AlpacaException("Serial port " + config_.serial_port + " is already in use by another device",
-                                  AlpacaError::NotConnected);
+        std::string error;
+        link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner, configure_tty,
+                                       &error);
+        if (!link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        opened_port_ = resolved;
+        serial_fd_ = link_.fd();
         opened_port_config_ = config_.serial_port;
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            const int err = errno;
-            util::mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(err) + ")",
-                AlpacaError::NotConnected);
-        }
-        if (!configure_tty(serial_fd_)) {
-            close_port_locked();
-            throw AlpacaException("Failed to configure serial port " + config_.serial_port,
-                                  AlpacaError::DriverException);
-        }
         tcflush(serial_fd_, TCIOFLUSH);
 #else
         throw AlpacaException("QHYCFW3 driver is Linux-only", AlpacaError::DriverException);
 #endif
     }
 
+    // Release the port for real: the alias and the held-port record first,
+    // then the link (TIOCNXCL, close, registry claim).
     void close_port_locked() {
 #ifndef _WIN32
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        if (!opened_port_.empty()) {
-            util::mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-        }
+        serial_fd_ = -1;
         opened_port_config_.clear();
+        link_.close();
 #endif
     }
 
@@ -579,7 +566,7 @@ private:
 
 #ifndef _WIN32
     void write_locked(const char* data, std::size_t len) {
-        if (!util::write_all(serial_fd_, data, len)) {
+        if (!util::tty_write_all(serial_fd_, data, len)) {
             const int err = errno;
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("QHYCFW3 write failed: " + util::errno_string(err), AlpacaError::DriverException);
@@ -615,9 +602,9 @@ private:
     std::atomic<bool> link_lost_{false};
     bool in_connect_ = false;  // guarded by mutex_
 #ifndef _WIN32
-    int serial_fd_ = -1;
-    std::string opened_port_;         // canonical path registered in the serial-port registry
-    std::string opened_port_config_;  // config path the held fd was opened from
+    util::SerialLink link_;           // held across logical disconnects (see connect())
+    int serial_fd_ = -1;              // link_.fd() while the link is open, else -1
+    std::string opened_port_config_;  // config path the held link was opened from
 #endif
 };
 

@@ -53,7 +53,7 @@ Symbol: `UtcOffset`
 | SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | planned | #1409 | |
 | Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | planned | #1409 | |
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | with its clock ticket |
-| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | with its clock ticket |
+| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | with its clock ticket; clears on disconnect too |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | — | with its clock ticket |
 
 ## Links

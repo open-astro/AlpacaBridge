@@ -334,11 +334,17 @@ public:
                 connection_info_, connection_resolved_, connection_resolver_,
                 [&protocol](const ConnectionInfo& info) {
                     if (!protocol.connect(info)) {
-                        // Refused TCP connect or vanished serial node: stale, re-scan.
-                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
-                            throw util::StaleEndpoint("Failed to connect to Celestron mount");
+                        // The wrapper's reason (a port another device holds, #1202)
+                        // goes to the operator.
+                        const std::string reason = protocol.last_connect_error();
+                        const std::string message = reason.empty() ? "Failed to connect to Celestron mount"
+                                                                   : "Failed to connect to Celestron mount: " + reason;
+                        // Refused TCP connect, vanished serial node, or a port another connected
+                        // device now holds (#1202): stale, re-scan.
+                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
+                            throw util::StaleEndpoint(message);
                         }
-                        throw AlpacaException("Failed to connect to Celestron mount");
+                        throw AlpacaException(message);
                     }
                 },
                 "Celestron");
@@ -1290,131 +1296,160 @@ public:
                                   AlpacaError::MethodNotImplemented);
         }
         std::lock_guard<std::mutex> ilock(initiator_mutex_);
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("PulseGuide");
-
         auto& protocol = CelestronProtocolWrapper::instance();
 
         int axis = -1;
         int velocity = 0;
+        // Validation only. The join and the start below run with mutex_ free (decision 0006).
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
 
-        switch (direction) {
-            case 0: // North → DEC axis, positive velocity
-                axis = 1;
-                velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                break;
-            case 1: // South → DEC axis, negative velocity
-                axis = 1;
-                velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
-                break;
-            case 2: // East → RA axis, negative velocity (slow tracking = RA increases on sky)
-                axis = 0;
-                velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                break;
-            case 3: // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
-                axis = 0;
-                velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
-                break;
-            default:
-                throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
-        }
+            switch (direction) {
+                case 0:  // North → DEC axis, positive velocity
+                    axis = 1;
+                    velocity = static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 1:  // South → DEC axis, negative velocity
+                    axis = 1;
+                    velocity = -static_cast<int>(std::round((guide_rate_.dec / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 2:  // East → RA axis, negative velocity (slow tracking = RA increases on sky)
+                    axis = 0;
+                    velocity = -static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
+                    break;
+                case 3:  // West → RA axis, positive velocity (speed tracking = RA decreases on sky)
+                    axis = 0;
+                    velocity = static_cast<int>(std::round((guide_rate_.ra / kSiderealDegPerSec) * 100.0));
+                    break;
+                default:
+                    throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
+            }
 
-        if (velocity == 0) {
-            velocity = (direction == 1 || direction == 2) ? -1 : 1;
-        }
+            if (velocity == 0) {
+                velocity = (direction == 1 || direction == 2) ? -1 : 1;
+            }
 
-        // MC_AUX_GUIDE uses raw motor coordinates: positive rate = South
-        // when pierWest (normal), North when pierEast (through-the-pole).
-        // Flip DEC sign on the normal (West) side so North means North.
-        if (axis == 1 && hc_available_) {
-            char pier = protocol.get_pier_side();
-            if (pier == 'W') {
-                velocity = -velocity;
+            // MC_AUX_GUIDE uses raw motor coordinates: positive rate = South
+            // when pierWest (normal), North when pierEast (through-the-pole).
+            // Flip DEC sign on the normal (West) side so North means North.
+            if (axis == 1 && hc_available_) {
+                char pier = protocol.get_pier_side();
+                if (pier == 'W') {
+                    velocity = -velocity;
+                }
             }
         }
 
         int total_cs = std::clamp(duration / 10, 0, 2550);
         int first_chunk_cs = std::min(total_cs, 255);
 
-        const bool is_dec_axis = (direction == 0 || direction == 1);
-        const double duration_sec = duration / 1000.0;
-        const auto now = clock_.now();
-        const auto hold_end = now + std::chrono::milliseconds(duration) +
-                              kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
-        const auto correction_end = now + std::chrono::milliseconds(duration) +
-                                    kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
-
-        const auto [served_ra, served_dec] = served_equatorial_locked();
-
-        if (is_dec_axis) {
-            pg_hold_ra_hours_ = served_ra;
-            pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
-            pg_hold_ra_until_ = hold_end;
-            pg_hold_dec_valid_ = false;
-
-            double expected_delta = guide_rate_.dec * duration_sec;
-            if (direction == 1) expected_delta = -expected_delta;
-            pg_dec_baseline_degrees_ = served_dec;
-            pg_dec_expected_delta_degrees_ = expected_delta;
-            pg_dec_correction_valid_ = true;
-            pg_dec_correction_until_ = correction_end;
-        } else {
-            pg_hold_dec_degrees_ = served_dec;
-            pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
-            pg_hold_dec_until_ = hold_end;
-            pg_hold_ra_valid_ = false;
-
-            double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
-            if (direction == 3) expected_delta = -expected_delta;
-            pg_ra_baseline_hours_ = served_ra;
-            pg_ra_expected_delta_hours_ = expected_delta;
-            pg_ra_correction_valid_ = true;
-            pg_ra_correction_until_ = correction_end;
-        }
-
-        // The pulse body never takes mutex_, so joining it here is safe.
+        // The pulse body never takes mutex_, but joining it waits out the serial transaction it is in: do it
+        // with mutex_ free, so no getter stalls for that long.
         pulse_ops_[axis].cancel_all_and_join();
-        pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
-        protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
 
-        pulse_guide_active_[static_cast<std::size_t>(axis)] = true;
-        pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
-            now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
-        drop_poll_in_flight_locked();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked_locked("PulseGuide");
+
+            // Taken after the join: it can last a full transaction timeout, which would leave these stale.
+            const bool is_dec_axis = (direction == 0 || direction == 1);
+            const double duration_sec = duration / 1000.0;
+            const auto now = clock_.now();
+            const auto hold_end =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
+            const auto correction_end =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
+
+            const auto [served_ra, served_dec] = served_equatorial_locked();
+
+            if (is_dec_axis) {
+                pg_hold_ra_hours_ = served_ra;
+                pg_hold_ra_valid_ = !pulse_guide_active_[0] || now >= pulse_guide_end_time_[0];
+                pg_hold_ra_until_ = hold_end;
+                pg_hold_dec_valid_ = false;
+
+                double expected_delta = guide_rate_.dec * duration_sec;
+                if (direction == 1) expected_delta = -expected_delta;
+                pg_dec_baseline_degrees_ = served_dec;
+                pg_dec_expected_delta_degrees_ = expected_delta;
+                pg_dec_correction_valid_ = true;
+                pg_dec_correction_until_ = correction_end;
+            } else {
+                pg_hold_dec_degrees_ = served_dec;
+                pg_hold_dec_valid_ = !pulse_guide_active_[1] || now >= pulse_guide_end_time_[1];
+                pg_hold_dec_until_ = hold_end;
+                pg_hold_ra_valid_ = false;
+
+                double expected_delta = (guide_rate_.ra * duration_sec) / 15.0;
+                if (direction == 3) expected_delta = -expected_delta;
+                pg_ra_baseline_hours_ = served_ra;
+                pg_ra_expected_delta_hours_ = expected_delta;
+                pg_ra_correction_valid_ = true;
+                pg_ra_correction_until_ = correction_end;
+            }
+
+            pulse_guide_active_[static_cast<std::size_t>(axis)] = false;
+            protocol.pulse_guide_axis(axis, velocity, first_chunk_cs);
+
+            pulse_guide_active_[static_cast<std::size_t>(axis)] = true;
+            pulse_guide_end_time_[static_cast<std::size_t>(axis)] =
+                now + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
+            drop_poll_in_flight_locked();
+        }
 
         // Chain remaining chunks on the axis's own slot (MC_AUX_GUIDE max =
         // 255cs = 2550ms): one slot per axis, so a pulse on RA never supersedes
         // one on Dec. Cancelled + joined on disconnect and in the destructor.
-        // The body never takes mutex_, so starting and joining it while mutex_
-        // is held (as here) cannot deadlock.
+        // Started with mutex_ free, like the join above.
         int remaining_cs = total_cs - first_chunk_cs;
         if (remaining_cs > 0) {
-            pulse_ops_[axis].start([axis, velocity, remaining_cs, first_chunk_cs](util::OperationContext& ctx) {
-                if (!ctx.wait_for(std::chrono::milliseconds(first_chunk_cs * 10))) {
-                    return;
-                }
-                int left = remaining_cs;
-                auto& proto = CelestronProtocolWrapper::instance();
-                while (left > 0) {
-                    int chunk = std::min(left, 255);
-                    try {
-                        proto.pulse_guide_axis(axis, velocity, chunk);
-                    } catch (const std::exception& e) {
-                        // Each MC_AUX_GUIDE chunk is hardware-timed, so a
-                        // failed re-arm just ends the pulse early (no runaway).
-                        ALPACA_LOG_WARN("Celestron", std::string("Pulse-guide chunk chain aborted: ") + e.what());
-                        break;
-                    } catch (...) {
-                        ALPACA_LOG_WARN("Celestron", "Pulse-guide chunk chain aborted");
-                        break;
-                    }
-                    left -= chunk;
-                    if (left > 0 && !ctx.wait_for(std::chrono::milliseconds(chunk * 10))) {
+            try {
+                pulse_ops_[axis].start([axis, velocity, remaining_cs, first_chunk_cs](util::OperationContext& ctx) {
+                    if (!ctx.wait_for(std::chrono::milliseconds(first_chunk_cs * 10))) {
                         return;
                     }
+                    int left = remaining_cs;
+                    auto& proto = CelestronProtocolWrapper::instance();
+                    while (left > 0) {
+                        int chunk = std::min(left, 255);
+                        try {
+                            proto.pulse_guide_axis(axis, velocity, chunk);
+                        } catch (const std::exception& e) {
+                            // Each MC_AUX_GUIDE chunk is hardware-timed, so a
+                            // failed re-arm just ends the pulse early (no runaway).
+                            ALPACA_LOG_WARN("Celestron", std::string("Pulse-guide chunk chain aborted: ") + e.what());
+                            break;
+                        } catch (...) {
+                            ALPACA_LOG_WARN("Celestron", "Pulse-guide chunk chain aborted");
+                            break;
+                        }
+                        left -= chunk;
+                        if (left > 0 && !ctx.wait_for(std::chrono::milliseconds(chunk * 10))) {
+                            return;
+                        }
+                    }
+                });
+            } catch (...) {
+                // No chain will end the pulse the first chunk started on this axis, and the mount keeps
+                // guiding for the first chunk only: stop the axis as AbortSlew does and drop the pulse state
+                // before the refusal reaches the client.
+                std::lock_guard<std::mutex> lock(mutex_);
+                const auto axis_index = static_cast<std::size_t>(axis);
+                pulse_guide_active_[axis_index] = false;
+                pulse_guide_end_time_[axis_index] = util::TaskClock::clock::time_point::min();
+                if (connected_) {
+                    try {
+                        protocol.move_axis_fixed_rate(axis, 0);
+                    } catch (...) {
+                        ALPACA_LOG_ERROR("Celestron", "PulseGuide stop after a refused chain start failed on axis " +
+                                                          std::to_string(axis) + "; the axis may still be moving");
+                    }
                 }
-            });
+                throw;
+            }
         }
     }
 
@@ -2057,6 +2092,11 @@ private:
 public:
     void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         slew_.set_spawn_for_testing(std::move(spawn));
+    }
+
+    void set_pulse_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        pulse_ops_[0].set_spawn_for_testing(spawn);
+        pulse_ops_[1].set_spawn_for_testing(std::move(spawn));
     }
 
 private:
@@ -3159,9 +3199,10 @@ private:
     // get_tracking()).
     //
     // Atomic rather than moving the reads under mutex_ deliberately: these are
-    // capability getters that AGENTS.md requires to be cheap, and mutex_ is
-    // held across the whole blocking connect handshake, so locking them would
-    // park a polling client for the duration -- the issue #130 shape.
+    // capability getters a polling client calls, and mutex_ is held across the
+    // whole blocking connect handshake, so locking them would park that client
+    // for the duration -- the issue #130 shape (alpaca-http-conformance.instructions.md
+    // states the rule for get_connected()).
     std::atomic<bool> has_autoguider_port_{false};
 
     mutable double pg_hold_ra_hours_ = 0.0;
@@ -3245,6 +3286,12 @@ std::unique_ptr<TelescopeDriver> create_celestron_telescope_with_site(
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_pulse_spawn_for_testing(std::move(spawn));
     }
 }
 

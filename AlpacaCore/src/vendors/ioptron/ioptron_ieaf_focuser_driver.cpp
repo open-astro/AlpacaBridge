@@ -139,8 +139,9 @@ public:
                     try {
                         info = protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node is stale; a handshake miss on a present port is not.
-                        if (util::device_node_missing(cfg.serial_port))
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale; a
+                        // handshake miss on a present port is not.
+                        if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
                     }
@@ -213,7 +214,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()

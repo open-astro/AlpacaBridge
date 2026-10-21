@@ -57,7 +57,8 @@ it is never reachable through `router.cpp` or the web UI.
   the character's *absence* means the state is active — this is the opposite polarity of what
   the INDI driver's comments implied, and was the single biggest early bug in this driver).
   `H` = at home, `P`/`p` = parked/not parked, `I` = parking in progress, `F` = park failed,
-  `h` = homing. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
+  `h` = homing, `g` = a guide move is running (`guide.active()`: a `:Mn#/:Ms#/:Me#/:Mw#` move, so a `MoveAxis`, and also a home or spiral guide; not a pulse guide),
+  `G` = a pulse guide is running. `N` covers a GOTO only: a `MoveAxis` never clears it. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
   pier side: `T` east, `W` west, `o` none (OnStepX `Status.command.cpp`; HM-17 traces `nNpEW180`
   = pier west, `nNpET1:0` = pier east, `nNPHEo180` = parked at home). `e` means "sync to
   encoders only": unpark, home and sync set it and the next GOTO clears it, and it matters only
@@ -94,6 +95,56 @@ it is never reachable through `router.cpp` or the web UI.
   half-max) is still called once at connect as a harmless safe default, but the real rate for
   every `MoveAxis` call is set immediately before each `:Mn#/:Ms#/:Me#/:Mw#` via the mechanism
   above.
+- **A running `MoveAxis` is re-sent every 7 s** (#1378): OnStepX ends a `:Mn#/:Ms#/:Me#/:Mw#` move
+  after `GUIDE_TIME_LIMIT` (default 10 s; 1-120 s, or 0 for none, set at firmware build), and every
+  repeat restarts that timer (`Guide::startAxis1`). A background task (`move_axis_resend_`, an
+  `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
+  `AbortSlew`, a GOTO, park, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
+  itself fails. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
+  that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
+  `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
+  between ticks. A skipped tick (a failed read, `G`, or near a limit) therefore puts the next
+  attempt about 14 s after the last send, past the default 10 s limit: the move ends there. The re-send needs a `GUIDE_TIME_LIMIT` of 8 s or more; with less the move lapses
+  between re-sends and reads as ended. Seen on the HM-17 before the fix: `MoveAxis(0, 0.5)` held
+  for 20 s moved for about 10 s.
+  - **On the task clock (decision 0005).** The driver takes a `util::TaskClock&` (factories
+    `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
+    the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
+    position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
+    sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
+    connect and on disconnect), and the #521 relink outage:
+    the driver hands its clock to the process-wide wrapper at connect
+    (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
+    when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
+    clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
+    `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
+    slew, 2 s past the relink window, 60 s past a UTCDate write).
+  - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
+    that read shows `g` (a guide-style move runs, either axis). A move the firmware let lapse stays
+    ended: its time limit, or the 5 s `GUIDE_TIME_NO_LIMITS` cap it applies while its soft limits
+    are off (`Guide::finalizeTimeLimit`), which asks for a fresh command on purpose. `G` (a pulse
+    guide runs) hides `g`; that tick sends nothing and ends nothing. OnStepX keeps `G` until both
+    axes are idle (`Guide::poll`), so after a pulse guide during a move the move ends at the
+    firmware's time limit. Once the firmware has shown
+    `g` since this connect, a `:GU#` read taken after the move started with no `g` (and no `G`)
+    means the move ended at the mount (a hand controller or another app sent a stop, or a limit):
+    the re-send ends and `Slewing` reads false. Firmware that never sends `g` gets no re-send, and
+    `Slewing` stays true until the client stops the move, as before.
+  - **Braking (HM-17, OnStepX 10.23a, 2026-10-20):** after a stop `g` stays set while the axis
+    brakes (`GA_BREAK`; about 0.4 s at 0.5 deg/s), and a move command in that time restarts the
+    move at full rate (`Axis::autoSlew` "resum"). A stop at the mount is therefore undone when a
+    tick lands in the braking; the 7 s interval keeps that rare. On an equatorial mount, with both
+    axes moving, a stop of one axis alone keeps `g` set and that axis is re-sent.
+  - **Altitude limits:** on an equatorial mount OnStepX stops at the horizon and overhead limits
+    only on the crossing, and accepts a custom-rate move past them afterwards. The re-send
+    therefore reads `:GA#`, `:Gh#` and `:Go#` and sends nothing unless the altitude is at least
+    1 degree inside both limits (90 overhead means none); a move started below the horizon limit
+    gets none either. `:GA#` strips refraction, so it reads at or below the altitude the firmware
+    tests; the margin also covers whole-degree limits and a small pointing model. A failed or
+    out-of-range read sends nothing. The firmware then ends the move after its time limit. The meridian, axis and switch
+    limits need no check: OnStepX enforces them on every poll and refuses a move further out.
+  - A client that goes silent is stopped by the server's 30 s motion watchdog instead of the
+    firmware's 10 s.
 - **Tracking on/off**: confirmed on real hardware to be `:ST60.164275#` (start — sets tracking
   rate to exact sidereal, `60.164275 = 60.0 × 1.00273790935`) / `:ST0#` (stop — any rate below
   0.1 Hz reads as `TrackingNone`). `:To#`/`:Tn#` (this driver's original guess, inferred from the
@@ -126,13 +177,16 @@ it is never reachable through `router.cpp` or the web UI.
   implementation) hung every slew/site/time write until timeout and was the root cause of the
   first several ConformU failures (`SlewToCoordinatesAsync`, site/time writes).
   `kSetAckTimeoutMs = 1000` bounds the failure case only; real acks arrive in well under 100ms.
-- **Serial `VTIME` must be 1 (100ms), not higher**: an earlier version copied Gemini's one-time
-  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every blocking read
+- **The serial per-read window must be 100 ms, not higher** (`util::tty_read(..., 100)` since
+  #1202; it was `VTIME=1` on a blocking fd before): an earlier version copied Gemini's one-time
+  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every read
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
-  stale-input drain window is `50ms` (one VTIME cycle) for the same reason — `120ms` (2+ cycles)
+  stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
   pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
-  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17.
+  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17. The fd is
+  non-blocking (`util::SerialLink`), so a port another program retunes to `VMIN=1` can no longer park
+  the drain after a blind command (the TeSeek HM-17 hang reported on #1202).
 - **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
   the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
   lost when that path is gone or points elsewhere, or when a read or write on the fd fails with
@@ -149,7 +203,7 @@ it is never reachable through `router.cpp` or the web UI.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
-  no poll thread, and the router reads `Connected` before every Connect, so the first to notice
+  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s), and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
   still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that

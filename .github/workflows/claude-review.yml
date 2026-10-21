@@ -28,12 +28,86 @@ jobs:
         || contains(github.event.pull_request.labels.*.name, 'safe-to-review')
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Up to 45 min waiting for CI (below) plus the review itself.
+    timeout-minutes: 75
     permissions:
       contents: read
       pull-requests: write
       id-token: write
+      checks: read
+      actions: read
     steps:
+      # Review only a head whose build and test jobs passed: a red build would
+      # otherwise pay for a full review the next push throws away. The names
+      # are the `name:` of those jobs in ci.yml (a check run carries the job's
+      # name, not its id); renaming one there fails this step at once with
+      # "never reported". A newer push cancels this wait through the
+      # concurrency group above. The job fails here, before the action runs,
+      # and /pr-checker and /submit-pr read that as "fix CI", not as a broken
+      # review workflow.
+      - name: Wait for the CI build and test jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          required=(
+            "Build + test (arm64)"
+            "Build + test (all vendors, arm64)"
+            "Sanitizers (ASan + UBSan, arm64)"
+            "Sanitizers (TSan concurrency stress, arm64)"
+          )
+          deadline=$(( $(date +%s) + 45 * 60 ))
+          while :; do
+            # filter=latest keeps the newest run per name, so a re-run job counts.
+            runs="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=latest" \
+              | jq -s '[.[].check_runs[] | select(.app.slug == "github-actions")]')" || runs='[]'
+            waiting=(); missing=(); failed=()
+            for name in "${required[@]}"; do
+              state="$(jq -r --arg n "${name}" \
+                '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" elif .status != "completed" then "pending" else .conclusion end' \
+                <<<"${runs}")"
+              case "${state}" in
+                success|skipped|neutral) ;;
+                pending) waiting+=("${name}") ;;
+                missing) missing+=("${name}") ;;
+                *) failed+=("${name}: ${state}") ;;
+              esac
+            done
+            if [ "${#failed[@]}" -gt 0 ]; then
+              printf '::error::CI is red on %s, so the review is skipped. Fix CI and push again: %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${failed[*]}")"
+              exit 1
+            fi
+            if [ "${#waiting[@]}" -eq 0 ] && [ "${#missing[@]}" -eq 0 ]; then
+              echo "CI build and test jobs passed on ${HEAD_SHA}."
+              exit 0
+            fi
+            # Every other ci.yml job on this head has finished and a required
+            # name is still absent: it was renamed in ci.yml. Only ci.yml's own
+            # check suites count: a pull_request_target workflow
+            # (decision-records) finishes in seconds on a fork PR whose CI still
+            # waits for approval, and must not read as "CI finished". A failed
+            # lookup leaves ci_suites empty, so a rename then surfaces as the
+            # 45-minute timeout instead of at once; that errs toward waiting.
+            ci_suites="$(gh api --paginate "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .check_suite_id' \
+              | jq -s .)" || ci_suites='[]'
+            others_running="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status != "completed")] | length' <<<"${runs}")"
+            others_done="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status == "completed")] | length' <<<"${runs}")"
+            if [ "${#missing[@]}" -gt 0 ] && [ "${others_running}" = 0 ] && [ "${others_done}" -gt 0 ]; then
+              printf '::error::CI finished on %s but these jobs never reported (renamed in ci.yml?): %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${missing[*]}")"
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              printf '::error::CI did not finish on %s within 45 minutes (a fork PR whose CI waits for approval stays here): %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${waiting[*]} ${missing[*]}")"
+              exit 1
+            fi
+            sleep 30
+          done
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Review the head the author pushed, not the base branch or merge ref.
@@ -120,7 +194,7 @@ jobs:
             echo "ADR_SCOPE_EOF"
           } >> "${GITHUB_OUTPUT}"
 
-      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc  # v1
+      - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is

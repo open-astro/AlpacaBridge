@@ -10,6 +10,38 @@ the matching shared file, not in a vendor file.
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
+**Open every serial port with `util::SerialLink` (`util/serial_link.h`, issue #1202).** Many vendors ship
+the same CH340 adapter, so one vendor's auto-detect probe matches every other vendor's device. When only
+some wrappers used the in-use registry, a Gemini flat panel scan opened the connected Gemini PDH's port at
+its own baud rate and the hub stayed faulted until restart, and a port retuned to `VMIN=1` by another
+program parked a WandererRotator monitor and an OnStep drain in `n_tty_read`, hanging Disconnect.
+`SerialLink::open(path, kind, owner, configure, &error)` claims the port (`util/serial_port_registry.h`),
+takes `TIOCEXCL`, applies the line settings and keeps the fd **non-blocking**; `close()` releases all three.
+Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
+
+- **The connected link** opens with `SerialClaimKind::Link`. A port another connected device holds is
+  refused with a message that names the holder; put it in the connect refusal.
+- **A probe** opens with `SerialClaimKind::Probe` for exactly the probe's duration. Before probing,
+  `enumerate_*_ports()` classifies each candidate with `util::serial_candidate_use(path, owner)`: a port held
+  by another kind of device is skipped without being opened, and a port held by a connected device of the
+  same kind stays in the results at its scan position without being probed, so an auto-detect index still
+  names the same device while its sibling is connected. Probes that collide on a port take turns (the claim
+  waits, bounded by `kSerialProbeClaimWait`); they never skip each other.
+- **One owner name per wrapper**, shared by its probe and its link (`"Gemini focuser"`): it is what the
+  sibling test compares and what a refused operator reads.
+- **Reads go through `util::tty_read(fd, buf, n, timeout_ms)` and writes through `util::tty_write_all()`.**
+  Both are `poll()`-bounded. `VMIN`/`VTIME` do nothing on the non-blocking fd, so a retune cannot park a
+  reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
+  back any another program changed. A streaming reader whose link-health latch trips calls
+  `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
+  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment or a
+  pre-#1202 `mark_serial_port_*` call anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the
+  two helper headers. The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
+  non-tty fds only.
+- A by-id name does not identify a CH340 device (they carry no serial number): the connect-time handshake
+  is what proves which device is on a port, so every serial driver must check its handshake reply.
+
 POSIX serial and socket code has several easy-to-get-wrong patterns that must not
 be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
 included inside the existing `#ifndef _WIN32` branches):
@@ -29,24 +61,20 @@ included inside the existing `#ifndef _WIN32` branches):
   reader at 100% CPU; a stuck-blocking connect socket hangs for the full ~127s TCP
   timeout). Both helpers check both `fcntl` calls and return false on failure.
 
-Apply these on **both** the auto-detect probe path **and** the production
-connect/open path — the fd is typically opened `O_NONBLOCK`, so `connect_serial()`
-must `clear_nonblocking()` after `tcsetattr` (not just the probe), or reads ignore
-`VMIN`/`VTIME` and `write_all` fails on `EAGAIN`. Use the **same abort-on-failure
-pattern** (`close(fd); return false/""`) at every call site.
-
-**Exception — Sky-Watcher direct serial.** On the **connected link**, that driver
-deliberately keeps the fd **non-blocking** and bounds its reads and writes with `poll()`
-instead, because some USB CDC-ACM virtual COM ports do not honour `VMIN`/`VTIME` and a
-blocking `read()` on a board that went quiet parks forever in `n_tty_read`, wedging the
-driver. There `connect_serial()` calls `set_nonblocking()`, `settle_serial`/`exchange_serial`
-reads go through a `poll(POLLIN)`-bounded helper, and frame sends go through a
-`poll(POLLOUT)`-bounded write (not `write_all`, which would fail fast on an `EAGAIN` before
-the first byte). Do **not** "fix" that back to `clear_nonblocking` — see the Sky-Watcher
-scoped instructions. The auto-detect *probe* path, `probe_skywatcher_port`, keeps its fd
-non-blocking and bounds each read with `poll(POLLIN)` against its 1500 ms budget the same way,
-and so does the SynScan echo guard it runs first at 115200 (`exchange_synscan_echo_on_fd` in
-`util/synscan_handset_probe.h`), so a silent candidate on such an adapter cannot hang the scan.
+On a serial port these apply only through `SerialLink`'s own helpers: a tty fd is
+non-blocking, so its reads go through `util::tty_read()` and its writes through
+`util::tty_write_all()`, never a bare `read()`, `write_all()` or `clear_nonblocking()`.
+`write_all`, `send_all` and the `fcntl` helpers remain the rule for sockets and other
+fds. The non-blocking, `poll()`-bounded shape started as the Sky-Watcher driver's
+exception (some USB CDC-ACM ports ignore `VMIN`/`VTIME`, and a blocking `read()` on a
+board that went quiet parked forever in `n_tty_read`); #1202 made it the rule for every
+serial driver, probes included. Two links keep their own `poll()`-bounded loops on the
+same non-blocking fd: Sky-Watcher, because they are the path through its
+`serial_read_`/`serial_write_` test seams, and the Celestron CGX AUX link (mount and
+focuser), whose `read()`/`write()` run only after its own `poll()` on the exchange deadline
+([decision 0017](../../docs/decisions/0017-serial-port-ownership.md) rule 5). Neither
+restores retuned line settings on a timeout the way `tty_read()` does; the CGX link opens
+with `SerialExclusive::Required`, so no other program can open its port to retune it.
 
 ### Auto-detect failure message (`util/auto_detect.h`)
 
@@ -78,7 +106,10 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   so repeated ConformU / NINA connects stay under the Platform 7 5 s `Connect()`
   budget. **Re-scanning is opt-in**: the retry falls through to the resolver
   only when the lambda throws `util::StaleEndpoint`, which it does for a
-  vanished serial or HID node (`util::device_node_missing()`), a refused network
+  vanished serial or HID node (`util::device_node_missing()`), a serial port
+  another connected device now holds (#1202: after a replug or a change of plug
+  order the remembered name can belong to another CH340 device; serial drivers
+  check both with `util::serial_endpoint_stale()`), a refused network
   connect, or a failed identity gate (SynScan's echo test). Every other
   exception propagates: a scan DTR-resets every CP210x / CH340 device on the
   box, so a wheel still homing or a handshake that missed once must never start
@@ -87,7 +118,10 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
   sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
   window, so before a ConformU run against a freshly restarted service connect
-  the device once from the web UI, or give it an explicit port or host.
+  the device once from the web UI, or give it an explicit port or host. A
+  connect that finds another device's probe on its serial port waits for that
+  probe too (up to `util::kSerialProbeClaimWait`, sized for the CFW3 probe,
+  #1202), which can likewise outlast the 5 s window.
 - **Every driver converted from a construction-time scan (the ten in #660)
   exposes a `create_*_deferred(device_number, resolver, ...)` seam** and ships
   the cases in `tests/deferred_connect_cases.h` over its fake:

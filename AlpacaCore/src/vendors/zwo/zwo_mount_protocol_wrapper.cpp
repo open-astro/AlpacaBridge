@@ -14,6 +14,8 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -343,44 +345,55 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 // the '#' terminator or the probe timeout, returning the mount model string
 // (e.g. "AM5N") on success or empty on failure.
 
+// Operator-facing owner of this wrapper's ports, for both the auto-detect
+// probe and the connected link (issue #1202): a probe skips a port another
+// device holds, and lists one a ZWO mount holds without opening it.
+constexpr const char* kSerialOwner = "ZWO mount";
+
+#ifndef _WIN32
+// Issue #1202: whether the scan may probe @p port. A port another connected
+// device holds is never opened. One a connected ZWO mount holds is listed at
+// its scan position without being probed (model unknown), so the order of
+// the results stays stable; connecting to it is refused by the link claim,
+// which names the holder.
+bool zwo_mount_candidate_free(const std::string& port, const std::string& name, std::vector<ZWODeviceInfo>& results) {
+    switch (util::serial_candidate_use(port, kSerialOwner)) {
+        case util::SerialCandidateUse::HeldByOther:
+            ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping " + port + ": held by another connected device");
+            return false;
+        case util::SerialCandidateUse::HeldBySibling:
+            ALPACA_LOG_DEBUG("ZWO", "Auto-detect: listing " + port + " unprobed: a connected ZWO mount holds it");
+            results.push_back({ConnectionType::Serial, port, "", 4030, "", name});
+            return false;
+        case util::SerialCandidateUse::Free:
+            break;
+    }
+    return true;
+}
+
+// 8N1 raw, no flow control.
+void configure_mount_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
+#endif
+
 std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
 #ifdef _WIN32
     (void)port_path;
     (void)timeout_ms;
     return "";
 #else
-    const int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // Probe claim, held for exactly this function: a connected device's port
+    // is refused before it is opened, another scan's probe is waited for.
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_mount_line(tty, B9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping " + port_path + ": " + error);
         return "";
     }
+    const int fd = link.fd();
 
-    termios tty{};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_oflag &= ~OPOST;
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 1;
-    if (tcsetattr(fd, TCSANOW, &tty) != 0 || !util::clear_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
-
-    const std::string cmd = ":GVP#";
-    if (!util::write_all(fd, cmd.c_str(), cmd.size())) {
-        close(fd);
+    if (!util::tty_write_all(fd, std::string(":GVP#"))) {
         return "";
     }
 
@@ -389,15 +402,13 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
         char ch = '\0';
-        // This read() is reached via enumerate_zwo_mounts() called from
+        // This read is reached via enumerate_zwo_mounts() called from
         // Impl::connect(Auto), which deliberately holds mutex_ across the
         // whole auto-detect probe sequence (see that function's doc comment)
-        // so a concurrent connect can't race it; that predates and is
-        // unrelated to the by-id scan fix in this change, just newly
-        // reachable to the analyzer now that the scan no longer routes
-        // through nested try/catch.
+        // so a concurrent connect can't race it. Each read waits at most
+        // 100 ms; the loop's deadline bounds the probe.
         // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        const ssize_t n = ::read(fd, &ch, 1);
+        const ssize_t n = util::tty_read(fd, &ch, 1, 100);
         if (n == 1) {
             if (ch == '#') {
                 break;
@@ -405,7 +416,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
             if (ch != '\r' && ch != '\n') {
                 response.push_back(ch);
             }
-        } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        } else if (n < 0) {
             break;
         }
         if (!response.empty() && n == 0) {
@@ -413,7 +424,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    close(fd);
+    link.close();
 
     // Trim whitespace; the model is the non-empty body (e.g. "AM5N").
     auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
@@ -556,6 +567,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
             std::error_code canon_ec;
             const std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
+            if (!zwo_mount_candidate_free(resolved, name, results)) continue;
             const std::string model = probe_serial_mount(resolved, probe_timeout_ms);
             if (!model.empty()) {
                 std::string found_msg = "Auto-detect: found ";
@@ -576,6 +588,7 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
             if (!alpacacore::util::path_exists(port)) {
                 continue;
             }
+            if (!zwo_mount_candidate_free(port, port, results)) continue;
             const std::string model = probe_serial_mount(port, probe_timeout_ms);
             if (!model.empty()) {
                 std::string found_msg = "Auto-detect: found ";
@@ -697,6 +710,7 @@ public:
 
         connection_type_ = info.type;
         connection_info_ = info;
+        last_connect_error_.clear();
 
         bool ok = false;
         if (info.type == ConnectionType::Serial) {
@@ -717,6 +731,11 @@ public:
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    std::string last_connect_error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_connect_error_;
     }
 
     std::string send_command(const std::string& command,
@@ -791,13 +810,14 @@ private:
             return;
         }
 
+        // Connection state first, then the port (#1202): nothing can see a
+        // connected wrapper whose fd is already closed.
+        connected_ = false;
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
-
-        connected_ = false;
     }
 
     bool connect_serial(const std::string& port_path, int baud_rate) {
@@ -847,20 +867,6 @@ private:
 
         return true;
 #else
-        serial_fd_ = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("ZWO", "Failed to open serial port " + port_path + ": errno=" +
-                                            std::to_string(errno));
-            return false;
-        }
-
-        termios tty {};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-
         speed_t speed = B9600;
         switch (baud_rate) {
         case 1200: speed = B1200; break;
@@ -874,39 +880,19 @@ private:
         default: speed = B9600; break;
         }
 
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_oflag &= ~OPOST;
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 1;
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
+        // SerialLink (issue #1202) claims the port for this mount, so another
+        // driver's connect or another vendor's auto-detect probe never opens
+        // it while it is ours, and locks it for exclusive use so another
+        // program cannot either. The fd stays non-blocking; every read and
+        // write below is bounded with poll().
+        link_ = util::SerialLink::open(
+            port_path, util::SerialClaimKind::Link, kSerialOwner,
+            [speed](struct termios& tty) { configure_mount_line(tty, speed); }, &last_connect_error_);
+        if (!link_) {
+            ALPACA_LOG_ERROR("ZWO", last_connect_error_);
             return false;
         }
-
-        // Fail the open if we can't clear O_NONBLOCK: a non-blocking fd makes
-        // every read return EAGAIN immediately and breaks all I/O silently.
-        // Matches the abort-on-failure behaviour of the other serial wrappers.
-        if (!util::clear_nonblocking(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-
+        serial_fd_ = link_.fd();
         return true;
 #endif
     }
@@ -918,10 +904,8 @@ private:
             serial_handle_ = INVALID_HANDLE_VALUE;
         }
 #else
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        serial_fd_ = -1;
+        link_.close();
 #endif
     }
 
@@ -1038,7 +1022,7 @@ private:
         }
         return true;
 #else
-        return util::write_all(serial_fd_, data.c_str(), data.size());
+        return util::tty_write_all(serial_fd_, data);
 #endif
     }
 
@@ -1121,8 +1105,8 @@ private:
         }
         return false;
 #else
-        const ssize_t bytes_read = read(serial_fd_, &ch, 1);
-        return bytes_read == 1;
+        // Up to 100 ms for a character, the read window this link always had.
+        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
 #endif
     }
 
@@ -1167,9 +1151,11 @@ private:
     HANDLE serial_handle_;
     SOCKET socket_handle_;
 #else
-    int serial_fd_;
+    util::SerialLink link_;
+    int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
 #endif
+    std::string last_connect_error_;
 };
 
 ZWOMountProtocolWrapper::ZWOMountProtocolWrapper()
@@ -1193,6 +1179,8 @@ void ZWOMountProtocolWrapper::disconnect() {
 bool ZWOMountProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
 }
+
+std::string ZWOMountProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
 std::string ZWOMountProtocolWrapper::send_command(const std::string& command,
                                                   bool require_hash_terminator,
@@ -1585,6 +1573,8 @@ SiteInfo ZWOMountProtocolWrapper::get_site_info() {
         throw AlpacaException("Unable to parse site coordinates", AlpacaError::DriverException);
     }
 
+    // ZWO wire longitude is west-positive; SiteInfo follows ASCOM's east-positive convention.
+    info.longitude_degrees = -info.longitude_degrees;
     return info;
 }
 
@@ -1597,7 +1587,7 @@ void ZWOMountProtocolWrapper::set_site_info(const SiteInfo& info) {
     }
 
     const std::string lat = format_angle_star(info.latitude_degrees, 2);
-    const std::string lon = format_angle_star(info.longitude_degrees, 3);
+    const std::string lon = format_angle_star(-info.longitude_degrees, 3);
 
     const std::string response = trim_copy(send_command(":SMGE" + lat + "&" + lon, false));
     throw_if_mount_error(response, ":SMGE");

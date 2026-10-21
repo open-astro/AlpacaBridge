@@ -23,13 +23,14 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <alpacacore/util/serial_link.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -44,6 +45,22 @@ constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
 constexpr int kHandshakeRetryDelayS = 1;
 constexpr int kHandshakeReadTimeoutS = 2;  // Shorter timeout during handshake
+constexpr int kProbeReadTimeoutMs = 5000;  // Probe reply budget per attempt
+
+// Operator-facing owner name for the port registry (#1202), shared by the
+// probe and the connected link of every flat panel model (Lite, Rev2, Pro all
+// compete for one auto-detect index), so a scan counts a connected panel's
+// port as a sibling instead of opening it.
+constexpr const char* kSerialOwner = "Gemini flat panel";
+
+#ifndef _WIN32
+// 8N1 raw at @p baud with HUPCL cleared: DTR stays high on close, so the next
+// open does not reset the MCU (see probe_port()).
+void configure_flatpanel_line(struct termios& tty, speed_t baud) {
+    util::make_raw_8n1(tty, baud);
+    tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
+}
+#endif
 // Cover travel is mechanical, not an instant ack -- INDI's Rev2 adapter uses
 // a long timeout for open/close specifically (vs. the short default used for
 // light/brightness/status queries). 30s matches INDI's move/calibration
@@ -175,43 +192,18 @@ bool is_flatpanel_handshake_reply(const std::string& reply) {
 // trigger a second reset.
 static bool probe_port(const std::string& port_path) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe's claim lasts exactly as long as `link`: a connect or another
+    // scan waits for it, and a port a connected driver holds (the #1202 PDH)
+    // is refused here without being opened or retuned.
+    std::string error;
+    auto link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_flatpanel_line(tty, B9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("Gemini", "Flat panel probe skipped " + port_path + ": " + error);
         return false;
     }
-
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return false;
-    }
-
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 50;  // 5-second per-character timeout
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return false;
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return false;
-    }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
     // Wait for MCU boot after the DTR reset, then try the handshake. Two
@@ -221,7 +213,7 @@ static bool probe_port(const std::string& port_path) {
         tcflush(fd, TCIOFLUSH);
 
         const char* cmd = ">H#";
-        if (!util::write_all(fd, cmd, std::strlen(cmd))) {
+        if (!util::tty_write_all(fd, cmd, std::strlen(cmd))) {
             continue;
         }
 
@@ -231,21 +223,22 @@ static bool probe_port(const std::string& port_path) {
         // check below never passes and the port is wrongly rejected.
         char resp[kMaxResponseLen] = {};
         int total = 0;
-        auto start = std::chrono::steady_clock::now();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kProbeReadTimeoutMs);
         while (total < static_cast<int>(sizeof(resp)) - 1) {
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > 5) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
+                    .count();
+            if (remaining <= 0) {
                 break;
             }
             char ch = 0;
-            ssize_t r = read(fd, &ch, 1);
+            const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
             if (r == 1) {
                 if (ch == '\r' || ch == '\n') continue;
                 resp[total++] = ch;
                 if (ch == '#') break;
             } else if (r == 0) {
-                continue;  // VTIME timeout, keep trying
+                continue;  // timed out; the deadline check above ends the loop
             } else {
                 break;
             }
@@ -256,17 +249,14 @@ static bool probe_port(const std::string& port_path) {
         // what lets auto-detect discriminate the flat panel from the Gemini
         // focuser when both share the same USB-serial by-id patterns.
         if (is_flatpanel_handshake_reply(std::string(resp, static_cast<std::size_t>(total)))) {
-            // HUPCL was already cleared in the tty config above; no need to
-            // re-fetch/re-clear/re-set it here.
-            close(fd);
+            // HUPCL was already cleared by configure_flatpanel_line(); DTR
+            // stays high when `link` closes the port.
             return true;
         }
 
         ALPACA_LOG_DEBUG("Gemini", "Flat panel probe attempt " + std::to_string(attempt + 1) +
                                        " got no valid response from " + port_path);
     }
-
-    close(fd);
 #else
     (void)port_path;
 #endif
@@ -385,11 +375,27 @@ std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
     // Probe every candidate concurrently: a non-responsive port costs the full
     // handshake timeout, so serial probing scaled linearly with adapter count
     // (issue #218); one thread per port bounds the scan to one port's worst case.
+    //
+    // A port a connected device holds is never opened (#1202): this scan used
+    // to probe a connected PDH's CH340 port at 9600 baud and leave it faulted.
+    // Another kind's port is skipped; a connected flat panel's port keeps its
+    // place in the results unprobed, so the auto-detect index stays stable.
     std::vector<char> found(candidates.size(), 0);
     std::vector<std::thread> workers;
     workers.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& c = candidates[i];
+        const auto use = alpacacore::util::serial_candidate_use(c.path, kSerialOwner);
+        if (use == alpacacore::util::SerialCandidateUse::HeldByOther) {
+            ALPACA_LOG_DEBUG("Gemini", "Skipping " + c.path + ": held by another connected device");
+            continue;
+        }
+        if (use == alpacacore::util::SerialCandidateUse::HeldBySibling) {
+            found[i] = 1;
+            ALPACA_LOG_DEBUG("Gemini",
+                             "Counting " + c.path + " without probing it: a connected Gemini flat panel holds it");
+            continue;
+        }
         ALPACA_LOG_INFO("Gemini",
                         "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for a flat panel...");
         workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path) ? 1 : 0; });
@@ -434,7 +440,7 @@ public:
             }
 
 #ifndef _WIN32
-            tcflush(serial_fd_, TCIOFLUSH);
+            tcflush(link_.fd(), TCIOFLUSH);
 #else
             PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #endif
@@ -680,20 +686,6 @@ private:
 
         PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #else
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
-        }
-
-        struct termios tty {};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to get serial port attributes", AlpacaError::DriverException);
-        }
-
         speed_t baud = B9600;
         switch (config_.baud_rate) {
             case 9600:
@@ -715,42 +707,20 @@ private:
                 baud = B9600;
                 break;
         }
-        cfsetospeed(&tty, baud);
-        cfsetispeed(&tty, baud);
 
-        // 8N1
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_cflag &= ~HUPCL;  // Keep DTR high on close -- prevents MCU reset on reopen
-
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-
-        tty.c_oflag &= ~OPOST;
-        tty.c_oflag &= ~ONLCR;
-
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 10;  // 1s per-character timeout; read_response() has its own timeout
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port attributes", AlpacaError::DriverException);
+        // Claims the port (#1202): a port another connected device holds is
+        // refused before it is opened or retuned, and the refusal names the
+        // holder for the operator.
+        std::string error;
+        auto link = util::SerialLink::open(
+            config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+            [baud](struct termios& tty) { configure_flatpanel_line(tty, baud); }, &error);
+        if (!link) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
+        link_ = std::move(link);
 
-        if (!util::clear_nonblocking(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port to blocking mode", AlpacaError::DriverException);
-        }
-
-        tcflush(serial_fd_, TCIOFLUSH);
+        tcflush(link_.fd(), TCIOFLUSH);
 #endif
     }
 
@@ -766,10 +736,7 @@ private:
             serial_handle_ = INVALID_HANDLE_VALUE;
         }
 #else
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        link_.close();
 #endif
     }
 
@@ -786,7 +753,7 @@ private:
             total += bytes_written;
         }
 #else
-        if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
+        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
             throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #endif
@@ -814,9 +781,11 @@ private:
                 got_char = true;
             }
 #else
-            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            const ssize_t r = util::tty_read(link_.fd(), &ch, 1, static_cast<int>(timeout_ms - elapsed));
             if (r == 1) {
                 got_char = true;
+            } else if (r == 0) {
+                continue;  // timed out; the elapsed check above throws
             }
 #endif
 
@@ -846,7 +815,7 @@ private:
 #ifdef _WIN32
         PurgeComm(serial_handle_, PURGE_RXCLEAR);
 #else
-        tcflush(serial_fd_, TCIFLUSH);
+        tcflush(link_.fd(), TCIFLUSH);
 #endif
     }
 
@@ -857,7 +826,7 @@ private:
         // The Pro firmware answers >S# in ~27 ms wire-to-wire (measured on a
         // Pi, 18-char reply), and its CoverState must land inside ConformU's
         // 0.1 s FAST target; the fixed pre-read settle below pushed a live
-        // read to ~0.13 s. read_response() already blocks per byte (VTIME),
+        // read to ~0.13 s. read_response() already waits per byte (poll),
         // so the Pro path reads immediately. Lite/Rev2 keep the settle they
         // were ConformU-validated with -- no Lite/Rev2 unit was on hand to
         // prove they tolerate its removal.
@@ -874,7 +843,7 @@ private:
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
 #else
-    int serial_fd_ = -1;
+    util::SerialLink link_;  // the claimed, open port (#1202); closed while disconnected
 #endif
 };
 

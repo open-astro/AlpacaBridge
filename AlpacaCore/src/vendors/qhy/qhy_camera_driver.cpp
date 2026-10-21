@@ -314,7 +314,7 @@ private:
 
             std::lock_guard<std::mutex> lock(mutex_);
             // Clear driver state and cached capabilities BEFORE the SDK close
-            // (AGENTS.md): a throwing close must not leave the driver
+            // (driver-lifecycle.instructions.md): a throwing close must not leave the driver
             // half-connected serving a previous camera's caps/ranges. Keep the
             // model string so the web UI device name survives a disconnect
             // (see the constructor comment).
@@ -1308,7 +1308,7 @@ public:
         //
         // The thread captures NO object state — only the copied camera ID
         // and the shared_ptr flag — so it cannot dereference a destroyed
-        // driver if the object is torn down mid-pulse (AGENTS.md: never
+        // driver if the object is torn down mid-pulse (driver-lifecycle.instructions.md: never
         // detach a thread that touches `this`; the Player One camera fixed
         // this exact bug with the same shared_ptr pattern).
         std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_, sdk = &sdk_]() {
@@ -2022,7 +2022,7 @@ private:
     // own and can occasionally run well past its documented ~10s PID-loop
     // figure (ConformU finding), so join_temp_thread() below bounds the wait
     // and detaches on timeout. A detached thread must never touch `this`
-    // (AGENTS.md) -- these shared_ptrs, plus the immediate stop-flag
+    // (driver-lifecycle.instructions.md) -- these shared_ptrs, plus the immediate stop-flag
     // recheck in start_temp_control_thread() right after the blocking call,
     // are what make that safe. Same pattern as pulse_guiding_/
     // cooler_off_running_.
@@ -2042,7 +2042,7 @@ private:
     // indefinitely on real hardware with no SDK-side timeout (ConformU
     // finding), so join_cooler_off_thread() bounds its wait and detaches on
     // timeout. A detached thread must never touch `this` once it might
-    // outlive the driver (AGENTS.md) — the shared_ptr keeps this flag alive
+    // outlive the driver (driver-lifecycle.instructions.md) — the shared_ptr keeps this flag alive
     // independent of `this`, same pattern as pulse_guiding_ below.
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
 
@@ -2090,7 +2090,7 @@ private:
     // GetQHYCCDSingleFrame holding no lock, so a mid-exposure write would race
     // the live integration and corrupt the frame or the buffer geometry.
     // Checked under mutex_ — the same lock start_exposure publishes
-    // exposure_status_ under (AGENTS.md TOCTOU rule). Caller must hold mutex_.
+    // exposure_status_ under (driver-lifecycle.instructions.md TOCTOU rule). Caller must hold mutex_.
     void ensure_not_exposing_locked() const {
         if (exposure_status_ == QHYExposureStatus::Working) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
@@ -2274,7 +2274,7 @@ private:
             ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during shutdown: " + std::string(e.what()));
         }
         // Wake a worker parked in GetQHYCCDSingleFrame before joining, or the
-        // join blocks for the whole remaining exposure (AGENTS.md abort rule).
+        // join blocks for the whole remaining exposure (driver-lifecycle.instructions.md abort rule).
         if (exposure_thread_.joinable()) {
             std::string cancel_id;
             {

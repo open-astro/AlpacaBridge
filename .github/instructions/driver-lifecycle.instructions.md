@@ -52,9 +52,9 @@ vendor-agnostic; do them in the driver from the start.
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
-  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide and the Gemini
-  focuser and flat panel run their operation bodies (async slew, park, home, pulse-guide
-  timer, slew-completion tail) in a `util::AsyncOperation` slot
+  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
+  telescope's MoveAxis re-send (#1378) and the Gemini focuser and flat panel run their operation bodies (async slew,
+  park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
   reasons, cancellable `ctx.wait_for()` polling, the kept failure and the join at
@@ -95,29 +95,46 @@ vendor-agnostic; do them in the driver from the start.
   [CGX handoff/disconnect race](../../docs/failures/0011-cgx-handoff-disconnect-race.md).
 
 **Handles, locks & disconnect — the #1 source of use-after-close bugs**
-- One fixed lock order everywhere: `driver mutex_` → operation lock
-  (`readout_mutex_`, …) → SDK-wrapper mutex. Never acquire in reverse.
+- **Getters never wait on device I/O** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md)).
+  The driver `mutex_` is a short state lock and is never held across an SDK call, a
+  serial exchange, a connect handshake or a move; the one exception is a camera's
+  short `with_camera`/`with_handle` SDK calls (the camera exception below). Device transactions run under one
+  per-link I/O lock (an `io_mutex_`, or the lock of the `TtlStatusCache` or
+  protocol wrapper that already serialises the wire). The `StateSnapshot` mutex is not
+  an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
+  a getter served from a snapshot already meets this rule.
+  Identity, limits and capabilities (`Name`, `UniqueID`, `Max*`, `Can*`, names
+  lists) are published at the end of connect; `Connected` is lock-free. Lock order in
+  a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
+  SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
+  operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
+  slot mutex and the `StateSnapshot` mutex are leaves that nest under `mutex_`
+  (decisions 0006, 0010). Never acquire in reverse, and
+  convert a whole driver class in one PR so the old and new order never mix in one
+  class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
-  underneath it. Two valid shapes: **(a)** hold the driver `mutex_` across the whole
-  SDK call (fine for fast, non-blocking calls); **(b)** if you snapshot the handle
-  and then use a separate op-lock, `set_connected(false)` must take that op-lock
-  (after `mutex_`) across the close, **and** the operation must re-check
-  `ensure_connected()`/`!handle_` under the op-lock before the SDK call. A
-  snapshot-then-call gap with no re-check is a use-after-close.
+  underneath it. In a converted driver, `set_connected(false)` clears state under
+  `mutex_` and releases it, then takes the I/O lock across the close, so the I/O
+  lock is never taken under `mutex_`. In a camera or unconverted driver it takes the
+  op-lock (`readout_mutex_`, …) nested under `mutex_` across the close, as the old
+  order requires. In both, the operation also re-checks `ensure_connected()`/`!handle_` under
+  that lock before the SDK call. A snapshot-then-call gap with no re-check is a
+  use-after-close.
 - **A "copy the handle out, then call the SDK" helper is a trap** — returning the
   handle from a locked getter and calling the SDK *after* the lock releases is
-  exactly the snapshot-then-call gap. Prefer a `with_handle([&](auto h){ return
-  sdk.foo(h); })`-style helper that holds `mutex_` **across** the SDK call (shape
-  (a)) for every fast option read/write, so there's no window at all. Reviewers
-  will flag these one method at a time; convert the whole class at once. The
-  ToupTek camera driver is the reference (`with_handle`); the ZWO, Player One,
-  and SVBONY cameras use the same shape as `with_camera` (issue #116). Only the
-  exposure worker keeps a bare snapshot — it must not hold `mutex_` across a
-  blocking image wait (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`),
-  and its close is stop-and-joined first. Same exemption for a call that
-  blocks for its whole duration on the device (SVBONY `SVBPulseGuide`).
-  A helper returning a **reference** into a locked container (`control_caps_`)
-  is the same trap one level up — return by value.
+  exactly the snapshot-then-call gap. Use a `with_handle([&](auto h){ return
+  sdk.foo(h); })`-style helper that holds the I/O lock across the SDK call.
+  Reviewers will flag these one method at a time; convert the whole class at once.
+  **Camera exception:** the ToupTek camera driver (`with_handle`) and the ZWO,
+  Player One and SVBONY cameras (`with_camera`, issue #116) hold `mutex_` across
+  short SDK calls, and that stays allowed until a measurement shows a getter
+  stall; a camera converts to the rule above only then. The exposure worker keeps
+  a bare snapshot — it must not hold any lock across a blocking image wait
+  (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`), and its close is
+  stop-and-joined first. Same exemption for a call that blocks for its whole
+  duration on the device (SVBONY `SVBPulseGuide`). A helper returning a
+  **reference** into a locked container (`control_caps_`) is the same trap one
+  level up — return by value.
 - `set_connected(false)` clears driver state (`connected_`, handle, cached info,
   element/name containers) **before** the SDK close, so a throwing close can't trap
   the driver half-connected. A getter that checks `connected_` and then re-locks to
@@ -272,7 +289,9 @@ the static SDK version directly. Where a vendor SDK exposes both (e.g. SVBONY:
 `std::nullopt` when disconnected and the value is unknown.
 
 **Guard the cache with a DEDICATED narrow mutex, never the coarse driver
-`mutex_`.** `set_connected()` typically holds the driver `mutex_` across the
+`mutex_`.** A driver not yet converted to the getters-never-wait rule
+([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md))
+has `set_connected()` hold the driver `mutex_` across the
 entire multi-second connect (SDK open, serial handshake, site/time sync). If
 `get_device_firmware()` takes that same `mutex_`, a `/management/v1/configureddevices`
 poll arriving mid-connect blocks the HTTP thread for the whole connect. Add a

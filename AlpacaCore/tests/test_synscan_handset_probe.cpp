@@ -18,94 +18,21 @@
 // are exercised hardware-free.
 #ifndef _WIN32
 
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
-#include <sys/select.h>
-#include <unistd.h>
+#include <termios.h>
 
-#include <atomic>
 #include <chrono>
-#include <functional>
-#include <mutex>
 #include <string>
-#include <thread>
 
 #include "catch2_compat.h"
-#include "fake_pty_write.h"
+#include "pty_responder.h"
 
 namespace {
 
-// Minimal pty "handset": every chunk read from the master goes through the
-// responder, whose reply (if any) is written straight back.
-class FakeSerialHandset {
-public:
-    using Responder = std::function<std::string(const std::string& chunk)>;
-
-    explicit FakeSerialHandset(Responder responder) : pty_("FakeSerialHandset"), responder_(std::move(responder)) {
-        // The pty pair is owned by pty_ (fake_pty_write.h), constructed
-        // before this body runs; a setup failure throws from there with
-        // nothing left open (issue #387). Its keep-alive slave keeps the
-        // master clear of EIO between the probe's close and a later open.
-        reader_ = std::thread([this] { run(); });
-    }
-
-    ~FakeSerialHandset() {
-        stop_.store(true);
-        if (reader_.joinable()) {
-            reader_.join();
-        }
-    }
-
-    FakeSerialHandset(const FakeSerialHandset&) = delete;
-    FakeSerialHandset& operator=(const FakeSerialHandset&) = delete;
-
-    std::string slave_path() const { return pty_.slave_path(); }
-
-    std::string received() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return received_;
-    }
-
-private:
-    void run() {
-        while (!stop_.load()) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(pty_.master_fd(), &fds);
-            timeval tv{0, 50000};  // 50 ms poll so stop_ is honoured promptly
-            if (select(pty_.master_fd() + 1, &fds, nullptr, nullptr, &tv) <= 0) {
-                continue;
-            }
-            char buf[64];
-            const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
-            if (n <= 0) {
-                continue;
-            }
-            const std::string chunk(buf, static_cast<std::size_t>(n));
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                received_ += chunk;
-            }
-            const std::string reply = responder_(chunk);
-            if (!reply.empty()) {
-                // Issue #424: bounded, on a non-blocking master. A short or
-                // dropped write just means the probe sees less than the full
-                // reply, which the silent / non-echo cases exercise on
-                // purpose -- whereas a blocking write to a pty the probe has
-                // stopped draining parks this thread and hangs the join.
-                alpacacore::test::pty_write_bounded(pty_.master_fd(), reply, stop_);
-            }
-        }
-    }
-
-    // First member: constructed before the reader, destroyed after it has
-    // been joined.
-    alpacacore::test::PtyPair pty_;
-    Responder responder_;
-    std::thread reader_;
-    std::atomic<bool> stop_{false};
-    mutable std::mutex mutex_;
-    std::string received_;
-};
+// The pty "handset": every chunk read from the master goes through the
+// responder, whose reply (if any) is written straight back (pty_responder.h).
+using FakeSerialHandset = alpacacore::test::PtyResponder;
 
 long elapsed_ms(std::chrono::steady_clock::time_point since) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - since).count();
@@ -114,13 +41,7 @@ long elapsed_ms(std::chrono::steady_clock::time_point since) {
 }  // namespace
 
 TEST_CASE("SynScan handset probe - a handset's exact echo is recognised", "[util][synscan_handset_probe]") {
-    FakeSerialHandset handset([](const std::string& chunk) -> std::string {
-        // Protocol echo: "K" + byte -> byte + "#"
-        if (chunk.size() >= 2 && chunk[0] == 'K') {
-            return std::string(1, chunk[1]) + "#";
-        }
-        return "";
-    });
+    FakeSerialHandset handset(alpacacore::test::answer_handset_echo);
     const auto t0 = std::chrono::steady_clock::now();
     CHECK(alpacacore::util::port_answers_synscan_echo(handset.slave_path(), 1000));
     CHECK(elapsed_ms(t0) < 500);        // answered at once, not at the deadline
@@ -142,6 +63,33 @@ TEST_CASE("SynScan handset probe - a non-echo reply is not mistaken for a handse
     // not make the scan skip the port: only the exact echo identifies a handset.
     FakeSerialHandset other([](const std::string&) { return std::string("0#"); });
     CHECK_FALSE(alpacacore::util::port_answers_synscan_echo(other.slave_path(), 500));
+}
+
+TEST_CASE("SynScan handset probe - a port a connected device holds is never opened",
+          "[util][synscan_handset_probe][serial][issue1202]") {
+    FakeSerialHandset handset(alpacacore::test::answer_handset_echo);
+    struct termios before {};
+    REQUIRE(tcgetattr(handset.keepalive_fd(), &before) == 0);
+    cfsetispeed(&before, B19200);
+    cfsetospeed(&before, B19200);
+    REQUIRE(tcsetattr(handset.keepalive_fd(), TCSANOW, &before) == 0);
+
+    auto held = alpacacore::util::SerialPortClaim::acquire(handset.slave_path(),
+                                                           alpacacore::util::SerialClaimKind::Link, "Other device");
+    REQUIRE(held);
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK_FALSE(alpacacore::util::port_answers_synscan_echo(handset.slave_path(), 300));
+    CHECK(elapsed_ms(t0) < 250);  // refused at once, not after the echo window
+    CHECK(handset.received().empty());
+
+    struct termios after {};
+    REQUIRE(tcgetattr(handset.keepalive_fd(), &after) == 0);
+    CHECK(cfgetospeed(&after) == B19200);  // never retuned to 9600 either
+
+    // The probe's own claim is gone once it returns.
+    held.release();
+    CHECK(alpacacore::util::port_answers_synscan_echo(handset.slave_path(), 1000));
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(handset.slave_path()));
 }
 
 #endif  // !_WIN32

@@ -1170,7 +1170,8 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         try {
             // Lost matching invalidates the reference. Recover on the owned fd
             // and leave tracking off rather than resume an uncertain frame.
-            protocol_.connect_serial(info_.port_path);
+            // Under mutex_: never wait out another device's probe (#1457).
+            protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
             rollback_succeeded = !write(false, tracking_rate_, "tracking rollback");
             if (rollback_succeeded) tracking_ = false;
         } catch (...) {
@@ -1631,7 +1632,9 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
                     try {
                         // AUX synchronization is shared: a missing RA reply must
                         // not prevent the responsive Dec controller receiving stop.
-                        protocol_.connect_serial(info_.port_path);
+                        // Under mutex_: never wait out another device's probe (#1457).
+                        protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200,
+                                                 std::chrono::milliseconds(0));
                     } catch (const std::exception& error) {
                         ALPACA_LOG_WARN(
                             "Celestron CGX",

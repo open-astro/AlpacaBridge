@@ -260,7 +260,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour. The cached

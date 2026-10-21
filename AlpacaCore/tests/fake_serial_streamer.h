@@ -62,6 +62,10 @@ public:
     FakeSerialStreamer& operator=(const FakeSerialStreamer&) = delete;
 
     std::string slave_path() const { return pty_.slave_path(); }
+    /// The keep-alive slave fd: it shares the line settings of the driver's
+    /// fd, so a test can retune the live port through it (issue #1202) or
+    /// read back what the driver configured.
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
 
     void set_frame(std::string frame) {
         std::lock_guard<std::mutex> lock(mutex_);

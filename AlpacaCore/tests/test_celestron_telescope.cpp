@@ -33,6 +33,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -119,12 +120,12 @@ TEST_CASE("Celestron serial backends - refuse a NexStar open of a CGX AUX port",
     alpacacore::vendor::celestron::ConnectionInfo info;
     info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
     info.port_path = mount.slave_path();
-    try {
-        static_cast<void>(nexstar.connect(info));
-        FAIL("The NexStar backend must not share the direct CGX serial port");
-    } catch (const alpacacore::AlpacaException& error) {
-        CHECK(error.error_code() == alpacacore::AlpacaError::InvalidOperation);
-    }
+    // SerialLink (#1202, #1448) refuses the held port before opening it: the
+    // connect fails, names the CGX link that holds it, and leaves it working.
+    CHECK_FALSE(nexstar.connect(info));
+    CHECK_FALSE(nexstar.is_connected());
+    CHECK(nexstar.last_connect_error().find("Celestron CGX mount") != std::string::npos);
+    CHECK(direct.is_connected());
 }
 #endif
 
@@ -321,7 +322,7 @@ TEST_CASE("Celestron Telescope Driver - ASCOM Error Codes", "[celestron][telesco
 }
 
 // open-astro#769: MoveAxis validates its arguments before the connection check
-// (AGENTS.md error precedence), so a disconnected driver answers a bad
+// (driver-lifecycle.instructions.md error precedence), so a disconnected driver answers a bad
 // argument with InvalidValue rather than NotConnected.
 TEST_CASE("Celestron Telescope Driver - MoveAxis argument errors precede NotConnected",
           "[celestron][telescope][unit]") {
@@ -880,6 +881,116 @@ std::chrono::system_clock::time_point snapshot_time_stamp(const alpacacore::Tele
 }
 
 }  // namespace
+
+// #1408: the pulse body takes no driver mutex, but joining it waits out the serial transaction it is in.
+// Joining with mutex_ held stalls every getter for that long. The mount is the snapshot fake, which answers
+// every poll query with a valid frame, so the link cannot fault and let the case pass without the join.
+TEST_CASE("Celestron Telescope Driver - PulseGuide joins the previous pulse without holding the driver mutex",
+          "[celestron][telescope][unit][pulseguide]") {
+    auto st = std::make_shared<SnapshotMount>();
+    auto chunk_in_flight = std::make_shared<std::atomic<bool>>(false);
+    alpacacore::test::FakeMountServer server([st, chunk_in_flight](const std::string& command) {
+        // The chained 245 cs chunk of the long RA pulse: a slow serial transaction.
+        if (command.size() > 5 && command[0] == 'P' && command[2] == '\x10' && command[3] == '\x26' &&
+            static_cast<unsigned char>(command[5]) == 245) {
+            chunk_in_flight->store(true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+        return snapshot_reply(*st, command);
+    });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;  // above the 300 ms delay
+    auto driver = cel::create_celestron_telescope(0, info);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_can_pulse_guide());
+
+    driver->pulse_guide(2, 5000);  // East, RA: 255 cs now, 245 cs chained at ~2.55 s
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!chunk_in_flight->load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(chunk_in_flight->load());
+
+    std::atomic<bool> stop{false};
+    std::atomic<long long> max_blocked_ms{0};
+    std::thread sampler([&]() {
+        while (!stop.load()) {
+            const auto begin = std::chrono::steady_clock::now();
+            (void)driver->get_is_pulse_guiding();
+            const auto waited =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+            long long seen = max_blocked_ms.load();
+            while (waited > seen && !max_blocked_ms.compare_exchange_weak(seen, waited)) {
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+    });
+
+    // Same axis: must cancel and join the body while its chunk is in flight.
+    bool second_threw = false;
+    try {
+        driver->pulse_guide(2, 1000);
+    } catch (const std::exception&) {
+        second_threw = true;
+    }
+    stop.store(true);
+    sampler.join();
+
+    CHECK_FALSE(second_threw);
+    INFO("longest get_is_pulse_guiding wait " << max_blocked_ms.load() << " ms");
+    CHECK(max_blocked_ms.load() < 100);
+    driver->set_connected(false);
+}
+
+// #1408: a refused chain start leaves the first chunk running on the mount; the driver stops the axis as
+// AbortSlew does and drops the pulse state before the refusal reaches the client.
+TEST_CASE("Celestron Telescope Driver - a refused PulseGuide chain start stops the axis and clears the pulse",
+          "[celestron][telescope][unit][pulseguide]") {
+    auto st = std::make_shared<SnapshotMount>();
+    auto commands = std::make_shared<std::vector<std::string>>();
+    auto commands_mutex = std::make_shared<std::mutex>();
+    alpacacore::test::FakeMountServer server([st, commands, commands_mutex](const std::string& command) {
+        {
+            std::lock_guard<std::mutex> lock(*commands_mutex);
+            commands->push_back(command);
+        }
+        return snapshot_reply(*st, command);
+    });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 1000;
+    auto driver = cel::create_celestron_telescope(0, info);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    cel::set_pulse_spawn_for_testing(*driver, [](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    {
+        std::lock_guard<std::mutex> lock(*commands_mutex);
+        commands->clear();
+    }
+    CHECK_THROWS_AS(driver->pulse_guide(2, 5000), alpacacore::AlpacaException);  // 5 s needs a chained chunk
+
+    const auto sent = [&](const std::string& prefix) {
+        std::lock_guard<std::mutex> lock(*commands_mutex);
+        for (const auto& c : *commands) {
+            if (c.compare(0, prefix.size(), prefix) == 0) return true;
+        }
+        return false;
+    };
+    CHECK(sent(std::string("P\x03\x10\x26", 4)));  // the first guide chunk
+    const bool stop = sent(std::string("P\x02\x10\x24\x00", 5));
+    CHECK(stop);  // then the stop
+    CHECK_FALSE(driver->get_is_pulse_guiding());
+    driver->set_connected(false);
+}
 
 TEST_CASE("Celestron snapshot - getters and DeviceState make no mount transaction at 100 ms per transaction",
           "[celestron][telescope][snapshot]") {

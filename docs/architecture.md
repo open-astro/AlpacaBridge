@@ -114,7 +114,7 @@ See the [Development Guide](development.md) for step-by-step implementation.
 | iOptron | Telescope, Switch (iMate PowerBox), Focuser (iEAF / iAFS2/3), FilterWheel (iEFW), Camera (iCAM, routed to the Player One SDK wrapper) | Protocol wrapper (+ Player One SDK wrapper for iCAM) | Production |
 | SynScan | Telescope | Protocol wrapper | Production |
 | SkyWatcher (direct MC) | Telescope (Wave 100i/150i, AZ-GTi class, EQ-class boards e.g. EQM-35 Pro, motor controller protocol over USB or WiFi UDP) | Protocol wrapper | Production |
-| Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX), Focuser (focus motor on its own USB port) | Protocol wrapper | NexStar production; direct USB and focus motor in development |
+| Celestron | Telescope (NexStar hand controller; CGX/CGX-L direct USB AUX), Focuser (focus motor on its own USB port) | Protocol wrapper | Production (CGX-L direct USB untested) |
 | OnStep | Telescope (generic DIY/retrofit mounts) | Protocol wrapper | Production |
 | Losmandy Gemini | Focuser, CoverCalibrator (Astro Flat Panel Cover Lite, Astro Automatic FlatPanel v2, Motorized Flat Panel V3), Switch (Power & Data Hubs Advanced 3) | Protocol wrapper | Production |
 | WandererAstro | CoverCalibrator (WandererCover V4), Rotator (WandererRotator Mini V1/V2), FilterWheel (SFW50/SFW50S/SFW36S), Switch (WandererBox Pro V3) | Protocol wrapper | Production |

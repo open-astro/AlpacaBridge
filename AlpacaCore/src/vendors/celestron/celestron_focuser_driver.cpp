@@ -213,7 +213,7 @@ public:
             ALPACA_LOG_INFO("Celestron", "Focuser connected (limits " + std::to_string(limits.low) + ".." +
                                              std::to_string(limits.high) + ")");
         } else {
-            // Driver state first, transport close second (AGENTS.md, issue #387).
+            // Driver state first, transport close second (driver-lifecycle.instructions.md, issue #387).
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_.clear();
@@ -690,7 +690,7 @@ private:
     int device_number_;
     std::string port_path_;
     std::atomic<bool> connected_{false};
-    CelestronCgxProtocol protocol_;
+    CelestronCgxProtocol protocol_{"Celestron focuser"};
     // Serializes the calibration commands (0x2A start and abort) with the
     // poll's 0x2B read and its decision. Held across an exchange; taken before
     // the protocol's mutex and before calibration_mutex_.

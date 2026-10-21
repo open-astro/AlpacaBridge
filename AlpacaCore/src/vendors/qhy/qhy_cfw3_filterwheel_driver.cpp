@@ -48,7 +48,7 @@ constexpr const char* kLogTag = "QHY";
  *
  * The goto's arrival wait (about 1 s per slot travelled) runs on a joinable
  * member thread so the Position PUT returns within the STANDARD budget;
- * disconnect and the destructor cancel and join it (AGENTS.md: never detach
+ * disconnect and the destructor cancel and join it (driver-lifecycle.instructions.md: never detach
  * a thread that touches `this`).
  */
 class QhyCfw3FilterWheelDriver : public FilterWheelDriver, protected alpacacore::AsyncConnectable {
@@ -91,7 +91,7 @@ public:
     int get_interface_version() const override { return 3; }
 
     // VRS firmware date from the connect handshake; web UI only, never
-    // DriverInfo. Dedicated narrow mutex (AGENTS.md): the management poll must
+    // DriverInfo. Dedicated narrow mutex (driver-lifecycle.instructions.md): the management poll must
     // not queue behind a multi-second connect holding the driver mutex.
     std::optional<std::string> get_device_firmware() const override {
         std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -153,10 +153,10 @@ public:
                     try {
                         info = protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node is stale. The out-of-step refusal of a wheel
-                        // that is still homing, or any other failure on a present port, must
-                        // NOT trigger the probe: it DTR-resets every CP210x device on the box.
-                        if (util::device_node_missing(cfg.serial_port))
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale. The
+                        // out-of-step refusal of a wheel that is still homing, or any other failure on a present port,
+                        // must NOT trigger the probe: it DTR-resets every CP210x device on the box.
+                        if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
                     }

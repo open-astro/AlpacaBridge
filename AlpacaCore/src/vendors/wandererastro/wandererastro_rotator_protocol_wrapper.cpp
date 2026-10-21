@@ -29,11 +29,12 @@
 #include <string>
 #include <thread>
 
+#include "wandererastro_serial_scan.h"
+
 #ifndef _WIN32
+#include <alpacacore/util/serial_link.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <termios.h>
-#include <unistd.h>
 #endif
 
 namespace alpacacore::vendor::wandererastro {
@@ -51,44 +52,24 @@ constexpr int MAX_TOKEN_LEN = 64;
 // bound how long the completion monitor waits for the device's reply.
 constexpr double kMsPerDegree = 240.0;
 
-using util::is_serial_port_in_use;
-using util::mark_serial_port_closed;
-using util::mark_serial_port_open;
+// The registry owner name for this wrapper's probe AND connected link
+// (issue #1202), see enumerate_wanderer_rotator_ports().
+constexpr const char* kSerialOwner = "WandererRotator";
+
+// Each single read waits at most this long, the old VTIME=5 window. The fd is
+// non-blocking (SerialLink) and every read is bounded by poll(), so a retune
+// to VMIN=1/VTIME=0 by another program can no longer park the move monitor in
+// read() and hang Disconnect (#1202).
+constexpr int kReadWindowMs = 500;
 
 #ifndef _WIN32
-// Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
-// DTR stays asserted on close: the CH340 adapter asserts DTR on open, which
-// pulses the rotator's MCU reset line; keeping DTR high across close means a
-// subsequent reopen does not reset the controller again.
-bool configure_serial_fd(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        return false;
-    }
-    cfsetospeed(&tty, B19200);
-    cfsetispeed(&tty, B19200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;  // keep DTR high on close — avoids CH340 MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;  // 0.5s per-read timeout so loops can poll their stop flags
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        return false;
-    }
-    if (!util::clear_nonblocking(fd)) {
-        return false;
-    }
-    tcflush(fd, TCIOFLUSH);
-    return true;
+// 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
+// adapter asserts DTR on open, which pulses the rotator's MCU reset line;
+// keeping DTR high across close means a subsequent reopen does not reset the
+// controller again.
+void configure_line(struct termios& tty) {
+    util::make_raw_8n1(tty, B19200);
+    tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);  // keep DTR high on close — avoids CH340 MCU reset on reopen
 }
 
 // Read one 'A'-terminated token from the port, skipping CR/LF, within
@@ -107,9 +88,9 @@ std::optional<std::string> read_section(int fd, int timeout_ms, std::string& car
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
         char ch = 0;
-        // Intentional bounded read under the caller's lock: VMIN=0/VTIME=0.5s
-        // caps each read at 0.5s (same pattern as the other serial wrappers).
-        ssize_t r = ::read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+        // Intentional bounded read under the caller's lock: poll() caps each
+        // read at the read window whatever VMIN/VTIME the port carries.
+        ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
         if (r == 1) {
             if (ch == 'A') {
                 return token;
@@ -121,9 +102,10 @@ std::optional<std::string> read_section(int fd, int timeout_ms, std::string& car
             if (token.size() > MAX_TOKEN_LEN) {
                 token.clear();  // garbage — resynchronise on the next delimiter
             }
-        } else if (r < 0 && errno != EINTR) {
-            // Persistent read error (e.g. unplugged): VTIME rate-limits only the
-            // no-data path, so back off to avoid spinning for the whole window.
+        } else if (r < 0) {
+            // Persistent read error (e.g. unplugged): the read window bounds
+            // only the no-data path, so back off to avoid spinning for the
+            // whole window.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -152,7 +134,7 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
     tcflush(fd, TCIOFLUSH);
     // The controller parses the bare digit string; no terminator is sent
     // (matches the INDI reference, which only appends '\n' to config commands).
-    if (!util::write_all(fd, "1500001", 7)) {
+    if (!util::tty_write_all(fd, std::string("1500001"))) {
         return std::nullopt;
     }
     std::string carry;
@@ -162,7 +144,7 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
         // command buffer (same retry the INDI reference performs).
         tcflush(fd, TCIOFLUSH);
         carry.clear();  // flushed the wire — a held partial token is stale too
-        if (!util::write_all(fd, "1500001", 7)) {
+        if (!util::tty_write_all(fd, std::string("1500001"))) {
             return std::nullopt;
         }
         name = read_section(fd, timeout_ms, carry);
@@ -200,7 +182,7 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
             // Accumulated virtual angle is implausible — reset to zero like the
             // INDI reference, then re-handshake once for a consistent snapshot.
             const char reset_cmd[] = "1500002\n";
-            if (!util::write_all(fd, reset_cmd, sizeof(reset_cmd) - 1)) {
+            if (!util::tty_write_all(fd, reset_cmd, sizeof(reset_cmd) - 1)) {
                 return std::nullopt;
             }
             ALPACA_LOG_WARN("WandererAstro", "Rotator virtual mechanical angle out of range; reset to zero");
@@ -220,31 +202,24 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
 // Open a candidate port, handshake, and report the model/firmware if it
 // identifies a WandererRotator. Returns true on a positive identification.
 bool probe_rotator_port(const std::string& port_path, RotatorPortInfo& info) {
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe claim is held for exactly this function: a driver that claimed
+    // the port first refuses the probe before it opens anything, so the probe
+    // never injects a handshake into a connected device's command stream.
+    std::string error;
+    util::SerialLink probe =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_line, &error);
+    if (!probe) {
+        ALPACA_LOG_DEBUG("WandererAstro", "WandererRotator probe skipped " + port_path + ": " + error);
         return false;
     }
-    if (!configure_serial_fd(fd)) {
-        close(fd);
-        return false;
-    }
-    // Re-check after opening: a driver may have claimed this port in the window
-    // between the caller's is_serial_port_in_use() check and this open(). Bail
-    // rather than injecting a handshake into that device's command stream.
-    if (is_serial_port_in_use(port_path)) {
-        close(fd);
-        return false;
-    }
+    tcflush(probe.fd(), TCIOFLUSH);
 
-    auto handshake = do_handshake(fd, 1500);
+    auto handshake = do_handshake(probe.fd(), 1500);
 
-    // Re-apply HUPCL-clear before closing so DTR stays asserted.
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) == 0) {
-        tty.c_cflag &= ~HUPCL;
-        tcsetattr(fd, TCSANOW, &tty);
-    }
-    close(fd);
+    // Put back the HUPCL-clear settings if anything changed them, so DTR stays
+    // asserted across the close below.
+    probe.restore_line_settings();
+    probe.close();
 
     if (handshake.has_value() && handshake->model.rfind(kRotatorModelPrefix, 0) == 0) {
         info.port_path = port_path;
@@ -295,7 +270,7 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
             if (ec) continue;
             probed.insert(resolved);
 
-            if (is_serial_port_in_use(resolved)) continue;
+            if (!detail::admit_serial_candidate(resolved, name, kSerialOwner, results)) continue;
             std::string probe_msg = "Probing ";
             probe_msg.append(resolved).append(" (").append(name).append(") for WandererRotator...");
             ALPACA_LOG_INFO("WandererAstro", probe_msg);
@@ -330,7 +305,7 @@ std::vector<RotatorPortInfo> enumerate_wanderer_rotator_ports() {
         if (!raw_port_looks_like_rotator_candidate(resolved)) continue;
         probed.insert(resolved);
 
-        if (is_serial_port_in_use(resolved)) continue;  // held by another connected device
+        if (!detail::admit_serial_candidate(resolved, std::string(), kSerialOwner, results)) continue;
         ALPACA_LOG_INFO("WandererAstro", "Probing " + resolved + " for WandererRotator...");
         RotatorPortInfo info;
         if (probe_rotator_port(resolved, info)) {
@@ -363,7 +338,7 @@ public:
         config_ = config;
         open_serial_locked();
 
-        auto handshake = do_handshake(serial_fd_, config_.serial_timeout_s * 1000);
+        auto handshake = do_handshake(serial_link_.fd(), config_.serial_timeout_s * 1000);
         if (!handshake.has_value() || handshake->model.rfind(kRotatorModelPrefix, 0) != 0) {
             const std::string found = handshake.has_value() ? (" (device reported '" + handshake->model + "')") : "";
             close_serial_locked();
@@ -465,7 +440,7 @@ public:
             return;  // sub-step request — nothing the hardware can do
         }
         const std::string cmd = std::to_string(steps + 1000000);
-        tcflush(serial_fd_, TCIFLUSH);  // stale completion bytes would fake an instant arrival
+        tcflush(serial_link_.fd(), TCIFLUSH);  // stale completion bytes would fake an instant arrival
         write_command_locked(cmd, /*terminator=*/false);
 
         const double commanded = static_cast<double>(steps) / kRotatorMiniStepsPerDegree;
@@ -600,7 +575,7 @@ private:
     void write_command_locked(const std::string& code, bool terminator) {
         const std::string payload = terminator ? code + "\n" : code;
         ALPACA_LOG_TRACE("WandererAstro", "Rotator command: " + code);
-        if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
+        if (!util::tty_write_all(serial_link_.fd(), payload)) {
             throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
     }
@@ -621,11 +596,14 @@ private:
             int fd;
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
-                fd = serial_fd_;
+                fd = serial_link_.fd();
             }
             if (fd < 0) {
                 return;  // disconnected under us
             }
+            // A bounded window (each read inside it is poll()-bounded too):
+            // monitor_running_ is re-checked about once a second, so
+            // disconnect()'s join returns promptly (#1202).
             auto token = read_section(fd, 600, carry);
             if (token.has_value() && !token->empty()) {
                 ALPACA_LOG_TRACE("WandererAstro", "Rotator move report token: " + *token);
@@ -685,38 +663,20 @@ private:
 
 #ifndef _WIN32
     void open_serial_locked() {
-        // Claim the port in the registry BEFORE opening it so a concurrent
-        // auto-detect scan can't slip in between check and open. Store the
-        // canonical path so by-id symlinks and ttyUSBn nodes compare equal.
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
-        opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_serial_port_open(opened_port_);
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
+        // SerialLink claims the port before it opens it (a port another
+        // connected device holds is refused untouched, a scan's probe is waited
+        // for) and holds it exclusively until close_serial_locked() (#1202).
+        std::string error;
+        serial_link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+                                              configure_line, &error);
+        if (!serial_link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        if (!configure_serial_fd(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
+        tcflush(serial_link_.fd(), TCIOFLUSH);
     }
 
     void close_serial_locked() {
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        mark_serial_port_closed(opened_port_);
-        opened_port_.clear();
+        serial_link_.close();  // releases the port's claim with the fd
     }
 #endif
 
@@ -724,7 +684,6 @@ private:
     mutable std::mutex state_mutex_;  // guards state_ + move bookkeeping + firmware_date_
     RotatorConnectionConfig config_;
     bool connected_ = false;
-    std::string opened_port_;  // path registered in the in-use registry while open
 
     RotatorState state_;
     std::string firmware_date_;  // YYYY-MM-DD, from the handshake
@@ -738,7 +697,7 @@ private:
     std::thread monitor_thread_;
 
 #ifndef _WIN32
-    int serial_fd_ = -1;
+    util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by io_mutex_
 #endif
 };
 

@@ -124,7 +124,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
+        // below runs under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -141,34 +143,19 @@ public:
 
         auto& sdk = sdk_;
         if (connected) {
-            int resolved_id = resolve_rotator_id_locked();
-            sdk.open_rotator(resolved_id);
-            try {
-                refresh_rotator_info_locked(resolved_id);
-                refresh_limits_locked(resolved_id);
-                // Reverse only changes through set_reverse(): read once, then served from here.
-                reverse_ = sdk.get_reverse(resolved_id);
-                status_cache_.reset();
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                const int resolved_id = resolve_rotator_id();
+                sdk.open_rotator(resolved_id);
                 try {
-                    serial_number_ = sdk.get_serial_number(resolved_id);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "CAA serial number unavailable: " + std::string(e.what()));
-                    serial_number_.clear();
+                    publish_connect_state(resolved_id);
+                } catch (...) {
+                    sdk.close_rotator(resolved_id);
+                    throw;
                 }
-                try {
-                    rotator_type_ = sdk.get_rotator_type(resolved_id);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
-                    rotator_type_.clear();
-                }
-                // Persisted Sync offset, keyed by the serial resolved just above.
-                sync_offset_ = util::RotatorSyncOffsetStore::load(unique_id_locked());
-                target_position_ = 0.0;
-                has_target_position_ = false;
-            } catch (...) {
-                sdk.close_rotator(resolved_id);
-                throw;
             }
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
+            status_cache_.reset();
             connected_.store(true);
             return;
         }
@@ -176,18 +163,24 @@ public:
         // Clear driver state before the SDK close: if the close throws (e.g.
         // device unplugged) the error still surfaces, but the driver must not
         // stay half-connected.
-        const std::optional<int> close_id = rotator_id_;
-        reverse_ = false;
-        status_cache_.reset();
-        if (rotator_index_.has_value()) {
-            rotator_id_.reset();
-            rotator_info_ = {};
-            rotator_info_valid_ = false;
-            serial_number_.clear();
-            rotator_type_.clear();
+        std::optional<int> close_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = rotator_id_;
+            reverse_ = false;
+            if (rotator_index_.has_value()) {
+                rotator_id_.reset();
+                rotator_info_ = {};
+                rotator_info_valid_ = false;
+                serial_number_.clear();
+                rotator_type_.clear();
+            }
+            connected_.store(false);
         }
-        connected_.store(false);
+        status_cache_.reset();
         if (close_id.has_value()) {
+            // Waits for an exchange in flight: the handle is never closed under one.
+            std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_rotator(close_id.value());
         }
     }
@@ -233,10 +226,12 @@ public:
 
     void set_reverse(bool reverse) override {
         ensure_connected();
-        sdk_.set_reverse(rotator_id_value(), reverse);
+        with_io([&](int id) {
+            sdk_.set_reverse(id, reverse);
+            std::lock_guard<std::mutex> lock(mutex_);
+            reverse_ = reverse;
+        });
         // The reported angle is the reverse-applied one, so the frame is stale too.
-        std::lock_guard<std::mutex> lock(mutex_);
-        reverse_ = reverse;
         status_cache_.invalidate();
     }
 
@@ -276,7 +271,7 @@ public:
     }
 
     void set_target_position(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = normalize_angle(position);
@@ -285,18 +280,19 @@ public:
 
     void halt() override {
         ensure_connected();
-        sdk_.stop(rotator_id_value());
+        // Waits for a status refill in flight (the I/O lock is not preemptible); the stop follows at once.
+        with_io([&](int id) { sdk_.stop(id); });
         status_cache_.invalidate();
     }
 
     void move(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         status_cache_.invalidate();  // relative to the live angle, not a frame up to one TTL old
         double current = get_position();
         double target = normalize_angle(current + position);
         double mechanical_target = to_mechanical_angle(target);
-        sdk_.move_absolute(rotator_id_value(), mechanical_target);
+        with_io([&](int id) { sdk_.move_absolute(id, mechanical_target); });
         status_cache_.invalidate();
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = target;
@@ -304,11 +300,11 @@ public:
     }
 
     void move_absolute(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         double target = normalize_angle(position);
         double mechanical_target = to_mechanical_angle(target);
-        sdk_.move_absolute(rotator_id_value(), mechanical_target);
+        with_io([&](int id) { sdk_.move_absolute(id, mechanical_target); });
         status_cache_.invalidate();
         std::lock_guard<std::mutex> lock(mutex_);
         target_position_ = target;
@@ -316,10 +312,10 @@ public:
     }
 
     void move_mechanical(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         double mechanical_target = normalize_angle(position);
-        sdk_.move_mechanical(rotator_id_value(), mechanical_target);
+        with_io([&](int id) { sdk_.move_mechanical(id, mechanical_target); });
         status_cache_.invalidate();
         // CAAGetDegree() returns the logical (reverse-applied) angle. When Reverse is
         // enabled, the logical angle for a given mechanical angle is 360 - mechanical.
@@ -331,7 +327,7 @@ public:
     }
 
     void sync(double position) override {
-        validate_angle(position);  // InvalidValue wins over NotConnected (AGENTS.md)
+        validate_angle(position);  // InvalidValue wins over NotConnected (driver-lifecycle.instructions.md)
         ensure_connected();
         status_cache_.invalidate();  // the offset is taken against the live angle
         double mechanical = read_status().degree;
@@ -349,6 +345,7 @@ public:
 private:
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
+        bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
         bool is_moving{};
         double degree{};  // logical (reverse-applied) angle, as CAAGetDegree() reports it
     };
@@ -358,26 +355,47 @@ private:
     Status read_status() const {
         ensure_connected();
         const int id = rotator_id_value();
-        // The refill runs under the cache's own mutex and must not take mutex_:
-        // callers hold mutex_ around cache operations (set_reverse), so taking it
-        // here would invert the lock order.
-        return status_cache_.get([this, id] {
+        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
+        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
+        Status status = status_cache_.get([this, id] {
+            std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
             fresh.is_moving = sdk_.get_motion_status(id).is_moving;
             fresh.degree = sdk_.get_degree(id);
             return fresh;
         });
+        if (status.closed) {
+            throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
+        }
+        return status;
     }
 
     // Caller holds mutex_.
-    std::string unique_id_locked() const {
-        if (!serial_number_.empty()) {
-            return "ZWO_CAA_SN_" + serial_number_;
+    std::string unique_id_locked() const { return unique_id_for(serial_number_, rotator_id_); }
+
+    std::string unique_id_for(const std::string& serial, std::optional<int> rotator_id) const {
+        if (!serial.empty()) {
+            return "ZWO_CAA_SN_" + serial;
         }
-        if (rotator_id_.has_value()) {
-            return "ZWO_CAA_ID_" + std::to_string(rotator_id_.value());
+        if (rotator_id.has_value()) {
+            return "ZWO_CAA_ID_" + std::to_string(rotator_id.value());
         }
         return "ZWO_CAA_" + std::to_string(device_number_);
+    }
+
+    // One SDK transaction on the open handle. The I/O lock excludes the close in set_connected(false), and
+    // the connected check is repeated under it: a disconnect that won the lock has closed the handle.
+    template <typename Fn>
+    void with_io(Fn&& fn) {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        ensure_connected();
+        fn(rotator_id_value());
     }
 
     void ensure_connected() const {
@@ -386,7 +404,8 @@ private:
         }
     }
 
-    int resolve_rotator_id_locked() {
+    // Caller holds io_mutex_ (the enumeration is a device call); the id and info publish under mutex_.
+    int resolve_rotator_id() {
         if (rotator_index_.has_value()) {
             auto rotators = sdk_.enumerate_rotators();
             if (rotators.empty()) {
@@ -400,12 +419,14 @@ private:
                 throw AlpacaException("Rotator index not found", AlpacaError::InvalidValue);
             }
             const auto& info = rotators[static_cast<std::size_t>(index)];
+            std::lock_guard<std::mutex> lock(mutex_);
             rotator_id_ = info.rotator_id;
             rotator_info_ = info;
             rotator_info_valid_ = true;
-            return rotator_id_.value();
+            return info.rotator_id;
         }
 
+        std::lock_guard<std::mutex> lock(mutex_);
         if (rotator_id_.has_value()) {
             return rotator_id_.value();
         }
@@ -413,31 +434,56 @@ private:
         throw AlpacaException("Rotator ID not specified", AlpacaError::InvalidValue);
     }
 
-    void refresh_rotator_info_locked(int rotator_id) {
+    // Reads the connect-time state from the device, then publishes it: the info, serial and type under
+    // mutex_ (short), the rotation limit as an atomic. Caller holds io_mutex_ and not mutex_.
+    void publish_connect_state(int rotator_id) {
         ZWOCAARotatorInfo info;
-        if (sdk_.get_rotator_info_by_id(rotator_id, info)) {
-            rotator_info_ = info;
-            rotator_info_valid_ = true;
-            if (info.max_degree > 0.0) {
-                max_degree_ = info.max_degree;
-            }
-            return;
+        if (!sdk_.get_rotator_info_by_id(rotator_id, info)) {
+            throw AlpacaException("Failed to read rotator info", AlpacaError::DriverException);
         }
-        throw AlpacaException("Failed to read rotator info", AlpacaError::DriverException);
-    }
-
-    void refresh_limits_locked(int rotator_id) {
-        min_degree_ = 0.0;
+        double max_degree = max_degree_.load();
+        if (info.max_degree > 0.0) {
+            max_degree = info.max_degree;
+        }
         try {
-            double max_degree = sdk_.get_max_degree(rotator_id);
-            if (max_degree > 0.0) {
-                max_degree_ = max_degree;
+            const double reported = sdk_.get_max_degree(rotator_id);
+            if (reported > 0.0) {
+                max_degree = reported;
             }
         } catch (const std::exception&) {
-            if (!rotator_info_valid_ || rotator_info_.max_degree <= 0.0) {
-                max_degree_ = 360.0;
+            if (info.max_degree <= 0.0) {
+                max_degree = 360.0;
             }
         }
+        // Reverse only changes through set_reverse(): read once, then served from here.
+        const bool reverse = sdk_.get_reverse(rotator_id);
+        std::string serial;
+        try {
+            serial = sdk_.get_serial_number(rotator_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "CAA serial number unavailable: " + std::string(e.what()));
+        }
+        std::string type;
+        try {
+            type = sdk_.get_rotator_type(rotator_id);
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
+        }
+        // Persisted Sync offset, keyed by the serial read just above.
+        const double sync_offset = util::RotatorSyncOffsetStore::load(unique_id_for(serial, rotator_id));
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            rotator_info_ = info;
+            rotator_info_valid_ = true;
+            min_degree_ = 0.0;
+            reverse_ = reverse;
+            serial_number_ = serial;
+            rotator_type_ = type;
+            sync_offset_ = sync_offset;
+            target_position_ = 0.0;
+            has_target_position_ = false;
+        }
+        max_degree_.store(max_degree);
     }
 
     void validate_angle(double position) const {
@@ -482,7 +528,7 @@ private:
     ZWOCAARotatorInfo rotator_info_;
     bool rotator_info_valid_;
     double min_degree_;
-    // Written under mutex_ by the connect path, read lock-free by normalize_angle() from
+    // Published at the end of connect, read lock-free by normalize_angle() from
     // move()/move_absolute()/sync() before they take mutex_; atomic so the two never race.
     std::atomic<double> max_degree_;
     double target_position_;
@@ -490,6 +536,13 @@ private:
     double sync_offset_;
     bool reverse_{false};
     std::atomic<bool> connected_;
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
+    // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
+    // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
+    // device transactions (connect, close, move, halt, set_reverse, the status refill). Never take the
+    // cache mutex (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     mutable util::TtlStatusCache<Status> status_cache_;
 };

@@ -90,6 +90,10 @@ public:
     FakeSkyWatcherSerialBoard& operator=(const FakeSkyWatcherSerialBoard&) = delete;
 
     std::string slave_path() const { return pty_.slave_path(); }
+    /// The pty's keep-alive slave fd: lets a test read or retune the line the
+    /// driver holds without opening the slave path, which TIOCEXCL refuses
+    /// while the driver is connected (#1202).
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
 
     // open-astro#445: pull the cable. Closing the master is what a USB-serial
     // adapter leaving the bus does to the driver's side of the link: the node

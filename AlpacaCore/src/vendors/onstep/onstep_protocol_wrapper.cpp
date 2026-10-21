@@ -15,6 +15,8 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -56,6 +58,16 @@ namespace {
 // in well under 100ms on a working link, so this only bounds the failure
 // case (mount silent/rejecting) rather than the normal-success path.
 constexpr int kSetAckTimeoutMs = 1000;
+
+// Operator-facing owner name for the serial-port registry (#1202): the probe
+// and the connected link use the same one, so the auto-detect scan can tell
+// a connected OnStep mount (a sibling) from another vendor's device.
+constexpr const char* kSerialOwner = "OnStep mount";
+
+// Per-read wait on the connected link. The fd is non-blocking and every read
+// goes through util::tty_read(), so this is the poll() bound that replaced
+// the old VTIME=1 (100 ms) read window.
+constexpr int kSerialReadSliceMs = 100;
 
 // Parse a generic sexagesimal LX200 field ("HH:MM:SS", "HH:MM.T", "sDD*MM:SS",
 // "sDD*MM", "sHH.H", ...) into a decimal value. Any run of non-digit,
@@ -224,6 +236,8 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
+    status.is_guide_active = raw.find('g') != std::string::npos;
+    status.is_pulse_guide_active = raw.find('G') != std::string::npos;
     // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
     // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
     // therefore always present on a GEM and says nothing about the pier
@@ -239,53 +253,65 @@ MountStatus parse_status(const std::string& raw) {
     return status;
 }
 
-// Probe a serial port for an OnStep controller by sending :GVP# and checking
-// for "OnStep" or "On-Step" in the response.
+// Line settings shared by the probe and the connected link: 8N1 raw at
+// @p speed, with HUPCL cleared so DTR stays asserted on close.
 //
 // OnStep firmware runs almost exclusively on Arduino/Teensy/ESP32/STM32
 // boards behind CH340/CH341/CP2102/native-USB-CDC adapters. These reset the
 // MCU when DTR asserts on port open (same issue as the Gemini focuser
-// wrapper) — clear HUPCL before AND after the probe so DTR stays high and
-// the driver's subsequent real connect() doesn't trigger a second reset.
-std::string probe_onstep_port(const std::string& port_path) {
+// wrapper) -- keeping HUPCL clear means the probe's close does not drop DTR,
+// so the driver's subsequent real connect() doesn't trigger a second reset.
+void configure_onstep_line(struct termios& tty, speed_t speed) {
+    util::make_raw_8n1(tty, speed);
+    tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);
+}
+
+// Send one '#'-terminated query on an open probe link and collect the reply
+// (without the '#') for at most @p budget_ms. Empty on a write failure,
+// silence or a read error.
+std::string probe_query(int fd, const char* cmd, int budget_ms) {
+    if (!util::tty_write_all(fd, cmd, std::char_traits<char>::length(cmd))) {
+        return "";
+    }
+    std::string resp;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budget_ms);
+    while (resp.size() < 31) {
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0) {
+            break;
+        }
+        char ch = 0;
+        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
+        if (r != 1) {
+            break;  // 0: silent for the rest of the budget; -1: read error or hangup
+        }
+        if (ch == '#') {
+            break;
+        }
+        resp.push_back(ch);
+    }
+    return resp;
+}
+
+// Probe a serial port for an OnStep controller by sending :GVP# and checking
+// for "OnStep" or "On-Step" in the response; on a match, also read :GVN#
+// (into @p version) under the same claim, so no other scan or connect can
+// take the port between the two. Returns the :GVP# identity, or "" when the
+// port is not an OnStep controller or could not be opened (a refused claim
+// is logged at DEBUG: the port belongs to a connected device or another
+// scan is still probing it).
+std::string probe_onstep_port(const std::string& port_path, std::string& version) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_onstep_line(tty, B9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("OnStep", "Not probing " + port_path + ": " + error);
         return "";
     }
-
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;  // Keep DTR high on close — prevents MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 20;  // 2-second per-read timeout
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
     // Wait for the MCU to finish booting after the DTR-triggered reset, then
@@ -295,102 +321,21 @@ std::string probe_onstep_port(const std::string& port_path) {
         std::this_thread::sleep_for(std::chrono::seconds(attempt == 0 ? 2 : 1));
         tcflush(fd, TCIOFLUSH);
 
-        const char cmd[] = ":GVP#";
-        if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
-            continue;
-        }
-
-        char resp[32] = {};
-        int total = 0;
-        auto start = std::chrono::steady_clock::now();
-        while (total < static_cast<int>(sizeof(resp) - 1)) {
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > 3) {
-                break;
-            }
-            char ch = 0;
-            ssize_t r = read(fd, &ch, 1);
-            if (r == 1) {
-                if (ch == '#') {
-                    break;
-                }
-                resp[total++] = ch;
-            } else if (r == 0) {
-                continue;
-            } else {
-                break;
-            }
-        }
-
-        std::string response(resp, static_cast<std::size_t>(total));
+        const std::string response = probe_query(fd, ":GVP#", 3000);
         if (response.find("OnStep") != std::string::npos || response.find("On-Step") != std::string::npos) {
-            // Re-apply HUPCL-clear before closing so DTR stays asserted for
-            // the driver's subsequent real connect().
-            tcgetattr(fd, &tty);
-            tty.c_cflag &= ~HUPCL;
-            tcsetattr(fd, TCSANOW, &tty);
-            close(fd);
+            tcflush(fd, TCIOFLUSH);
+            version = probe_query(fd, ":GVN#", 2000);
             return response;
         }
 
         ALPACA_LOG_DEBUG("OnStep",
                          "Probe attempt " + std::to_string(attempt + 1) + " got no OnStep identity from " + port_path);
     }
-
-    close(fd);
 #else
     (void)port_path;
+    (void)version;
 #endif
     return "";
-}
-
-std::string probe_onstep_version(const std::string& port_path) {
-#ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
-        return "";
-    }
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) == 0) {
-        tty.c_cc[VTIME] = 10;
-        tcsetattr(fd, TCSANOW, &tty);
-    }
-    util::clear_nonblocking(fd);
-    tcflush(fd, TCIOFLUSH);
-    const char cmd[] = ":GVN#";
-    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
-        close(fd);
-        return "";
-    }
-    char resp[32] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < static_cast<int>(sizeof(resp) - 1)) {
-        auto elapsed =
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 2) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            if (ch == '#') {
-                break;
-            }
-            resp[total++] = ch;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
-    close(fd);
-    return std::string(resp, static_cast<std::size_t>(total));
-#else
-    (void)port_path;
-    return "";
-#endif
 }
 
 #ifndef _WIN32
@@ -466,6 +411,32 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
     // pass below never re-opens a port the by-id pass already tried.
     std::set<std::string> probed;
 
+    // One candidate, in scan order (#1202). A port another vendor's connected
+    // device holds is never opened. A port a connected OnStep mount holds is
+    // not probed either, but keeps its place in the results so the auto-detect
+    // index of every other mount stays stable; a driver that picks it is
+    // refused by its link claim, which names the holder.
+    auto consider = [&results](const std::string& resolved, const std::string& name) {
+        switch (util::serial_candidate_use(resolved, kSerialOwner)) {
+            case util::SerialCandidateUse::HeldByOther:
+                ALPACA_LOG_DEBUG("OnStep", "Skipping " + resolved + ": held by another connected device");
+                return;
+            case util::SerialCandidateUse::HeldBySibling:
+                ALPACA_LOG_DEBUG("OnStep", "Not probing " + resolved + ": a connected OnStep mount holds it");
+                results.push_back({resolved, name, ""});
+                return;
+            case util::SerialCandidateUse::Free:
+                break;
+        }
+        ALPACA_LOG_INFO("OnStep", "Probing " + resolved + (name.empty() ? "" : " (" + name + ")") + "...");
+        std::string version;
+        const std::string identity = probe_onstep_port(resolved, version);
+        if (!identity.empty()) {
+            ALPACA_LOG_INFO("OnStep", "Found OnStep mount on " + resolved + " (" + identity + ")");
+            results.push_back({resolved, name, version});
+        }
+    };
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
@@ -489,25 +460,7 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-
-            std::string probe_message = "Probing ";
-            probe_message += resolved;
-            probe_message += " (";
-            probe_message += name;
-            probe_message += ")...";
-            ALPACA_LOG_INFO("OnStep", probe_message);
-
-            std::string identity = probe_onstep_port(resolved);
-            if (!identity.empty()) {
-                std::string version = probe_onstep_version(resolved);
-                std::string found_message = "Found OnStep mount on ";
-                found_message += resolved;
-                found_message += " (";
-                found_message += identity;
-                found_message += ")";
-                ALPACA_LOG_INFO("OnStep", found_message);
-                results.push_back({resolved, name, version});
-            }
+            consider(resolved, name);
         }
     }
 
@@ -535,19 +488,7 @@ std::vector<OnStepPortInfo> enumerate_onstep_ports() {
             if (probed.count(resolved) != 0) continue;
             if (!raw_port_looks_like_onstep_candidate(resolved)) continue;
             probed.insert(resolved);
-
-            ALPACA_LOG_INFO("OnStep", "Probing " + resolved + "...");
-            std::string identity = probe_onstep_port(resolved);
-            if (!identity.empty()) {
-                std::string version = probe_onstep_version(resolved);
-                std::string found_message = "Found OnStep mount on ";
-                found_message += resolved;
-                found_message += " (";
-                found_message += identity;
-                found_message += ")";
-                ALPACA_LOG_INFO("OnStep", found_message);
-                results.push_back({resolved, "", version});
-            }
+            consider(resolved, "");
         }
     }
 #endif
@@ -594,6 +535,7 @@ public:
 
         connection_type_ = info.type;
         connection_info_ = info;
+        last_connect_error_.clear();
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
@@ -642,6 +584,15 @@ public:
     }
 
     // ── Link loss (decision 0009, #1241) ──
+
+    // Decision 0005 (#1378): the loss and last-alive stamps read the clock of
+    // the driver that uses this process-wide wrapper, so the driver's #521
+    // outage is measured on one clock. Default: the process clock.
+    void set_task_clock(util::TaskClock& c) { clock_.store(&c); }
+    void release_task_clock(util::TaskClock& c) {
+        util::TaskClock* expected = &c;
+        clock_.compare_exchange_strong(expected, &util::default_task_clock());
+    }
 
     bool link_alive() {
         if (!connected_) {
@@ -716,6 +667,11 @@ public:
         return at;
     }
 
+    std::string last_connect_error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_connect_error_;
+    }
+
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
@@ -767,9 +723,9 @@ public:
         // firmware. Drain whatever arrives within a short window rather than
         // leaving it to corrupt the next command's response framing — the
         // same lesson learned from iOptron's blind-command handling. Each
-        // read() call blocks for a full VTIME period (100ms) when nothing
-        // arrives regardless of this budget, so a lower value here still
-        // costs one full VTIME cycle — kept short so that AbortSlew's five
+        // read waits a full kSerialReadSliceMs (100ms) when nothing arrives
+        // regardless of this budget, so a lower value here still costs one
+        // full read slice — kept short so that AbortSlew's five
         // sequential blind commands (:Q# + four :Qx#) stay under ASCOM's
         // 1.0s STANDARD response target instead of stacking multiple cycles
         // each (confirmed against real hardware: 120ms here cost ~1.04s
@@ -853,6 +809,18 @@ public:
         altaz.altitude_degrees = alt.value();
         altaz.azimuth_degrees = az.value();
         return altaz;
+    }
+
+    AltitudeLimits get_altitude_limits() {
+        auto horizon = parse_sexagesimal(send_command(":Gh#", true, 0));
+        auto overhead = parse_sexagesimal(send_command(":Go#", true, 0));
+        if (!horizon.has_value() || !overhead.has_value()) {
+            throw AlpacaException("Invalid OnStep altitude limit response");
+        }
+        AltitudeLimits limits;
+        limits.horizon_degrees = horizon.value();
+        limits.overhead_degrees = overhead.value();
+        return limits;
     }
 
     MountStatus get_status() {
@@ -1093,19 +1061,6 @@ private:
     }
 
     bool connect_serial(const std::string& port_path, int baud_rate) {
-        serial_fd_ = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            ALPACA_LOG_ERROR("OnStep", "Failed to open serial port [" + port_path + "]: " + util::errno_string(errno));
-            return false;
-        }
-
-        struct termios tty {};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-
         speed_t speed = B9600;
         switch (baud_rate) {
             case 9600:
@@ -1130,48 +1085,37 @@ private:
                 speed = B9600;
                 break;
         }
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
 
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        // Keep DTR asserted on close (matches the probe path) — an OnStep
-        // controller behind CH340/CH341/native-USB-CDC resets its MCU on a
-        // DTR edge, so tearing HUPCL down here would reset the board every
-        // time the driver reconnects.
-        tty.c_cflag &= ~HUPCL;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_oflag &= ~OPOST;
-        tty.c_oflag &= ~ONLCR;
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_cc[VMIN] = 0;
-        // 100ms per read() syscall — NOT the probe path's 2s: read_response()'s
-        // and drain_stale()'s software timeout budgets are only enforced in
-        // increments of this value (each failed read() blocks for the full
-        // VTIME regardless of the caller's shorter deadline), so a long VTIME
-        // here made every non-acking blind command (e.g. pulse guide) and
-        // every genuinely-silent response cost multiple real seconds instead
-        // of the intended tens of milliseconds — confirmed against real
-        // hardware, where this alone caused PulseGuide to block ~2s and
-        // AbortSlew's multi-command stop sequence to cascade into a timeout.
-        tty.c_cc[VTIME] = 1;
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
+        // SerialLink claims the port (a port another connected device holds
+        // is refused before it is opened), takes TIOCEXCL so no other program
+        // can open and retune it, and keeps the fd non-blocking: every read
+        // goes through util::tty_read(), bounded by poll(), so a retune to
+        // VMIN=1/VTIME=0 by another program cannot park a read and hang every
+        // telescope call (#1202, TeSeek HM-17 after Park). HUPCL stays clear
+        // (matches the probe path): an OnStep controller behind
+        // CH340/CH341/native-USB-CDC resets its MCU on a DTR edge, so tearing
+        // HUPCL down here would reset the board every time the driver
+        // reconnects.
+        //
+        // The read slice is kSerialReadSliceMs (100ms), NOT the probe path's
+        // 2s: read_response()'s and drain_stale()'s software timeout budgets
+        // are only enforced in increments of it, so a long slice made every
+        // non-acking blind command (e.g. pulse guide) and every
+        // genuinely-silent response cost multiple real seconds instead of the
+        // intended tens of milliseconds — confirmed against real hardware
+        // (when this was VTIME), where this alone caused PulseGuide to block
+        // ~2s and AbortSlew's multi-command stop sequence to cascade into a
+        // timeout.
+        std::string error;
+        link_ = util::SerialLink::open(
+            port_path, util::SerialClaimKind::Link, kSerialOwner,
+            [speed](struct termios& tty) { configure_onstep_line(tty, speed); }, &error);
+        if (!link_) {
+            ALPACA_LOG_ERROR("OnStep", "Failed to open serial port [" + port_path + "]: " + error);
+            last_connect_error_ = error;
             return false;
         }
-
-        if (!util::clear_nonblocking(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
+        serial_fd_ = link_.fd();
 
         // Remember which node the configured path reached, so link_alive()
         // can tell when the adapter is gone or the path now points elsewhere.
@@ -1183,15 +1127,12 @@ private:
             link_ino_ = st.st_ino;
             ++link_generation_;
         }
-
         return true;
     }
 
     void disconnect_serial() {
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        serial_fd_ = -1;
+        link_.close();
     }
 
     // Network path is a test-seam only (see ConnectionType::Network) —
@@ -1271,28 +1212,29 @@ private:
 
     bool write_data(const std::string& data) {
         if (connection_type_ == ConnectionType::Serial) {
-            return util::write_all(serial_fd_, data.c_str(), data.length());
+            return util::tty_write_all(serial_fd_, data.c_str(), data.length());
         }
         return util::send_all(socket_fd_, data.c_str(), data.length(), MSG_NOSIGNAL);
     }
 
     bool read_serial_char(char& ch) {
-        // Bounded read (VMIN/VTIME), held under mutex_ by design — the mutex
-        // provides transaction atomicity for command/response pairs.
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+        // Bounded read (poll() on a non-blocking fd), held under mutex_ by
+        // design — the mutex provides transaction atomicity for
+        // command/response pairs.
+        const ssize_t bytes_read = util::tty_read(serial_fd_, &ch, 1, kSerialReadSliceMs);
         if (bytes_read == 1) {
             return true;
         }
         if (bytes_read < 0) {
+            // tty_read() reports a hung-up tty (read() returning 0) as EIO.
             const int err = errno;
             if (is_loss_errno(err)) {
                 lose_link_locked("read failed: " + util::errno_string(err));
             }
             return false;
         }
-        // 0 is a VTIME timeout, or a hung-up tty whose node is gone (it then
-        // reads 0 at once, so without this check the loop would run to the
-        // full response timeout).
+        // 0 is a read-slice timeout; the node may be gone without the fd
+        // reporting it yet.
         if (node_removed_locked()) {
             lose_link_locked("the adapter was removed");
         }
@@ -1406,12 +1348,12 @@ private:
             lost_reason_ = reason;
             link_lost_ = true;
             const auto alive_ns = last_alive_ns_.load();
-            if (alive_ns != 0) {
-                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns));
+            if (alive_ns != 0) {  // stored + 1 ns, so 0 means never (see mark_alive())
+                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns - 1));
             }
         }
         (void)link_lost_at_.consume();  // an older, unclaimed loss is superseded by this one
-        link_lost_at_.note(util::default_task_clock().now());
+        link_lost_at_.note(clock().now());
         return true;
     }
 
@@ -1419,10 +1361,13 @@ private:
     // link_alive(), the check before an exchange). A loss happened after it,
     // so it bounds the outage from above even when nobody looked for a while.
     void mark_alive() {
+        // Stored + 1 ns: 0 means "never", and a FakeTaskClock starts at the
+        // epoch, where a real stamp would otherwise read as never.
         last_alive_ns_ =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(util::default_task_clock().now().time_since_epoch())
-                .count();
+            std::chrono::duration_cast<std::chrono::nanoseconds>(clock().now().time_since_epoch()).count() + 1;
     }
+
+    util::TaskClock& clock() const { return *clock_.load(); }
 
     void clear_loss() {
         std::lock_guard<std::mutex> lock(loss_mutex_);
@@ -1471,6 +1416,7 @@ private:
         throw AlpacaException("Failed to send command to mount");
     }
 
+    std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     mutable std::mutex mutex_;
     std::atomic<bool> connected_;
     std::atomic<bool> link_lost_{false};
@@ -1488,8 +1434,10 @@ private:
     std::uint64_t link_generation_ = 0;  // under link_id_mutex_: bumped when the node is recorded or cleared
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
-    int serial_fd_;
+    util::SerialLink link_;  // the connected serial port (#1202); closed while disconnected
+    int serial_fd_;          // link_.fd() while the serial link is open, else -1
     int socket_fd_;
+    std::string last_connect_error_;  // operator-facing reason the last connect() failed
 };
 
 OnStepProtocolWrapper::OnStepProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
@@ -1506,6 +1454,10 @@ void OnStepProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool OnStepProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
 
+void OnStepProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_->set_task_clock(clock); }
+
+void OnStepProtocolWrapper::release_task_clock(util::TaskClock& clock) { pimpl_->release_task_clock(clock); }
+
 bool OnStepProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
 std::string OnStepProtocolWrapper::link_lost_reason() const { return pimpl_->link_lost_reason(); }
@@ -1518,6 +1470,8 @@ std::optional<std::chrono::steady_clock::time_point> OnStepProtocolWrapper::cons
     return pimpl_->consume_last_alive_before_loss();
 }
 
+std::string OnStepProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
+
 std::string OnStepProtocolWrapper::get_product_name() { return pimpl_->get_product_name(); }
 
 std::string OnStepProtocolWrapper::get_version_number() { return pimpl_->get_version_number(); }
@@ -1527,6 +1481,8 @@ std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 
 AltAz OnStepProtocolWrapper::get_alt_az() { return pimpl_->get_alt_az(); }
+
+AltitudeLimits OnStepProtocolWrapper::get_altitude_limits() { return pimpl_->get_altitude_limits(); }
 
 MountStatus OnStepProtocolWrapper::get_status() { return pimpl_->get_status(); }
 

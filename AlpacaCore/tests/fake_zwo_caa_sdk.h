@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <stdexcept>
@@ -30,7 +31,10 @@ namespace alpacacore::test {
 // concurrent storm (the ZWO driver tests run it through lifecycle stress and TSan);
 // the public knobs and counters are plain fields for single-threaded tests, set before
 // the driver starts and read after it stops. No call blocks except the explicit
-// open_delay, which holds a connect open (contract sweep tier 2).
+// delays: open_delay holds a connect open (contract sweep tier 2), read_delay holds a
+// get_motion_status() read and move_delay a move, stop or set_reverse in flight (getters-never-wait tests).
+// The *_entered flags and `busy` are atomics a test polls from another thread; close_rotator()
+// sets closed_while_busy when it runs while a delayed call is still in flight.
 
 // KNOWN PARITY GAPS: move_absolute() settles a move at once (position/degree jump to the target and
 // the moving flag stays whatever a test set), where the real CAAIsMoving reports motion until the unit
@@ -59,6 +63,15 @@ public:
     bool fail_open{false};
     // open_rotator() sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};
+    // get_motion_status() sleeps this long (a status refill held open); moves, stop() and set_reverse() sleep
+    // move_delay.
+    std::chrono::milliseconds read_delay{0};
+    std::chrono::milliseconds move_delay{0};
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> read_entered{false};
+    std::atomic<bool> move_entered{false};
+    std::atomic<int> busy{0};
+    std::atomic<bool> closed_while_busy{false};
 
     std::vector<Info> enumerate_rotators() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -74,16 +87,18 @@ public:
     }
     bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
     void open_rotator(int) override {
-        if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
+        const InFlight in_flight(*this, open_delay, open_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
     }
     void close_rotator(int) override {
+        if (busy.load() > 0) closed_while_busy = true;
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls;
     }
     vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override {
+        const InFlight in_flight(*this, read_delay, read_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         ++motion_calls;
         if (fail_reads) {
@@ -104,16 +119,19 @@ public:
         degree += angle;
     }
     void move_absolute(int, double angle) override {
+        const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         last_move_absolute = angle;
         degree = angle;
     }
     void move_mechanical(int, double angle) override {
+        const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         last_move_mechanical = angle;
         degree = reverse ? 360.0 - angle : angle;
     }
     void stop(int) override {
+        const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         moving = false;
     }
@@ -132,6 +150,7 @@ public:
         return reverse;
     }
     void set_reverse(int, bool value) override {
+        const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         reverse = value;
     }
@@ -144,6 +163,19 @@ public:
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
+    // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.
+    struct InFlight {
+        InFlight(FakeZWOCAASDK& fake, std::chrono::milliseconds delay, std::atomic<bool>& entered) : fake_(fake) {
+            ++fake_.busy;
+            entered = true;
+            if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        }
+        ~InFlight() { --fake_.busy; }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+        FakeZWOCAASDK& fake_;
+    };
+
     mutable std::mutex mutex_;
 };
 

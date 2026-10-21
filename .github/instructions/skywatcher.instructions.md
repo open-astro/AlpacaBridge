@@ -387,8 +387,11 @@ datagrams before each send so replies cannot get off-by-one.
   `poll(POLLIN)` within the command budget, and frame sends use a `poll(POLLOUT)`-bounded
   write (`write_all_bounded`) rather than `util::write_all` — which only retries `EAGAIN`
   after a partial write and would fail a frame fast once the fd is non-blocking. This is the
-  deliberate exception to the shared "always `clear_nonblocking`" serial rule in `.github/instructions/serial-autodetect.instructions.md`;
-  do not revert it. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
+  shape every serial driver has followed since #1202 (`util::SerialLink`, the shared rule in
+  `.github/instructions/serial-autodetect.instructions.md`); do not revert it. The port is opened
+  through `SerialLink`, which also holds the registry claim and `TIOCEXCL`; this driver keeps its own
+  poll-bounded read/write loops because they are the path through the `serial_read_`/`serial_write_`
+  test seams. Regression tests (`test_skywatcher_serial.cpp`): a muted board times out
   within the command budget (catches a revert of the read `poll()`), and a write seam that
   reports `EAGAIN` is waited out (catches a revert of the bounded write). The auto-detect
   probe follows the same rule: `probe_skywatcher_port` and the SynScan echo guard it runs at
@@ -620,13 +623,10 @@ against its checklist, 2026-09-06:
   built for WandererAstro, explicitly designed to generalize "across wrappers"). Fixed:
   both scan loops skip a port another connected device holds open, `probe_skywatcher_port`
   re-checks after `open()` for the TOCTOU window, and `connect_serial()` claims the port
-  in the registry BEFORE opening it and releases it in `disconnect_locked()`. The gap is
-  wider than this vendor: only WandererAstro (all four wrappers) and Gemini's PDH wrapper
-  (`gemini_pdh_protocol_wrapper.cpp`) use the registry; synscan, ioptron, celestron, onstep
-  and Gemini's focuser/flat-panel wrappers do not — only `skywatcher` was closed here, in
-  scope for this issue. The claim/release in `connect_serial()` is covered by a pty-backed
-  test in `test_skywatcher_serial.cpp`; the post-`open()` re-check in `probe_skywatcher_port`
-  narrows the TOCTOU window but cannot close it (in-process best-effort set, not a file lock).
+  in the registry BEFORE opening it and releases it in `disconnect_locked()`. Since #1202
+  every serial wrapper does this through `util::SerialLink`, and the probe holds a Probe
+  claim for its whole duration, which closes the TOCTOU window the post-`open()` re-check
+  only narrowed.
 - [x] Pier side / meridian handling for GEMs in the southern hemisphere — open-astro#261.
   Audit (2026-09-09, no hardware): unlike the RA/Dec direction bugs above, the branch that
   drives `SideOfPier`/`DestinationSideOfPier` is chosen purely from the sign of hour angle
@@ -998,4 +998,4 @@ probes link health first. The late-loss branch needs a deterministic probe seam 
 outstanding fake-board task; assert that the old task never sends commands to the new link.
 Zero-byte reads are not themselves proof of removal; back off within the response deadline
 so a hung-up-but-present tty cannot busy-spin, while retaining the quiet-board timeout policy.
-- **The session open claims the tty with `TIOCEXCL` and re-applies the termios settings after every silent timeout** (#912): an outside open (a GPS probe at 9600) reprograms the shared line, and without the re-apply the latched link fault never cleared. `disconnect_locked()` issues `TIOCNXCL` explicitly, because the flag survives our close while any other fd holds the tty open. The echo-guard/probe opens are short-lived and do not claim.
+- **The session open claims the tty with `TIOCEXCL` and re-applies the termios settings after every silent timeout** (#912): an outside open (a GPS probe at 9600) reprograms the shared line, and without the re-apply the latched link fault never cleared. `SerialLink::close()` issues `TIOCNXCL`, because the flag survives our close while any other fd holds the tty open. Since #1202 the probe opens claim too (a Probe claim plus `TIOCEXCL` for the probe's duration), and the re-apply is `SerialLink::restore_line_settings()`.

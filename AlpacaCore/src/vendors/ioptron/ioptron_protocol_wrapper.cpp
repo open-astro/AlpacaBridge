@@ -44,6 +44,9 @@
 #include <unordered_set>
 
 #ifndef _WIN32
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
+
 #include <filesystem>
 #endif
 
@@ -51,53 +54,39 @@ namespace alpacacore::vendor::ioptron {
 
 namespace {
 
+// Names this wrapper's probe and its connected serial link in the serial-port
+// registry (#1202). The Wi-Fi path holds no serial port and takes no claim.
+constexpr const char* kSerialOwner = "iOptron mount";
+
+#ifndef _WIN32
+// 8N1 raw at @p speed. The mount reads through tty_read(), so VMIN/VTIME
+// are not set here (SerialLink keeps the fd non-blocking).
+util::SerialLineConfigure mount_line(speed_t speed) {
+    return [speed](struct termios& tty) { util::make_raw_8n1(tty, speed); };
+}
+#endif
+
 // Probe a serial port for an iOptron mount by sending :MountInfo# and checking
 // for a valid 4-digit model code response.
 // iOptron returns exactly 4 ASCII digits with no '#' terminator.
 // Returns the model code (e.g. "0025") on success, empty string on failure.
 std::string probe_ioptron_port(const std::string& port_path) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe claim waits out another scan's probe of this port (the iEAF
+    // and iEFW scans match the same Prolific adapters) and is held until this
+    // function returns.
+    std::string error;
+    util::SerialLink link =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, mount_line(B115200), &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("iOptron", "Mount probe skipped " + port_path + ": " + error);
         return "";
     }
-
-    struct termios tty{};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    cfsetospeed(&tty, B115200);
-    cfsetispeed(&tty, B115200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 20;
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
     const char cmd[] = ":MountInfo#";
-    if (!util::write_all(fd, cmd, sizeof(cmd) - 1)) {
-        close(fd);
+    if (!util::tty_write_all(fd, cmd, sizeof(cmd) - 1)) {
         return "";
     }
 
@@ -112,7 +101,7 @@ std::string probe_ioptron_port(const std::string& port_path) {
             break;
         }
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
+        ssize_t r = util::tty_read(fd, &ch, 1, 2000);  // the old VTIME=20 window
         if (r == 1) {
             resp[total++] = ch;
         } else if (r == 0) {
@@ -122,7 +111,7 @@ std::string probe_ioptron_port(const std::string& port_path) {
         }
     }
 
-    close(fd);
+    link.close();
 
     if (total == 4) {
         bool all_digit = true;
@@ -448,6 +437,34 @@ std::string model_code_to_name(const std::string& code) {
     return "";
 }
 
+#ifndef _WIN32
+namespace {
+// A port another connected device holds is never opened. One the connected
+// iOptron mount holds keeps its place in the list (no probe, model unknown),
+// so a mount index stays stable; a connect that picks it is refused by the
+// link claim, which names the holder. Returns true when the caller must not
+// probe @p resolved.
+bool skip_or_count_held_port(const std::string& resolved, const std::string& name,
+                             std::vector<iOptronPortInfo>& results) {
+    switch (util::serial_candidate_use(resolved, kSerialOwner)) {
+        case util::SerialCandidateUse::HeldByOther:
+            ALPACA_LOG_DEBUG("iOptron", "Mount scan skipped " + resolved + ": another connected device holds it");
+            return true;
+        case util::SerialCandidateUse::HeldBySibling:
+            ALPACA_LOG_INFO("iOptron",
+                            "Counted " + resolved + " without probing: the connected iOptron mount holds it");
+            results.push_back({resolved, name, ""});
+            return true;
+        case util::SerialCandidateUse::Free:
+            break;
+    }
+    return false;
+}
+}  // namespace
+#endif
+
+std::string probe_ioptron_serial_port(const std::string& port_path) { return probe_ioptron_port(port_path); }
+
 std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
     std::vector<iOptronPortInfo> results;
 
@@ -475,6 +492,7 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            if (skip_or_count_held_port(resolved, name, results)) continue;
             std::string probe_message = "Probing ";
             probe_message.append(resolved).append(" (").append(name).append(")...");
             ALPACA_LOG_INFO("iOptron", probe_message);
@@ -514,6 +532,7 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_ioptron_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (skip_or_count_held_port(resolved, "", results)) continue;
 
         std::string probe_message = "Probing ";
         probe_message.append(resolved).append("...");
@@ -858,10 +877,7 @@ int64_t parse_int64_field(const std::string& text, const char* context) {
 // PIMPL implementation class
 class iOptronProtocolWrapper::Impl {
 public:
-    Impl() : connected_(false), connection_type_(ConnectionType::Serial) {
-        serial_fd_ = -1;
-        socket_fd_ = -1;
-    }
+    Impl() : connected_(false), connection_type_(ConnectionType::Serial) { socket_fd_ = -1; }
 
     ~Impl() {
         disconnect();
@@ -898,6 +914,7 @@ public:
         }
         
         ALPACA_LOG_INFO("iOptron", "Connection type: " + std::string(info.type == ConnectionType::Serial ? "Serial" : "Network"));
+        last_connect_error_.clear();
         connection_type_ = info.type;
         connection_info_ = info;
         
@@ -932,7 +949,12 @@ public:
     bool is_network_connection() const {
         return connection_type_ == ConnectionType::Network;
     }
-    
+
+    std::string last_connect_error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_connect_error_;
+    }
+
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
@@ -945,13 +967,14 @@ public:
             return;
         }
 
+        // Clear the state before the close, so nothing reads a half-closed link.
+        connected_ = false;
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
 
-        connected_ = false;
         ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
     }
 
@@ -982,8 +1005,8 @@ public:
         // response garbles fixed-offset parsing (:GPC/:GLS field slicing).
         if (connection_type_ == ConnectionType::Serial) {
 #ifndef _WIN32
-            if (serial_fd_ >= 0) {
-                tcflush(serial_fd_, TCIFLUSH);
+            if (link_) {
+                tcflush(link_.fd(), TCIFLUSH);
             }
 #else
             if (serial_handle_ != INVALID_HANDLE_VALUE) {
@@ -1051,7 +1074,7 @@ public:
 
     // Wait up to wait_ms for acknowledgment bytes and discard them; once any
     // byte has arrived, return as soon as the line goes idle (read_serial_char
-    // blocks <=100 ms per attempt via VTIME/COMMTIMEOUTS). Never throws: a
+    // waits <=100 ms per attempt via tty_read()/COMMTIMEOUTS). Never throws: a
     // silent mount is the expected case for a blind command.
     void drain_serial_stale(int wait_ms) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
@@ -1108,8 +1131,8 @@ public:
         }
         if (connection_type_ == ConnectionType::Serial) {
 #ifndef _WIN32
-            if (serial_fd_ >= 0) {
-                tcflush(serial_fd_, TCIFLUSH);
+            if (link_) {
+                tcflush(link_.fd(), TCIFLUSH);
             }
 #else
             if (serial_handle_ != INVALID_HANDLE_VALUE) {
@@ -1186,51 +1209,7 @@ private:
             ALPACA_LOG_ERROR("iOptron", "Port path is empty!");
             return false;
         }
-        
-        // Make sure we have a valid C string
-        const char* port_cstr = port_path.c_str();
-        if (port_cstr == nullptr) {
-            ALPACA_LOG_ERROR("iOptron", "Port path C string is null!");
-            return false;
-        }
-        
-        ALPACA_LOG_INFO("iOptron", "Got C string pointer: [" + std::string(port_cstr) + "], calling open()...");
-        
-        // Call open() with error handling
-        errno = 0;  // Clear errno before call
-        serial_fd_ = open(port_cstr, O_RDWR | O_NOCTTY | O_NONBLOCK);
-        int open_errno = errno;
-        ALPACA_LOG_INFO("iOptron", "open() returned: " + std::to_string(serial_fd_) + ", errno: " + std::to_string(open_errno));
-        if (serial_fd_ < 0) {
-            const std::string errmsg = (open_errno != 0) ? util::errno_string(open_errno) : "unknown";
-            ALPACA_LOG_ERROR("iOptron", "Failed to open serial port [" + port_path + "]: " + errmsg + " (errno " +
-                                            std::to_string(open_errno) +
-                                            "). Check port exists, permissions (e.g. user in dialout group), and that "
-                                            "no other process has it open.");
-            return false;
-        }
 
-        // Exclusive access (issue #995): a later open() of this node, e.g. an
-        // auto-detect probe of another iOptron driver scanning the same
-        // Prolific/FTDI candidates, then fails with EBUSY and the probe skips
-        // the port, instead of flushing our pending reply and writing its own
-        // query. Same as the SynScan and Sky-Watcher wrappers: connected link
-        // only, ignored on failure (pty back ends may not support it).
-        (void)ioctl(serial_fd_, TIOCEXCL);
-        ALPACA_LOG_INFO("iOptron", "Getting terminal attributes...");
-        // Configure serial port
-        struct termios tty;
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            int tc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "tcgetattr failed: " + util::errno_string(tc_err) + " (errno " +
-                                            std::to_string(tc_err) + ")");
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-        ALPACA_LOG_INFO("iOptron", "Got terminal attributes");
-        
         // Set baud rate
         speed_t speed = B9600;
         switch (baud_rate) {
@@ -1241,53 +1220,15 @@ private:
             case 115200: speed = B115200; break;
             default: speed = B9600; break;
         }
-        
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-        
-        // 8N1 configuration
-        tty.c_cflag &= ~PARENB;  // No parity
-        tty.c_cflag &= ~CSTOPB;   // 1 stop bit
-        tty.c_cflag &= ~CSIZE;    // Clear size bits
-        tty.c_cflag |= CS8;       // 8 data bits
-        tty.c_cflag &= ~CRTSCTS;  // No hardware flow control
-        tty.c_cflag |= CREAD | CLOCAL;  // Enable receiver, ignore modem controls
-        
-        // Input flags
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);  // No software flow control
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        
-        // Output flags
-        tty.c_oflag &= ~OPOST;
-        
-        // Local flags
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        
-        // Set timeouts
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 1;  // 0.1 second timeout
-        
-        ALPACA_LOG_INFO("iOptron", "Setting terminal attributes...");
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            int tc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "tcsetattr failed: " + util::errno_string(tc_err) + " (errno " +
-                                            std::to_string(tc_err) + ")");
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
-        ALPACA_LOG_INFO("iOptron", "Set terminal attributes");
 
-        // Set to blocking mode (matches the probe path and the other wrappers).
-        ALPACA_LOG_INFO("iOptron", "Setting to blocking mode...");
-        if (!util::clear_nonblocking(serial_fd_)) {
-            int fc_err = errno;
-            ALPACA_LOG_ERROR("iOptron", "Clearing O_NONBLOCK failed: " + util::errno_string(fc_err) + " (errno " +
-                                            std::to_string(fc_err) + ")");
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
+        // SerialLink claims the port (one another connected device holds is
+        // refused, naming it), takes TIOCEXCL, applies 8N1 raw and keeps the
+        // fd non-blocking: every read below is bounded by tty_read().
+        std::string error;
+        link_ = util::SerialLink::open(port_path, util::SerialClaimKind::Link, kSerialOwner, mount_line(speed), &error);
+        if (!link_) {
+            ALPACA_LOG_ERROR("iOptron", error);
+            last_connect_error_ = error;
             return false;
         }
         ALPACA_LOG_INFO("iOptron", "Serial port configured successfully");
@@ -1303,7 +1244,8 @@ private:
             serial_handle_ = INVALID_HANDLE_VALUE;
         }
 #else
-        if (serial_fd_ >= 0) {
+        if (link_) {
+            const int fd = link_.fd();
             // Let any queued TX bytes reach the mount and discard unread RX
             // before closing — slamming the port shut mid-exchange is what
             // wedges the mount under rapid connect/disconnect cycling.
@@ -1316,17 +1258,15 @@ private:
             // port — where discarding is the right call anyway.
             const auto drain_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
             int tx_pending = 0;
-            while (ioctl(serial_fd_, TIOCOUTQ, &tx_pending) == 0 && tx_pending > 0 &&
+            while (ioctl(fd, TIOCOUTQ, &tx_pending) == 0 && tx_pending > 0 &&
                    std::chrono::steady_clock::now() < drain_deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
             if (tx_pending > 0) {
-                tcflush(serial_fd_, TCOFLUSH);
+                tcflush(fd, TCOFLUSH);
             }
-            tcflush(serial_fd_, TCIFLUSH);
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
+            tcflush(fd, TCIFLUSH);
+            link_.close();  // releases TIOCEXCL and the registry claim
         }
 #endif
     }
@@ -1490,7 +1430,7 @@ private:
         }
         return true;
 #else
-        return util::write_all(serial_fd_, data.c_str(), data.length());
+        return util::tty_write_all(link_.fd(), data.c_str(), data.length());
 #endif
     }
 
@@ -1583,11 +1523,11 @@ private:
         }
         return false;
 #else
-        // Bounded blocking read (VMIN=0/VTIME=1 -> <=100 ms) intentionally
-        // under the wrapper mutex for transaction atomicity — the documented
-        // protocol-wrapper pattern (see ci_preflight scan-build note).
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        return bytes_read == 1;
+        // Bounded read (<=100 ms, the old VTIME=1 window) intentionally under
+        // the wrapper mutex for transaction atomicity — the documented
+        // protocol-wrapper pattern. tty_read() polls a non-blocking fd, so a
+        // port another program retuned to VMIN=1 cannot park it.
+        return util::tty_read(link_.fd(), &ch, 1, 100) == 1;
 #endif
     }
     
@@ -1682,9 +1622,10 @@ private:
     HANDLE serial_handle_;
     SOCKET socket_handle_;
 #else
-    int serial_fd_;
+    util::SerialLink link_;
     int socket_fd_;
 #endif
+    std::string last_connect_error_;  // operator-facing reason the last connect failed (guarded by mutex_)
 };
 
 // Singleton instance
@@ -1708,6 +1649,8 @@ bool iOptronProtocolWrapper::connect(const ConnectionInfo& info) {
 void iOptronProtocolWrapper::disconnect() {
     pimpl_->disconnect();
 }
+
+std::string iOptronProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
 bool iOptronProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();

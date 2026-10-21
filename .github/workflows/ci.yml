@@ -959,6 +959,25 @@ jobs:
           python3 scripts/check_connect_error_hook.py --self-test
           python3 scripts/check_connect_error_hook.py
 
+  serial-port-ownership:
+    name: Serial port ownership
+    runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every serial port is opened through util::SerialLink
+        # A wrapper that opens a tty by hand compiles and tests green while
+        # skipping the in-use registry, TIOCEXCL and the poll()-bounded reads,
+        # so another device's probe can retune its live port and a retune can
+        # hang Disconnect (issue #1202). Nothing but this scan catches it.
+        run: |
+          python3 scripts/check_serial_port_ownership.py --self-test
+          python3 scripts/check_serial_port_ownership.py
+
   layering:
     name: Layering gate
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent

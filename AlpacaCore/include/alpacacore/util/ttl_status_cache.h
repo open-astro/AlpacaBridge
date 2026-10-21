@@ -45,7 +45,9 @@ namespace alpacacore::util {
  *
  * Locking: the cache has its own mutex, held across the refill so concurrent
  * readers share one device round trip. Lock order is driver mutex (if held)
- * -> cache mutex -> SDK mutex. Never call get() from inside the refill.
+ * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch)
+ * refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock when they call the cache.
+ * Never call get() from inside the refill.
  * Writers call invalidate() after the write; connect/disconnect call reset().
  */
 template <typename Status>

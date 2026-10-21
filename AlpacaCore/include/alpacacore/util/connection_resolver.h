@@ -14,6 +14,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 
 #include <exception>
 #include <filesystem>
@@ -58,8 +59,10 @@ namespace alpacacore::util {
  * endpoint falls through to the resolver only when the lambda throws
  * `StaleEndpoint`, which it does for failures that mean the endpoint is gone
  * or is not this device any more: the serial or HID node no longer exists
- * (`device_node_missing()`), a network connect was refused, or the vendor's
- * identity gate failed (SynScan's echo test). Every other exception
+ * (`device_node_missing()`), another connected device now holds the serial
+ * port (#1202; serial drivers check both with `serial_endpoint_stale()`), a
+ * network connect was refused, or the vendor's identity gate failed (SynScan's
+ * echo test). Every other exception
  * propagates unchanged, because a scan is not free: the QHYCFW3 and Gemini
  * probes open, and DTR-reset, every CP210x or CH340 device on the box, so a
  * wheel that is still homing ("try again in a few seconds") or a handshake
@@ -96,6 +99,20 @@ inline bool device_node_missing(const std::string& path) {
     const auto status = std::filesystem::status(path, ec);
     if (status.type() == std::filesystem::file_type::not_found) return true;
     return ec == std::errc::no_such_file_or_directory || ec == std::errc::not_a_directory;
+}
+
+/// True when a serial endpoint a previous connect resolved is no longer this
+/// device's to reuse: the node is gone (device_node_missing()), or another
+/// connected device now holds the port (issue #1202). Many vendors share the
+/// CH340 adapter, so after a replug or a change of plug order the name a
+/// driver remembered can belong to another device. Its connect is refused by
+/// the port claim without touching the line, and a fresh scan finds this
+/// device on its new port. Only a connected holder counts: a port another
+/// scan is still probing is waited for by the claim, not re-scanned around.
+inline bool serial_endpoint_stale(const std::string& path) {
+    if (device_node_missing(path)) return true;
+    const auto holder = serial_port_holder(path);
+    return holder.has_value() && holder->kind == SerialClaimKind::Link;
 }
 
 template <typename Info, typename TryConnect>

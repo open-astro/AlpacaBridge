@@ -39,6 +39,7 @@ constexpr util::ThermalSwitchLabels kDewHeaterLabels{"ZWO", "dew heater"};
 constexpr std::chrono::milliseconds kStatusTtl{100};
 
 struct DewStatus {
+    bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
     long value{};
 };
 
@@ -217,7 +218,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake
+        // below runs under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -234,34 +237,33 @@ public:
 
         auto& sdk = sdk_;
         if (connected) {
-            std::vector<ZwoDewHeaterCamera> listing;
-            int resolved_id = resolve_camera_id_locked(listing);
-            try {
-                sdk.open_camera(resolved_id);
-            } catch (...) {
-                if (!camera_bound_by_id_only()) {
-                    camera_id_.reset();
-                }
-                throw;
-            }
-            // Guard everything after the open, init included: the ZWO open is
-            // ref-counted, so an open left unclosed by a throw is never balanced.
-            try {
-                sdk.init_camera(resolved_id);
-                refresh_camera_name_locked(resolved_id);
-                load_dew_caps_locked(resolved_id, listing);
-                serial_number_ = sdk.get_serial_number(resolved_id);
-            } catch (...) {
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                std::vector<ZwoDewHeaterCamera> listing;
+                const int resolved_id = resolve_camera_id(listing);
                 try {
-                    sdk.close_camera(resolved_id);
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "close_camera after failed dew heater connect: " + std::string(e.what()));
+                    sdk.open_camera(resolved_id);
+                } catch (...) {
+                    forget_unbound_camera_id();
+                    throw;
                 }
-                if (!camera_bound_by_id_only()) {
-                    camera_id_.reset();
+                // Guard everything after the open, init included: the ZWO open is
+                // ref-counted, so an open left unclosed by a throw is never balanced.
+                try {
+                    sdk.init_camera(resolved_id);
+                    publish_connect_state(resolved_id, listing);
+                } catch (...) {
+                    try {
+                        sdk.close_camera(resolved_id);
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("ZWO",
+                                        "close_camera after failed dew heater connect: " + std::string(e.what()));
+                    }
+                    forget_unbound_camera_id();
+                    throw;
                 }
-                throw;
             }
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
             status_cache_.reset();
             connected_.store(true);
             return;
@@ -269,19 +271,25 @@ public:
 
         // Clear driver state and publish disconnected BEFORE the SDK close so
         // a racing operational call fails fast at ensure_connected() instead
-        // of hitting a just-closed camera (ops here snapshot the id and call
-        // the SDK without holding mutex_) — same order as the EFW/CAA/EAF
-        // siblings, per the AGENTS.md disconnect rule.
-        const std::optional<int> close_id = camera_id_;
-        if (!camera_bound_by_id_only()) {
-            camera_id_.reset();
-            camera_name_ = "ZWO Camera";
-            serial_number_.clear();
+        // of hitting a just-closed camera; one already past that check holds
+        // the I/O lock, which the close below waits for -- same order as the
+        // EFW/CAA/EAF siblings, per the driver-lifecycle.instructions.md
+        // disconnect rule.
+        std::optional<int> close_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = camera_id_;
+            if (!camera_bound_by_id_only()) {
+                camera_id_.reset();
+                camera_name_ = "ZWO Camera";
+                serial_number_.clear();
+            }
+            dew_caps_.reset();
+            connected_.store(false);
         }
-        dew_caps_.reset();
         status_cache_.reset();
-        connected_.store(false);
         if (close_id.has_value()) {
+            std::lock_guard<std::mutex> io(io_mutex_);
             sdk.close_camera(close_id.value());
         }
     }
@@ -353,17 +361,27 @@ public:
         ensure_connected();
         dew_caps_or_throw();
         const int camera_id = camera_id_value();
-        return static_cast<double>(
-            status_cache_
-                .get([this, camera_id] {
-                    bool is_auto = false;
-                    DewStatus fresh;
-                    if (!sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto)) {
-                        throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
-                    }
-                    return fresh;
-                })
-                .value);
+        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
+        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
+        const DewStatus status = status_cache_.get([this, camera_id] {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            DewStatus fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the camera. Returning (not throwing) keeps
+                // it out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
+            bool is_auto = false;
+            if (!sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto)) {
+                throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
+            }
+            return fresh;
+        });
+        if (status.closed) {
+            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+        }
+        return static_cast<double>(status.value);
     }
 
     void set_switch_value(int id, double value) override {
@@ -382,7 +400,11 @@ public:
         if (value_long < caps.min_value || value_long > caps.max_value) {
             throw AlpacaException("Dew heater value out of range", AlpacaError::InvalidValue);
         }
-        sdk_.set_control_value(camera_id_value(), ZWOControlType::AntiDewHeater, value_long, false);
+        {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            ensure_connected();  // a disconnect that won the I/O lock has closed the camera
+            sdk_.set_control_value(camera_id_value(), ZWOControlType::AntiDewHeater, value_long, false);
+        }
         status_cache_.invalidate();
     }
 
@@ -468,8 +490,10 @@ private:
     // id without listing (a listing opens every attached camera, and an id-only
     // switch must open only its own); an index or serial binding lists the
     // attached cameras into `listing`, which the capability refusal names too.
-    int resolve_camera_id_locked(std::vector<ZwoDewHeaterCamera>& listing) {
+    // Caller holds io_mutex_ (the listing opens cameras); the bound id and name publish under mutex_.
+    int resolve_camera_id(std::vector<ZwoDewHeaterCamera>& listing) {
         if (camera_bound_by_id_only()) {
+            std::lock_guard<std::mutex> lock(mutex_);
             if (camera_id_.has_value()) {
                 return camera_id_.value();
             }
@@ -494,25 +518,46 @@ private:
         }
         const auto& camera = listing[choice.chosen.value()];
         ALPACA_LOG_INFO("ZWO", "Dew heater using " + util::describe_thermal_camera(camera.candidate));
+        std::lock_guard<std::mutex> lock(mutex_);
         camera_id_ = camera.camera_id;
         camera_name_ = camera.candidate.name;
         return camera.camera_id;
     }
 
-    void refresh_camera_name_locked(int camera_id) {
-        ZWOCameraInfo info;
-        if (sdk_.get_camera_info_by_id(camera_id, info) && !info.name.empty()) {
-            camera_name_ = info.name;
+    // A failed connect forgets a camera it resolved by index or serial; an id-only binding keeps its id.
+    void forget_unbound_camera_id() {
+        if (!camera_bound_by_id_only()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            camera_id_.reset();
         }
     }
 
-    void load_dew_caps_locked(int camera_id, std::vector<ZwoDewHeaterCamera>& listing) {
-        dew_caps_.reset();
-        auto caps = sdk_.get_control_caps(camera_id);
-        for (const auto& cap : caps) {
+    // Reads the camera name, heater capability and serial from the open camera, then publishes them under
+    // mutex_ (short). Caller holds io_mutex_ and not mutex_.
+    void publish_connect_state(int camera_id, std::vector<ZwoDewHeaterCamera>& listing) {
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            name = camera_name_;
+        }
+        ZWOCameraInfo info;
+        if (sdk_.get_camera_info_by_id(camera_id, info) && !info.name.empty()) {
+            name = info.name;
+        }
+        const ZWOControlCaps caps = find_dew_caps(camera_id, listing, name);
+        const std::string serial = sdk_.get_serial_number(camera_id);
+        std::lock_guard<std::mutex> lock(mutex_);
+        camera_name_ = name;
+        dew_caps_ = caps;
+        serial_number_ = serial;
+    }
+
+    // The heater control of the open camera, or the refusal that names the cameras that have one.
+    ZWOControlCaps find_dew_caps(int camera_id, std::vector<ZwoDewHeaterCamera>& listing,
+                                 const std::string& camera_name) {
+        for (const auto& cap : sdk_.get_control_caps(camera_id)) {
             if (cap.type == ZWOControlType::AntiDewHeater) {
-                dew_caps_ = cap;
-                return;
+                return cap;
             }
         }
         // An id-only binding connected without a listing; the refusal names the
@@ -521,7 +566,7 @@ private:
             listing = list_dew_heater_cameras(sdk_, nullptr);
         }
         util::ThermalCameraCandidate bound;
-        bound.name = camera_name_;
+        bound.name = camera_name;
         bound.index = -1;
         for (const auto& camera : listing) {
             if (camera.camera_id == camera_id) {
@@ -551,6 +596,13 @@ private:
     std::string camera_name_;
     std::optional<ZWOControlCaps> dew_caps_;
     std::atomic<bool> connected_;
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
+    // short state reads and writes, never held across an SDK call), then the SDK wrapper's own mutex.
+    // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
+    // device transactions (connect, close, the heater write, the status refill). Never take the cache
+    // mutex (reset/invalidate) while holding io_mutex_ or mutex_.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
     mutable std::mutex mutex_;
     std::string switch_name_;
     std::string switch_description_;

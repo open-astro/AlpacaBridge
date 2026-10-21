@@ -35,7 +35,7 @@ generated `61-alpacabridge-libgphoto2.rules`), and `AlpacaCore/src/vendors/gphot
 links that copy through `ALPACACORE_GPHOTO_PREFIX` / `ALPACACORE_GPHOTO_STAGE`. The distro's
 libgphoto2 is never linked or loaded: the executables carry a `DT_RPATH` (not `DT_RUNPATH`) to the
 prefix, and the prefix is never added to `/etc/ld.so.conf.d/`, so other programs on the host keep the
-distro library. `scripts/check_bundled_gphoto.sh` is the acceptance check (CI job `package-deb`;
+distro library. `scripts/check_bundled_gphoto.sh` is the acceptance check (CI job `package-deb` on every PR, and the nightly build job before it publishes;
 on the rig add `--pid` of the service). A dev build runs the script once before CMake. Decision:
 [0012](../../docs/decisions/0012-bundled-libgphoto2.md). Unlike the proprietary camera SDKs there is
 no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not apply.

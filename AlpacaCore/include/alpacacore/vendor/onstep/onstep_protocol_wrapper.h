@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -69,6 +71,13 @@ struct AltAz {
     double azimuth_degrees = 0.0;
 };
 
+// The firmware's horizon and overhead limits (:Gh#, :Go#), whole degrees.
+// OnStepX accepts -30..30 and 60..90; 90 overhead means no overhead limit.
+struct AltitudeLimits {
+    double horizon_degrees = 0.0;
+    double overhead_degrees = 90.0;
+};
+
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
@@ -83,6 +92,13 @@ struct MountStatus {
     bool is_slewing = false;
     bool is_parked = false;
     bool is_at_home = false;
+    // 'g' in :GU#: a guide move is running (OnStepX guide.active(): a
+    // :Mn#/:Ms#/:Me#/:Mw# move, so a MoveAxis, and also a home or spiral
+    // guide; not a pulse guide). Firmware without the letter never sets it.
+    bool is_guide_active = false;
+    // 'G': a pulse guide is running. While it runs OnStepX drops 'g' even
+    // when a MoveAxis is still running on the other axis.
+    bool is_pulse_guide_active = false;
     int side_of_pier = -1;
     std::string raw_status;
 };
@@ -122,6 +138,11 @@ public:
     void disconnect();
     bool is_connected() const;
 
+    /// Operator-facing reason the last connect() returned false (e.g. the
+    /// serial port is held by another connected device, #1202); empty when
+    /// it gave none.
+    std::string last_connect_error() const;
+
     /**
      * @brief Whether the serial link is still there (decision 0009, #1241).
      *
@@ -132,6 +153,16 @@ public:
      * the network test seam is never lost this way.
      */
     bool link_alive();
+
+    /**
+     * @brief The clock the link-loss and last-alive stamps read (decision 0005,
+     *        #1378): the driver's injected TaskClock, set at connect, so the
+     *        driver times the #521 outage on the clock it runs on. Default:
+     *        util::default_task_clock(). release_task_clock() puts the default
+     *        back if `clock` is still the one set (a driver going away).
+     */
+    void set_task_clock(util::TaskClock& clock);
+    void release_task_clock(util::TaskClock& clock);
 
     /// Why the link was lost, or "" while it is not lost. Cleared by
     /// disconnect() or a successful connect().
@@ -188,6 +219,13 @@ public:
      * Sends :GA# and :GZ#.
      */
     AltAz get_alt_az();
+
+    /**
+     * @brief Get the horizon and overhead limits.
+     *
+     * Sends :Gh# and :Go#.
+     */
+    AltitudeLimits get_altitude_limits();
 
     /**
      * @brief Get mount status (tracking/slewing/parked/home/pier side).

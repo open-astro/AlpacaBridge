@@ -13,6 +13,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <fcntl.h>
@@ -77,7 +78,8 @@ int poll_timeout_ms(std::chrono::steady_clock::time_point deadline) {
 
 CelestronCgxProtocol::~CelestronCgxProtocol() { disconnect(); }
 
-void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkSpeed speed) {
+void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkSpeed speed,
+                                          std::chrono::milliseconds probe_wait) {
     if (port_path.empty()) {
         throw_link_error("a serial port path is required");
     }
@@ -88,7 +90,7 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
     const std::string registry_path = path_error ? port_path : canonical.string();
     struct stat held {
     }, current{};
-    if (serial_fd_ >= 0 && registry_path == registered_port_path_ && ::fstat(serial_fd_, &held) == 0 &&
+    if (serial_fd_ >= 0 && registry_path == link_.key() && ::fstat(serial_fd_, &held) == 0 &&
         ::stat(port_path.c_str(), &current) == 0 && held.st_nlink != 0 && held.st_dev == current.st_dev &&
         held.st_ino == current.st_ino && held.st_rdev == current.st_rdev) {
         if (desynchronized_) {
@@ -105,58 +107,38 @@ void CelestronCgxProtocol::connect_serial(const std::string& port_path, AuxLinkS
         return;
     }
     disconnect_locked();
-    if (!util::try_mark_serial_port_open(registry_path)) {
-        throw AlpacaException("Celestron CGX USB port is already in use: " + port_path, AlpacaError::InvalidOperation);
+    // SerialLink (#1202) claims the port (a port another connected device
+    // holds is refused, naming it; another device's probe is waited out),
+    // takes TIOCEXCL and keeps the fd non-blocking. The lock is Required: the
+    // process-local registry cannot exclude another daemon's serial probe, and
+    // decision 0011 keeps this fd across logical disconnects.
+    const speed_t baud = speed == AuxLinkSpeed::Baud9600 ? B9600 : B115200;
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Link, owner_,
+        [baud](struct termios& settings) {
+            ::cfmakeraw(&settings);
+            settings.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
+            settings.c_cflag |= CS8 | CREAD | CLOCAL;
+            ::cfsetispeed(&settings, baud);
+            ::cfsetospeed(&settings, baud);
+        },
+        &error, probe_wait, util::SerialExclusive::Required);
+    if (!link) {
+        if (util::serial_port_holder(port_path)) {
+            throw AlpacaException("Celestron CGX USB: " + error, AlpacaError::InvalidOperation);
+        }
+        throw_link_error(error);
+    }
+    if (::tcflush(link.fd(), TCIFLUSH) != 0) {
+        throw_link_error("cannot clear stale AUX input before reconnect: " + util::errno_string(errno));
     }
 
-    const int fd = ::open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
-        util::mark_serial_port_closed(registry_path);
-        throw_link_error("cannot open " + port_path + ": " + util::errno_string(errno));
-    }
-
-    bool exclusive = false;
-    try {
-        // The process-local registry cannot exclude another daemon's serial probe.
-        if (::ioctl(fd, TIOCEXCL) != 0) {
-            throw_link_error("cannot claim exclusive serial access: " + util::errno_string(errno));
-        }
-        exclusive = true;
-        struct termios settings {};
-        if (::tcgetattr(fd, &settings) != 0) {
-            throw_link_error("cannot read serial settings: " + util::errno_string(errno));
-        }
-
-        ::cfmakeraw(&settings);
-        settings.c_cflag &= ~(PARENB | CSTOPB | CSIZE | CRTSCTS);
-        settings.c_cflag |= CS8 | CREAD | CLOCAL;
-        settings.c_cc[VMIN] = 0;
-        settings.c_cc[VTIME] = 0;
-        const speed_t baud = speed == AuxLinkSpeed::Baud9600 ? B9600 : B115200;
-        if (::cfsetispeed(&settings, baud) != 0 || ::cfsetospeed(&settings, baud) != 0 ||
-            ::tcsetattr(fd, TCSANOW, &settings) != 0) {
-            throw_link_error(std::string("cannot configure ") + (speed == AuxLinkSpeed::Baud9600 ? "9600" : "115200") +
-                             "-baud serial link: " + util::errno_string(errno));
-        }
-        if (!util::set_nonblocking(fd)) {
-            throw_link_error("cannot enable bounded serial I/O: " + util::errno_string(errno));
-        }
-        if (::tcflush(fd, TCIFLUSH) != 0) {
-            throw_link_error("cannot clear stale AUX input before reconnect: " + util::errno_string(errno));
-        }
-
-        registered_port_path_ = registry_path;
-        receive_buffer_.clear();
-        serial_fd_ = fd;
-        ++session_generation_;
-        healthy_.store(true);
-    } catch (...) {
-        if (exclusive) (void)::ioctl(fd, TIOCNXCL);
-        ::close(fd);
-        util::mark_serial_port_closed(registry_path);
-        registered_port_path_.clear();
-        throw;
-    }
+    link_ = std::move(link);
+    receive_buffer_.clear();
+    serial_fd_ = link_.fd();
+    ++session_generation_;
+    healthy_.store(true);
 }
 
 void CelestronCgxProtocol::resync() {
@@ -347,12 +329,9 @@ void CelestronCgxProtocol::disconnect_locked() {
     healthy_.store(false);
     if (serial_fd_ >= 0) {
         ++session_generation_;
-        (void)::ioctl(serial_fd_, TIOCNXCL);
-        ::close(serial_fd_);
         serial_fd_ = -1;
     }
-    util::mark_serial_port_closed(registered_port_path_);
-    registered_port_path_.clear();
+    link_.close();  // releases TIOCEXCL and the registry claim
     receive_buffer_.clear();
     desynchronized_ = false;
 }

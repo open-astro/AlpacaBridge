@@ -77,3 +77,5 @@ A record is referred to by its slug until it is written, and numbered then.
 - [Designs to avoid](0013-designs-to-avoid.md)
 - [Mount UTC offset](0014-utc-offset.md)
 - [SDK seams](0015-sdk-seams.md)
+- [Getters never wait on device I/O](0016-getters-never-wait-on-device-io.md)
+- [Serial port ownership](0017-serial-port-ownership.md)

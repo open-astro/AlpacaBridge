@@ -53,8 +53,14 @@ Each line is a summary; the linked topic file holds the rule and its history.
   `util::AsyncOperation` slot; never hand-roll either
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md)).
 - Never `.detach()` a thread that touches `this`; join every thread before members die.
-- One lock order everywhere: driver `mutex_` → operation lock → SDK-wrapper mutex.
-  Hold `mutex_` across fast SDK calls (`with_handle`); no snapshot-then-call gaps.
+- Getters never wait on device I/O: `mutex_` is a short state lock, never held across
+  an SDK call, serial exchange or connect handshake, except a camera's short
+  `with_camera`/`with_handle` SDK calls (kept until a stall is measured); one per-link
+  I/O lock serialises the wire. Lock order in a converted driver: `transition_mutex_` →
+  I/O lock → `mutex_` (leaf of the driver's own locks) → SDK-wrapper mutex, with the
+  `StateSnapshot` and slot mutexes as leaves under `mutex_`. Cameras and unconverted
+  drivers keep `mutex_` → operation lock → SDK-wrapper mutex
+  ([decision 0016](docs/decisions/0016-getters-never-wait-on-device-io.md)).
 - `set_connected(false)` clears driver state before the SDK close; a connect guards all
   post-open init so a throw closes the handle.
 - `InvalidValue` precedes the connection check; every other member throws

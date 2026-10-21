@@ -75,6 +75,9 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    /// Why the last connect() returned false, written for the operator (a port
+    /// another device holds, a failed open); empty when no reason is known.
+    std::string last_connect_error() const;
 
     std::string send_command(const std::string& command,
                              bool require_hash_terminator = true,

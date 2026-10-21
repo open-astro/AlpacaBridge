@@ -77,7 +77,7 @@ Runs ConformU against a connected AlpacaBridge device and processes the results:
 - Safety checks: refuses to PR from `main`, blocks on uncommitted changes and failing ConformU reports
 - Auto-detects direct contributor vs fork and handles both flows
 - Runs the pre-submission checklist (tests, ConformU, changelog fragment, SUPPORTED-DRIVERS, instruction files, license headers, SDK cleanup)
-- Reproduces CI locally via `scripts/ci_preflight.sh` before pushing, so PRs never open red
+- Runs the quick pre-flight (`scripts/ci_preflight.sh`, every gate that needs no build) before pushing; CI runs the build and test gates, and the review waits for them
 - Builds the PR title and a body that follows `.github/PULL_REQUEST_TEMPLATE.md` (thinking path, linked issues, what changed, verification, risks, model used, checklist), then creates the PR via `gh`; the `pr-template` job in `.github/workflows/pr-body.yml` (`scripts/check_pr_template.py`) fails a PR whose body drops a template section or leaves one unfilled
 - Watches for the automated review verdict and batches fixes into single pushes (every push restarts a full fresh review)
 
@@ -183,16 +183,19 @@ ctest --test-dir AlpacaHTTP/build/AlpacaCore   # AlpacaCore only
 Filter by tag: `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests [zwo][camera]`
 Exclude hardware tests: `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests ~[hardware]`
 
-These assume the tree `run_all_tests.sh` just made. A pre-flight leaves a different
-one there (see below), so after one, rebuild rather than filtering against what is left.
+These assume the tree `run_all_tests.sh` just made. A full pre-flight (`PREFLIGHT_FULL=1`)
+leaves a different one there (see below), so after one, rebuild rather than filtering against
+what is left.
 
-Before pushing, reproduce the full CI gate set locally:
+Before pushing, run the quick pre-flight:
 
 ```sh
 ./scripts/ci_preflight.sh
 ```
 
-This runs clang-format, the Unicode/Trojan-Source scan, both build+test configurations (vendors OFF and ON), clang-tidy, cppcheck, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. It finishes with the ASan+UBSan pass, which is on by default since #588 and runs last of the default gates, after zizmor; `RUN_SANITIZERS=0` opts out, and the opt-in `RUN_TSAN=1` and `RUN_SCAN_BUILD=1` passes run after it when set. `/submit-pr` runs it automatically.
+The default run takes about a minute and builds nothing: clang-format, the Unicode/Trojan-Source scan, the Python gates (stress registration, ConformU reports, docs drift, connect-error hook, layering, contract sweep, and the PR-body gates when `PR_BODY_FILE` is set), the beta VERSION split, cppcheck on changed C/C++ files, and — when the relevant files changed — shellcheck, the web UI JavaScript gate (`node --check` for syntax plus `node --test` for the pure formatters in `AlpacaHTTP/web/format.js`, triggered by changes under `AlpacaHTTP/web/` or `AlpacaHTTP/tests/web/`), and zizmor. It also runs on macOS with the stock bash 3.2 (pass `PREFLIGHT_NO_INSTALL=1` there). `/submit-pr` runs it automatically.
+
+The build and test gates are reported `[SKIP]` in that run, because CI runs them on every PR and the review bot waits for them before it reviews. `PREFLIGHT_FULL=1 ./scripts/ci_preflight.sh` runs them locally on an arm64 Linux host too: both build+test configurations (vendors OFF and ON), clang-tidy, and the ASan+UBSan pass, which is on by default inside a full run since #588 and runs last, after zizmor; `RUN_SANITIZERS=0` opts out. The opt-in `RUN_TSAN=1` and `RUN_SCAN_BUILD=1` passes build their own trees and run in either mode.
 
 ## Writing tests
 

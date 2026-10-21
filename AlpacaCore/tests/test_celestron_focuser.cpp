@@ -16,6 +16,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
@@ -189,6 +190,24 @@ TEST_CASE("Celestron Focuser Driver - the motor's USB port runs at 9600 baud", "
     CHECK(::cfgetispeed(&settings) == B9600);
     driver->set_connected(false);
     ::close(observer);
+}
+
+TEST_CASE("Celestron Focuser Driver - holds its port under its own name", "[celestron][focuser][unit][fake]") {
+    // The focuser shares the CGX AUX transport; the registry holder is what a
+    // refused operator reads (#1202, decision 0017), so it must name the focuser.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(1000, 61000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    const auto holder = alpacacore::util::serial_port_holder(fake.slave_path());
+    REQUIRE(holder.has_value());
+    CHECK(holder->owner == "Celestron focuser");
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 }
 
 TEST_CASE("Celestron Focuser Driver - Move sends the raw target and IsMoving follows the motor",

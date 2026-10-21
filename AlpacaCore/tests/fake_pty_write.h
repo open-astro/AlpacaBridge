@@ -38,7 +38,7 @@
 // run most of the time -- so it surfaces as an occasional CI hang.
 //
 // Two rules, applied to all six pty-backed fakes rather than to the one that
-// was caught (AGENTS.md: a template bug found in one place is fixed
+// was caught (driver-lifecycle.instructions.md: a template bug found in one place is fixed
 // everywhere):
 //
 //   1. The master is opened non-blocking, so a write can never park.

@@ -31,11 +31,12 @@
 #include <thread>
 #include <vector>
 
+#include "wandererastro_serial_scan.h"
+
 #ifndef _WIN32
+#include <alpacacore/util/serial_link.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <termios.h>
-#include <unistd.h>
 #endif
 
 namespace alpacacore::vendor::wandererastro {
@@ -54,9 +55,15 @@ constexpr int kBoxFrameFieldCount = 22;
 // never trips it.
 constexpr int kBoxLinkSilenceMs = 10000;
 
-using util::is_serial_port_in_use;
-using util::mark_serial_port_closed;
-using util::mark_serial_port_open;
+// The registry owner name for this wrapper's probe AND connected link
+// (issue #1202), see enumerate_wandererbox_ports().
+constexpr const char* kSerialOwner = "WandererBox";
+
+// Each single read waits at most this long, the old VTIME=5 window. The fd is
+// non-blocking (SerialLink) and every read is bounded by poll(), so a retune
+// to VMIN=1/VTIME=0 by another program can no longer park the reader in
+// read() and hang Disconnect (#1202).
+constexpr int kReadWindowMs = 500;
 
 // Dew point from DHT22 humidity/temperature via the Magnus formula — same
 // expression as the INDI reference (and the vendor's WandererEmpire app).
@@ -69,39 +76,13 @@ double magnus_dew_point(double temp_c, double humidity_pct) {
 }
 
 #ifndef _WIN32
-// Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
-// DTR stays asserted on close: the CH340 adapter asserts DTR on open, which
-// pulses the controller's MCU reset line; keeping DTR high across close means a
-// subsequent reopen does not reset the controller again.
-bool configure_serial_fd(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        return false;
-    }
-    cfsetospeed(&tty, B19200);
-    cfsetispeed(&tty, B19200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;  // keep DTR high on close — avoids CH340 MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;  // 0.5s per-read timeout so loops can poll their stop flags
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        return false;
-    }
-    if (!util::clear_nonblocking(fd)) {
-        return false;
-    }
-    tcflush(fd, TCIOFLUSH);
-    return true;
+// 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
+// adapter asserts DTR on open, which pulses the controller's MCU reset line;
+// keeping DTR high across close means a subsequent reopen does not reset the
+// controller again.
+void configure_line(struct termios& tty) {
+    util::make_raw_8n1(tty, B19200);
+    tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);  // keep DTR high on close — avoids CH340 MCU reset on reopen
 }
 
 // Read one 'A'-terminated token from the port, skipping CR/LF, within
@@ -118,9 +99,9 @@ std::optional<std::string> read_token(int fd, int timeout_ms, std::string& carry
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
         char ch = 0;
-        // Intentional bounded read under the caller's lock: VMIN=0/VTIME=0.5s
-        // caps each read at 0.5s (same pattern as the other serial wrappers).
-        ssize_t r = ::read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+        // Intentional bounded read under the caller's lock: poll() caps each
+        // read at the read window whatever VMIN/VTIME the port carries.
+        ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
         if (r == 1) {
             if (ch == 'A') {
                 return token;
@@ -132,9 +113,10 @@ std::optional<std::string> read_token(int fd, int timeout_ms, std::string& carry
             if (token.size() > MAX_TOKEN_LEN) {
                 token.clear();  // garbage — resynchronise on the next delimiter
             }
-        } else if (r < 0 && errno != EINTR) {
-            // Persistent read error (e.g. unplugged): VTIME rate-limits only the
-            // no-data path, so back off to avoid spinning for the whole window.
+        } else if (r < 0) {
+            // Persistent read error (e.g. unplugged): the read window bounds
+            // only the no-data path, so back off to avoid spinning for the
+            // whole window.
             if (read_errno != nullptr) *read_errno = errno;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
@@ -239,32 +221,25 @@ std::optional<BoxState> await_frame(int fd, int timeout_ms) {
 // Open a candidate port and listen for the streamed identity. Returns true on
 // a positive identification. Fully passive.
 bool probe_box_port(const std::string& port_path, BoxPortInfo& info) {
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe claim is held for exactly this function: a driver that claimed
+    // the port first refuses the probe before it opens anything, so the probe
+    // never listens on a connected device's stream.
+    std::string error;
+    util::SerialLink probe =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_line, &error);
+    if (!probe) {
+        ALPACA_LOG_DEBUG("WandererAstro", "WandererBox probe skipped " + port_path + ": " + error);
         return false;
     }
-    if (!configure_serial_fd(fd)) {
-        close(fd);
-        return false;
-    }
-    // Re-check after opening: a driver may have claimed this port in the window
-    // between the caller's is_serial_port_in_use() check and this open(). Bail
-    // rather than listening on that device's stream.
-    if (is_serial_port_in_use(port_path)) {
-        close(fd);
-        return false;
-    }
+    tcflush(probe.fd(), TCIOFLUSH);
 
     // 3.5 s covers one full frame period plus a mid-frame join.
-    auto state = await_frame(fd, 3500);
+    auto state = await_frame(probe.fd(), 3500);
 
-    // Re-apply HUPCL-clear before closing so DTR stays asserted.
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) == 0) {
-        tty.c_cflag &= ~HUPCL;
-        tcsetattr(fd, TCSANOW, &tty);
-    }
-    close(fd);
+    // Put back the HUPCL-clear settings if anything changed them, so DTR stays
+    // asserted across the close below.
+    probe.restore_line_settings();
+    probe.close();
 
     if (state.has_value()) {
         info.port_path = port_path;
@@ -315,7 +290,7 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports() {
             if (ec) continue;
             probed.insert(resolved);
 
-            if (is_serial_port_in_use(resolved)) continue;
+            if (!detail::admit_serial_candidate(resolved, name, kSerialOwner, results)) continue;
             std::string probe_msg = "Probing ";
             probe_msg.append(resolved).append(" (").append(name).append(") for WandererBox Pro V3...");
             ALPACA_LOG_INFO("WandererAstro", probe_msg);
@@ -350,7 +325,7 @@ std::vector<BoxPortInfo> enumerate_wandererbox_ports() {
         if (!raw_port_looks_like_box_candidate(resolved)) continue;
         probed.insert(resolved);
 
-        if (is_serial_port_in_use(resolved)) continue;  // held by another connected device
+        if (!detail::admit_serial_candidate(resolved, std::string(), kSerialOwner, results)) continue;
         ALPACA_LOG_INFO("WandererAstro", "Probing " + resolved + " for WandererBox Pro V3...");
         BoxPortInfo info;
         if (probe_box_port(resolved, info)) {
@@ -380,7 +355,7 @@ public:
             throw AlpacaException("WandererBox already connected; call disconnect() first",
                                   AlpacaError::InvalidOperation);
         }
-        // The protocol is fixed at 19200 8N1; configure_serial_fd() hardcodes
+        // The protocol is fixed at 19200 8N1; configure_line() hardcodes
         // B19200, so reject any other configured rate instead of silently
         // ignoring it (the stored config value must not imply control it
         // doesn't have — PR #152 review).
@@ -393,7 +368,7 @@ public:
 
         // The controller streams unprompted; wait up to the configured timeout
         // plus one frame period for the first complete frame.
-        auto state = await_frame(serial_fd_, config_.serial_timeout_s * 1000 + 3500);
+        auto state = await_frame(serial_link_.fd(), config_.serial_timeout_s * 1000 + 3500);
         if (!state.has_value()) {
             close_serial_locked();
             throw AlpacaException(
@@ -526,7 +501,7 @@ private:
         ensure_connected_locked();
         const std::string payload = code + "\n";
         ALPACA_LOG_TRACE("WandererAstro", "Box command: " + code);
-        if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
+        if (!util::tty_write_all(serial_link_.fd(), payload)) {
             throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #else
@@ -562,7 +537,7 @@ private:
             int fd;
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
-                fd = serial_fd_;
+                fd = serial_link_.fd();
             }
             if (fd < 0) {
                 return;  // disconnected under us
@@ -573,7 +548,7 @@ private:
                 std::lock_guard<std::mutex> state_lock(state_mutex_);
                 link_.note_read_error(read_errno);
             }
-            check_link_silence();
+            check_link_silence(fd);
             if (!token.has_value()) {
                 continue;
             }
@@ -609,8 +584,11 @@ private:
 
     // Issue #237: latch a link fault after kBoxLinkSilenceMs without a frame.
     // The cache is invalidated (valid=false) and the driver refuses to serve
-    // it until the next frame clears the latch in reader_loop().
-    void check_link_silence() {
+    // it until the next frame clears the latch in reader_loop(). On the
+    // latching pass only, put back the line settings if another program
+    // retuned the port (#1202): a stream arriving at the wrong baud never
+    // times out a read, so tty_read()'s own restore would never run.
+    void check_link_silence(int fd) {
         std::optional<std::string> latched;
         {
             std::lock_guard<std::mutex> state_lock(state_mutex_);
@@ -623,6 +601,7 @@ private:
             ALPACA_LOG_ERROR("WandererAstro",
                              "WandererBox: serial link faulted (" + *latched +
                                  "); cached status is invalid and reads will fail until frames resume");
+            util::restore_serial_line_settings(fd);
         }
     }
 #endif
@@ -636,38 +615,20 @@ private:
 
 #ifndef _WIN32
     void open_serial_locked() {
-        // Claim the port in the registry BEFORE opening it so a concurrent
-        // auto-detect scan can't slip in between check and open. Store the
-        // canonical path so by-id symlinks and ttyUSBn nodes compare equal.
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
-        opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_serial_port_open(opened_port_);
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
+        // SerialLink claims the port before it opens it (a port another
+        // connected device holds is refused untouched, a scan's probe is waited
+        // for) and holds it exclusively until close_serial_locked() (#1202).
+        std::string error;
+        serial_link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+                                              configure_line, &error);
+        if (!serial_link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        if (!configure_serial_fd(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
+        tcflush(serial_link_.fd(), TCIOFLUSH);
     }
 
     void close_serial_locked() {
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        mark_serial_port_closed(opened_port_);
-        opened_port_.clear();
+        serial_link_.close();  // releases the port's claim with the fd
     }
 #endif
 
@@ -675,7 +636,6 @@ private:
     mutable std::mutex state_mutex_;  // guards state_ + firmware_date_
     BoxConnectionConfig config_;
     bool connected_ = false;
-    std::string opened_port_;  // path registered in the in-use registry while open
 
     BoxState state_;
     std::string firmware_date_;    // YYYY-MM-DD, from the status stream
@@ -686,7 +646,7 @@ private:
     std::thread reader_thread_;
 
 #ifndef _WIN32
-    int serial_fd_ = -1;
+    util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by io_mutex_
 #endif
 };
 

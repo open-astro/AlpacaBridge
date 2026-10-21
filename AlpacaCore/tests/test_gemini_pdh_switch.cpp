@@ -395,7 +395,7 @@ TEST_CASE("Gemini PDH Switch Driver - Disconnect is never observed beside a stal
     // Issue #387 ordering: connected_ is stored false before the wrapper's
     // close, and that close clears the firmware cache only after joining a
     // reader that can sit in a 500 ms read. The getter relies on the cache
-    // being empty while disconnected (AGENTS.md), so the driver must clear it
+    // being empty while disconnected (driver-lifecycle.instructions.md), so the driver must clear it
     // before the store. A sampler reads (connected, firmware) pairs for the
     // whole disconnect; one pair of (false, present) is the defect. Red
     // without the clear_firmware() call (hundreds of stale samples), green

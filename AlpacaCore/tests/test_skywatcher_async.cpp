@@ -4694,7 +4694,7 @@ TEST_CASE("SkyWatcher async - the synchronous slew reports Slewing until trackin
     // #514 shape. Fixed by gating on Slewing alone and pairing the negative
     // check with a positive "this actually ran" assertion, which is the remedy
     // #334 already landed for the stress harness (StressCallGuard::total_calls,
-    // documented in AGENTS.md as one of three lines that must always appear
+    // documented in ci-gates.instructions.md as one of three lines that must always appear
     // together). "Never polled" is a failure here, not a pass.
     //
     // Keeping the slew past the first poll is the fake's job, by name: every

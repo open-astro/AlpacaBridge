@@ -580,7 +580,7 @@
                     <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you run the driver's Calibrate action (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
-                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/ttyUSB0">
+                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
                         <small>Required. A /dev/serial/by-id/ path keeps working when other USB devices are plugged in.</small>
                     </div>
                   </div>

@@ -38,13 +38,11 @@
 
 #ifndef _WIN32
 
-#include <alpacacore/util/serial_io.h>
-#include <fcntl.h>
-#include <poll.h>
+#include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <termios.h>
-#include <unistd.h>
 
-#include <cerrno>
 #include <chrono>
 #include <string>
 
@@ -55,14 +53,14 @@ namespace alpacacore::util {
  *        open, already-configured (9600 8N1, non-canonical) fd and wait up
  *        to @p timeout_ms for the exact reply (the same byte followed by
  *        '#'). Leaves the fd open; the caller owns it before and after.
- *        Every read waits on poll(POLLIN) for the time left before the
+ *        Every read goes through tty_read() for the time left before the
  *        deadline, so the bound holds even on a USB-serial adapter that
  *        ignores VMIN/VTIME, where a bare read() on a silent port parks
- *        forever (#836). Pass a NON-blocking fd for a hard bound: on a
- *        blocking fd the bound is complete only in the common case, because
- *        such an adapter can report a spurious "readable" from poll() and the
- *        read() that follows then parks with no deadline. The fd is accepted
- *        either way.
+ *        forever (#836). Pass a NON-blocking fd (a SerialLink's) for a hard
+ *        bound: on a blocking fd the bound is complete only in the common
+ *        case, because such an adapter can report a spurious "readable" from
+ *        poll() and the read() that follows then parks with no deadline. The
+ *        fd is accepted either way.
  *
  * Strict, and tolerant of noise ahead of the real reply: only an exact
  * `#`-terminated token that is the echoed byte followed by '#' counts as a
@@ -83,7 +81,7 @@ namespace alpacacore::util {
 inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
     constexpr char kEchoByte = 'B';
     const char cmd[] = {'K', kEchoByte};
-    if (!write_all(fd, cmd, sizeof(cmd))) {
+    if (!tty_write_all(fd, cmd, sizeof(cmd), timeout_ms)) {
         return false;
     }
 
@@ -95,33 +93,19 @@ inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
         if (remaining <= 0) {
             break;
         }
-        struct pollfd pfd {};
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        const int pr = ::poll(&pfd, 1, static_cast<int>(remaining));
-        if (pr == 0) {
-            break;
-        }
-        if (pr < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            break;
-        }
         char ch = 0;
-        const ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            token.push_back(ch);
-            if (ch == '#') {
-                if (token.size() == 2 && token[0] == kEchoByte) {
-                    return true;
-                }
-                token.clear();  // not our echo — keep listening past it, not away from it
-            } else if (token.size() > 8) {
-                token.clear();  // runaway garbage ahead of '#', not our echo either
+        const ssize_t r = tty_read(fd, &ch, 1, static_cast<int>(remaining));
+        if (r != 1) {
+            break;  // 0: silence until the deadline; -1: hangup or read error
+        }
+        token.push_back(ch);
+        if (ch == '#') {
+            if (token.size() == 2 && token[0] == kEchoByte) {
+                return true;
             }
-        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
-            break;  // hangup or read error; EAGAIN is a spurious "readable"
+            token.clear();  // not our echo — keep listening past it, not away from it
+        } else if (token.size() > 8) {
+            token.clear();  // runaway garbage ahead of '#', not our echo either
         }
     }
     return false;
@@ -131,44 +115,38 @@ inline bool exchange_synscan_echo_on_fd(int fd, int timeout_ms) {
  * @brief True if a SynScan hand controller answers its protocol echo on
  *        @p port_path at 9600 8N1 within @p timeout_ms.
  *
+ * Opens the port through SerialLink with a Probe claim (issue #1202), held
+ * for exactly this check: a port a connected device holds is never opened
+ * (false, "not a handset"), and a port another scan is probing is waited for.
+ * Call it BEFORE opening your own SerialLink on the same port, never while
+ * holding one: the claim would wait on the caller's own probe claim and then
+ * report "not a handset". A caller that already holds the port runs
+ * exchange_synscan_echo_on_fd() on its own fd at 9600 instead.
+ *
  * @param timeout_ms How long to wait for the echo before concluding "not a
  *        handset". A live handset answers in well under 200 ms (16-135 ms
  *        measured on hardware); the default leaves headroom for a slower
  *        adapter/USB hub without unduly penalising the (far more common)
  *        non-handset port, which always pays this full wait.
+ * @param owner Operator-facing name of the scan running the check, shown to
+ *        a connect that has to wait for it.
  */
-inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_ms = 300) {
-    const int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+inline bool port_answers_synscan_echo(const std::string& port_path, int timeout_ms = 300,
+                                      const std::string& owner = "SynScan hand controller check") {
+    std::string error;
+    SerialLink link = SerialLink::open(
+        port_path, SerialClaimKind::Probe, owner,
+        [](struct termios& tty) {
+            make_raw_8n1(tty, B9600);
+            tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);  // do not drop DTR on close: some adapters reset the far end
+        },
+        &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("Serial", "SynScan handset check skipped " + port_path + ": " + error);
         return false;
     }
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return false;
-    }
-    cfmakeraw(&tty);
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag &= ~HUPCL;  // do not drop DTR on close: some adapters reset the far end on it
-    tty.c_cc[VMIN] = 0;
-    // VMIN/VTIME only shape a blocking read, and the fd is made non-blocking
-    // below, so VTIME is inert here; the echo helper's poll() is the timeout.
-    tty.c_cc[VTIME] = 1;
-    // Stay non-blocking, as the Sky-Watcher ":e1" probe does: the echo
-    // helper's poll() bounds the wait, and a read after a spurious
-    // "readable" returns EAGAIN instead of parking.
-    if (tcsetattr(fd, TCSANOW, &tty) != 0 || !set_nonblocking(fd)) {
-        close(fd);
-        return false;
-    }
-    tcflush(fd, TCIOFLUSH);
-
-    const bool answered = exchange_synscan_echo_on_fd(fd, timeout_ms);
-    close(fd);
-    return answered;
+    tcflush(link.fd(), TCIOFLUSH);
+    return exchange_synscan_echo_on_fd(link.fd(), timeout_ms);
 }
 
 }  // namespace alpacacore::util

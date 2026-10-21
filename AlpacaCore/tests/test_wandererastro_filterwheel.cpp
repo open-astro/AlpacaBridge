@@ -176,8 +176,7 @@ TEST_CASE("WandererAstro FilterWheel Protocol Wrapper - Disconnected behavior", 
     require_alpaca_error([&]() { wrapper.calibrate(); }, alpacacore::AlpacaError::NotConnected);
 
     // Connecting to a missing port must fail with NotConnected and leave the
-    // wrapper disconnected. (/dev/null is not used here: it opens fine but is
-    // not a tty, so serial configuration fails with DriverException instead.)
+    // wrapper disconnected.
     alpacacore::vendor::wandererastro::FilterWheelConnectionConfig config;
     config.serial_port = "/nonexistent/wanderer-filterwheel-test-port";
     config.serial_timeout_s = 1;
@@ -284,4 +283,90 @@ TEST_CASE("WandererAstro FilterWheel Driver - Connect with empty serial port nam
     }
     CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1202: the filter wheel opens its port through util::SerialLink, so a port
+// another device holds is refused untouched, its own claim is released on
+// disconnect, a retuned port cannot hang Disconnect, and a link-fault latch
+// puts back line settings another program changed.
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/serial_port_registry.h>
+
+#include "wandererastro_serial_ownership_helpers.h"
+
+TEST_CASE("WandererAstro FilterWheel Driver - Refuses a port another device holds (issue #1202)",
+          "[wandererastro][filterwheel][serial][issue1202]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    const speed_t before = alpacacore::test::wanderer::line_speed(wheel.keepalive_fd());
+    auto claim = util::SerialPortClaim::acquire(wheel.slave_path(), util::SerialClaimKind::Link, "Other device");
+    REQUIRE(claim);
+
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    const std::string error = alpacacore::test::wanderer::connect_error([&] { driver->set_connected(true); });
+    CHECK(error.find("Other device") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    // Refused before the open: the holder's line settings are untouched.
+    CHECK(alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == before);
+}
+
+TEST_CASE("WandererAstro FilterWheel Driver - Holds its port while connected and releases it (issue #1202)",
+          "[wandererastro][filterwheel][serial][issue1202]") {
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(alpacacore::util::is_serial_port_in_use(wheel.slave_path()));
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(wheel.slave_path()));
+    // TIOCEXCL and the claim are both gone: the same port connects again.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE("WandererAstro FilterWheel Driver - Disconnect returns after the port is retuned to VMIN=1 (issue #1202)",
+          "[wandererastro][filterwheel][serial][issue1202]") {
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(300));
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // A silent link under a blocking-read retune: a VTIME-paced reader would
+    // park in read() and never see its stop flag.
+    wheel.set_muted(true);
+    drain_after_mute();
+    alpacacore::test::wanderer::retune_to_blocking_read(wheel.keepalive_fd());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    CHECK(alpacacore::test::wanderer::returns_within([&] { driver->set_connected(false); }, std::chrono::seconds(3),
+                                                     [&] { wheel.set_muted(false); }));
+    CHECK_FALSE(driver->get_connected());
+}
+
+TEST_CASE("WandererAstro FilterWheel Driver - Link fault restores retuned line settings (issue #1202)",
+          "[wandererastro][filterwheel][serial][issue1202]") {
+    alpacacore::test::FakeTaskClock clock;  // outlives the driver
+    alpacacore::test::FakeSerialStreamer wheel(kSfwFrame, std::chrono::milliseconds(50));
+    auto driver =
+        alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, wheel.slave_path(), 19200, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == B19200);
+
+    // Bytes keep arriving but no frame parses (the wrong baud's garbage), so no
+    // read ever times out and tty_read()'s own restore never runs.
+    wheel.set_frame("ZZZZZZ\r");
+    drain_after_mute();
+    alpacacore::test::wanderer::set_line_speed(wheel.keepalive_fd(), B9600);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    REQUIRE(alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == B9600);
+
+    REQUIRE(advance_one_pass(clock, std::chrono::milliseconds(10001)));
+    CHECK(wait_until_sfw([&] { return !driver->get_link_fault().empty(); }, std::chrono::milliseconds(2000)));
+    CHECK(wait_until_sfw([&] { return alpacacore::test::wanderer::line_speed(wheel.keepalive_fd()) == B19200; },
+                         std::chrono::milliseconds(2000)));
+    driver->set_connected(false);
 }

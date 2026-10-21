@@ -14,6 +14,8 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -22,7 +24,6 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
@@ -47,52 +48,32 @@ namespace alpacacore::vendor::synscan {
 
 namespace {
 
+// Operator-facing owner of this wrapper's ports, for both the auto-detect
+// probe and the connected link (issue #1202): a probe skips a port another
+// device holds, and lists one a SynScan mount holds without opening it.
+constexpr const char* kSerialOwner = "SynScan mount";
+
+#ifndef _WIN32
+// 9600 8N1 raw, no flow control: the handset's only rate.
+void configure_synscan_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
+#endif
+
 // Probe a serial port for a SynScan hand controller using the echo command (Kx).
 // Returns HC firmware version string (e.g. "04.42.00") on success, empty on failure.
 // SynScan V command returns 6 hex-ASCII digits (e.g. "042A00#"), unlike NexStar binary format.
 std::string probe_synscan_port(const std::string& port_path) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // Probe claim, held for exactly this function: a connected device's port
+    // is refused before it is opened, another scan's probe is waited for.
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_synscan_line(tty, B9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("SynScan", "Skipping " + port_path + ": " + error);
         return "";
     }
-
-    struct termios tty{};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    // 100 ms per read(): the version loop below checks its deadline only
-    // BETWEEN reads, so the per-read timeout is the granularity at which it
-    // is honoured (the echo helper bounds its reads with poll()). The previous
-    // 2 s (VTIME=20) let a silent port overrun a 3 s budget by up to another
-    // 2 s (review finding on PR #3); the deadlines bound the loops, not this.
-    tty.c_cc[VTIME] = 1;
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
     // Echo check ("K" + byte -> byte + "#"), shared with the Sky-Watcher
@@ -101,16 +82,13 @@ std::string probe_synscan_port(const std::string& port_path) {
     // '#'-terminated reply ahead of the real one instead of mistaking it for
     // silence.
     if (!util::exchange_synscan_echo_on_fd(fd, 3000)) {
-        close(fd);
         return "";
     }
 
     // Echo confirmed — query firmware version with "V" command.
     // SynScan returns 6 hex-ASCII digits + '#' (e.g. "042A00#" for 4.42.00).
     tcflush(fd, TCIOFLUSH);
-    const char ver_cmd[] = {'V'};
-    if (!util::write_all(fd, ver_cmd, 1)) {
-        close(fd);
+    if (!util::tty_write_all(fd, std::string("V"))) {
         return "";
     }
 
@@ -124,7 +102,12 @@ std::string probe_synscan_port(const std::string& port_path) {
             break;
         }
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
+        // 100 ms per read: the loop checks its deadline only BETWEEN reads, so
+        // the per-read wait is the granularity at which it is honoured (the
+        // echo helper bounds its own reads). The previous 2 s per read let a
+        // silent port overrun a 3 s budget by up to another 2 s (review
+        // finding on PR #3); the deadlines bound the loops, not this.
+        ssize_t r = util::tty_read(fd, &ch, 1, 100);
         if (r == 1) {
             ver_resp[total++] = ch;
             if (ch == '#') break;
@@ -139,8 +122,7 @@ std::string probe_synscan_port(const std::string& port_path) {
     // SynScan V: 6 hex-ASCII chars + '#' (7 bytes total).
     // NexStar V: 2 binary bytes + '#' (3 bytes total).
     bool is_synscan = (total == 7 && ver_resp[6] == '#');
-
-    close(fd);
+    link.close();
 
     if (is_synscan) {
         // Parse "XXYYZZ" as version XX.YY.ZZ (each pair is hex)
@@ -196,6 +178,27 @@ bool raw_port_looks_like_synscan_candidate(const std::string& port_path) {
     return alpacacore::util::usb_tty_descriptor_matches(
         *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
 }
+
+// Issue #1202: whether the scan may probe @p resolved. A port another
+// connected device holds is never opened. One a connected SynScan mount
+// holds is listed at its scan position without being probed (firmware
+// unknown), so a mount index stays stable; a driver that then picks it is
+// refused by its link claim, which names the holder.
+bool synscan_candidate_free(const std::string& resolved, const std::string& name,
+                            std::vector<SynScanPortInfo>& results) {
+    switch (alpacacore::util::serial_candidate_use(resolved, kSerialOwner)) {
+        case alpacacore::util::SerialCandidateUse::HeldByOther:
+            ALPACA_LOG_DEBUG("SynScan", "Skipping " + resolved + ": held by another connected device");
+            return false;
+        case alpacacore::util::SerialCandidateUse::HeldBySibling:
+            ALPACA_LOG_DEBUG("SynScan", "Listing " + resolved + " unprobed: a connected SynScan mount holds it");
+            results.push_back({resolved, name, ""});
+            return false;
+        case alpacacore::util::SerialCandidateUse::Free:
+            break;
+    }
+    return true;
+}
 #endif  // _WIN32
 
 } // anonymous namespace
@@ -227,6 +230,7 @@ std::vector<SynScanPortInfo> enumerate_synscan_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
+            if (!synscan_candidate_free(resolved, name, results)) continue;
             std::string probe_message = "Probing ";
             probe_message.append(resolved).append(" (").append(name).append(")...");
             ALPACA_LOG_INFO("SynScan", probe_message);
@@ -261,6 +265,7 @@ std::vector<SynScanPortInfo> enumerate_synscan_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_synscan_candidate(resolved)) continue;
         probed.insert(resolved);
+        if (!synscan_candidate_free(resolved, "", results)) continue;
 
         std::string probe_message = "Probing ";
         probe_message.append(resolved).append("...");
@@ -420,6 +425,7 @@ public:
 
         connection_type_ = info.type;
         connection_info_ = info;
+        last_connect_error_.clear();
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
@@ -443,17 +449,24 @@ public:
         if (!connected_) {
             return;
         }
+        // Connection state first, then the port (#1202): nothing can see a
+        // connected wrapper whose fd is already closed.
+        connected_ = false;
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
-        connected_ = false;
     }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    std::string last_connect_error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_connect_error_;
     }
 
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override,
@@ -945,30 +958,6 @@ private:
         SetCommTimeouts(serial_handle_, &timeouts);
         return true;
 #else
-        serial_fd_ = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            return false;
-        }
-        // Exclusive access: without this, any other scan on this process that
-        // opens the same node (e.g. the Sky-Watcher auto-detect probe, which
-        // shares Prolific/FTDI/CP210x adapter classes with a SynScan handset)
-        // can open this fd's port concurrently, flush our pending reply out
-        // from under a read in flight, and write its own probe bytes onto the
-        // wire — corrupting whatever query this driver is mid-flight on. Not
-        // a substitute for the handset-echo guard those scans run first (this
-        // only protects a port already claimed by a connected driver, not one
-        // a scan reaches before any driver has opened it), and it does not
-        // stop another process or a root process from opening the node — but
-        // it closes the same-process, common-user race. Ignored on failure:
-        // some pty/virtual-serial back ends used in tests don't support it,
-        // and a mount that already works without it should keep working.
-        (void)ioctl(serial_fd_, TIOCEXCL);
-        termios tty{};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
         speed_t speed = B9600;
         switch (baud_rate) {
             case 9600: speed = B9600; break;
@@ -978,36 +967,20 @@ private:
             case 115200: speed = B115200; break;
             default: speed = B9600; break;
         }
-
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_oflag &= ~OPOST;
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 1;
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
+        // SerialLink (issue #1202) claims the port for this mount, so another
+        // driver's connect or another vendor's auto-detect probe (the
+        // Sky-Watcher scan shares Prolific/FTDI/CP210x adapter classes with a
+        // SynScan handset) never opens it while it is ours, and locks it for
+        // exclusive use so another program cannot either. The fd stays non-blocking; every
+        // read and write below is bounded with poll().
+        link_ = util::SerialLink::open(
+            port_path, util::SerialClaimKind::Link, kSerialOwner,
+            [speed](struct termios& tty) { configure_synscan_line(tty, speed); }, &last_connect_error_);
+        if (!link_) {
+            ALPACA_LOG_ERROR("SynScan", last_connect_error_);
             return false;
         }
-        // The fd was opened O_NONBLOCK; clear it so reads honour VMIN/VTIME and
-        // write_all()/read don't spuriously fail with EAGAIN (matches the probe
-        // path and the other serial wrappers).
-        if (!util::clear_nonblocking(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
+        serial_fd_ = link_.fd();
         // Drop whatever is already queued on the port before the first
         // exchange - the same flush probe_synscan_port() does. A reply to a
         // command the previous session never read (abrupt service restart
@@ -1121,10 +1094,8 @@ private:
             serial_handle_ = INVALID_HANDLE_VALUE;
         }
 #else
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        serial_fd_ = -1;
+        link_.close();
 #endif
     }
 
@@ -1170,7 +1141,7 @@ private:
         }
         return true;
 #else
-        return util::write_all(serial_fd_, data.c_str(), data.length());
+        return util::tty_write_all(serial_fd_, data);
 #endif
     }
 
@@ -1291,10 +1262,9 @@ private:
         }
         return false;
 #else
-        // Bounded read (VMIN/VTIME) held under the wrapper mutex by design —
+        // Bounded read (100 ms poll) held under the wrapper mutex by design —
         // the mutex provides transaction atomicity for command/response pairs.
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        return bytes_read == 1;
+        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
 #endif
     }
 
@@ -1337,9 +1307,11 @@ private:
     HANDLE serial_handle_;
     SOCKET socket_handle_;
 #else
-    int serial_fd_;
+    util::SerialLink link_;
+    int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
 #endif
+    std::string last_connect_error_;
 };
 
 SynScanProtocolWrapper::SynScanProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
@@ -1361,6 +1333,8 @@ void SynScanProtocolWrapper::disconnect() {
 bool SynScanProtocolWrapper::is_connected() const {
     return pimpl_->is_connected();
 }
+
+std::string SynScanProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
 std::string SynScanProtocolWrapper::send_command(const std::string& command,
                                                  bool require_hash_terminator,
