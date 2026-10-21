@@ -200,6 +200,7 @@ public:
             }
             read_firmware();
             snapshot_.reset();
+            inline_poll_spent_.store(false);
             {
                 std::lock_guard<std::mutex> lock(health_mutex_);
                 health_.reset();
@@ -417,6 +418,10 @@ private:
     // while the motor has none.
     Limits usable_limits() const {
         std::lock_guard<std::mutex> lock(calibration_mutex_);
+        // A getter that passed its own check before a disconnect and reconnect
+        // would read the next connect's cleared calibration; connected_ is set
+        // only after that connect has read the limits.
+        ensure_connected();
         if (calibration_.running) {
             throw AlpacaException("Celestron focus motor calibration is in progress", AlpacaError::InvalidOperation);
         }
@@ -603,10 +608,16 @@ private:
         if (!reading.has_value()) {
             // Connected but no frame: the connect's first poll was lost, or a
             // racing Move/Halt write dropped it. Measure the motor now rather
-            // than wait up to a poll period. A disconnect in between makes the
-            // exchange fail and the check below report NotConnected.
-            const_cast<CelestronFocuserDriver*>(this)->poll_state_once();
-            reading = snapshot_.read();
+            // than wait up to a poll period, but only once per connection: a
+            // getter otherwise waits on the wire and every failed inline poll
+            // counts toward the link latch (decisions 0010 and 0016). Later
+            // getters answer "not available yet" until the poll publishes. A
+            // disconnect in between makes the exchange fail and the check
+            // below report NotConnected.
+            if (!inline_poll_spent_.exchange(true)) {
+                const_cast<CelestronFocuserDriver*>(this)->poll_state_once();
+                reading = snapshot_.read();
+            }
         }
         if (!reading.has_value()) {
             ensure_connected();
@@ -639,7 +650,14 @@ private:
             frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
                                               static_cast<std::int64_t>(read_be(position, 0, 3)));
             frame.moving = done[0] != 0xff || state.running;
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            // A poll that finds the port closed after a disconnect cleared
+            // connected_ is not a link fault; the disconnect already reset the
+            // latch. A closed port while connected_ still reads true counts.
+            const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+            if (alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected && !connected_.load()) {
+                return;
+            }
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
                 ALPACA_LOG_ERROR("Celestron", "Focuser communications compromised: " + health_.fault());
@@ -699,6 +717,8 @@ private:
     mutable std::mutex calibration_mutex_;
     CalibrationState calibration_;
     mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
+    // Set by the one inline poll a getter may run per connection.
+    mutable std::atomic<bool> inline_poll_spent_{false};
     mutable std::mutex health_mutex_;
     util::PolledLinkHealth health_;
     util::OperationGeneration state_poll_generation_;

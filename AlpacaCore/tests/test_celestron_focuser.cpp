@@ -628,6 +628,46 @@ TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first
     driver->set_connected(false);
 }
 
+TEST_CASE("Celestron Focuser Driver - getters on a stalled link add no AUX exchanges and never trip the latch",
+          "[celestron][focuser][unit][fake]") {
+    // Getters read the snapshot and never wait on the wire (decisions 0010 and
+    // 0016). The connect's first poll was lost, so no frame is held; the motor
+    // then goes silent. At most one inline poll is allowed (the lost-first-poll
+    // case above); every later getter must answer "not available yet" without
+    // an exchange of its own, so the 250 ms poll cadence alone decides when the
+    // latch (threshold 3) trips.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.drop_next_reply(0x13);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    const int before = fake.count(0x01);
+
+    fake.set_muted(true);
+    std::string last;
+    for (int i = 0; i < 4; ++i) {
+        try {
+            (void)driver->get_position();
+            FAIL("expected the getter to throw while the motor is silent");
+        } catch (const alpacacore::AlpacaException& ex) {
+            REQUIRE(ex.error_code() == AlpacaError::DriverException);
+            last = ex.what();
+        }
+    }
+    INFO(last);
+    CHECK(fake.count(0x01) - before <= 1);
+    CHECK(last.find("not available yet") != std::string::npos);
+    CHECK(last.find("compromised") == std::string::npos);
+
+    // The poll alone recovers the link and publishes the first frame.
+    fake.set_muted(false);
+    tick(clock);
+    CHECK(driver->get_position() == 31000);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron Focuser Driver - Halt and Move resynchronize a timed-out link first",
           "[celestron][focuser][unit][fake]") {
     // One lost poll reply leaves the AUX stream desynchronized until the next
