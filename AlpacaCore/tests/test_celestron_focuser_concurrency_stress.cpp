@@ -31,6 +31,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_celestron_focuser.h"
+#include "fake_task_clock.h"
 
 using alpacacore::AlpacaDriver;
 using alpacacore::test::FakeCelestronFocuser;
@@ -78,8 +79,8 @@ TEST_CASE("Celestron focuser - concurrent connect/disconnect/operate stress", "[
 
 TEST_CASE("Celestron focuser - getters across reconnects never serve a prior session's frame",
           "[celestron][focuser][stress]") {
-    // A getter's inline poll that passed ensure_connected() can still be in its
-    // exchange while set_connected(false) then set_connected(true) runs. Each
+    // A getter that passed ensure_connected() can still be running while
+    // set_connected(false) then set_connected(true) runs. Each
     // session has its own encoder reading; a getter that sees the session
     // current before and after its call must read that session's value.
     FakeCelestronFocuser fake;
@@ -137,10 +138,9 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
 }
 
 TEST_CASE("Celestron focuser - a getter racing a disconnect logs no link fault", "[celestron][focuser][stress]") {
-    // resync() throws NotConnected on a closed port. A getter whose inline poll
-    // lands after the disconnect closed it must not count that toward the link
-    // latch, or enough racing getters log "communications compromised" for a
-    // link that was closed on purpose.
+    // Pins that a disconnect never logs a link fault: the state poll is
+    // joined before the port closes and getters run no exchange, so
+    // "communications compromised" must not appear for a link closed on purpose.
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
     std::mutex log_mutex;
@@ -152,10 +152,19 @@ TEST_CASE("Celestron focuser - a getter racing a disconnect logs no link fault",
             faults.emplace_back(message);
         }
     });
-    auto driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake.slave_path());
+    // The state poll waits on a fake clock a ticker thread advances, so polls
+    // land throughout the connect/disconnect cycles instead of once per 250 ms.
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake.slave_path(), clock);
     std::atomic<bool> done{false};
     std::vector<std::thread> readers;
-    for (int t = 0; t < 8; ++t) {
+    readers.emplace_back([&] {
+        while (!done.load()) {
+            clock.advance(std::chrono::milliseconds(300));
+            std::this_thread::yield();
+        }
+    });
+    for (int t = 0; t < 4; ++t) {
         readers.emplace_back([&] {
             while (!done.load()) {
                 try {

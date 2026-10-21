@@ -200,14 +200,20 @@ public:
             }
             read_firmware();
             snapshot_.reset();
-            inline_poll_failed_.store(false);
             {
                 std::lock_guard<std::mutex> lock(health_mutex_);
                 health_.reset();
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns.
+            // answer the moment Connect returns. Connect may do I/O (decision
+            // 0016 rule 4); a getter may not. A lost first reply gets one
+            // retry here. A connect whose retry also publishes nothing still
+            // connects, and getters answer "not available yet" until the
+            // 250 ms poll publishes.
             poll_state_once();
+            if (!snapshot_.read().has_value()) {
+                poll_state_once();
+            }
             connected_.store(true);
             start_state_poll();
             const auto limits = current_limits();
@@ -606,24 +612,10 @@ private:
         throw_if_faulted();
         auto reading = snapshot_.read();
         if (!reading.has_value()) {
-            // Connected but no frame: the connect's first poll was lost, or a
-            // racing Move/Halt write dropped it. Measure the motor now rather
-            // than wait up to a poll period, but only until one inline poll of
-            // this connection fails: a getter otherwise waits on the wire and
-            // every failed inline poll counts toward the link latch
-            // (decisions 0010 and 0016). Later getters answer "not available
-            // yet" until the poll publishes. A poll dropped by a racing write
-            // did not fail and does not stop the next getter. A disconnect in
-            // between makes the exchange fail and the check below report
-            // NotConnected.
-            if (!inline_poll_failed_.load()) {
-                if (!const_cast<CelestronFocuserDriver*>(this)->poll_state_once()) {
-                    inline_poll_failed_.store(true);
-                }
-                reading = snapshot_.read();
-            }
-        }
-        if (!reading.has_value()) {
+            // Connected but no frame: the connect's polls were lost, or a
+            // racing Move/Halt write dropped it. Getters never touch the
+            // device (decisions 0010 and 0016): answer "not available yet"
+            // until the next poll, at most one poll period away.
             ensure_connected();
             throw_if_faulted();
             throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
@@ -631,8 +623,7 @@ private:
         return reading->value;
     }
 
-    // Returns false when an exchange failed (a reply was missing or invalid).
-    bool poll_state_once() {
+    void poll_state_once() {
         const auto token = snapshot_.begin_poll();
         StateFrame frame;
         try {
@@ -655,21 +646,14 @@ private:
             frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
                                               static_cast<std::int64_t>(read_be(position, 0, 3)));
             frame.moving = done[0] != 0xff || state.running;
-        } catch (const std::exception& ex) {
-            // A poll that finds the port closed after a disconnect cleared
-            // connected_ is not a link fault; the disconnect already reset the
-            // latch. A closed port while connected_ still reads true counts.
-            const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
-            if (alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected && !connected_.load()) {
-                return false;
-            }
+        } catch (const std::exception&) {
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
                 ALPACA_LOG_ERROR("Celestron", "Focuser communications compromised: " + health_.fault());
             } else {
                 ALPACA_LOG_DEBUG("Celestron", "Focuser state poll failed; the frame keeps its age");
             }
-            return false;
+            return;
         }
         {
             std::lock_guard<std::mutex> lock(health_mutex_);
@@ -678,7 +662,6 @@ private:
             }
         }
         snapshot_.publish(token, frame);
-        return true;
     }
 
     void run_state_poll(util::OperationContext& ctx) {
@@ -723,8 +706,6 @@ private:
     mutable std::mutex calibration_mutex_;
     CalibrationState calibration_;
     mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
-    // Set when a getter's inline poll fails; stops further inline polls this connection.
-    mutable std::atomic<bool> inline_poll_failed_{false};
     mutable std::mutex health_mutex_;
     util::PolledLinkHealth health_;
     util::OperationGeneration state_poll_generation_;
