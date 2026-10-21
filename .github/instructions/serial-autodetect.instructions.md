@@ -10,6 +10,11 @@ the matching shared file, not in a vendor file.
 
 ### Serial / socket I/O: always use the shared helpers (`util/serial_io.h`)
 
+[Decision 0017](../../docs/decisions/0017-serial-port-ownership.md) makes `util::SerialLink` the one way a
+wrapper opens a serial port. It is in force on `stable/5.0`; on `main` the port is #1448, and
+every serial wrapper here is a defect against that record until it lands. The text below
+describes `main`'s current wrappers and is replaced by the `SerialLink` rules in #1448.
+
 POSIX serial and socket code has several easy-to-get-wrong patterns that must not
 be hand-rolled in a wrapper. Use `alpacacore/util/serial_io.h` (POSIX-only,
 included inside the existing `#ifndef _WIN32` branches):
