@@ -11,6 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -20,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -274,6 +277,114 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     CHECK(restarted->get_position() == 30.0);
     CHECK(restarted->get_mechanical_position() == 0.0);
     restarted->set_connected(false);
+}
+
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 0.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
+// Two Syncs at once must leave the stored offset and Position agreeing: one
+// Sync's save and in-memory write may not straddle the other's, or a restart
+// moves Position to the offset the file kept (review of #1493). The first Sync
+// is held between its save and its in-memory write while the second runs.
+TEST_CASE("WandererAstro Rotator Driver - Concurrent Syncs leave the file and Position agreeing",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    using alpacacore::util::RotatorSyncOffsetStore;
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    std::atomic<bool> first_saved{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> saves{0};
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing([&] {
+        if (saves.fetch_add(1) == 0) {
+            first_saved.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    });
+    std::thread first([&] { driver->sync(10.0); });
+    while (!first_saved.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::thread second([&] { driver->sync(20.0); });
+    // Without serialisation the second Sync saves and publishes in this window.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    release.store(true);
+    first.join();
+    second.join();
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing({});
+    CHECK(RotatorSyncOffsetStore::load(driver->get_unique_id()) == driver->get_position());
+    driver->set_connected(false);
+}
+
+// Decision 0008 (#1473): IRotatorV4 requires the offset to persist, so a Sync
+// that cannot store it fails and the previous offset stays.
+TEST_CASE("WandererAstro Rotator Driver - Sync that cannot save throws and keeps the offset",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    driver->sync(30.0);
+    REQUIRE(driver->get_position() == 30.0);
+
+    // A regular file where the store's directory should be: every save fails.
+    const auto blocker = dir.file().parent_path().parent_path() / "blocker";
+    { std::ofstream(blocker) << "x"; }
+    alpacacore::util::RotatorSyncOffsetStore::set_default_path((blocker / "offsets.json").string());
+    require_alpaca_error([&] { driver->sync(50.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
+// Decision 0018 (#1471): keyed by the assigned GUID. The offset saved under the
+// device-number ID moves only when the router asks, at the start that gives the
+// stored entry its first GUID; a connect never moves it, so a rotator added later
+// on the same device number cannot inherit it.
+TEST_CASE("WandererAstro Rotator Driver - Connect does not adopt the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 30.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state moves the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
 }
 
 // #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its

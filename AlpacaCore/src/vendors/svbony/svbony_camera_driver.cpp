@@ -134,7 +134,7 @@ public:
         return DeviceType::Camera;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!serial_number_.empty()) {
             return "SVBONY_SN_" + serial_number_;

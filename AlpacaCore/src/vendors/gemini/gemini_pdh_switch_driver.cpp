@@ -164,7 +164,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "GEMINI_PDH_ADV3_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "GEMINI_PDH_ADV3_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Gemini Power & Data Hubs Advanced 3 Power Box Switch Driver";

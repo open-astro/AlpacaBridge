@@ -187,7 +187,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
-    std::string get_unique_id() const override { return "OnStep_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "OnStep_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "OnStep LX200-Protocol Telescope Driver"; }
 

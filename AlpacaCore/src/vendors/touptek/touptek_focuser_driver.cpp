@@ -79,7 +79,7 @@ public:
         return DeviceType::Focuser;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!info_.id.empty()) {
             return "TOUPTEK_AAF_" + info_.id;

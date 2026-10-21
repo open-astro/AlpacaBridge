@@ -170,7 +170,7 @@ public:
         return DeviceType::Camera;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_id_.has_value()) {
             return "QHY_" + camera_id_.value();

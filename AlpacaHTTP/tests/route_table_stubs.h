@@ -48,7 +48,7 @@ using namespace alpacacore;
     int get_device_number() const override { return number_; }                                              \
     std::string get_name() const override { return "Route Table Stub " LABEL; }                             \
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::DEVICE_TYPE; } \
-    std::string get_unique_id() const override { return "route-table-stub-" LABEL; }                        \
+    std::string fallback_unique_id() const override { return "route-table-stub-" LABEL; }                   \
     std::string get_description() const override { return "fake device"; }                                  \
     std::string get_driver_info() const override { return "fake driver"; }                                  \
     std::string get_driver_version() const override { return "0.0.1"; }                                     \
