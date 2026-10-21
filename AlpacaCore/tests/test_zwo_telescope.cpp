@@ -685,8 +685,8 @@ TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in fl
     driver->set_connected(false);
 }
 
-// Falsified by: zwo_telescope_driver.cpp set_connected(false) joining the teardown inline behind the exchange in
-// flight (the call then takes the whole reply time plus the serial timeout instead of returning).
+// Falsified by: zwo_telescope_driver.cpp set_connected(false) joining disconnect_thread_ inline (the teardown waits
+// for the wire behind the 300 ms exchange in flight, so the call no longer returns at once).
 TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange is in flight",
           "[zwo][telescope][unit][getter-stall]") {
     using namespace alpacacore::test;
@@ -706,7 +706,7 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
     });
     REQUIRE(wait_for_flag(mount.info_entered));
 
-    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    CHECK(time_call([&] { driver->set_connected(false); }) < kHoldOpen / 3);  // well under the hold, inside 5 s
     worker.join();
     CHECK_FALSE(driver->get_connected());
 }

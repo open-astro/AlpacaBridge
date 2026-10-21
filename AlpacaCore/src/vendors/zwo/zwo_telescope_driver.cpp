@@ -1383,6 +1383,9 @@ public:
     void set_site_latitude(double latitude) override {
         validate_latitude(latitude);
 
+        // One site write at a time, so two concurrent setters reach the mount in the order they published.
+        // No getter takes it.
+        std::lock_guard<std::mutex> site_write(site_write_mutex_);
         std::optional<SiteInfo> to_send;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1424,6 +1427,7 @@ public:
     void set_site_longitude(double longitude) override {
         validate_longitude(longitude);
 
+        std::lock_guard<std::mutex> site_write(site_write_mutex_);  // see set_site_latitude
         std::optional<SiteInfo> to_send;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -3125,6 +3129,9 @@ private:
     std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    // Serialises the site latitude/longitude setters across their serial write; no getter takes it. Taken
+    // before mutex_ and the protocol wrapper's mutex.
+    std::mutex site_write_mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;

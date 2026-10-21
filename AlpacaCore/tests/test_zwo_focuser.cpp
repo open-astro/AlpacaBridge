@@ -318,7 +318,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step equal to the stored on
     CHECK(driver->get_max_step() == 60000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() calling
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() calling
 // sdk.set_max_step(id, 64000) when no max step is configured (set_max_step_calls 1, not 0).
 TEST_CASE("ZWO EAF Focuser Driver - Without a configured max step the stored value is left alone",
           "[zwo][focuser][unit][fake-sdk]") {
@@ -352,7 +352,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A stored max step of 0 with none configured 
 }
 
 // Falsified by: zwo_focuser_driver.cpp set_connected() skipping
-// apply_configured_max_step_locked() (MaxStep stays 0, set_max_step_calls 0).
+// apply_configured_max_step() (MaxStep stays 0, set_max_step_calls 0).
 TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max step of 0",
           "[zwo][focuser][unit][fake-sdk]") {
     FakeEAFSDK sdk;
@@ -366,7 +366,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step repairs a stored max s
     CHECK(driver->get_max_step() == 50000);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() throwing
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() throwing
 // (or writing the unclamped value) instead of clamping to step_range_.
 TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step range is clamped to it",
           "[zwo][focuser][unit][fake-sdk]") {
@@ -385,7 +385,7 @@ TEST_CASE("ZWO EAF Focuser Driver - A configured max step above the unit's step 
     CHECK(warnings[0].find("1000") != std::string::npos);
 }
 
-// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step_locked() clamping
+// Falsified by: zwo_focuser_driver.cpp apply_configured_max_step() clamping
 // without the "step_range_ > 0" guard (an unavailable range clamps to 0, writing 0).
 TEST_CASE("ZWO EAF Focuser Driver - An unavailable step range does not refuse a configured max step",
           "[zwo][focuser][unit][fake-sdk]") {

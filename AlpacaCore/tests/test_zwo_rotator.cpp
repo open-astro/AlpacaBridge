@@ -153,7 +153,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Sync offset survives reconnect and a new ins
     CHECK(second->get_mechanical_position() == 10.0);
 }
 
-// Falsified by: zwo_rotator_driver.cpp unique_id_locked() skipping its serial
+// Falsified by: zwo_rotator_driver.cpp unique_id_for() skipping its serial
 // branch (a second rotator with another serial inherits the stored 30).
 TEST_CASE("ZWO CAA Rotator Driver - Sync offset is keyed by serial number", "[zwo][rotator][unit][fake-sdk]") {
     alpacacore::test::TempSyncOffsetDir dir;

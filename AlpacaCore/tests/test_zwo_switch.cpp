@@ -210,7 +210,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - a dead link is not served from the cac
     CHECK(driver->get_switch_value(0) == 40.0);
 }
 
-// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, index into the list (cameras[index]) instead of
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id, index into the list (cameras[index]) instead of
 // matching slot_index
 TEST_CASE("ZWO Dew Heater Switch Driver - an index binds the SDK slot, not the list position", "[zwo][switch][unit]") {
     FakeDewSdk sdk;
@@ -251,7 +251,7 @@ void add_mini_and_pro(FakeDewSdk& sdk, bool mini_has_heater) {
 
 }  // namespace
 
-// Falsified by: zwo_switch_driver.cpp resolve_camera_id_locked, call list_dew_heater_cameras before the
+// Falsified by: zwo_switch_driver.cpp resolve_camera_id, call list_dew_heater_cameras before the
 // camera_bound_by_id_only() return
 TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without touching other cameras",
           "[zwo][switch][unit]") {
@@ -269,7 +269,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - an id-only binding connects without to
     CHECK(touched.count(9) == 1);
 }
 
-// Falsified by: zwo_switch_driver.cpp load_dew_caps_locked, skip the lazy listing for an id-only binding
+// Falsified by: zwo_switch_driver.cpp find_dew_caps, skip the lazy listing for an id-only binding
 TEST_CASE("ZWO Dew Heater Switch Driver - an id-only camera with no heater names the one that has it",
           "[zwo][switch][unit]") {
     FakeDewSdk sdk;
