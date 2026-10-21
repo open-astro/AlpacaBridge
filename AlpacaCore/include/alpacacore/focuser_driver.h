@@ -43,6 +43,9 @@ public:
         // TimeStamp names when it was measured (decision 0010).
         const auto age = device_state_age();
         std::vector<DeviceState> state;
+        // IsMoving, Position, Temperature and TimeStamp: one allocation, so GCC 14 at -O2 cannot
+        // inline a reallocation path it misreads as a 1-element buffer (-Wstringop-overflow in variant).
+        state.reserve(4);
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});
