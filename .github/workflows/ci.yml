@@ -1107,6 +1107,9 @@ jobs:
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
 
+      - name: ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
+        run: ./scripts/ci_preflight.sh --self-test
+
   javascript:
     name: JavaScript syntax + unit tests
     runs-on: ubuntu-24.04-arm   # parses and runs pure JS only; arch-independent
