@@ -12,7 +12,7 @@
 
 #pragma once
 
-// Celestron telescope catalog field declarations, shared by celestron_schema.cpp
+// Celestron telescope and focuser catalog field declarations, shared by celestron_schema.cpp
 // (no vendor header) and celestron_catalog.cpp (the factory, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -31,6 +31,11 @@
 #endif
 
 namespace alpacacore::catalog {
+
+inline constexpr const char* kCelestronProtocols[] = {"nexstar", "cgx-aux"};
+
+inline const Field<std::string> kCelestronProtocol{
+    .key = "protocol", .default_value = "nexstar", .role = Role::Discriminator, .allowed_values = kCelestronProtocols};
 
 // "" and "auto" scan at connect; "serial" and "network" name the endpoint. No
 // allowed_values: the per-field rule would substitute the default "auto" for an
@@ -61,19 +66,30 @@ inline const Field<double> kCelestronSiteLatitude{
     .key = "siteLatitude", .default_value = 0.0, .min = -90.0, .max = 90.0};
 inline const Field<double> kCelestronSiteLongitude{
     .key = "siteLongitude", .default_value = 0.0, .min = -180.0, .max = 180.0};
-inline const Field<double> kCelestronSiteElevation{.key = "siteElevation", .default_value = 0.0};
+inline const Field<double> kCelestronSiteElevation{
+    .key = "siteElevation", .default_value = 0.0, .min = -300.0, .max = 10000.0};
 inline const Field<bool> kCelestronSyncTimeOnConnect{.key = "syncTimeOnConnect", .default_value = false};
 // Applied only when > 0, as the router arm did.
-inline const Field<double> kCelestronApertureDiameter{.key = "apertureDiameter", .default_value = 0.0};
-inline const Field<double> kCelestronFocalLength{.key = "focalLength", .default_value = 0.0};
+inline const Field<double> kCelestronApertureDiameter{.key = "apertureDiameter", .default_value = 0.0, .min = 0.0};
+inline const Field<double> kCelestronFocalLength{.key = "focalLength", .default_value = 0.0, .min = 0.0};
 
 inline const std::vector<FieldRef>& celestron_telescope_fields() {
     static const std::vector<FieldRef> fields{
-        kCelestronConnectionType.ref(),    kCelestronMountIndex.ref(),    kCelestronPortPath.ref(),
-        kCelestronBaudRate.ref(),          kCelestronHost.ref(),          kCelestronTcpPort.ref(),
-        kCelestronResponseTimeoutMs.ref(), kCelestronAlignmentMode.ref(), kCelestronSiteLatitude.ref(),
-        kCelestronSiteLongitude.ref(),     kCelestronSiteElevation.ref(), kCelestronSyncTimeOnConnect.ref(),
-        kCelestronApertureDiameter.ref(),  kCelestronFocalLength.ref()};
+        kCelestronProtocol.ref(),          kCelestronConnectionType.ref(),    kCelestronMountIndex.ref(),
+        kCelestronPortPath.ref(),          kCelestronBaudRate.ref(),          kCelestronHost.ref(),
+        kCelestronTcpPort.ref(),           kCelestronResponseTimeoutMs.ref(), kCelestronAlignmentMode.ref(),
+        kCelestronSiteLatitude.ref(),      kCelestronSiteLongitude.ref(),     kCelestronSiteElevation.ref(),
+        kCelestronSyncTimeOnConnect.ref(), kCelestronApertureDiameter.ref(),  kCelestronFocalLength.ref()};
+    return fields;
+}
+
+// Celestron Focus Motor on its own USB port (issue #896): an explicit port
+// only, no auto-detect (the motor's USB descriptors are not verified yet).
+inline const Field<std::string> kCelestronFocuserPortPath{
+    .key = "portPath", .default_value = "", .role = Role::PortPath};
+
+inline const std::vector<FieldRef>& celestron_focuser_fields() {
+    static const std::vector<FieldRef> fields{kCelestronFocuserPortPath.ref()};
     return fields;
 }
 

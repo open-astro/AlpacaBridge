@@ -33,7 +33,7 @@ ZWOImageType from_asi_image_type(ASI_IMG_TYPE type) {
     case ASI_IMG_Y8:
         return ZWOImageType::Y8;
     default:
-        return ZWOImageType::Raw8;
+        return ZWOImageType::Unknown;
     }
 }
 
@@ -47,8 +47,10 @@ ASI_IMG_TYPE to_asi_image_type(ZWOImageType type) {
         return ASI_IMG_RAW16;
     case ZWOImageType::Y8:
         return ASI_IMG_Y8;
+    case ZWOImageType::Unknown:
+        throw AlpacaException("Unsupported ZWO image format", AlpacaError::DriverException);
     }
-    return ASI_IMG_RAW8;
+    throw AlpacaException("Unsupported ZWO image format", AlpacaError::DriverException);
 }
 
 ZWOBayerPattern from_asi_bayer_pattern(ASI_BAYER_PATTERN pattern) {
@@ -239,6 +241,7 @@ ZWOCameraInfo convert_camera_info(const ASI_CAMERA_INFO& info) {
     out.has_cooler = (info.IsCoolerCam == ASI_TRUE);
     out.electrons_per_adu = info.ElecPerADU;
     out.bit_depth = info.BitDepth;
+    out.is_usb3 = (info.IsUSB3Camera == ASI_TRUE);
 
     out.supported_bins.clear();
     for (int i = 0; i < 16; ++i) {
@@ -355,6 +358,7 @@ bool ZWOSDKWrapper::get_camera_info_by_id(int camera_id, ZWOCameraInfo& info) {
         ASI_CAMERA_INFO sdk_info{};
         if (ASIGetCameraProperty(&sdk_info, i) == ASI_SUCCESS && sdk_info.CameraID == camera_id) {
             info = convert_camera_info(sdk_info);
+            info.slot_index = i;
             return true;
         }
     }
@@ -369,6 +373,7 @@ bool ZWOSDKWrapper::get_camera_info_by_index(int camera_index, ZWOCameraInfo& in
         return false;
     }
     info = convert_camera_info(sdk_info);
+    info.slot_index = camera_index;
     return true;
 }
 

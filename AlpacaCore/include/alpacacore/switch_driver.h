@@ -40,7 +40,7 @@ public:
      * checks. A getter that throws (NotConnected, or an unwrapped vendor error)
      * causes that id's members to be omitted rather than failing the whole call.
      *
-     * Per AGENTS.md, DeviceState is intentionally NOT an atomic snapshot (each
+     * Per ascom-contract.instructions.md, DeviceState is intentionally NOT an atomic snapshot (each
      * getter locks separately) and vendors must NOT override this with a
      * single-lock or wrapper-direct per-vendor version: reading through anything
      * but the public getters is exactly what desyncs DeviceState from the GETs.

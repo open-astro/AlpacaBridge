@@ -523,6 +523,13 @@ PEC data persists in the motor controller across power cycles. The current PEC b
 
 Parameters for MTR_AUX_GUIDE:
 - **Byte 0 (velocity):** Signed byte, percentage of sidereal rate. Positive = North (DEC) or West (RA). Negative = South (DEC) or East (RA). Range: -100 to +100.
+
+**Direct CGX USB distinction:** the directional shorthand above must not be copied
+to raw CGX motor commands. On the hardware-tested northern Normal pointing
+branch, positive Dec velocity increases encoder counts and **lowers** declination:
+North requires negative velocity and South positive. Hemisphere and BeyondPole
+adjustments follow the encoder geometry. RA West-positive/East-negative was
+confirmed independently. See [lab evidence](../../../docs/failures/0012-cgx-dec-guide-polarity.md).
 - **Byte 1 (duration):** Unsigned byte, time in centiseconds (10ms units). Max 255 = 2550ms.
 
 ```

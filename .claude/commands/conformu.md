@@ -107,15 +107,16 @@ If `ErrorNumber` is non-zero (e.g. NotConnected because hardware is unplugged), 
 
 ### 2c2. SynScan telescope only: the handset answers more than the echo
 
-A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 3 s apart: the driver serves a position read in the last 2 s from its cache (`kPositionCacheTtl`) without asking the handset, so only the second read is sure to reach it:
+A SynScan connect only gates on one echo, so a handset that answers that and then goes silent comes up `Connected=true` with every query timing out (issue #881). Read a position value through the driver twice, 25 s apart. The driver serves position from a frame its status poll refreshes every second (`kStatusPollPeriod`, issue #1247), so a read answers from memory and a silent handset shows only once the poll has failed three times in a row (`kPositionLinkFailureThreshold`). Each failed tick spends the whole response timeout (`responseTimeoutMs`, default 5000 ms) before it fails, so the fault latches about 3 x (timeout + 1 s), roughly 18 s, after the handset goes quiet; a shorter gap returns the old frame with `ErrorNumber: 0` and passes a stuck handset. Keep the gap under the latch time plus 30 s (`util::kLinkStalenessBound`, counted from the latch): past it the fault turns into a lost link and the read answers `NotConnected` instead. With a non-default `responseTimeoutMs`, use a gap a few seconds above 3 x (timeout + 1 s):
 
 ```bash
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=1"
-sleep 3
+# gap: 3 x (responseTimeoutMs + 1 s) plus a few s, under that plus 30 s; 25 s at the default 5000 ms
+sleep 25
 curl -sS --max-time 8 "http://<host>:<port>/api/v1/telescope/<n>/declination?ClientID=1&ClientTransactionID=2"
 ```
 
-Expect `ErrorNumber: 0` from both, each within about a second. A timeout, `Timeout waiting for SynScan response`, or `communications compromised` means the handset is stuck:
+Expect `ErrorNumber: 0` from both, each within about a second. A timeout, `Timeout waiting for SynScan response`, `communications compromised`, `SynScan mount position is not available` (the handset was already silent when the connect seeded the first frame), or `Not connected to SynScan mount` (the fault outlived the 30 s bound) means the handset is stuck, not unplugged:
 
 > "The SynScan handset is not answering. Disconnect the device (web UI, or `curl -X PUT http://<host>:<port>/api/v1/telescope/<n>/connected -d 'Connected=false&ClientID=1&ClientTransactionID=3'`), unplug the handset's USB from the SBC, power-cycle the mount, bring the handset to its main screen, wait 30 s, plug the USB back in, then reconnect and re-run `/conformu`."
 
@@ -178,42 +179,31 @@ ssh astro@<host> '~/conformu/conformu --version 2>/dev/null | tail -1 || echo MI
 gh api repos/ASCOMInitiative/ConformU/releases/latest --jq .tag_name
 ```
 
-(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0, which step 2g replaces regardless of whether the upstream lookup succeeded.)
+(If `gh` is unavailable, `curl -sS https://api.github.com/repos/ASCOMInitiative/ConformU/releases/latest | jq -r .tag_name`; if that fails too, warn and proceed with the installed version -- but never with an installed arm64 4.5.0 or 4.5.1, which step 2g replaces regardless of whether the upstream lookup succeeded.)
 
 Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.10.0`): strip any `v` prefix, then `printf '%s\n%s\n' "<installed>" "<latest>" | sort -V | tail -1` — installed is current only if it equals that maximum.
 
 **Read this before running any install command.** On arm64 -- which is every rig this project
-supports (AGENTS.md "Target Architecture") -- an installed **4.5.0 counts as outdated no matter what
-`releases/latest` says**, and `releases/latest` itself is *not* the place to install from today.
+supports (AGENTS.md "Target Architecture"; the version rule is "ConformU version" in `.github/instructions/testing.instructions.md`) -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
+`releases/latest` says**. The 4.5.0 arm64 asset was published without `PublishReadyToRun`, so the *first*
+member returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET"
+([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.5.2**, which fixes it and
+keeps the Telescope PulseGuide test declinations within +-65 degrees
+([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)).
 
-The official `conformu.linux-arm64.tar.xz` 4.5.0 asset was published without `PublishReadyToRun`, so
-.NET JIT-compiles each generic-over-value-type instantiation on first use and the *first* member
-returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET" no
-matter whose driver answers (Camera: `CameraState`, `CameraXSize`, `SensorType`; Telescope:
-`AlignmentMode`, `EquatorialSystem`, `SideOfPier`). That is a ConformU bug, not a driver regression
-([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)), and a warm re-run only hides
-it. 4.5.1 fixes it but is not a GitHub release yet, so `releases/latest` still resolves to the broken
-4.5.0.
-
-So, while that remains true, if the installed version is MISSING, outdated, **or 4.5.0**, install the
-maintainer's fixed 4.5.1 beta (no confirmation needed -- this is part of the standard rig setup):
+If the installed version is MISSING, outdated, or **4.5.0 or 4.5.1**, install the pinned 4.5.2 release asset
+(no confirmation needed -- this is part of the standard rig setup). The install stops before unpacking if the
+checksum does not match:
 
 ```bash
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz 'https://download.ascom-standards.org/beta/conformu.linux-arm64.tar.xz' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.xz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.2/conformu.linux-arm64.tar.xz' && echo '603803767a56bed38fe4ee872da00b5bd4e5f7f4364f17217a8a3e93e06e57b9  cu.tar.xz' | sha256sum -c - && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-That URL is unpinned and unsigned: the same name can serve a different build later. Check the version
-line it prints against the build the current reports were produced with, `4.5.1.54507, Build time:
-Thu 27 August 2026 11:40:17` -- a different build is not automatically wrong, but note it in the log
-and say so in the PR rather than labelling the run "4.5.1" and moving on.
-
-**Once 4.5.1 or later is a real GitHub release, delete everything above from "Read this before" and
-go back to the ordinary release asset**, which is the only correct path at that point:
-
-```bash
-URL=$(gh api repos/ASCOMInitiative/ConformU/releases/latest --jq '.assets[]|select(.name|test("linux-arm64"))|.browser_download_url' | head -1)
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSL -o cu.tar.xz '$URL' && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
-```
+The printed version line must read `Conform Universal 4.5.2 (Build 56139.4ccb591)`. A saved report's log header
+(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.2.56139, Build time:` (4.5.2, build 56139). Reports made with
+4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted only after a
+check on one camera and one telescope run: then update the URL, sha256 and build line above, the
+`conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
 directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a
@@ -371,8 +361,11 @@ After user approval, apply each edit. If multiple files are touched, group them 
 cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake --build build-vendors --target alpacacore_tests && ./build-vendors/tests/alpacacore_tests "[<vendor>]"
 ```
 
-Build into `build-vendors`, not `build`. Since #588 a default pre-flight leaves `AlpacaCore/build`
-holding the ASan+UBSan, **vendors-OFF** binary from its last pass, so reusing it here rebuilds a
+Build into `build-vendors`, not `build`. From #588 until #1251 a default pre-flight left
+`AlpacaCore/build` holding the ASan+UBSan, **vendors-OFF** binary from its last pass (since #1251
+a full pre-flight, `PREFLIGHT_FULL=1`, builds in `AlpacaHTTP/build` and deletes `AlpacaCore/build`,
+and the default quick run builds nothing; but a `build` from an older run or
+a manual configure can still be there), so reusing it here rebuilds a
 tree with no driver compiled in: the `"[<vendor>]"` filter matches nothing and Catch2 exits rc 2,
 a failure that says nothing about the fix. A **fresh** `build-vendors` would have the driver
 anyway -- `ALPACACORE_ENABLE_ALL_VENDORS` defaults ON (`AlpacaCore/CMakeLists.txt:22`) -- so the

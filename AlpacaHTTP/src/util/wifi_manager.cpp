@@ -33,6 +33,54 @@
 
 namespace alpacahttp::util {
 
+namespace detail {
+
+WifiSettingValue WifiSettingValue::str(std::string value) {
+    WifiSettingValue result;
+    result.type = 's';
+    result.string_value = std::move(value);
+    return result;
+}
+
+WifiSettingValue WifiSettingValue::boolean(bool value) {
+    WifiSettingValue result;
+    result.type = 'b';
+    result.boolean_value = value;
+    return result;
+}
+
+WifiSettingValue WifiSettingValue::i32(std::int32_t value) {
+    WifiSettingValue result;
+    result.type = 'i';
+    result.integer_value = value;
+    return result;
+}
+
+WifiSettingValue WifiSettingValue::u32(std::uint32_t value) {
+    WifiSettingValue result;
+    result.type = 'u';
+    result.integer_value = value;
+    return result;
+}
+
+WifiSettingValue WifiSettingValue::bytearr(const std::string& value) {
+    WifiSettingValue result;
+    result.type = 'y';
+    result.bytes.assign(value.begin(), value.end());
+    return result;
+}
+
+}  // namespace detail
+
+using detail::WifiDeviceRoles;
+using detail::WifiProfileBackend;
+using detail::WifiSettings;
+using detail::WifiSettingSection;
+using detail::WifiSettingValue;
+using SVal = WifiSettingValue;
+using Section = WifiSettingSection;
+using SettingsSpec = WifiSettings;
+
 std::string ssid_to_hex(std::string_view ssid) {
     constexpr char digits[] = "0123456789abcdef";
     std::string out;
@@ -106,47 +154,6 @@ void throw_bus(const char* what, int r, const sd_bus_error* err = nullptr) {
 }
 
 // A tagged value for building a{sa{sv}} connection settings.
-struct SVal {
-    char type = 0;  // 's', 'b', 'i', 'u', 'y' = byte-array
-    std::string s;
-    std::int64_t i = 0;
-    bool b = false;
-    std::vector<std::uint8_t> bytes;
-
-    static SVal str(std::string v) {
-        SVal x;
-        x.type = 's';
-        x.s = std::move(v);
-        return x;
-    }
-    static SVal boolean(bool v) {
-        SVal x;
-        x.type = 'b';
-        x.b = v;
-        return x;
-    }
-    static SVal i32(std::int32_t v) {
-        SVal x;
-        x.type = 'i';
-        x.i = v;
-        return x;
-    }
-    static SVal u32(std::uint32_t v) {
-        SVal x;
-        x.type = 'u';
-        x.i = v;
-        return x;
-    }
-    static SVal bytearr(const std::string& v) {
-        SVal x;
-        x.type = 'y';
-        x.bytes.assign(v.begin(), v.end());
-        return x;
-    }
-};
-using Section = std::vector<std::pair<std::string, SVal>>;
-using SettingsSpec = std::vector<std::pair<std::string, Section>>;
-
 // Defined with the other nl80211 helpers below.
 std::uint32_t nl80211_iftype(const std::string& ifname);
 
@@ -154,15 +161,9 @@ std::uint32_t nl80211_iftype(const std::string& ifname);
 // hosts the hotspot. On single-radio boards both name the same device; on
 // boards with a dedicated AP-type virtual interface (OPi 4 Pro ap0, ASIAIR
 // uap0) they differ.
-struct DeviceRoles {
-    std::string client_path, client_if;
-    std::string ap_path, ap_if;
-    std::size_t count = 0;
-};
-
 }  // namespace
 
-struct WifiManager::BusHandle {
+struct WifiManager::BusHandle final : WifiProfileBackend {
     sd_bus* bus = nullptr;
     ~BusHandle() {
         if (bus) sd_bus_unref(bus);
@@ -340,7 +341,7 @@ struct WifiManager::BusHandle {
     // Append a SettingsSpec as a{sa{sv}} to an open message. pin_shared_ip4:
     // when true, an "ipv4" section with method=shared and address-data
     // 172.24.1.1/24 is appended (the OpenAstro fleet-wide AP subnet).
-    static void append_settings(sd_bus_message* m, const SettingsSpec& spec, bool pin_shared_ip4) {
+    static void append_settings(sd_bus_message* m, const WifiSettings& spec, bool pin_shared_ip4) {
         sd_bus_message_open_container(m, 'a', "{sa{sv}}");
         for (const auto& [section, entries] : spec) {
             sd_bus_message_open_container(m, 'e', "sa{sv}");
@@ -352,19 +353,19 @@ struct WifiManager::BusHandle {
                 switch (val.type) {
                     case 's':
                         sd_bus_message_open_container(m, 'v', "s");
-                        sd_bus_message_append(m, "s", val.s.c_str());
+                        sd_bus_message_append(m, "s", val.string_value.c_str());
                         break;
                     case 'b':
                         sd_bus_message_open_container(m, 'v', "b");
-                        sd_bus_message_append(m, "b", val.b ? 1 : 0);
+                        sd_bus_message_append(m, "b", val.boolean_value ? 1 : 0);
                         break;
                     case 'i':
                         sd_bus_message_open_container(m, 'v', "i");
-                        sd_bus_message_append(m, "i", static_cast<std::int32_t>(val.i));
+                        sd_bus_message_append(m, "i", static_cast<std::int32_t>(val.integer_value));
                         break;
                     case 'u':
                         sd_bus_message_open_container(m, 'v', "u");
-                        sd_bus_message_append(m, "u", static_cast<std::uint32_t>(val.i));
+                        sd_bus_message_append(m, "u", static_cast<std::uint32_t>(val.integer_value));
                         break;
                     case 'y':
                         sd_bus_message_open_container(m, 'v', "ay");
@@ -418,7 +419,7 @@ struct WifiManager::BusHandle {
         sd_bus_message_close_container(m);  // a{sa{sv}}
     }
 
-    void add_connection(const SettingsSpec& spec, bool pin_shared_ip4) {
+    void add_connection(const WifiSettings& spec, bool pin_shared_ip4) override {
         sd_bus_message* m = nullptr;
         int r = sd_bus_message_new_method_call(bus, &m, kNmService, kNmSettingsPath, kNmSettingsIface, "AddConnection");
         if (r < 0) throw_bus("AddConnection new_method_call", r);
@@ -435,7 +436,7 @@ struct WifiManager::BusHandle {
         sd_bus_message_unref(reply);
     }
 
-    void update_connection(const std::string& conn_path, const SettingsSpec& spec, bool pin_shared_ip4) {
+    void update_connection(const std::string& conn_path, const WifiSettings& spec, bool pin_shared_ip4) override {
         sd_bus_message* m = nullptr;
         int r = sd_bus_message_new_method_call(bus, &m, kNmService, conn_path.c_str(), kNmConnIface, "Update");
         if (r < 0) throw_bus("Update new_method_call", r);
@@ -565,8 +566,8 @@ struct WifiManager::BusHandle {
     }
 
     // All saved wifi connections: (path, settings-json).
-    std::vector<std::pair<std::string, nlohmann::json>> wifi_connections() {
-        std::vector<std::pair<std::string, nlohmann::json>> out;
+    std::vector<WifiProfileBackend::Connection> wifi_connections() override {
+        std::vector<WifiProfileBackend::Connection> out;
         for (const auto& c : call_objpaths(kNmSettingsPath, kNmSettingsIface, "ListConnections")) {
             try {
                 auto s = get_settings(c);
@@ -608,8 +609,8 @@ struct WifiManager::BusHandle {
     // the device currently hosting the hotspot > nl80211 iftype AP > the
     // client device (single radio). Client device: first non-AP-type device
     // that is not the AP device > any other device > the AP device.
-    DeviceRoles device_roles() {
-        DeviceRoles out;
+    WifiDeviceRoles device_roles() override {
+        WifiDeviceRoles out;
         auto devs = wifi_devices();
         out.count = devs.size();
         if (devs.empty()) return out;
@@ -902,9 +903,13 @@ std::string security_label(std::uint32_t wpa_flags, std::uint32_t rsn_flags) {
 
 WifiManager::WifiManager(std::string state_dir) : state_dir_(std::move(state_dir)) {}
 
+WifiManager::WifiManager(std::string state_dir, detail::WifiProfileBackend& backend)
+    : state_dir_(std::move(state_dir)), profile_backend_(&backend) {}
+
 WifiManager::~WifiManager() { delete bus_; }
 
 void WifiManager::ensure_bus_locked() {
+    if (profile_backend_) throw WifiError("operation unavailable with injected Wi-Fi profile backend");
     if (bus_ && bus_->bus) return;
     delete bus_;
     bus_ = new BusHandle();
@@ -914,6 +919,12 @@ void WifiManager::ensure_bus_locked() {
         bus_ = nullptr;
         throw WifiError(std::string("cannot connect to system bus: ") + alpacacore::util::errno_string(-r));
     }
+}
+
+detail::WifiProfileBackend& WifiManager::profile_backend_locked() {
+    if (profile_backend_) return *profile_backend_;
+    ensure_bus_locked();
+    return *bus_;
 }
 
 std::string WifiManager::country_file() const { return state_dir_ + "/wifi_country"; }
@@ -1121,12 +1132,12 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
         throw WifiError("Passphrase must be 8-63 characters (or empty for open networks)");
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    ensure_bus_locked();
+    auto& backend = profile_backend_locked();
 
     // Existing client profile for this SSID → update in place.
     std::string existing_path;
     nlohmann::json existing;
-    for (const auto& [path, s] : bus_->wifi_connections()) {
+    for (const auto& [path, s] : backend.wifi_connections()) {
         if (s.contains("802-11-wireless") && s["802-11-wireless"].value("ssid", "") == ssid &&
             s["802-11-wireless"].value("mode", "infrastructure") == "infrastructure") {
             existing_path = path;
@@ -1148,7 +1159,7 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
     // interface: without the pin NM may activate them on the dedicated AP
     // interface, displacing the hotspot (OPi 4 Pro field bug, 2026-08-13).
     {
-        auto roles = bus_->device_roles();
+        auto roles = backend.device_roles();
         if (roles.count > 1 && !roles.client_if.empty()) {
             conn.push_back({"interface-name", SVal::str(roles.client_if)});
         }
@@ -1170,9 +1181,9 @@ nlohmann::json WifiManager::save_profile(const std::string& ssid, const std::str
     }
 
     if (existing_path.empty()) {
-        bus_->add_connection(spec, /*pin_shared_ip4=*/false);
+        backend.add_connection(spec, /*pin_shared_ip4=*/false);
     } else {
-        bus_->update_connection(existing_path, spec, /*pin_shared_ip4=*/false);
+        backend.update_connection(existing_path, spec, /*pin_shared_ip4=*/false);
     }
 
     return {{"Id", connection_id},

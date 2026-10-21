@@ -74,11 +74,13 @@
                         <!-- TODO: re-enable when drivers are ready
                         <option value="bisque">Bisque (Paramount / TheSkyX)</option>
                         -->
+                        <option value="altair">Altair</option>
                         <option value="astroasis">Astroasis</option>
-                        <option value="celestron">Celestron NexStar</option>
+                        <option value="celestron">Celestron</option>
                         <option value="gemini">Gemini</option>
                         <option value="gphoto">DSLR / Mirrorless</option>
                         <option value="ioptron">iOptron</option>
+                        <option value="iguider">iOptron iGuider</option>
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
@@ -219,7 +221,7 @@
 
                   <div id="ioptron-camera-config" style="display: none;">
                     <h3>iOptron iCAM Camera Configuration</h3>
-                    <small style="color: #666;">iCAM cameras (e.g. iCAM178M) are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system.</small>
+                    <small style="color: #666;">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
                     <div class="form-group">
                         <label for="ioptron-camera-index">Camera Index:</label>
                         <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" value="0" min="0">
@@ -509,6 +511,23 @@
                         </select>
                         <small>Leave on Auto unless the mount points 12 hours out in hour angle. Only mounts that have not been measured need this; see the troubleshooting guide for the reading that tells you which to pick.</small>
                     </div>
+                    <div class="form-group">
+                        <label for="skywatcher-backlash-enabled-ra">
+                            <input type="checkbox" id="skywatcher-backlash-enabled-ra" name="skywatcherBacklashEnabledRA">
+                            RA backlash compensation
+                        </label>
+                        <label for="skywatcher-backlash-steps-ra">RA backlash (microsteps):</label>
+                        <input type="number" id="skywatcher-backlash-steps-ra" name="skywatcherBacklashStepsRA" min="0" max="100000" step="1" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="skywatcher-backlash-enabled-dec">
+                            <input type="checkbox" id="skywatcher-backlash-enabled-dec" name="skywatcherBacklashEnabledDec">
+                            Dec backlash compensation
+                        </label>
+                        <label for="skywatcher-backlash-steps-dec">Dec backlash (microsteps):</label>
+                        <input type="number" id="skywatcher-backlash-steps-dec" name="skywatcherBacklashStepsDec" min="0" max="100000" step="1" value="0">
+                        <small>Off and 0 by default. When on, every goto finishes from the same side: RA in the tracking direction, Dec upward in counts. A goto that would arrive from the other side goes this many microsteps past the target, then comes back onto it at a slow speed derived from the mount. Only gotos are compensated: guide pulses, MoveAxis and the rate properties are not, because autoguiders measure and correct backlash themselves. A board that does not report its worm step count is left uncompensated.</small>
+                    </div>
                 </div>
 
                 <!-- OnStep Telescope Configuration -->
@@ -557,8 +576,28 @@
 
                 <!-- Celestron NexStar Telescope Configuration -->
                 <div id="celestron-config" class="vendor-config" style="display: none;">
-                    <h3>Celestron NexStar Telescope Configuration</h3>
+                  <div id="celestron-focuser-config" style="display: none;">
+                    <h3>Celestron Focus Motor Configuration</h3>
+                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you run the driver's Calibrate action (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
+                    <div class="form-group">
+                        <label for="celestron-focuser-port-path">Serial Port:</label>
+                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
+                        <small>Required. A /dev/serial/by-id/ path keeps working when other USB devices are plugged in.</small>
+                    </div>
+                  </div>
 
+                  <div id="celestron-telescope-config">
+                    <h3>Celestron Telescope Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="celestron-protocol">Mount Connection:</label>
+                        <select id="celestron-protocol" name="celestronProtocol" required>
+                            <option value="nexstar">NexStar hand controller</option>
+                            <option value="cgx-aux">CGX / CGX-L direct USB (no hand controller)</option>
+                        </select>
+                    </div>
+
+                    <div id="celestron-nexstar-only">
                     <div class="form-group">
                         <label for="celestron-alignment-mode">Alignment Mode:</label>
                         <select id="celestron-alignment-mode" name="celestronAlignmentMode">
@@ -577,17 +616,37 @@
                             <option value="network">Network/WiFi</option>
                         </select>
                     </div>
+                    </div>
 
                     <!-- Serial Connection -->
                     <div id="celestron-serial-config" class="connection-config" style="display: none;">
                         <div class="form-group">
                             <label for="celestron-port-path">Serial Port:</label>
                             <input type="text" id="celestron-port-path" name="celestronPortPath" placeholder="/dev/ttyUSB0">
-                            <small>Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
+                            <small id="celestron-port-help">Linux: /dev/ttyUSB0. Connect to the RS-232 port on the NexStar hand control.</small>
                         </div>
-                        <div class="form-group">
+                        <div class="form-group" id="celestron-baud-group">
                             <label for="celestron-baud-rate">Baud Rate:</label>
                             <input type="number" id="celestron-baud-rate" name="celestronBaudRate" value="9600" min="1200" max="115200">
+                        </div>
+                    </div>
+
+                    <div id="celestron-cgx-site-config" style="display: none;">
+                        <h4>Direct USB Site</h4>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-latitude">Site Latitude (degrees):</label>
+                            <input type="number" id="celestron-cgx-site-latitude" name="celestronSiteLatitude"
+                                   min="-90" max="90" step="any" placeholder="45.0">
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-longitude">Site Longitude (degrees east):</label>
+                            <input type="number" id="celestron-cgx-site-longitude" name="celestronSiteLongitude"
+                                   min="-180" max="180" step="any" placeholder="-75.0">
+                        </div>
+                        <div class="form-group">
+                            <label for="celestron-cgx-site-elevation">Site Elevation (meters, optional):</label>
+                            <input type="number" id="celestron-cgx-site-elevation" name="celestronSiteElevation"
+                                   min="-300" max="10000" step="any">
                         </div>
                     </div>
 
@@ -615,6 +674,7 @@
                         <input type="number" id="celestron-focal-length" name="celestronFocalLength" min="0" step="1" placeholder="2032">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
+                  </div>
                 </div>
 
                 <!-- Bisque (Paramount / TheSkyX) Telescope Configuration -->
@@ -854,7 +914,6 @@
                              which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
                         <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial">
                         <input type="hidden" id="zwo-camera-name" name="zwoCameraName">
-                        <input type="hidden" id="zwo-camera-unique-id" name="zwoCameraUniqueId">
                         <input type="hidden" id="zwo-camera-loaded-index">
                         <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
@@ -905,6 +964,11 @@
                             <label for="focuser-id">Focuser ID (optional):</label>
                             <input type="number" id="focuser-id" name="focuserId" min="0">
                             <small>If set, overrides the focuser index.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zwo-focuser-max-step">Max Step (optional):</label>
+                            <input type="number" id="zwo-focuser-max-step" name="zwoFocuserMaxStep" min="1" max="2000000">
+                            <small>Upper travel limit written to the EAF at connect. Leave blank to keep the value stored in the focuser. It cannot exceed the EAF's own step range.</small>
                         </div>
                     </div>
 
@@ -1152,6 +1216,32 @@
                         <label for="svbony-camera-index">Camera Index:</label>
                         <input type="number" id="svbony-camera-index" name="svbonyCameraIndex" value="0" min="0">
                         <small>0-based index from the SVBONY SDK enumeration.</small>
+                    </div>
+
+                </div>
+
+                <!-- Altair Camera Configuration -->
+                <div id="altair-config" class="vendor-config" style="display: none;">
+                    <h3>Altair Camera Configuration</h3>
+
+                    <div class="form-group">
+                        <label for="altair-camera-index">Camera Index:</label>
+                        <input type="number" id="altair-camera-index" name="altairCameraIndex" value="0" min="0">
+                        <small>0-based index from the Altair SDK enumeration. Configure an Altair
+                        camera here, not under ToupTek: each camera belongs to one vendor.</small>
+                    </div>
+
+                </div>
+
+                <!-- iOptron iGuider Guide Camera Configuration -->
+                <div id="iguider-config" class="vendor-config" style="display: none;">
+                    <h3>iOptron iGuider Guide Camera Configuration</h3>
+                    <small style="color: #666;">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
+
+                    <div class="form-group">
+                        <label for="iguider-device-path">Device Path (optional):</label>
+                        <input type="text" id="iguider-device-path" name="iguiderDevicePath" placeholder="Leave blank to auto-detect" maxlength="256">
+                        <small>Leave blank to use the first iGuider found. To pin one, enter its /dev/v4l/by-id/... link (survives a replug) or /dev/videoN.</small>
                     </div>
 
                 </div>
@@ -1792,6 +1882,19 @@
                             <button id="update-install" class="btn btn-primary" type="button" onclick="updateInstallClicked()" hidden>Install Update</button>
                         </div>
                     </div>
+                    <div class="update-row">
+                        <div class="wifi-row-label">
+                            <label for="update-channel">Update channel</label>
+                            <small id="update-channel-note"></small>
+                        </div>
+                        <div class="update-actions">
+                            <select id="update-channel" class="wifi-country-select" onchange="updateChannelChanged()" disabled>
+                                <option value="stable">Stable</option>
+                                <option value="beta">Beta</option>
+                            </select>
+                        </div>
+                    </div>
+                    <p id="update-channel-line" class="wifi-substatus"></p>
                     <p class="wifi-hint">Checks the OpenAstro repository for a newer release. Installing runs the same upgrade as <code>apt</code> and restarts the server for a few seconds, so do it between exposures.<button class="info-btn" type="button" aria-label="About software updates" data-info-title="Software Update" data-info-text="Check for Updates reads the newest AlpacaBridge version from apt.openastro.net and compares it with the running one. Install Update asks the system to upgrade the alpacabridge package through apt, exactly as 'sudo apt install --only-upgrade alpacabridge' would, so the download is signature-checked. The server restarts at the end and every connected client is disconnected for a few seconds. Nothing updates on its own.">i</button></p>
                     <div id="update-notes" class="update-notes hidden">
                         <div class="update-notes-header">
@@ -1849,7 +1952,7 @@
                                 <button type="button" data-band="a">5 GHz</button>
                             </div>
                         </div>
-                        <p class="wifi-hint">Changes save automatically.</p>
+                        <p class="wifi-hint">Changes save automatically. Anything that can drop your connection asks first.</p>
                     </div>
 
                     <div class="wifi-row">

@@ -48,4 +48,20 @@ const ConfigValue* DeviceConfig::find_value(std::string_view key) const {
     return nullptr;
 }
 
+std::string fold_connection_type_value(std::string_view value) {
+    std::string lower(value);
+    for (char& c : lower) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return lower;
+}
+
+void fold_connection_type(DeviceConfig& config) {
+    const ConfigValue* v = config.find_value("connectionType");
+    const auto* text = v ? std::get_if<std::string>(v) : nullptr;
+    if (!text) return;
+    std::string lower = fold_connection_type_value(*text);
+    if (lower != *text) config.set("connectionType", std::move(lower));
+}
+
 }  // namespace alpacacore::catalog

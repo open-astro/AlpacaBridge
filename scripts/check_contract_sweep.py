@@ -37,6 +37,11 @@ DeviceCatalog::describe() instead of parsing the *_catalog.cpp files):
      `if(TARGET alpacacore_<v>)`.
   5. test_contract_sweep.cpp must be in the unconditional TEST_SOURCES list and
      must expand CONTRACT_SWEEP_ENTRIES.
+  6. Snapshot adopters (decision 0010 rule 6): the Source column of every `adopted` row in the Adoption table of
+     docs/decisions/0010-snapshot-served-state.md and the `source` of every kSnapshotAdopterRoster row in
+     contract_sweep.h are the same set (SNAPSHOT ADOPTER UNSWEPT / SNAPSHOT ROSTER ROW NOT ADOPTED), and the roster
+     ids and the X(<id>, ...) hooks of the CS3_* macros in test_contract_sweep.cpp are the same set
+     (SNAPSHOT HOOK MISSING / SNAPSHOT HOOK NOT IN ROSTER). An empty table, roster or hook list fails.
 
 Run from the repo root:  python3 scripts/check_contract_sweep.py
 Self-test (literal fixtures, no repo state):  python3 scripts/check_contract_sweep.py --self-test
@@ -56,6 +61,7 @@ REGISTRY = "AlpacaCore/tests/contract_sweep.h"
 SWEEP_TEST = "AlpacaCore/tests/test_contract_sweep.cpp"
 TESTS_CMAKE = "AlpacaCore/tests/CMakeLists.txt"
 THIS_SCRIPT = "scripts/check_contract_sweep.py"
+SNAPSHOT_ADR = "docs/decisions/0010-snapshot-served-state.md"
 
 ROUTER_FUNCTION = "Router::register_device_from_config("
 
@@ -65,7 +71,8 @@ ALLOWLIST: dict[tuple[str, str], str] = {}
 
 # Pairs the router builds under another vendor's build flag.
 GUARD_OVERRIDE = {
-    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (router.cpp)
+    ("ioptron", "camera"): "PLAYERONE",  # iCAM cameras are rebadged Player One (playerone_catalog.cpp)
+    ("iguider", "camera"): "IOPTRON",  # the iOptron iGuider guide camera's own catalog vendor (ioptron_catalog.cpp)
 }
 
 # (vendor, device_type, factory) -> reason the router's factory has no registry entry. Empty: every
@@ -158,6 +165,18 @@ def strip_comments(text: str) -> str:
             out.append(c)
             i += 1
     return "".join(out)
+
+
+def router_function_parsed(router_text: str) -> bool:
+    """Whether register_device_from_config() was found and its braces matched. Zero arms inside it is
+    legitimate once every vendor is a catalog descriptor (open-astro#664 Part D, the last arm left in
+    #1228); a function the parser cannot find or match is not."""
+    text = strip_comments(router_text)
+    start = text.find(ROUTER_FUNCTION)
+    if start < 0:
+        return False
+    open_idx = text.find("{", text.find(")", start))
+    return open_idx >= 0 and matching_brace(text, open_idx) >= 0
 
 
 def router_pairs(router_text: str) -> set[tuple[str, str]]:
@@ -304,6 +323,74 @@ def registry_entries(header_text: str) -> dict[str, set[str]]:
     return entries
 
 
+ROSTER_START_RE = re.compile(r"\bkSnapshotAdopterRoster\s*\[\s*\]\s*=\s*\{")
+ROSTER_ROW_RE = re.compile(r'\{\s*"(?P<id>[^"]*)"\s*,\s*"[^"]*"\s*,\s*"(?P<src>[^"]*)"\s*\}')
+HOOK_DEFINE_RE = re.compile(r"^#\s*define\s+CS3_[A-Z0-9_]+\(\s*X\s*\)(?P<body>.*)$", re.M)
+HOOK_ID_RE = re.compile(r"\bX\(\s*(?P<id>[a-z0-9_]+)\s*,")
+
+
+def adopted_sources(adr_text: str) -> set[str]:
+    """Source column (backticks removed) of each `adopted` row in the ADR's `## Adoption` table."""
+    out: set[str] = set()
+    in_adoption = False
+    for line in adr_text.splitlines():
+        if line.startswith("## "):
+            in_adoption = line.strip() == "## Adoption"
+        if not in_adoption or not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 3 and cells[1].startswith("`") and cells[1].endswith("`") and cells[2] == "adopted":
+            out.add(cells[1][1:-1])
+    return out
+
+
+def snapshot_roster(header_text: str) -> dict[str, str]:
+    """id -> source of each kSnapshotAdopterRoster row."""
+    text = strip_comments(header_text)
+    m = ROSTER_START_RE.search(text)
+    if not m:
+        return {}
+    end = text.find("};", m.end())
+    body = text[m.end():end if end >= 0 else len(text)]
+    return {r.group("id"): r.group("src") for r in ROSTER_ROW_RE.finditer(body)}
+
+
+def snapshot_hook_ids(sweep_text: str) -> set[str]:
+    """The adopter ids in the single-line `#define CS3_<VENDOR>(X) X(<id>, ...)` hook lists."""
+    ids: set[str] = set()
+    for m in HOOK_DEFINE_RE.finditer(strip_comments(sweep_text)):
+        ids.update(h.group("id") for h in HOOK_ID_RE.finditer(m.group("body")))
+    return ids
+
+
+def snapshot_findings(adr_text: str, header_text: str, sweep_text: str) -> list[str]:
+    failures: list[str] = []
+    adopted = adopted_sources(adr_text)
+    roster = snapshot_roster(header_text)
+    hooks = snapshot_hook_ids(sweep_text)
+    if not adopted:
+        failures.append("EMPTY SNAPSHOT ADOPTION TABLE: no `adopted` row parsed from the Adoption table in %s"
+                        % SNAPSHOT_ADR)
+    if not roster:
+        failures.append("EMPTY SNAPSHOT ROSTER: no kSnapshotAdopterRoster row parsed from %s" % REGISTRY)
+    if not hooks:
+        failures.append("EMPTY SNAPSHOT HOOKS: no CS3_*(X) X(<id>, ...) hook parsed from %s" % SWEEP_TEST)
+    roster_sources = set(roster.values())
+    for src in sorted(adopted - roster_sources):
+        failures.append("SNAPSHOT ADOPTER UNSWEPT: %s is `adopted` in %s but kSnapshotAdopterRoster (%s) has no "
+                        "row for it" % (src, SNAPSHOT_ADR, REGISTRY))
+    for src in sorted(roster_sources - adopted):
+        failures.append("SNAPSHOT ROSTER ROW NOT ADOPTED: kSnapshotAdopterRoster lists %s but %s has no `adopted` "
+                        "row for it" % (src, SNAPSHOT_ADR))
+    for rid in sorted(set(roster) - hooks):
+        failures.append("SNAPSHOT HOOK MISSING: kSnapshotAdopterRoster row %s has no X(%s, ...) hook in %s"
+                        % (rid, rid, SWEEP_TEST))
+    for rid in sorted(hooks - set(roster)):
+        failures.append("SNAPSHOT HOOK NOT IN ROSTER: %s has a hook in %s but no kSnapshotAdopterRoster row"
+                        % (rid, SWEEP_TEST))
+    return failures
+
+
 def cmake_defined_guards(cmake_text: str) -> dict[str, set[str]]:
     """guard token -> the set of `if(TARGET alpacacore_<x>)` block names it is
     defined in for alpacacore_tests ('' when defined outside any such block)."""
@@ -331,11 +418,13 @@ def check(root: pathlib.Path) -> list[str]:
     header_text = load(REGISTRY)
     cmake_text = load(TESTS_CMAKE)
     sweep_text = load(SWEEP_TEST)
-    if router_text is None or header_text is None or cmake_text is None or sweep_text is None:
+    adr_text = load(SNAPSHOT_ADR)
+    if (router_text is None or header_text is None or cmake_text is None or sweep_text is None
+            or adr_text is None):
         return failures
 
     pairs = router_pairs(router_text)
-    if not pairs:
+    if not pairs and not router_function_parsed(router_text):
         failures.append("NO ROUTER ARMS FOUND in %s (%s): the parser is broken or the function moved"
                         % (ROUTER, ROUTER_FUNCTION))
     failures.extend(unparsed_arm_findings(router_text))
@@ -358,10 +447,12 @@ def check(root: pathlib.Path) -> list[str]:
     for path, text in sorted(catalog_file_texts.items()):
         dir_vendor = pathlib.PurePosixPath(path).parent.name
         key_vendors = {m.group("v") for m in DEVICE_KEY_VENDOR_RE.finditer(strip_comments(text))}
+        # A pair built under another vendor's flag (GUARD_OVERRIDE) has its factory in that vendor's file.
+        hosted = {pair[0] for pair, flag in GUARD_OVERRIDE.items() if flag.lower() == dir_vendor}
         if not key_vendors:
             failures.append("CATALOG VENDOR UNVERIFIED: %s has no DeviceKey{\"<vendor>\", ...} literal, so its "
                             "directory vendor %s cannot be checked; write the key as a literal" % (path, dir_vendor))
-        for key_vendor in sorted(key_vendors - {dir_vendor}):
+        for key_vendor in sorted(key_vendors - {dir_vendor} - hosted):
             failures.append("CATALOG VENDOR MISMATCH: %s sits in the %s directory but declares DeviceKey vendor "
                             "%s" % (path, dir_vendor, key_vendor))
 
@@ -474,6 +565,9 @@ def check(root: pathlib.Path) -> list[str]:
     if "CONTRACT_SWEEP_ENTRIES(" not in sweep_text:
         failures.append("SWEEP DOES NOT EXPAND THE REGISTRY: %s never uses CONTRACT_SWEEP_ENTRIES(...)" % SWEEP_TEST)
 
+    # 6: the snapshot adopter roster agrees with the ADR table and the hooks.
+    failures.extend(snapshot_findings(adr_text, header_text, sweep_text))
+
     return failures
 
 
@@ -571,7 +665,31 @@ if(TARGET alpacacore_playerone)
 endif()
 '''
 
-FIX_SWEEP = "CONTRACT_SWEEP_ENTRIES(CS_T1_INVALID)\n"
+FIX_SWEEP = '''CONTRACT_SWEEP_ENTRIES(CS_T1_INVALID)
+#define CS3_BISQUE(X) X(bisque_telescope, snapshot_telescope_getters(false))
+#define CS3_GEMINI(X) X(gemini_focuser, snapshot_focuser_getters(true)) X(astroasis_focuser, a)
+'''
+
+FIX_ADR = '''
+## Adoption
+
+| Driver | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- |
+| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1 | n |
+| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #2 | n |
+| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #3 | n |
+| Planned focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | planned | #4 | n |
+
+## Other
+'''
+
+FIX_ROSTER = '''
+inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
+    {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
+    {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
+    {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
+};
+'''
 
 
 # open-astro#664: one catalog file per vendor, AlpacaCore/src/vendors/<vendor>/<vendor>_catalog.cpp,
@@ -613,10 +731,12 @@ endif()
 
 
 def _run(router=FIX_ROUTER, header=FIX_HEADER, cmake=FIX_CMAKE, sweep=FIX_SWEEP,
-         catalog: dict[str, str] | None = None) -> list[str]:
+         catalog: dict[str, str] | None = None, adr=FIX_ADR, roster=FIX_ROSTER) -> list[str]:
     with tempfile.TemporaryDirectory() as d:
         root = pathlib.Path(d)
-        files = dict(((ROUTER, router), (REGISTRY, header), (TESTS_CMAKE, cmake), (SWEEP_TEST, sweep)))
+        header += roster  # the snapshot roster rides on whichever registry text the case mutates
+        files = dict(((ROUTER, router), (REGISTRY, header), (TESTS_CMAKE, cmake), (SWEEP_TEST, sweep),
+                      (SNAPSHOT_ADR, adr)))
         files.update(catalog or {})
         for rel, text in files.items():
             p = root / rel
@@ -626,7 +746,7 @@ def _run(router=FIX_ROUTER, header=FIX_HEADER, cmake=FIX_CMAKE, sweep=FIX_SWEEP,
 
 
 def self_test() -> int:
-    global ALLOWLIST, BACKEND_ALLOWLIST
+    global ALLOWLIST, BACKEND_ALLOWLIST, GUARD_OVERRIDE
     problems: list[str] = []
 
     def expect(name: str, failures: list[str], needle: str | None):
@@ -638,6 +758,7 @@ def self_test() -> int:
 
     saved = dict(ALLOWLIST)
     saved_backends = dict(BACKEND_ALLOWLIST)
+    saved_overrides = dict(GUARD_OVERRIDE)
     try:
         ALLOWLIST = {}
         BACKEND_ALLOWLIST = {}
@@ -653,6 +774,25 @@ def self_test() -> int:
             problems.append("continuation-line entry lost its guard: %r" % ent.get("gemini_switch"))
 
         expect("clean fixture", _run(), None)
+
+        # Rule 6: the snapshot adopter roster, the ADR table and the hooks agree.
+        bisque_row = '    {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},\n'
+        expect("adopted row without roster row", _run(roster=FIX_ROSTER.replace(bisque_row, "")),
+               "SNAPSHOT ADOPTER UNSWEPT: AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp")
+        expect("roster row not adopted", _run(adr=FIX_ADR.replace("| adopted | #1 |", "| planned | #1 |")),
+               "SNAPSHOT ROSTER ROW NOT ADOPTED: kSnapshotAdopterRoster lists "
+               "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp")
+        expect("roster row with an unknown extra", _run(roster=FIX_ROSTER.replace(
+            "};", '    {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},\n};')),
+            "SNAPSHOT ROSTER ROW NOT ADOPTED: kSnapshotAdopterRoster lists AlpacaCore/src/vendors/qhy/")
+        expect("roster row without hook", _run(sweep=FIX_SWEEP.replace(
+            "X(bisque_telescope, snapshot_telescope_getters(false))", "")),
+            "SNAPSHOT HOOK MISSING: kSnapshotAdopterRoster row bisque_telescope")
+        expect("hook without roster row", _run(sweep=FIX_SWEEP + "#define CS3_QHY(X) X(qhy_focuser, q)\n"),
+               "SNAPSHOT HOOK NOT IN ROSTER: qhy_focuser")
+        expect("empty adoption table", _run(adr="## Adoption\n"), "EMPTY SNAPSHOT ADOPTION TABLE")
+        expect("empty roster", _run(roster=""), "EMPTY SNAPSHOT ROSTER")
+        expect("no hooks", _run(sweep=FIX_SWEEP.replace("#define CS3_", "#define XX_")), "EMPTY SNAPSHOT HOOKS")
 
         # Rule 1: a constructed pair missing from the registry.
         expect("missing pair", _run(header=FIX_HEADER.replace("X(gemini_switch)", "")), "UNSWEPT PAIR")
@@ -737,6 +877,11 @@ def self_test() -> int:
         expect("not expanded", _run(sweep="// nothing\n"), "SWEEP DOES NOT EXPAND THE REGISTRY")
         # Robustness: a moved router function is a finding, not a silent pass.
         expect("router moved", _run(router="int x;\n"), "NO ROUTER ARMS FOUND")
+        # ... but a router whose function holds no arm at all is the end state of the catalog
+        # migration, not a broken parser: it must not raise the finding.
+        no_arms = _run(router="bool Router::register_device_from_config(const nlohmann::json& c) {\n    return false;\n}\n")
+        if any("NO ROUTER ARMS FOUND" in f for f in no_arms):
+            problems.append("armless router: raised NO ROUTER ARMS FOUND, got %r" % (no_arms,))
         expect("empty registry", _run(header="// empty\n"), "EMPTY REGISTRY")
         # open-astro#664: catalog files. Their pairs are checked in C++ (module docstring); here a
         # catalog file supplies backends for UNSWEPT BACKEND and exempts its vendor's entries from
@@ -776,9 +921,14 @@ def self_test() -> int:
                _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG.replace('DeviceKey{"astroasis", DeviceType::Focuser}',
                                                                     "make_key()")}, **swept),
                "CATALOG VENDOR UNVERIFIED: %s" % CATALOG_ASTROASIS)
+        GUARD_OVERRIDE = {**saved_overrides, ("gemini", "focuser"): "ASTROASIS"}
+        expect("catalog DeviceKey vendor built under the directory vendor's flag",
+               _run(catalog={CATALOG_ASTROASIS: FIX_CATALOG + 'DeviceKey{"gemini", DeviceType::Focuser};\n'},
+                    **swept), None)
     finally:
         ALLOWLIST = saved
         BACKEND_ALLOWLIST = saved_backends
+        GUARD_OVERRIDE = saved_overrides
 
     if problems:
         print("check_contract_sweep self-test FAILED:")

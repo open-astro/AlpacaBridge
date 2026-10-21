@@ -264,7 +264,7 @@ public:
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return "Watchdog Stub"; }
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
-    std::string get_unique_id() const override { return "watchdog-stub-" + std::to_string(number_); }
+    std::string fallback_unique_id() const override { return "watchdog-stub-" + std::to_string(number_); }
     std::string get_description() const override { return "fake telescope"; }
     std::string get_driver_info() const override { return "fake driver"; }
     std::string get_driver_version() const override { return "0.0.1"; }

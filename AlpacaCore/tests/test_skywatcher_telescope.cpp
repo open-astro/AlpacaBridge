@@ -146,7 +146,7 @@ TEST_CASE("SkyWatcher Telescope Driver - Target persistence", "[skywatcher][tele
     CHECK(driver->get_slew_settle_time() == 2);
 
     CHECK_FALSE(driver->get_tracking_rates().empty());
-    CHECK(driver->get_tracking_rate() == 0);
+    require_alpaca_error([&] { (void)driver->get_tracking_rate(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("SkyWatcher Telescope Driver - half-set target refuses the target-based motions",
@@ -202,8 +202,9 @@ TEST_CASE("SkyWatcher Telescope Driver - State machine", "[skywatcher][telescope
     // other operational property (open-astro#656); they used to return the driver-side parked_ / at_home_ flags.
     require_alpaca_error([&] { (void)driver->get_at_park(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { (void)driver->get_at_home(); }, alpacacore::AlpacaError::NotConnected);
-    CHECK(driver->get_declination_rate() == 0.0);
-    CHECK(driver->get_right_ascension_rate() == 0.0);
+    // The rate offsets too (open-astro#882): they report mount state, not driver configuration.
+    require_alpaca_error([&] { (void)driver->get_declination_rate(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_right_ascension_rate(); }, alpacacore::AlpacaError::NotConnected);
 
     // Sidereal time is computed host-side and must be a valid hour value even
     // when disconnected.

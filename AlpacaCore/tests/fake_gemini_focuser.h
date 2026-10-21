@@ -116,6 +116,18 @@ public:
     /// worked or threw.
     void set_temp_comp_reply(bool on) { temp_comp_on_.store(on); }
 
+    /// What ":01#" and ":06#" report; the position is set by a move or here.
+    /// Answer the three state queries with a parseable-looking but invalid
+    /// frame at once ("Px#"), as a wedged firmware does, without the serial
+    /// timeout a silent fake costs.
+    void set_garbage_state_replies(bool on) { garbage_state_.store(on); }
+    /// ":06#" answers garbage while the other state queries stay good (a
+    /// focuser without a temperature probe).
+    void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
+    void set_moving(bool moving) { moving_.store(moving); }
+    void set_temperature(double celsius) { temperature_.store(celsius); }
+    void set_position(int position) { position_.store(position); }
+
     int position() const { return position_.load(); }
     int max_position() const { return max_position_.load(); }
 
@@ -161,12 +173,18 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(delay));
             }
             reply = "F" + std::to_string(kFirmware) + "#";
+        } else if (garbage_state_.load() && (cmd == ":00#" || cmd == ":01#" || cmd == ":06#")) {
+            reply = "Px#";
+        } else if (garbage_temperature_.load() && cmd == ":06#") {
+            reply = "Zx#";
         } else if (cmd == ":00#") {
             reply = "P" + std::to_string(position_.load()) + "#";
         } else if (cmd == ":01#") {
-            reply = "I0#";  // never moving: the tests here are about connect
+            reply = moving_.load() ? "I1#" : "I0#";
         } else if (cmd == ":06#") {
-            reply = "Z12.5#";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "Z%.1f#", temperature_.load());
+            reply = buf;
         } else if (cmd == ":08#") {
             reply = "M" + std::to_string(max_position_.load()) + "#";
         } else if (cmd == ":11#") {
@@ -204,6 +222,10 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
 
+    std::atomic<bool> garbage_state_{false};
+    std::atomic<bool> garbage_temperature_{false};
+    std::atomic<bool> moving_{false};
+    std::atomic<double> temperature_{12.5};
     std::atomic<int> position_{1000};
     std::atomic<int> max_position_{50000};
 };

@@ -9,6 +9,7 @@ set(WANDERERASTRO_SOURCES
     wandererastro_filterwheel_driver.cpp
     wandererastro_box_protocol_wrapper.cpp
     wandererastro_box_switch_driver.cpp
+    wandererastro_catalog.cpp
 )
 
 add_library(alpacacore_wandererastro STATIC ${WANDERERASTRO_SOURCES})

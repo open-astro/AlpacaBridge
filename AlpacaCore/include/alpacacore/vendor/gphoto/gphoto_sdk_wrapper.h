@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/error_handling.h>
+
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -40,6 +42,18 @@ struct GPhotoCaptureResult {
 };
 
 /**
+ * @brief A call failed because the camera is no longer on the USB bus (GP_ERROR_IO_USB_FIND), for
+ * example after the body's auto power-off.
+ *
+ * Still an AlpacaException with the DriverException number, so every caller that does not know about it
+ * sees the failure it saw before. The exposure worker catches it to report the camera as disconnected.
+ */
+class GPhotoDeviceGoneException : public AlpacaException {
+public:
+    using AlpacaException::AlpacaException;
+};
+
+/**
  * @brief Abstract interface over the libgphoto2 operations the gphoto driver
  * uses.
  *
@@ -63,7 +77,7 @@ public:
     // stack object (FakeGPhotoSDK, LockedGPhotoSDK). A public virtual
     // destructor here would make `delete static_cast<GPhotoSDK*>(&...)`
     // compile against the singleton, since access for delete is checked on the
-    // static type. AGENTS.md calls this the shape to copy; ToupTek's public
+    // static type. testing.instructions.md calls this the shape to copy; ToupTek's public
     // virtual destructor predates that reasoning.
 
     /**

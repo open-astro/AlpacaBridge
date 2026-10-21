@@ -35,6 +35,10 @@ namespace {
 constexpr const char* kLogTag = "GPhoto";
 
 [[noreturn]] void throw_gp_error(const std::string& what, int gp_result) {
+    // The only result recorded on a rig when a body powered itself off between exposures (issue #1064).
+    if (gp_result == GP_ERROR_IO_USB_FIND) {
+        throw GPhotoDeviceGoneException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
+    }
     throw AlpacaException(what + ": " + gp_result_as_string(gp_result), AlpacaError::DriverException);
 }
 

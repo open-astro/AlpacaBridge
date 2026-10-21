@@ -1,5 +1,5 @@
 # Player One vendor support
-# Uses vendored SDKs in external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0
+# Uses vendored SDKs in external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1
 # (cameras) and external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3
 # (Phoenix filter wheel).
 
@@ -7,7 +7,7 @@ if(ALPACACORE_ENABLE_PLAYERONE)
     message(STATUS "Building Player One camera and filter wheel driver support")
 
     get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-    set(PLAYERONE_SDK_ROOT "${ALPACACORE_ROOT}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0")
+    set(PLAYERONE_SDK_ROOT "${ALPACACORE_ROOT}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1")
     set(PLAYERONE_SDK_INCLUDE "${PLAYERONE_SDK_ROOT}/include")
     set(PLAYERONE_PW_SDK_ROOT "${ALPACACORE_ROOT}/external/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3")
     set(PLAYERONE_PW_SDK_INCLUDE "${PLAYERONE_PW_SDK_ROOT}/include")

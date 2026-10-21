@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/switch_driver.h>
+#include <alpacacore/vendor/touptek/touptek_powerbox_sdk.h>
 #include <alpacacore/vendor/touptek/touptek_powerbox_wrapper.h>
 
 #include <memory>
@@ -50,5 +51,16 @@ struct TouptekSwitchConfig {
 TouptekSwitchConfig default_stellavita_config();
 
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config);
+
+/**
+ * @brief Test seam: as create_touptek_switch(), over an injected power box.
+ *
+ * @p powerbox must outlive the driver. Its port_count() must equal
+ * config.ports.size(), else this throws InvalidValue. The config still supplies
+ * the port table (names, writability, PWM); the injected object supplies the
+ * line values and the open state.
+ */
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config,
+                                                    TouptekPowerboxSDK& powerbox);
 
 }  // namespace alpacacore::vendor::touptek

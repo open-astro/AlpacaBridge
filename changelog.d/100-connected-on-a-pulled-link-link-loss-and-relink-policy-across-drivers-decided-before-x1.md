@@ -1,0 +1,3 @@
+### Changed
+
+- **Sky-Watcher link loss and relink policy**, Sky-Watcher driver, issue #970. A latched link fault that stands for 30 s (`util::kLinkStalenessBound`, on the task clock) now drops `Connected`, makes operations throw `NotConnected`, empties `DeviceState`, closes the transport and stamps the loss time, on UDP as well as serial; an unusable UDP socket (`EBADF`, `ENOTSOCK`, `ENOTCONN`) loses the link at once, while reachability errors such as `ECONNREFUSED` count toward the same bound. The last fault text stays until the next Connect or Disconnect, and nothing reconnects until the client asks. Covered by `AlpacaCore/tests/test_skywatcher_link_loss.cpp`; the policy is [decision 0009](docs/decisions/0009-link-loss-and-relink-policy.md).

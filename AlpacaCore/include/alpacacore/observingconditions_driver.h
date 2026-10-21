@@ -117,11 +117,6 @@ public:
     virtual double get_sky_temperature() const = 0;
 
     /**
-     * @brief Get seeing in arcseconds.
-     */
-    virtual double get_seeing() const = 0;
-
-    /**
      * @brief Get star FWHM in arcseconds.
      */
     virtual double get_star_fwhm() const = 0;

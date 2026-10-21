@@ -8,7 +8,7 @@ if(ALPACACORE_ENABLE_QHY)
     if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         message(FATAL_ERROR "Unsupported architecture for QHY SDK: ${CMAKE_SYSTEM_PROCESSOR}. AlpacaBridge is arm64-only.")
     endif()
-    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_linux_arm64_26.06.04")
+    set(QHY_SDK_ROOT "${ALPACACORE_ROOT}/external/QHY/sdk_linux_arm64_26.07.28")
 
     set(QHY_SDK_INCLUDE  "${QHY_SDK_ROOT}/usr/local/include")
     set(QHY_SDK_LIB_DIR  "${QHY_SDK_ROOT}/usr/local/lib")
@@ -33,6 +33,7 @@ if(ALPACACORE_ENABLE_QHY)
         qhy_cfw3_filterwheel_driver.cpp
         qhy_qfocuser_protocol_wrapper.cpp
         qhy_focuser_driver.cpp
+        qhy_catalog.cpp
     )
 
     add_library(alpacacore_qhy STATIC ${QHY_SOURCES})
@@ -45,9 +46,10 @@ if(ALPACACORE_ENABLE_QHY)
     # links down to it, never the reverse (open-astro#710).
     target_link_libraries(alpacacore_qhy PRIVATE alpacacore)
 
-    # SYSTEM: the vendored SDK headers trip -Werror otherwise (26.06.04 ships
-    # qhyccdcamdef.h with QHY26800A_MAX_WIDTH defined twice with different
-    # values -- a vendor bug we don't get to fix).
+    # SYSTEM: the vendored SDK headers trip -Werror otherwise (earlier
+    # SDK releases shipped qhyccdcamdef.h with QHY26800A_MAX_WIDTH defined twice with
+    # different values -- a vendor bug we don't get to fix; 26.07.28 comments
+    # one pair out, and SYSTEM stays so the next header slip cannot break the build).
     target_include_directories(alpacacore_qhy SYSTEM PRIVATE
         ${QHY_SDK_INCLUDE}
     )

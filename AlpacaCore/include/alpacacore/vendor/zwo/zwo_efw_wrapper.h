@@ -12,40 +12,36 @@
 
 #pragma once
 
+#include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
+
 #include <memory>
 #include <string>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
 
-struct ZWOEFWInfo {
-    int wheel_id{};
-    std::string name;
-    int slot_count{};
-};
-
-class ZWOEFWSDKWrapper {
+class ZWOEFWSDKWrapper final : public ZWOEFWSDK {
 public:
     static ZWOEFWSDKWrapper& instance();
 
-    std::vector<ZWOEFWInfo> enumerate_wheels();
-    bool get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info);
-    bool get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info);
+    std::vector<ZWOEFWInfo> enumerate_wheels() override;
+    bool get_wheel_info_by_id(int wheel_id, ZWOEFWInfo& info) override;
+    bool get_wheel_info_by_index(int wheel_index, ZWOEFWInfo& info) override;
 
-    void open_wheel(int wheel_id);
-    void close_wheel(int wheel_id);
+    void open_wheel(int wheel_id) override;
+    void close_wheel(int wheel_id) override;
 
-    int get_position(int wheel_id);
-    void set_position(int wheel_id, int position);
+    int get_position(int wheel_id) override;
+    void set_position(int wheel_id, int position) override;
 
-    void set_unidirectional(int wheel_id, bool enabled);
-    bool get_unidirectional(int wheel_id);
-    void calibrate(int wheel_id);
+    void set_unidirectional(int wheel_id, bool enabled) override;
+    bool get_unidirectional(int wheel_id) override;
+    void calibrate(int wheel_id) override;
 
-    int get_hardware_error_code(int wheel_id);
-    std::string get_serial_number(int wheel_id);
-    std::string get_firmware_version(int wheel_id);
-    std::string get_sdk_version();
+    int get_hardware_error_code(int wheel_id) override;
+    std::string get_serial_number(int wheel_id) override;
+    std::string get_firmware_version(int wheel_id) override;
+    std::string get_sdk_version() override;
 
 private:
     class Impl;

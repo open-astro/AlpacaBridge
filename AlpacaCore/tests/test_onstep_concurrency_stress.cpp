@@ -27,10 +27,19 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
+#include <unistd.h>
+
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <string>
+#include <system_error>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_pty_write.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -142,6 +151,108 @@ TEST_CASE("OnStep telescope - destruction mid-operation (slew/pulse threads live
         }
         driver.reset();
     }
+}
+
+// open-astro#1289: link_alive() runs with no wrapper mutex_ held, from
+// get_link_fault() and get_connected(), while connect and
+// disconnect change the recorded node and an unplug or replug changes what
+// the port path points at. A storm of all three over a serial path that is
+// swapped between two ptys and removed, so the generation counter,
+// link_id_mutex_, loss_mutex_ and the try_lock close all run under TSan. A
+// serial connect only opens the port, so the ptys need no replies.
+TEST_CASE("OnStep wrapper - link_alive races connect and disconnect during an adapter swap",
+          "[onstep][telescope][stress]") {
+    using alpacacore::vendor::onstep::ConnectionInfo;
+    using alpacacore::vendor::onstep::ConnectionType;
+    using alpacacore::vendor::onstep::OnStepProtocolWrapper;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    const auto reset_wrapper = [&protocol]() {
+        protocol.disconnect();
+        static_cast<void>(protocol.consume_link_lost_at());
+        static_cast<void>(protocol.consume_last_alive_before_loss());
+    };
+    reset_wrapper();
+
+    alpacacore::test::PtyPair first("OnStep stress adapter A");
+    alpacacore::test::PtyPair second("OnStep stress adapter B");
+    const std::filesystem::path link = std::filesystem::temp_directory_path() /
+                                       ("alpacacore-onstep1289-stress-" + std::to_string(::getpid()) + "-" +
+                                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_symlink(first.slave_path(), link);
+
+    ConnectionInfo info;
+    info.type = ConnectionType::Serial;
+    info.port_path = link.string();
+    info.response_timeout_ms = 200;
+
+    // None of these calls should throw: a connect whose path is missing at
+    // that instant returns false. The default expected set ({NotConnected})
+    // stays, so any other throw, e.g. the "one mount per bridge" refusal if a
+    // disconnect ever left the wrapper connected, is counted as a failure.
+    alpacacore::test::StressCallGuard guard;
+    std::atomic<bool> stop{false};
+    std::thread checker;
+    std::thread swapper;
+    // Joins both workers on every way out, so a throw between the two thread
+    // starts cannot leave one joinable at destruction.
+    struct JoinBoth {
+        std::atomic<bool>& stop;
+        std::thread& a;
+        std::thread& b;
+        ~JoinBoth() {
+            stop.store(true);
+            if (a.joinable()) a.join();
+            if (b.joinable()) b.join();
+        }
+    } join_both{stop, checker, swapper};
+
+    checker = std::thread([&]() {
+        while (!stop.load()) {
+            guard([&] { static_cast<void>(protocol.link_alive()); });
+            guard([&] { static_cast<void>(protocol.link_lost_reason()); });
+        }
+    });
+    swapper = std::thread([&]() {
+        int step = 0;
+        while (!stop.load()) {
+            std::error_code ec;
+            std::filesystem::remove(link, ec);
+            if (step % 3 != 2) {  // every third step leaves the path missing for a while
+                std::filesystem::create_symlink((step % 2 == 0 ? second : first).slave_path(), link, ec);
+            }
+            ++step;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+
+    // Counted so the case fails if the storm stops reaching the paths it is
+    // for: connects that open a link, and losses recorded while one is up.
+    int connects = 0;
+    int losses = 0;
+    for (int i = 0; i < 2000; ++i) {
+        guard([&] {
+            if (protocol.connect(info)) ++connects;
+        });
+        guard([&] { static_cast<void>(protocol.link_alive()); });
+        guard([&] {
+            if (!protocol.link_lost_reason().empty()) ++losses;
+        });
+        guard([&] { protocol.disconnect(); });
+    }
+    stop.store(true);
+    checker.join();
+    swapper.join();
+
+    reset_wrapper();
+    std::error_code ec;
+    std::filesystem::remove(link, ec);
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    INFO("connects " << connects << ", losses " << losses);
+    CHECK(connects > 0);
+    CHECK(losses > 0);
 }
 
 #endif  // !_WIN32

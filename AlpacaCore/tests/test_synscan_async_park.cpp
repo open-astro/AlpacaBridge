@@ -38,12 +38,18 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
 struct FakeSynScanState {
+    std::atomic<int> tracking_mode{1};  // the handset's `T` mode: the status poll reads it back
+    // The GOTO timer reads the driver's task clock (a FakeTaskClock in the park
+    // cases), so a park runs in virtual time like the driver's own waits.
+    alpacacore::util::TaskClock* clock = &alpacacore::util::default_task_clock();
+    alpacacore::util::TaskClock::clock::time_point now() const { return clock->now(); }
     std::atomic<bool> goto_seen{false};
     std::atomic<int> goto_count{0};
     std::atomic<Clock::rep> goto_started{0};
@@ -53,9 +59,17 @@ struct FakeSynScanState {
     std::atomic<bool> hold_goto{false};
     std::atomic<bool> goto_held{false};
     std::atomic<unsigned char> model_id{50};
+    std::atomic<bool> invalid_slew_status{false};
+    // The next N slew-status queries go unanswered (a dropped reply), then the handset answers again.
+    std::atomic<int> drop_slew_status{0};
+    // While set, the GOTO never lands, so a test controls exactly when the slew-status queries see it end.
+    std::atomic<bool> goto_never_ends{false};
+    std::atomic<bool> reject_tracking_stop{false};
     // With `no_location` set the handset never answers the location query,
     // so the driver has no site unless config or a client supplies one.
     std::atomic<bool> no_location{false};
+    std::atomic<int> slew_status_polls{0};
+    std::atomic<int> tracking_stop_attempts{0};
     std::mutex mutex;
     std::string position = "00000000,00000000#";
     std::vector<std::string> gotos;
@@ -73,8 +87,9 @@ struct FakeSynScanState {
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
+        if (goto_never_ends.load()) return true;
         const auto started = Clock::time_point(Clock::duration(goto_started.load()));
-        return Clock::now() - started < kGotoDuration;
+        return now() - started < kGotoDuration;
     }
 };
 
@@ -107,7 +122,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
                         st->position = chunk.substr(1, 17) + "#";
                     }
                 }
-                st->goto_started.store(Clock::now().time_since_epoch().count());
+                st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
                 return "#";
@@ -117,13 +132,27 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(std::shared_ptr<F
             case 'W':
                 return "#";
             case 'L':
+                st->slew_status_polls.fetch_add(1);
+                if (st->drop_slew_status.load() > 0) {
+                    st->drop_slew_status.fetch_sub(1);
+                    return "";
+                }
+                if (st->invalid_slew_status.load()) return "?#";
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':  // cancel goto
                 st->goto_seen.store(false);
                 return "#";
-            case 't':  // tracking mode read: sidereal tracking on (open-astro#775 slew gate)
-                return std::string(1, '\x01') + "#";
+            case 't':  // tracking mode read: sidereal tracking on until a `T` says otherwise (open-astro#775 slew gate)
+                return std::string(1, static_cast<char>(st->tracking_mode.load())) + "#";
             case 'T':
+                if (st->reject_tracking_stop.load() && chunk.size() > 1 && chunk[1] == 0) {
+                    st->tracking_stop_attempts.fetch_add(1);
+                    return "";
+                }
+                if (chunk.size() > 1) {
+                    st->tracking_mode.store(chunk[1]);
+                }
+                return "#";
             case 'P':  // tracking mode write / passthrough
                 return "#";
             case 'm':  // model id: chr(model) + "#"; 50 = EQM-35 Pro
@@ -147,7 +176,46 @@ bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         if (pred()) return true;
+        // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return pred();
+}
+
+// RA in hours of a SynScan GOTO command: "r%08X,%08X" (precise) or "R%04X,%04X".
+double goto_ra_hours(const std::string& cmd) {
+    const bool precise = cmd.front() == 'r';
+    const std::string ra_hex = cmd.substr(1, precise ? 8 : 4);
+    const double full_scale = precise ? 4294967296.0 : 65536.0;
+    return static_cast<double>(std::stoul(ra_hex, nullptr, 16)) / full_scale * 24.0;
+}
+
+// SetPark saves an hour angle against the sidereal clock's LST and Park converts
+// it back against the same LST. The callers pin that clock through
+// set_sidereal_wall_clock_for_testing(), so after a six-hour shift the RA target
+// is 6 h to within one count of the command's resolution (24 bits for "r", 16
+// for "R"). An unpinned host clock drifted it by a real second (r4000C300) when
+// the two calls straddled a second boundary (#976). Dec is not time-dependent
+// and stays exact.
+void check_six_hour_park_goto(const std::string& cmd) {
+    CHECK(cmd.substr(cmd.find(',')) == (cmd.front() == 'r' ? ",00000000" : ",0000"));
+    const double resolution_hours = 24.0 / (cmd.front() == 'r' ? 16777216.0 : 65536.0);
+    const double past_six = goto_ra_hours(cmd) - 6.0;
+    INFO("RA target past 6 h: " << past_six * 3600.0 << " s");
+    CHECK(past_six >= -resolution_hours);
+    CHECK(past_six <= resolution_hours);
+}
+
+// Steps the fake clock one `step` at a time, once the driver's task is parked
+// on it, until `pred` holds or `max_steps` steps pass. Each step waits for the
+// woken task to settle, so no step lands between two of its waits.
+bool advance_until(alpacacore::test::FakeTaskClock& clock, const std::function<bool()>& pred,
+                   std::chrono::milliseconds step = std::chrono::milliseconds(250), int max_steps = 200) {
+    for (int i = 0; i < max_steps; ++i) {
+        if (pred()) return true;
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(step);
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
     return pred();
 }
@@ -168,6 +236,8 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
             case 'K':  // protocol echo: "K" + byte -> byte + "#"
                 return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
             case 'V':
+                // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task
+                // clock.
                 std::this_thread::sleep_for(std::chrono::milliseconds(kStallMs));
                 return "042A00#";
             case 'e':
@@ -189,6 +259,7 @@ TEST_CASE("SynScan - get_connected() answers at once while a connect is in fligh
     REQUIRE(wait_until([&] { return driver->get_connecting(); }, 1000));
     // Past the port open and the echo, inside the stalled firmware query:
     // the connect task holds mutex_ for the next few hundred milliseconds.
+    // Real time: the fake mount and the test's own polling run on the host clock, not the driver's task clock.
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     // The flag's value mid-task is driver-specific (SynScan raises it before
     // the warm-up queries, see .github/instructions/alpaca-http-conformance.instructions.md
@@ -350,11 +421,14 @@ TEST_CASE("SynScan - Name carries the model and the (SynScan) suffix once connec
 }
 
 TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew ends", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_FALSE(driver->get_at_park());
 
@@ -370,10 +444,11 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
     driver->park();
     REQUIRE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_at_park());
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // The task is parked on its first poll: a second GOTO would be on the wire by now.
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
     CHECK(st->goto_count.load() == 1);
 
-    REQUIRE(wait_until([&] { return driver->get_at_park(); }, 20000));
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
     REQUIRE_FALSE(driver->get_slewing());
     REQUIRE_FALSE(driver->get_tracking());  // park stops tracking
 
@@ -386,13 +461,132 @@ TEST_CASE("SynScan async - Park returns immediately, AtPark flips when the slew 
     driver->set_connected(false);
 }
 
-TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[synscan][telescope][park]") {
+TEST_CASE("SynScan async - Park survives dropped status replies below the threshold", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(2);
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    CHECK(st->drop_slew_status.load() == 0);  // both drops were consumed by Park polls
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - Park failure count resets on a good status reply", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->goto_never_ends.store(true);
+    st->drop_slew_status.store(2);
+    REQUIRE(advance_until(clock, [&] { return st->drop_slew_status.load() == 0; }));
+    // A good reply that still reports the slew in progress: the failure count must go back to zero here.
+    const int polls_after_drops = st->slew_status_polls.load();
+    REQUIRE(advance_until(clock, [&] { return st->slew_status_polls.load() > polls_after_drops; }));
+    REQUIRE_FALSE(driver->get_at_park());
+    st->drop_slew_status.store(2);
+    const int polls_before_second_drops = st->slew_status_polls.load();
+    REQUIRE(advance_until(clock, [&] { return st->drop_slew_status.load() == 0; }));
+    CHECK(st->slew_status_polls.load() >= polls_before_second_drops + 2);
+    // Two failures on each side of the good reply: four in all, never three in a row.
+    st->goto_never_ends.store(false);
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a new Park starts its failure count at zero", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(1000);
+    bool park_failed = false;
+    REQUIRE(advance_until(clock, [&] {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            park_failed = true;
+            return true;
+        }
+    }));
+    REQUIRE(park_failed);
+    st->drop_slew_status.store(0);
+    st->goto_seen.store(false);
+    // The second Park meets one dropped reply; a count left at three would fail it at once.
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(1);
+    REQUIRE(advance_until(clock, [&] { return driver->get_at_park(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - Park fails after three consecutive dropped status replies", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    // The dropped-reply count below is the park body's own status polls: the status poll's `L` reads would consume
+    // drops too.
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+    driver->park();
+    REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));
+    st->drop_slew_status.store(1000);
+    // The failed Park surfaces on the next Slewing read as its stored error.
+    bool park_failed = false;
+    REQUIRE(advance_until(clock, [&] {
+        try {
+            return !driver->get_slewing();
+        } catch (const alpacacore::AlpacaException&) {
+            park_failed = true;
+            return true;
+        }
+    }));
+    CHECK(park_failed);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(st->drop_slew_status.load() == 1000 - 3);  // exactly three polls before failing
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[synscan][telescope][park]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    // Pinned sidereal wall time: a real second between the two calls moved the target by 0xC300 counts (#976).
+    const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+    alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
 
     driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
     st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
@@ -403,18 +597,21 @@ TEST_CASE("SynScan SetPark - parked hour angle follows sidereal-time shifts", "[
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
     INFO("Park GOTO after a six-hour sidereal shift: " << gotos.front());
-    CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+    check_six_hour_park_goto(gotos.front());
     driver->set_connected(false);
 }
 
 TEST_CASE("SynScan SetPark - Alt-Az mount retains azimuth and altitude", "[synscan][telescope][park]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     st->model_id.store(128);  // AZ GOTO
     st->set_position("40000000,20000000#");
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->set_park();
@@ -433,14 +630,16 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
     using alpacacore::vendor::synscan::SynScanAlignmentSetting;
     {
         // Alt-Az: the park keeps azimuth and altitude, as on an AZ GOTO mount.
+        alpacacore::test::FakeTaskClock clock;
         auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
         st->model_id.store(5);  // AZ-EQ6
         st->set_position("40000000,20000000#");
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
-            std::nullopt, std::nullopt, SynScanAlignmentSetting::AltAz);
+            std::nullopt, std::nullopt, SynScanAlignmentSetting::AltAz, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
         driver->set_park();
@@ -456,14 +655,21 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
     }
     {
         // Equatorial: the park keeps the hour angle, so a sidereal shift moves the RA target.
+        alpacacore::test::FakeTaskClock clock;
         auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
         st->model_id.store(6);  // AZ-EQ5
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
         auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
             0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
-            std::nullopt, std::nullopt, SynScanAlignmentSetting::Equatorial);
+            std::nullopt, std::nullopt, SynScanAlignmentSetting::Equatorial, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+        // Pin the sidereal wall time (a real clock passing a second between the two calls moved the target by
+        // 0xC300 counts, #976), so the 90 degree longitude shift is the only sidereal change the target follows.
+        const auto wall = std::chrono::system_clock::time_point{std::chrono::seconds(1800000000)};
+        alpacacore::vendor::synscan::set_sidereal_wall_clock_for_testing(*driver, [wall] { return wall; });
 
         driver->set_park();                      // mechanical position is RA=0, Dec=0 at longitude 0
         st->set_position("40000000,00000000#");  // six hours later, the same mount position reads RA=6h
@@ -474,7 +680,7 @@ TEST_CASE("SynScan SetPark - AZ-EQ park follows the configured alignment mode (#
         const auto gotos = st->goto_snapshot();
         REQUIRE(gotos.size() == 1);
         INFO("AZ-EQ equatorial Park GOTO after a six-hour sidereal shift: " << gotos.front());
-        CHECK((gotos.front() == "r40000000,00000000" || gotos.front() == "R4000,0000"));
+        check_six_hour_park_goto(gotos.front());
         driver->set_connected(false);
     }
 }
@@ -483,12 +689,15 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
     for (const auto model_id :
          {static_cast<unsigned char>(5), static_cast<unsigned char>(6), static_cast<unsigned char>(255)}) {
         for (const bool set_park_first : {false, true}) {
+            alpacacore::test::FakeTaskClock clock;
             auto st = std::make_shared<FakeSynScanState>();
+            st->clock = &clock;
             st->model_id.store(model_id);
             alpacacore::test::FakeMountServer server(synscan_responder(st));
             REQUIRE(server.ok());
-            auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-                0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+            auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+                0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+                std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
             REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
             if (set_park_first) {
                 CHECK_NOTHROW(driver->set_park());
@@ -502,12 +711,15 @@ TEST_CASE("SynScan ambiguous or unknown mount - Park keeps the RA/Dec fallback",
 
 TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallback", "[synscan][telescope][park]") {
     for (const bool set_park_first : {false, true}) {
-        auto st = std::make_shared<FakeSynScanState>();  // model 50, EQM-35 Pro: known equatorial
+        alpacacore::test::FakeTaskClock clock;
+        auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;  // model 50, EQM-35 Pro: known equatorial
         st->no_location.store(true);
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
-        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         if (set_park_first) {
             CHECK_NOTHROW(driver->set_park());
@@ -520,11 +732,14 @@ TEST_CASE("SynScan equatorial mount without a site - Park keeps the RA/Dec fallb
 
 TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses the last known longitude",
           "[synscan][telescope][park]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     REQUIRE_NOTHROW(driver->set_park());  // RA=0 at longitude 0: saved as an hour angle
     driver->set_site_longitude(90.0);     // the last known longitude is now +90 degrees
@@ -540,21 +755,19 @@ TEST_CASE("SynScan hour-angle park after a reconnect without a site - Park uses 
     const auto gotos = st->goto_snapshot();
     REQUIRE(gotos.size() == 1);
     INFO("Park GOTO after a reconnect without a site: " << gotos.front());
-    const std::string& cmd = gotos.front();
-    const bool precise = cmd.front() == 'r';
-    const std::string ra_hex = cmd.substr(1, precise ? 8 : 4);
-    const double full_scale = precise ? 4294967296.0 : 65536.0;
-    const double ra_hours = static_cast<double>(std::stoul(ra_hex, nullptr, 16)) / full_scale * 24.0;
-    CHECK(std::abs(ra_hours - 6.0) < 0.01);
+    CHECK(std::abs(goto_ra_hours(gotos.front()) - 6.0) < 0.01);
     driver->set_connected(false);
 }
 
 TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->park();
@@ -563,7 +776,8 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
     REQUIRE_FALSE(driver->get_at_park());
     REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
     // The cancelled park task must never flip AtPark afterwards.
-    std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+    // Virtual time well past the GOTO and the start grace.
+    CHECK_FALSE(advance_until(clock, [&] { return driver->get_at_park(); }, std::chrono::milliseconds(250), 12));
     REQUIRE_FALSE(driver->get_at_park());
 
     // A park in flight gates motion members like a completed park does, so a
@@ -597,11 +811,14 @@ TEST_CASE("SynScan async - Unpark during a park cancels it", "[synscan][telescop
 // Unpark must throw once the park task is joined, and Slewing must not read
 // false: the park slew may still be running.
 TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     driver->park();
@@ -617,7 +834,13 @@ TEST_CASE("SynScan async - Unpark reports stops it could not send", "[synscan][t
         CHECK(std::string(ex.what()).rfind("Unpark could not stop the park slew: ", 0) == 0);
     }
     CHECK_FALSE(driver->get_at_park());
-    CHECK(driver->get_slewing());  // the hardware poll fails too, so the cached state stands
+    try {
+        static_cast<void>(driver->get_slewing());
+        FAIL("Slewing must surface the failed Unpark stop");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("Unpark could not stop") != std::string::npos);
+    }
 
     driver->set_connected(false);
 }
@@ -641,7 +864,9 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
             }
         });
 
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
     // A long reply timeout leaves the test ample time to drop the link while
@@ -649,8 +874,9 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
     // peer.
     auto info = endpoint(server.port());
     info.response_timeout_ms = 2000;
-    auto driver =
-        alpacacore::vendor::synscan::create_synscan_telescope(0, info, alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, info, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
     st->hold_goto.store(true);
@@ -663,8 +889,81 @@ TEST_CASE("SynScan async - a failed park logs the stops it could not send", "[sy
     REQUIRE(wait_until([&] { return stop_errors.load() > 0; }, 10000));
     CHECK(stop_errors.load() == 1);
     CHECK_FALSE(driver->get_at_park());
-    CHECK(driver->get_slewing());
+    try {
+        static_cast<void>(driver->get_slewing());
+        FAIL("Slewing must surface the failed Park");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("stopping after failure failed") != std::string::npos);
+    }
 
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - malformed Park status reply persists through Slewing",
+          "[synscan][telescope][async][parkfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    st->invalid_slew_status.store(true);
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->park());
+    bool surfaced = false;
+    for (int i = 0; i < 48 && !surfaced; ++i) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        try {
+            (void)driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("Invalid response to SynScan slew-status query") != std::string::npos);
+            surfaced = true;
+        }
+    }
+    REQUIRE(surfaced);
+    CHECK(st->slew_status_polls.load() > 0);
+    CHECK_FALSE(driver->get_at_park());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SynScan async - a Park tracking-stop failure persists through Slewing",
+          "[synscan][telescope][async][parkfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
+    alpacacore::test::FakeMountServer server(synscan_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    REQUIRE_NOTHROW(driver->park());
+    st->reject_tracking_stop.store(true);
+    bool surfaced = false;
+    for (int i = 0; i < 48 && !surfaced; ++i) {
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+        try {
+            (void)driver->get_slewing();
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("stopping tracking failed") != std::string::npos);
+            surfaced = true;
+        }
+    }
+    REQUIRE(surfaced);
+    CHECK(st->slew_status_polls.load() > 0);
+    CHECK(st->tracking_stop_attempts.load() > 0);
+    CHECK_FALSE(driver->get_at_park());
     driver->set_connected(false);
 }
 
@@ -685,14 +984,18 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
     };
     for (const auto& c : cases) {
         INFO(c.name);
+        alpacacore::test::FakeTaskClock clock;
         auto st = std::make_shared<FakeSynScanState>();
+        st->clock = &clock;
         alpacacore::test::FakeMountServer server(synscan_responder(st));
         REQUIRE(server.ok());
-        auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+        auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+            0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+            std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
 
         std::atomic<int> code{-1};
+        std::atomic<bool> done{false};
         std::thread slewer([&] {
             try {
                 driver->slew_to_coordinates(5.0, 20.0);
@@ -700,23 +1003,43 @@ TEST_CASE("SynScan sync slew - superseded by AbortSlew, Park or MoveAxis throws 
             } catch (const AlpacaException& e) {
                 code.store(static_cast<int>(e.error_code()));
             }
+            done.store(true);
         });
         REQUIRE(wait_until([&] { return st->goto_seen.load(); }, 5000));  // the GOTO is on the wire
         c.supersede(*driver);
+        // The slewer sleeps on the task clock between polls; step it until it has noticed.
+        const bool finished = advance_until(clock, [&] { return done.load(); });
         slewer.join();
+        REQUIRE(finished);
         CHECK(code.load() == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
         driver->set_connected(false);
     }
 }
 
 TEST_CASE("SynScan sync slew - uncontended slew returns normally", "[synscan][telescope][async]") {
+    alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<FakeSynScanState>();
+    st->clock = &clock;
     alpacacore::test::FakeMountServer server(synscan_responder(st));
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
-        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4);
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, endpoint(server.port()), alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt,
+        std::nullopt, std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    REQUIRE_NOTHROW(driver->slew_to_coordinates(5.0, 20.0));
+    std::atomic<bool> done{false};
+    std::atomic<bool> threw{false};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(5.0, 20.0);
+        } catch (const std::exception&) {
+            threw.store(true);
+        }
+        done.store(true);
+    });
+    const bool finished = advance_until(clock, [&] { return done.load(); });
+    slewer.join();
+    REQUIRE(finished);
+    REQUIRE_FALSE(threw.load());
     CHECK(st->goto_count.load() == 1);
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);

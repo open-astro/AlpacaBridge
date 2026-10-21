@@ -50,8 +50,10 @@ Thumbs.db
 !external/QHY/**
 !external/SVBONY/**
 !external/ToupTek/**
+!external/Altair/**
 !external/PlayerOne/**
 !external/libgpiod/**
+!external/libgphoto2/**
 
 # Vendor SDKs - exclude all files except documentation
 # Explicitly exclude .DS_Store files even in allowed directories

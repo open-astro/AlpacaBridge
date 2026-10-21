@@ -230,7 +230,7 @@ public:
     }
 
     // Lock-free on purpose (issue #382): the driver answers get_connected()
-    // with this, and AGENTS.md wants that getter cheap. open() holds mutex_
+    // with this, and alpaca-http-conformance.instructions.md wants that getter cheap. open() holds mutex_
     // for its whole sequence and close() holds it for its locked phases
     // (it drops the lock to join the PWM workers), so a locked read here
     // waited behind whichever phase was running. open_ is written only
@@ -421,9 +421,7 @@ void TouptekPowerboxWrapper::close() { impl_->close(); }
 bool TouptekPowerboxWrapper::is_open() const { return impl_->is_open(); }
 
 std::size_t TouptekPowerboxWrapper::port_count() const { return impl_->port_count(); }
-const StellaVitaPortConfig& TouptekPowerboxWrapper::port_config(std::size_t index) const {
-    return impl_->port_config(index);
-}
+StellaVitaPortConfig TouptekPowerboxWrapper::port_config(std::size_t index) const { return impl_->port_config(index); }
 int TouptekPowerboxWrapper::get_value(std::size_t index) const { return impl_->get_value(index); }
 void TouptekPowerboxWrapper::set_value(std::size_t index, int value) { impl_->set_value(index, value); }
 std::string TouptekPowerboxWrapper::gpio_chip_path() const { return impl_->gpio_chip_path(); }

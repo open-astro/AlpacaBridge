@@ -53,10 +53,12 @@ public:
     /// FakeQHYSDK::before_call. Called inside wait_for() after the predicate
     /// and deadline checks and before each block, with the caller's mutex
     /// held, and passed the caller's predicate so a hook can hold the waiter
-    /// in that window until the predicate turns true. Two cases use it: the
-    /// lost-wakeup case in test_task_clock.cpp, and the SkyWatcher case "a
+    /// in that window until the predicate turns true. Four cases use it: the
+    /// lost-wakeup case in test_task_clock.cpp, the SkyWatcher case "a
     /// reaper's cancel is not lost between a parked task's check and its
-    /// block (#743)", on a clock a connected driver and a fake mount share.
+    /// block (#743)", and the Celestron and SynScan cases of the same name
+    /// in their async_slew_failure suites, each on a clock a connected
+    /// driver and a fake mount share.
     using BeforeBlock = std::function<void(const std::function<bool()>& pred)>;
 
     FakeTaskClock() = default;

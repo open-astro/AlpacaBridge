@@ -1,0 +1,3 @@
+### Changed
+
+- **Bisque telescope waits read the task clock** (Bisque, issue #865): the park poll and its 120 s deadline, the synchronous slew poll, settle sleep and 120 s deadline, the 8 s slew-forced window and the 2 s position-cache age now read an injected `util::TaskClock` (real by default), so tests drive them with `FakeTaskClock::advance()` instead of sleeping. Production behaviour and the TheSkyX wire timeouts are unchanged. Covered by the `[bisque][telescope][taskclock]` cases in `AlpacaCore/tests/test_bisque_telescope.cpp`, over the new stateful `AlpacaCore/tests/fake_bisque_mount.h`.

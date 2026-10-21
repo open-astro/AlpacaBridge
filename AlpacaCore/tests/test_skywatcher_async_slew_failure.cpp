@@ -57,6 +57,10 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 
 constexpr auto kClockStep = std::chrono::milliseconds(50);
 constexpr auto kRendezvous = std::chrono::milliseconds(2000);
+// A connected driver keeps its status poll (decision 0010) parked on the clock
+// between polls: one waiter that is always there, counted before any task a
+// case is waiting for.
+constexpr std::size_t kPollerWaiter = 1;
 
 // Moves the shared fake clock forward in steps, once a driver thread is parked
 // on it, until pred() holds; false when `budget` of virtual time passes first.
@@ -68,7 +72,7 @@ bool run_clock_until(alpacacore::test::FakeTaskClock& clock, const std::function
         if (pred()) {
             return true;
         }
-        if (clock.wait_for_waiters(1, kRendezvous)) {
+        if (clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous)) {
             clock.advance(kClockStep);
             clock.wait_for_woken_settled(kRendezvous);
         }
@@ -102,6 +106,7 @@ TEST_CASE("SkyWatcher async - a slew that fails after dispatch surfaces through 
     // The goto starts RA first; refusing that ":J" with "!2" (Motor not
     // stopped) makes dispatch_predicted_goto_locked() throw INSIDE the slew
     // task, after slew_to_coordinates_async() has already returned.
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);
     const double lst = driver->get_sidereal_time();
     const double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
@@ -127,6 +132,8 @@ TEST_CASE("SkyWatcher async - a slew that fails after dispatch surfaces through 
 
     // And a fresh async slew (the fake accepts this one) is a clean start:
     // Slewing=true with no stale error in the way, landing as usual.
+    // The failed goto left Tracking off, so the client switches it on again first.
+    driver->set_tracking(true);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(target_ra, 40.0));
     CHECK(read_slewing(*driver) == SlewingRead::True);
     REQUIRE(run_clock_until(
@@ -141,6 +148,7 @@ TEST_CASE("SkyWatcher async - a new slew initiator replaces the stored failure (
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
 
+    driver->set_tracking(true);  // equatorial slews need Tracking (open-astro#1274)
     mount.reject_start_motion(1, 1);
     const double lst = driver->get_sidereal_time();
     const double target_ra = std::fmod(lst - 2.0 + 24.0, 24.0);
@@ -174,13 +182,105 @@ TEST_CASE("SkyWatcher async - AbortSlew's own cancellation is not reported as a 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(std::fmod(lst - 5.0 + 24.0, 24.0), 20.0));
     REQUIRE(read_slewing(*driver) == SlewingRead::True);
     // The slew task is parked on the clock (its goto dispatch / polls).
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    REQUIRE(clock.wait_for_waiters(kPollerWaiter + 1, kRendezvous));
     clock.advance(std::chrono::milliseconds(400));
     clock.wait_for_woken_settled(kRendezvous);
     driver->abort_slew();  // joins the slew task: its catch block has run by now
     CHECK(read_slewing(*driver) == SlewingRead::False);
     // Aborted: nothing is parked on the clock now, so only the mount moves.
     clock.advance(std::chrono::milliseconds(500));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - Park dispatch failure surfaces through Slewing and leaves AtPark false",
+          "[skywatcher][async][parkfailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    // RA starts, then DEC dispatch fails: cleanup must stop both axes.
+    mount.reject_start_motion(2, 1);
+
+    REQUIRE_NOTHROW(driver->park());
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    CHECK(message.find("Park failed") != std::string::npos);
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    CHECK_FALSE(driver->get_at_park());
+    CHECK(mount.stop_count(1) > 0);
+    CHECK(mount.stop_count(2) > 0);
+    CHECK_FALSE(mount.axis_running(1));
+    CHECK_FALSE(mount.axis_running(2));
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - AutoHome failure surfaces through Slewing and leaves AtHome false",
+          "[skywatcher][async][homefailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.reject_start_motion(1, 1);
+    mount.reject_instant_stop(1, 1);
+
+    REQUIRE_NOTHROW(driver->find_home());
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    CHECK(message.find("FindHome failed") != std::string::npos);
+    CHECK(message.find("stopping after failure failed") != std::string::npos);
+    CHECK(message.find("axis 1") != std::string::npos);
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(mount.stop_count(2) > 0);  // DEC stop is still attempted after the RA stop fails.
+    REQUIRE_NOTHROW(driver->abort_slew());
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - count-frame FindHome failure persists through Slewing",
+          "[skywatcher][async][homefailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.reject_start_motion(1, 1);
+
+    REQUIRE_NOTHROW(driver->find_home());
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    CHECK(message.find("FindHome failed") != std::string::npos);
+    CHECK_FALSE(driver->get_at_home());
+    REQUIRE_NOTHROW(driver->abort_slew());
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - count-frame FindHome rejects a short landing", "[skywatcher][async][homefailure]") {
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    mount.jump_axis_degrees(1, 5.0);
+    mount.land_short_by(1, 1, 0.2, 60000);
+
+    REQUIRE_NOTHROW(driver->find_home());
+    std::string message;
+    REQUIRE(run_clock_until(
+        clock, [&] { return read_slewing(*driver, &message) == SlewingRead::Threw; },
+        std::chrono::milliseconds(10000)));
+    CHECK(message.find("FindHome count-frame slew did not reach home") != std::string::npos);
+    CHECK_FALSE(driver->get_at_home());
+    CHECK(std::abs(mount.axis_degrees(1)) > 0.1);
+
+    REQUIRE_NOTHROW(driver->abort_slew());
     CHECK(read_slewing(*driver) == SlewingRead::False);
     driver->set_connected(false);
 }

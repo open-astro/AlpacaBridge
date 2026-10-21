@@ -13,7 +13,9 @@
 // Connect/disconnect/operate concurrency stress for the Player One drivers --
 // Phoenix filter wheel, camera, and thermal switch (issue #101). The camera
 // uses FakePlayerOneSDK and always reaches its connected path; the filter wheel
-// and switch use the production SDK and fail fast when hardware is absent.
+// has a fail-fast case over the production SDK (hardware absent) and a connected
+// case over FakePlayerOnePWSDK behind LockedPlayerOnePWSDK (issue #1256); the
+// switch uses the production SDK and fails fast when hardware is absent.
 
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/filterwheel_driver.h>
@@ -24,7 +26,9 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
+#include "fake_playerone_pw_sdk.h"
 #include "fake_playerone_sdk.h"
+#include "locked_playerone_pw_sdk.h"
 
 using alpacacore::AlpacaDriver;
 
@@ -55,6 +59,45 @@ TEST_CASE("Player One Phoenix - concurrent connect/disconnect/operate stress", "
 TEST_CASE("Player One Phoenix - destruction races an in-flight connect", "[playerone][filterwheel][stress]") {
     alpacacore::test::run_destruction_during_connect_stress(
         []() { return alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0); });
+}
+
+// Filter wheel lifecycle storm over the fake PW SDK (issue #1256): the fake
+// always enumerates a wheel, so every run reaches the connected path (slot
+// seeding, moves, -1 while moving) while racing lifecycle operations. The fake
+// is declared before the driver, which holds a reference to it.
+TEST_CASE("Player One Phoenix - connected concurrent connect/disconnect/operate stress",
+          "[playerone][filterwheel][stress]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    fake.set_moving_reads(2);
+    alpacacore::test::LockedPlayerOnePWSDK sdk(fake);
+    auto driver = alpacacore::vendor::playerone::create_playerone_filterwheel(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // open-astro#326: one guard per call, and it COUNTS what it swallows. This
+    // registration runs connected, so the expected set is widened beyond
+    // NotConnected: a move racing another move is InvalidOperation (the fake
+    // refuses a goto while the wheel is moving, as the real wrapper maps
+    // PW_ERROR_IS_MOVING).
+    alpacacore::test::StressCallGuard guard(
+        {alpacacore::AlpacaError::NotConnected, alpacacore::AlpacaError::InvalidOperation});
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(1); });
+        guard([&] { wheel.set_position(3); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+    });
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.call_count("open_wheel") > 0);
+    CHECK(fake.call_count("goto_position") > 0);
+    CHECK(fake.open_count() == 0);
 }
 
 // Camera lifecycle storm (issue #116): FakePlayerOneSDK always connects, so

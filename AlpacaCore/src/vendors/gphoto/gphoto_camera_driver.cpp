@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 #include <alpacacore/vendor/gphoto/gphoto_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -377,12 +378,14 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder)
+    GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder,
+                       util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("GPhoto"),
           device_number_(device_number),
           camera_index_(camera_index),
           sdk_(sdk),
-          decoder_(decoder) {
+          decoder_(decoder),
+          clock_(clock) {
         preload_camera_info_locked();
     }
 
@@ -410,7 +413,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         // Review PR #485 round 4: camera_info_.port (the libgphoto2 USB bus
         // path, e.g. "usb:001,005") is not a stable identity -- it changes
         // across an unplug/replug (the bus device number increments) and
@@ -583,7 +586,7 @@ public:
 
         // Disconnecting: publish disconnected before closing the SDK handle
         // so a racing operational call fails fast at its connection check
-        // instead of hitting a just-closed camera (AGENTS.md disconnect
+        // instead of hitting a just-closed camera (driver-lifecycle.instructions.md disconnect
         // rule). Exposure worker is already joined (lifecycle lock above).
         const int close_handle = handle_;
         handle_ = -1;
@@ -647,10 +650,10 @@ public:
     void set_bin_y(int bin_y) override { reject_non_unity_bin(bin_y); }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) return CameraState::Idle;
+        ensure_connected();
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ && std::chrono::steady_clock::now() >= exposure_deadline_) {
+            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
                 ALPACA_LOG_WARN(kLogTag,
                                 "Exposure deadline exceeded; forcing CameraState=Idle. "
                                 "Exposure thread may still be blocked inside libgphoto2.");
@@ -812,8 +815,9 @@ public:
     ImageArray get_image_array() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_exposure_failed_locked();
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("Image not ready");
         }
         return last_image_;
     }
@@ -823,6 +827,7 @@ public:
     bool get_image_ready() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_exposure_failed_locked();
         return last_exposure_valid_ && image_ready_ && image_cached_;
     }
 
@@ -873,7 +878,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) return 0.0;
+        ensure_connected();
         if (!exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             return image_ready_ ? 100.0 : 0.0;
@@ -987,8 +992,16 @@ public:
                 }
             }
             active_handle = handle_;
-            use_bulb = has_bulb_ && duration > max_native_shutter_seconds_ + 1e-9;
+            // A body in B mode lists only "bulb" for its shutter speed, so there is no native
+            // speed to fall back on: every duration takes the bulb path.
+            use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
+                                     duration > max_native_shutter_seconds_ + 1e-9);
             shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
+            // In B mode the body owns the shutter and refuses a shutterspeed write ("I/O in progress");
+            // the press/release pair alone drives the exposure.
+            if (native_shutter_choices_.empty() && !remote_press_choice_.empty()) {
+                shutter_choice.clear();
+            }
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
@@ -996,6 +1009,8 @@ public:
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
+            exposure_failed_ = false;
+            exposure_error_.clear();
             abort_requested_.store(false);
             // Generous watchdog margin over the requested duration: USB
             // transfer of a 20+MB RAW file plus libgphoto2/PTP overhead. A
@@ -1009,7 +1024,7 @@ public:
             if (use_bulb) {
                 duration_margin += bulb_file_wait_for(duration);
             }
-            exposure_deadline_ = std::chrono::steady_clock::now() + duration_margin;
+            exposure_deadline_ = clock_.now() + duration_margin;
             exposure_deadline_valid_ = true;
             exposure_active_.store(true);
         }
@@ -1037,6 +1052,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
+        exposure_failed_ = false;
+        exposure_error_.clear();
         exposure_deadline_valid_ = false;
     }
 
@@ -1046,6 +1063,7 @@ private:
     int handle_{-1};
     GPhotoSDK& sdk_;
     RawDecoder& decoder_;
+    util::TaskClock& clock_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
@@ -1064,7 +1082,11 @@ private:
     // Widget capability caches, populated at connect (configure_after_connect_locked).
     std::vector<std::string> iso_choices_;
     int current_iso_index_{0};
-    bool has_bulb_{false};
+    bool has_bulb_{false};  // long exposure available: a "bulb" toggle, or both eosremoterelease choices
+    // Canon bodies have no "bulb" widget; bulb is the shutter-speed "bulb" choice held open by writing
+    // eosremoterelease (issue #640). Both are picked by name at connect, never by index; empty without the pair.
+    std::string remote_press_choice_;
+    std::string remote_release_choice_;
     std::string bulb_choice_;  // shutter-speed choice string selecting bulb mode
     std::vector<std::pair<std::string, double>> native_shutter_choices_;  // sorted ascending by seconds
     std::string shutter_widget_name_{"shutterspeed2"};  // whichever of the fallback names was found at connect
@@ -1097,6 +1119,10 @@ private:
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
+    // Set when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
+    // disconnect. Both guarded by mutex_.
+    bool exposure_failed_{false};
+    std::string exposure_error_;
     std::atomic<bool> abort_requested_{false};
     std::thread exposure_thread_;
     std::mutex exposure_lifecycle_mutex_;
@@ -1151,6 +1177,8 @@ private:
         last_exposure_valid_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
+        exposure_failed_ = false;
+        exposure_error_.clear();
         abort_requested_.store(false);
     }
 
@@ -1246,21 +1274,44 @@ private:
                     // A "bulb"/fraction-sentinel entry in the shutter-speed
                     // choice list: remember it so run_exposure can prime the
                     // dial into bulb mode before driving the toggle below.
-                    bulb_choice_ = choice;
+                    // Prefer a literal "bulb" over other unparseable labels such as
+                    // "auto" (Canon shutter value 0), which does not hold the shutter.
+                    if (bulb_choice_.empty() || to_lower(choice) == "bulb") bulb_choice_ = choice;
                     continue;
                 }
                 native_shutter_choices_.emplace_back(choice, *seconds);
             }
             break;
         }
-        // Bulb mode is only implementable when the standalone "bulb" toggle
-        // widget is present -- that is the only mechanism this driver drives
-        // (see bulb_capture_with_abort). A shutter-speed "bulb" choice with
-        // no toggle widget (the classic Canon eosremoterelease press/release
-        // sequence) is not supported yet; ExposureMax stays capped at the
-        // longest native shutter speed for such a camera. TODO(gphoto/canon):
-        // add the press/release path if/when tested against real hardware.
+        // Two ways to hold the shutter open (see bulb_capture_with_abort): the
+        // standalone "bulb" toggle (Nikon), or on Canon bodies, which have no
+        // such widget, the eosremoterelease press/release pair together with
+        // the shutter-speed "bulb" choice. Without either, ExposureMax stays
+        // capped at the longest native shutter speed.
+        remote_press_choice_.clear();
+        remote_release_choice_.clear();
         has_bulb_ = sdk.has_widget(handle, "bulb");
+        if (!has_bulb_ && to_lower(bulb_choice_) == "bulb" && sdk.has_widget(handle, "eosremoterelease")) {
+            const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
+            const auto has = [&](const char* choice) {
+                return std::find(remote_choices.begin(), remote_choices.end(), choice) != remote_choices.end();
+            };
+            // The pair is chosen as a unit: both are remotereleaseon(3, 1) then remotereleaseoff(3).
+            // libgphoto2 2.5.34 renamed the choices; its "Release Full" is remotereleaseoff(2), which
+            // leaves the half press held, so it only pairs with the 2.5.31 "Press Full".
+            static constexpr std::pair<const char*, const char*> kRemoteReleasePairs[] = {
+                {"Press Full MF", "Release"},    // libgphoto2 2.5.34 and later
+                {"Press Full", "Release Full"},  // libgphoto2 2.5.33 and earlier
+            };
+            for (const auto& [press, release] : kRemoteReleasePairs) {
+                if (has(press) && has(release)) {
+                    remote_press_choice_ = press;
+                    remote_release_choice_ = release;
+                    has_bulb_ = true;
+                    break;
+                }
+            }
+        }
         if (!has_bulb_) {
             bulb_choice_.clear();
         }
@@ -1345,6 +1396,34 @@ private:
                                                                  decoded.bayer_offset_y, decoded.max_adu});
     }
 
+    // Requires mutex_ held. A failed exposure is reported by ImageReady and ImageArray while CameraState stays
+    // Idle, so the next StartExposure can run: a sticky Error poisoned every later operation on the ZWO driver,
+    // which reports a failure the same way (issue #1204).
+    void throw_if_exposure_failed_locked() const {
+        if (exposure_failed_) {
+            throw AlpacaException("Exposure failed: " + exposure_error_, AlpacaError::DriverException);
+        }
+    }
+
+    // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
+    // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
+    // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
+    // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
+    void record_exposure_failure(int handle, const char* what, bool device_gone) {
+        if (abort_requested_.load()) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        exposure_error_ = what;
+        exposure_failed_ = true;
+        if (!device_gone || handle_ != handle) return;
+        handle_ = -1;
+        connected_.store(false);
+        try {
+            sdk_.close_camera(handle);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            // The handle belongs to a device that is gone; the failure is already latched and logged.
+        }
+    }
+
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
                       bool use_bulb, double duration) {
         auto& sdk = sdk_;
@@ -1374,6 +1453,7 @@ private:
             image_ready_ = true;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogTag, "Exposure failed: " + std::string(e.what()));
+            record_exposure_failure(handle, e.what(), dynamic_cast<const GPhotoDeviceGoneException*>(&e) != nullptr);
         }
         exposure_active_.store(false);
     }
@@ -1405,39 +1485,56 @@ private:
     // flag between slices.
     GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
         auto& sdk = sdk_;
-        using clock = std::chrono::steady_clock;
+        using clock = util::TaskClock::clock;
         constexpr auto kHoldSlice = std::chrono::milliseconds(100);
         constexpr auto kFilePollSlice = std::chrono::seconds(1);
 
-        sdk.set_toggle_value(handle, "bulb", true);
+        // Nikon: the "bulb" toggle. Canon: eosremoterelease Press Full / Release Full.
+        const bool use_remote_release = !remote_press_choice_.empty();
+        const auto shutter_open = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_press_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", true);
+            }
+        };
+        const auto shutter_close = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", false);
+            }
+        };
+
+        shutter_open();
         const auto hold_deadline =
-            clock::now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
+            clock_.now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
         // The hold calls into the SDK, so unlike the sleep it replaced it can
         // throw. A throw that skipped the close would leave the shutter open,
         // the exact wedge issue #569 is about, so bulb=0 is sent on every way
         // out of the hold and the original failure is rethrown afterwards.
         try {
             while (!abort_requested_.load()) {
-                const auto now = clock::now();
+                const auto now = clock_.now();
                 if (now >= hold_deadline) break;
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
                 sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
             }
         } catch (...) {
             try {
-                sdk.set_toggle_value(handle, "bulb", false);
+                shutter_close();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(kLogTag, "Bulb close after a failed hold also failed: " + std::string(e.what()));
             }
             throw;
         }
-        sdk.set_toggle_value(handle, "bulb", false);
+        shutter_close();
 
         bool aborted = abort_requested_.load();
         auto file_deadline =
-            clock::now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
+            clock_.now() + (aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s));
         while (true) {
-            const auto now = clock::now();
+            const auto now = clock_.now();
             if (now >= file_deadline) break;
             if (!aborted && abort_requested_.load()) {
                 aborted = true;
@@ -1575,8 +1672,8 @@ std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera
 }
 
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
-                                                   RawDecoder& decoder) {
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder);
+                                                   RawDecoder& decoder, util::TaskClock& clock) {
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder, clock);
 }
 
 }  // namespace alpacacore::vendor::gphoto

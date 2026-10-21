@@ -1,0 +1,355 @@
+# Build the arm64 .deb from main every night and publish it on a moving
+# `nightly-build` pre-release (issue #1035).
+#
+# Nightlies are for testers who want a fix that has merged to main before a
+# beta carries it. They are unsupported and never reach apt.openastro.net.
+#
+# Version: <next>~nightly<YYYYMMDDHHMM>.g<sha7>, written to the workspace
+# VERSION only (never committed). <next> is the release main's code will ship
+# in (scripts/nightly_version.py): the changelog_fragments.py --bump result, but
+# never below X.(Y+1).0 once a stable/X.Y branch or a vX.Y.Z[-beta.N] tag exists,
+# because that line is built from its stable branch, not from main. dpkg then
+# sorts a nightly above every release and beta of the stable line and below
+# <next> itself: a tester moves beta -> nightly -> release without a downgrade.
+#
+# The `nightly-build` tag is moved to the built commit and the release's assets are
+# replaced. The tag does not match release.yml's v* filters, so it publishes
+# nothing else. The release is marked --latest=false so the repository's
+# Latest release stays the stable one.
+#
+# Each published .deb carries a signed build provenance attestation and an
+# SPDX SBOM attestation (Actions > Attestations); `gh attestation verify` on
+# the file proves it was built here, by this workflow, from the named commit.
+#
+# The .deb is also installed and scripts/check_bundled_gphoto.sh runs against
+# it before anything is published, as ci.yml's package-deb job does on every
+# pull request, so a nightly .deb that fails the check is never published.
+#
+# The same run also builds all vendors optimized and runs the full suite
+# (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
+# nothing else tests optimized, NDEBUG code like the .deb's. The test job
+# runs beside the .deb build, not before it: a red suite fails the run but
+# does not stop the nightly from publishing.
+#
+# Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
+# -f force=true`), so the public nightly-build release always names a main
+# commit. Forks never build on the cron; a manual run there builds the branch
+# it is dispatched on, for testing the workflow itself.
+
+name: Nightly Build
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Build even if the nightly-build tag already points at this commit"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-build
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash   # the trixie container has bash; the steps use its expansions
+
+jobs:
+  check:
+    name: Skip if main has not moved
+    if: >-
+      (github.repository == 'open-astro/AlpacaBridge' && github.ref == 'refs/heads/main') ||
+      (github.repository != 'open-astro/AlpacaBridge' && github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.compare.outputs.build }}
+    steps:
+      - name: Compare HEAD with the nightly-build tag
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          set -euo pipefail
+          tagged="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly-build" --jq .object.sha 2>/dev/null || true)"
+          if [ "${tagged}" = "${GITHUB_SHA}" ] && [ "${FORCE}" != "true" ]; then
+            echo "nightly-build already points at ${GITHUB_SHA}; nothing to build."
+            echo "build=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Building ${GITHUB_SHA} (nightly-build tag: ${tagged:-none})."
+            echo "build=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+  test-optimized:
+    name: Test all vendors, optimized (arm64)
+    # Follows the check job's skip: an unchanged main is not tested twice.
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Same list as ci.yml's build-vendors job, minus gcovr. libgpiod-dev is
+        # omitted on purpose: the runner ships 1.6 and the GPIO drivers need >= 2.0.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ccache g++ catch2 pkg-config \
+            libusb-1.0-0-dev libudev-dev libsystemd-dev libhidapi-dev \
+            libltdl-dev libexif-dev libjpeg-dev libraw-dev \
+            nlohmann-json3-dev zlib1g-dev libcurl4-openssl-dev
+
+      - name: Build libgpiod v2 from source
+        # The pin is read from ci.yml, the one place it lives, so a bump cannot skew this job.
+        run: |
+          set -euo pipefail
+          gpiod_ver="$(sed -n 's/^  LIBGPIOD_VER: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          sha="$(sed -n 's/^  LIBGPIOD_SHA256: "\(.*\)"$/\1/p' .github/workflows/ci.yml)"
+          if [ -z "${gpiod_ver}" ] || [ -z "${sha}" ]; then
+            echo "libgpiod pin not found in ci.yml"
+            exit 1
+          fi
+          cp "AlpacaCore/external/libgpiod/libgpiod-${gpiod_ver}.tar.xz" /tmp/libgpiod.tar.xz
+          echo "${sha}  /tmp/libgpiod.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/libgpiod
+          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
+          cd /tmp/libgpiod
+          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+
+      - name: Build bundled libgphoto2
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
+      - name: Stage vendor SDK shared libraries
+        run: |
+          set -euo pipefail
+          core="AlpacaCore/external"
+          libs=(
+            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
+            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
+            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
+          )
+          for lib in "${libs[@]}"; do
+            if compgen -G "${lib}*" > /dev/null; then
+              echo "Staging $(basename "$lib")*"
+              sudo cp -a "${lib}"* /usr/local/lib/
+            else
+              echo "WARNING: ${lib}* not found - skipping"
+            fi
+          done
+          sudo ldconfig
+
+      - name: Restore the compiler cache
+        # Keyed per job: these objects are optimized, so no other job's cache fits.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-nightly-optimized-${{ github.sha }}
+          restore-keys: ccache-nightly-optimized-
+
+      - name: Build + run tests (all vendors, Release)
+        # Release is optimized like the .deb (-O3 -DNDEBUG). CMake reads
+        # CMAKE_BUILD_TYPE from the environment on a fresh configure, and
+        # run_all_tests.sh wipes its build tree first.
+        env:
+          CMAKE_BUILD_TYPE: Release
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
+          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
+        run: |
+          ccache --zero-stats
+          ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-nightly-optimized-${{ github.sha }}
+
+  build:
+    name: Build and publish the nightly .deb
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    permissions:
+      contents: write       # move the nightly-build tag, gh release create/edit/upload
+      id-token: write       # OIDC token Sigstore signs the attestations with
+      attestations: write   # store the provenance and SBOM attestations
+    runs-on: ubuntu-24.04-arm
+    # Built on the target distribution so dpkg-shlibdeps derives trixie
+    # package names, as release.yml's deb job does.
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev gh binutils
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Stamp the nightly version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bump="$(python3 scripts/changelog_fragments.py --bump)"
+          # Stable branches and release tags: main is past every line they name.
+          # One call per assignment: set -e sees only the last command of a $(...).
+          stable="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/heads/stable/" --jq '.[].ref')"
+          tags="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/v" --jq '.[].ref')"
+          next="$(printf '%s\n%s\n' "${stable}" "${tags}" | python3 scripts/nightly_version.py --bump "${bump}")"
+          echo "Fragments propose ${bump}; main's next release is ${next}"
+          version="${next}~nightly$(date -u +%Y%m%d%H%M).g${GITHUB_SHA::7}"
+          # Guard the ordering the header promises: above any beta of <next>,
+          # below <next> itself (nightly_version.py --self-test pins the rest).
+          dpkg --compare-versions "${version}" gt "${next}~beta999"
+          dpkg --compare-versions "${version}" lt "${next}"
+          echo "${version}" > VERSION
+          # GitHub does not keep `~` in asset names; dpkg reads the version
+          # from the package, not the file name.
+          asset="alpacabridge_${version//\~/-}_arm64.deb"
+          echo "Nightly version ${version}"
+          {
+            echo "version=${version}"
+            echo "asset=${asset}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build the .deb
+        env:
+          VERSION_STR: ${{ steps.version.outputs.version }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          mkdir -p dist
+          cp "../alpacabridge_${VERSION_STR}_arm64.deb" "dist/${ASSET}"
+          (cd dist && sha256sum "${ASSET}" > "${ASSET}.sha256")
+          dpkg-deb --info "dist/${ASSET}" | sed -n '/Package:/,/Depends:/p'
+          ls -l dist
+
+      # The packaging acceptance checks of ci.yml's package-deb job, on the .deb
+      # this run publishes: install it and check the bundled libgphoto2 loader
+      # path (decision 0012). Both run before the SBOM, the attestations and the
+      # publish, so a .deb that fails them is never published. Recommends
+      # (NetworkManager, polkit) are not needed.
+      - name: Install the .deb
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends "./dist/${ASSET}"
+
+      - name: Check the bundled libgphoto2
+        run: scripts/check_bundled_gphoto.sh
+
+      - name: Generate the SBOM
+        # The repository's own inventory (scripts/dependency_snapshot.py), not a
+        # scanner: the vendored SDK .so files in the package carry no metadata a
+        # scanner could identify.
+        env:
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: python3 scripts/dependency_snapshot.py --spdx "dist/${ASSET}" --output dist/sbom.spdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2 pinned (immutable ref)
+        with:
+          subject-path: dist/${{ steps.version.outputs.asset }}
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0 pinned (immutable ref)
+        with:
+          subject-path: dist/${{ steps.version.outputs.asset }}
+          sbom-path: dist/sbom.spdx.json
+
+      - name: Move the nightly-build tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly-build" >/dev/null 2>&1; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly-build" \
+              -f sha="${GITHUB_SHA}" -F force=true >/dev/null
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref=refs/tags/nightly-build -f sha="${GITHUB_SHA}" >/dev/null
+          fi
+          echo "nightly-build -> ${GITHUB_SHA}"
+
+      - name: Publish the nightly pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_STR: ${{ steps.version.outputs.version }}
+          ASSET: ${{ steps.version.outputs.asset }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/nightly-build/${ASSET}"
+          {
+            echo "Nightly build of \`${GITHUB_REF_NAME}\` at ${GITHUB_SHA} (version \`${VERSION_STR}\`)."
+            echo ""
+            echo "Unsupported: built from unreleased code that has not been validated on hardware. Use a beta or a stable release for observing."
+            echo ""
+            echo '```bash'
+            echo "curl -LO ${url}"
+            echo "curl -LO ${url}.sha256 && sha256sum -c ${ASSET}.sha256"
+            echo "gh attestation verify ${ASSET} --repo ${GITHUB_REPOSITORY}   # optional: proves this workflow built it"
+            echo "sudo apt install ./${ASSET}"
+            echo '```'
+            echo ""
+            echo "Changes since the last release: https://github.com/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}/changelog.d"
+          } > release-notes.md
+          if gh release view nightly-build --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release edit nightly-build --repo "${GITHUB_REPOSITORY}" --title "Nightly Build" \
+              --notes-file release-notes.md --prerelease --latest=false
+          else
+            gh release create nightly-build --repo "${GITHUB_REPOSITORY}" --title "Nightly Build" \
+              --notes-file release-notes.md --verify-tag --prerelease --latest=false
+          fi
+          gh release upload nightly-build --repo "${GITHUB_REPOSITORY}" --clobber \
+            "dist/${ASSET}" "dist/${ASSET}.sha256"
+          # Upload first, then drop the previous night's assets, so the
+          # release is never left without a .deb.
+          gh release view nightly-build --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name' |
+            while read -r name; do
+              if [ "${name}" != "${ASSET}" ] && [ "${name}" != "${ASSET}.sha256" ]; then
+                gh release delete-asset nightly-build "${name}" --repo "${GITHUB_REPOSITORY}" --yes
+              fi
+            done

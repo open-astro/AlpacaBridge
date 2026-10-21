@@ -22,6 +22,7 @@
 #include <alpacacore/telescope_driver.h>
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -36,7 +37,7 @@
 //
 // These doubles are never connected: get_connected() is always false and
 // every operational getter throws NotConnected, matching a real driver's
-// disconnected behavior (AGENTS.md: "Every property otherwise throws
+// disconnected behavior (driver-lifecycle.instructions.md: "Every property otherwise throws
 // NotConnected when disconnected").
 
 namespace {
@@ -57,7 +58,7 @@ class DisconnectedDriverBase : public Base {
 public:
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "Disconnected Driver"; }
-    std::string get_unique_id() const override { return "disconnected-driver"; }
+    std::string fallback_unique_id() const override { return "disconnected-driver"; }
     std::string get_description() const override { return "test double"; }
     std::string get_driver_info() const override { return "test double"; }
     std::string get_driver_version() const override { return "0.0.0"; }
@@ -155,11 +156,10 @@ public:
     void stop_exposure() override { throw_not_connected(); }
 };
 
-// Mirrors zwo_camera_driver.cpp/gphoto_camera_driver.cpp et al.: these vendor
-// drivers answer CameraState and PercentCompleted with a default value while
-// disconnected instead of throwing NotConnected. get_device_state() must
-// still report the empty list for a disconnected driver regardless of what
-// an individual vendor getter does.
+// Guards against a driver that leaks a value (Idle, 0) from CameraState and
+// PercentCompleted while disconnected instead of throwing NotConnected.
+// get_device_state() must still report the empty list for a disconnected
+// driver regardless of what an individual getter does (#635).
 class LeakyDisconnectedCamera final : public DisconnectedCamera {
 public:
     alpacacore::CameraState get_camera_state() const override { return alpacacore::CameraState::Idle; }
@@ -196,7 +196,6 @@ public:
     bool get_can_set_park() const override { throw_not_connected(); }
     bool get_can_set_shutter() const override { throw_not_connected(); }
     bool get_can_slave() const override { throw_not_connected(); }
-    bool get_can_slew() const override { throw_not_connected(); }
     bool get_can_sync_azimuth() const override { throw_not_connected(); }
     double get_azimuth() const override { throw_not_connected(); }
     bool get_at_home() const override { throw_not_connected(); }
@@ -260,7 +259,6 @@ public:
     double get_sky_brightness() const override { throw_not_connected(); }
     double get_sky_quality() const override { throw_not_connected(); }
     double get_sky_temperature() const override { throw_not_connected(); }
-    double get_seeing() const override { throw_not_connected(); }
     double get_star_fwhm() const override { throw_not_connected(); }
     double get_temperature() const override { throw_not_connected(); }
     double get_wind_direction() const override { throw_not_connected(); }
@@ -540,4 +538,50 @@ TEST_CASE("DeviceState carries the TimeStamp once connected, per base class", "[
     SECTION("SafetyMonitor") { require_timestamp_once_connected<DisconnectedSafetyMonitor>(); }
     SECTION("Switch") { require_timestamp_once_connected<DisconnectedSwitch>(); }
     SECTION("Telescope") { require_timestamp_once_connected<DisconnectedTelescope>(); }
+}
+
+TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads", "[driver][utcdate]") {
+    class TelescopeWithClock final : public DisconnectedTelescope {
+    public:
+        std::chrono::system_clock::time_point get_utc_date() const override {
+            ++utc_reads;
+            if (failure == 1) {
+                throw alpacacore::AlpacaException("clock unavailable", alpacacore::AlpacaError::DriverException);
+            }
+            if (failure == 2) {
+                throw std::runtime_error("clock unavailable");
+            }
+            return std::chrono::sys_days{std::chrono::year{2024} / 2 / 29} + std::chrono::hours{23} +
+                   std::chrono::minutes{59} + std::chrono::seconds{58} + std::chrono::milliseconds{123};
+        }
+        std::optional<std::chrono::nanoseconds> device_state_age() const override { return std::chrono::seconds{10}; }
+        int failure = 0;
+        mutable int utc_reads = 0;
+    } driver;
+
+    driver.set_connected(true);
+    SECTION("disconnected does not read even a known clock") { driver.set_connected(false); }
+    SECTION("Alpaca failure omits UTCDate") { driver.failure = 1; }
+    SECTION("standard failure omits UTCDate") { driver.failure = 2; }
+    SECTION("known clock is a UTC string independent of snapshot age") {}
+
+    if (!driver.get_connected()) {
+        CHECK(driver.get_device_state().empty());
+        CHECK(driver.utc_reads == 0);
+        return;
+    }
+    const auto before = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    const auto state = driver.get_device_state();
+    const auto after = std::chrono::system_clock::now() - std::chrono::seconds{10};
+    CHECK(driver.utc_reads == 1);
+    REQUIRE(state.size() == (driver.failure ? 1 : 2));
+    if (!driver.failure) {
+        CHECK(state.front().name == "UTCDate");
+        REQUIRE(std::holds_alternative<std::string>(state.front().value));
+        CHECK(std::get<std::string>(state.front().value) == "2024-02-29T23:59:58.123Z");
+    }
+    CHECK(state.back().name == "TimeStamp");
+    const auto stamp = std::get<std::string>(state.back().value);
+    CHECK(stamp >= alpacacore::device_state_timestamp(before));
+    CHECK(stamp <= alpacacore::device_state_timestamp(after));
 }

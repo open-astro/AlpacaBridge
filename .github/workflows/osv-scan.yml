@@ -1,0 +1,138 @@
+# Scans the runtime packages the nightly .deb pulls in on Debian trixie for
+# known vulnerabilities with OSV-Scanner (which reads Debian advisories, unlike
+# Dependabot). The .deb's Depends are installed into a debian:trixie image with
+# `apt-get satisfy`, so every package is at the exact version a user gets; the
+# SBOM cannot be scanned as is, because its runtime versions are those of the
+# build environment, not the versions a user installs. Only findings in the
+# .deb's own runtime dependencies (not the base system, not the C/C++ runtime)
+# that Debian does not rate unimportant, and that Debian has fixed in trixie or that are Critical
+# (CVSS 9.0+) without a fix, go to Security > Code scanning; the new High/Critical ones that Debian
+# has fixed in trixie also open one summary issue
+# (scripts/dependency_updates.py --filter-sarif / --osv-summary).
+# Vendored SDKs have no advisory source and are not covered.
+
+name: OSV scan
+
+on:
+  schedule:
+    - cron: "23 5 * * *"   # after nightly-build.yml (03:17)
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: osv-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Scan the nightly .deb's runtime packages
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write   # upload the SARIF to code scanning
+      issues: write            # the High/Critical summary issue
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the nightly .deb
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release download nightly-build --pattern 'alpacabridge_*_arm64.deb' --dir image
+
+      - name: Build an image with the .deb's runtime dependencies
+        run: |
+          set -euo pipefail
+          cat > image/Dockerfile <<'EOF'
+          FROM debian:trixie
+          COPY *.deb /tmp/
+          RUN apt-get update \
+           && DEBIAN_FRONTEND=noninteractive apt-get satisfy -y --no-install-recommends \
+                "$(dpkg-deb -f /tmp/*.deb Depends)" \
+           && rm -rf /var/lib/apt/lists/*
+          EOF
+          docker build -t osv-target:nightly image
+          docker save osv-target:nightly -o osv-target.tar
+
+      - name: List the .deb's own runtime dependencies
+        # The .deb's Depends, and each installed binary package's Debian source
+        # package (what OSV names): scripts/dependency_updates.py scopes both
+        # code scanning and the summary issue to these, not the base system.
+        run: |
+          set -euo pipefail
+          dpkg-deb -f image/*.deb Depends > direct-depends.txt
+          docker run --rm osv-target:nightly dpkg-query -W -f='${Package} ${source:Package}\n' > direct-sources.txt
+          cat direct-depends.txt
+
+      - name: Install OSV-Scanner
+        # Prebuilt arm64 release binary, checksum-verified before it runs. Bump
+        # `ver` and `sha256` together. scripts/dependency_snapshot.py reads `ver`
+        # from this step (WORKFLOW_TOOL_STEPS), so the dependency-updates
+        # workflow reports a newer release; keep the step name.
+        run: |
+          set -euo pipefail
+          ver=2.7.0
+          sha256=4061ef4c021ed3c47f203b818f337e351336cc5cd67c0274fc36bd1dfc728dd7
+          curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${ver}/osv-scanner_linux_arm64" \
+            -o /tmp/osv-scanner
+          echo "${sha256}  /tmp/osv-scanner" | sha256sum --check --strict -
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      - name: Scan
+        # Exit 1 means findings, which is the expected result here, not a
+        # failure; 127 (error) and 128 (no packages found) fail the job. The
+        # default shell is `bash -e`, so the exit code is caught with `||`,
+        # never read from `$?` after a bare command.
+        run: |
+          set -uo pipefail
+          for fmt in sarif json; do
+            rc=0
+            osv-scanner scan image --archive osv-target.tar --format "${fmt}" > "osv-all.${fmt}" || rc=$?
+            if [ "${rc}" -ne 0 ] && [ "${rc}" -ne 1 ]; then
+              echo "osv-scanner --format ${fmt} exited ${rc}" >&2
+              exit "${rc}"
+            fi
+          done
+
+      - name: Keep the full unfiltered result
+        # Before the filter, so a run whose filter or summary fails still has it.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: osv-full-results
+          path: |
+            osv-all.sarif
+            osv-all.json
+          retention-days: 14
+
+      - name: Keep the findings in the .deb's own dependencies
+        # Base-system packages and the C/C++ runtime (glibc, gcc) are dropped,
+        # and so is anything Debian rates unimportant, and anything with no
+        # trixie fix unless it is Critical: none of it is actionable here. The
+        # full result is kept as the run's osv-full-results artifact.
+        run: |
+          set -o pipefail
+          python3 scripts/dependency_updates.py --filter-sarif osv-all.sarif --report osv-all.json \
+            --direct-depends direct-depends.txt --direct-sources direct-sources.txt --output osv.sarif \
+            | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee  # v4.39.0
+        with:
+          sarif_file: osv.sarif
+          category: osv-scanner-nightly-deb
+
+      - name: Open a summary issue for new fixable High/Critical findings
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        # pipefail: the default `bash -e` would let tee hide a failed script.
+        run: |
+          set -o pipefail
+          python3 scripts/dependency_updates.py --osv-summary osv-all.json \
+            --direct-depends direct-depends.txt --direct-sources direct-sources.txt | tee -a "${GITHUB_STEP_SUMMARY}"

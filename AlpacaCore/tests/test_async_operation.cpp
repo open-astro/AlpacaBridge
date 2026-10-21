@@ -42,6 +42,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -455,6 +456,42 @@ TEST_CASE("AsyncOperation - stale bound", "[util][async_operation][unit]") {
     }
 }
 
+// Pilot re-check 3 (decision 0006): a refused thread (EAGAIN) reaches the
+// caller as an AlpacaException, not a std::system_error, and changes nothing.
+TEST_CASE("AsyncOperation - a refused thread is an AlpacaException and changes nothing",
+          "[util][async_operation][unit]") {
+    Harness h;
+    auto first = probe();
+    auto gate = h.gate();
+    REQUIRE(h.start_within(gated_body(first, gate)));
+    REQUIRE(eventually([&] { return first->entered.load(); }));
+    const auto generation_before = h.generation.current();
+    const auto failure_before = h.op->last_failure();
+
+    h.op->set_spawn_for_testing([](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    int code = 0;
+    std::string message;
+    try {
+        h.op->start([](OperationContext&) {});
+    } catch (const AlpacaException& e) {
+        code = e.error_code();
+        message = e.what();
+    }
+    CHECK(code == AlpacaError::DriverException);
+    CHECK(message.find("test-slot: could not start a background thread") == 0);
+    CHECK(h.generation.current() == generation_before);
+    CHECK(h.op->stale_count() == 0);
+    CHECK(h.op->running());
+    CHECK(h.op->last_failure() == failure_before);
+
+    // The body that was current is still current, not superseded.
+    gate->open();
+    REQUIRE(eventually([&] { return first->exited.load(); }));
+    CHECK(first->reason.load() == StopReason::None);
+}
+
 // Case 4: a stop body on one slot sees Superseded when a slew on another slot,
 // or a direct bump(), takes the shared generation (rules 4, 5, 6).
 TEST_CASE("AsyncOperation - shared generation: a stop body sees superseded", "[util][async_operation][unit]") {
@@ -631,6 +668,8 @@ TEST_CASE("AsyncOperation - failure retention", "[util][async_operation][unit]")
         g->open();
         REQUIRE(joined.wait_for(kBound) == std::future_status::ready);
         CHECK(h.op->last_failure() == std::optional<std::string>("disconnect"));
+        h.op->clear_failure();
+        CHECK_FALSE(h.op->last_failure().has_value());
     }
 }
 

@@ -14,21 +14,25 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 
+#include <chrono>
 #include <memory>
 #include <optional>
 
 namespace alpacacore::vendor::onstep {
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info);
+// `clock` drives every wait, sleep and deadline of the driver (decision 0005),
+// and the wrapper's link-loss stamps while it is connected. Tests inject a
+// FakeTaskClock.
+std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock = util::default_task_clock());
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_number,
-                                                                   const ConnectionInfo& connection_info,
-                                                                   std::optional<double> site_latitude_deg,
-                                                                   std::optional<double> site_longitude_deg,
-                                                                   std::optional<double> site_elevation_m,
-                                                                   std::optional<bool> sync_time_on_connect);
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock = util::default_task_clock());
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -47,5 +51,14 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
                                                               std::optional<double> site_longitude_deg = std::nullopt,
                                                               std::optional<double> site_elevation_m = std::nullopt,
                                                               std::optional<bool> sync_time_on_connect = std::nullopt);
+
+namespace detail {
+// open-astro#521 / #1241: how long the serial link may be gone before motion
+// that outlived the outage is stopped at relink rather than left running
+// (default util::kRelinkMotionPreserveWindow, 5 s; a test shortens it).
+// Process-wide; tests restore the default afterwards.
+void set_relink_motion_preserve_window(std::chrono::milliseconds window);
+std::chrono::milliseconds relink_motion_preserve_window();
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

@@ -55,7 +55,27 @@ public:
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),
           config_(std::move(config)),
-          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz) {
+          owned_(std::make_unique<TouptekPowerboxWrapper>(config_.gpio_chip_path, config_.ports,
+                                                          config_.pwm_frequency_hz)),
+          wrapper_(*owned_) {
+        init_names();
+    }
+
+    // Test seam: the power box is injected and outlives the driver.
+    TouptekSwitchDriver(int device_number, TouptekSwitchConfig config, TouptekPowerboxSDK& powerbox)
+        : AsyncConnectable(kLogCategory),
+          device_number_(device_number),
+          config_(std::move(config)),
+          wrapper_(powerbox) {
+        if (powerbox.port_count() != config_.ports.size()) {
+            throw AlpacaException("StellaVita power box has " + std::to_string(powerbox.port_count()) +
+                                      " ports but the configuration lists " + std::to_string(config_.ports.size()),
+                                  AlpacaError::InvalidValue);
+        }
+        init_names();
+    }
+
+    void init_names() {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -79,7 +99,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "ToupTek_StellaVita_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "ToupTek_StellaVita_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "ToupTek " + config_.model_name + " DC power switch (" + config_.gpio_chip_path + ")";
@@ -91,10 +111,11 @@ public:
 
     int get_interface_version() const override { return 3; }
 
-    // Lock-free: is_open() is an atomic the wrapper publishes from inside
-    // its own open()/close() critical sections (issue #382), so this never
-    // waits behind a connect or disconnect and never nests a lock with
-    // AsyncConnectable's pending_mutex_.
+    // Lock-free: TouptekPowerboxSDK::is_open() is contractually lock-free
+    // (issue #382; the real wrapper publishes an atomic from inside its own
+    // open()/close() critical sections), so this never waits behind a connect
+    // or disconnect and never nests a lock with AsyncConnectable's
+    // pending_mutex_.
     bool get_connected() const override { return wrapper_.is_open(); }
 
     void connect() override { start_connection_task(true); }
@@ -280,7 +301,9 @@ private:
 
     const int device_number_;
     const TouptekSwitchConfig config_;
-    TouptekPowerboxWrapper wrapper_;
+    // Set only by the production factory; declared before wrapper_, which refers to it.
+    std::unique_ptr<TouptekPowerboxWrapper> owned_;
+    TouptekPowerboxSDK& wrapper_;
 
     mutable std::mutex name_mutex_;
     // Guards set_connected() against a concurrent set_connected() only (#528).
@@ -290,6 +313,11 @@ private:
 
 std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config) {
     return std::make_unique<TouptekSwitchDriver>(device_number, std::move(config));
+}
+
+std::unique_ptr<SwitchDriver> create_touptek_switch(int device_number, TouptekSwitchConfig config,
+                                                    TouptekPowerboxSDK& powerbox) {
+    return std::make_unique<TouptekSwitchDriver>(device_number, std::move(config), powerbox);
 }
 
 }  // namespace alpacacore::vendor::touptek

@@ -14,12 +14,16 @@
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <future>
 #include <string>
 #include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
+#include "fake_touptek_sdk.h"
 
 namespace {
 
@@ -133,11 +137,41 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - Create by id", "[touptek][filterwhe
 TEST_CASE("ToupTek AFW Filter Wheel Driver - Set position validation path", "[touptek][filterwheel][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_index(0, 0);
 
-    // ASCOM precedence (per AGENTS.md): range validation precedes the connection
+    // ASCOM precedence (per driver-lifecycle.instructions.md): range validation precedes the connection
     // check. A negative position is unconditionally invalid, so it is InvalidValue
     // even while disconnected. The upper bound depends on slot_count_ (unknown
     // until connect), so an in-range-but-unverifiable index reports NotConnected;
     // ConformU covers the connected out-of-range InvalidValue path on hardware.
     require_alpaca_error([&]() { driver->set_position(-1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_position(99); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("ToupTek AFW Filter Wheel Driver - homing poll sleeps on the task clock",
+          "[touptek][filterwheel][unit][taskclock]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::FakeToupTekSDK::ToupFilterWheelInfo wheel;
+    wheel.id = "fake-afw-0";
+    wheel.name = "FakeAFW";
+    wheel.model_name = "AFW-M";
+    fake.wheels.push_back(wheel);
+    fake.wheel_position_script = {-1, 0, 0, 0};  // moving, then three settled reads
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake, clock);
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+
+    // Four polls of 100 ms: -1 resets, then three consecutive real slots.
+    for (int poll = 1; poll <= 4; ++poll) {
+        REQUIRE(clock.wait_for_wait_count(static_cast<std::uint64_t>(poll), 5s));
+        CHECK(fake.call_count("get_filter_wheel_position") == poll - 1);
+        clock.advance(99ms);
+        CHECK(fake.call_count("get_filter_wheel_position") == poll - 1);
+        clock.advance(1ms);
+        REQUIRE(clock.wait_for_woken_settled(5s));
+    }
+    REQUIRE(connect.wait_for(5s) == std::future_status::ready);
+    connect.get();
+    CHECK(driver->get_connected());
+    CHECK(fake.call_count("get_filter_wheel_position") == 4);
 }

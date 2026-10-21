@@ -11,8 +11,9 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Astroasis Oasis focuser: auto-detect resolves at connect time, not at
-// construction (issue #659). There is no hidapi fake, so only the refusal
-// case runs here: construction succeeds with no focuser on the bus, and the
+// construction (issue #659). The focuser's HID transport seam has a
+// fake (test_astroasis_focuser.cpp) but the resolver-built factory takes none,
+// so only the refusal case runs here: construction succeeds with no focuser on the bus, and the
 // scan's message is the connect error. The reuse and re-scan cases are
 // covered by test_connection_resolver.cpp on the shared helper.
 

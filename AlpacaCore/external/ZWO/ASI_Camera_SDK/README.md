@@ -14,7 +14,7 @@ needed to build AlpacaCore's ZWO camera driver across supported OS/architectures
 
 ## Notes
 
-- These files are sourced from ZWO SDK v1.40 and are included for convenience.
+- These files are sourced from ZWO SDK v1.41 and are included for convenience.
 - The original vendor archives may still exist in this directory but are **not**
   used by the build system.
 - If you update the SDK version, update this README and keep the set of files

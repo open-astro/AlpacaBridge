@@ -40,6 +40,12 @@ Related decision: [LAN surface threat model](../../docs/decisions/0007-lan-surfa
   web UI front-runs that with a message pointing at the country selector
   (3.5.1). 2.4 GHz is exempt: ch 1-11 are world-domain legal, which is why
   the shipped images default to 2.4 GHz ch 6.
+- `WifiManager`'s profile test seam
+  (`AlpacaHTTP/include/alpacahttp/wifi_manager.h`, in `util::detail`) is
+  borrowed, test-only injection for `save_profile()`'s connection lookup,
+  device-role lookup, add and update operations. The fake must outlive the
+  manager. Do not add production backends or route unrelated operations through
+  it; injected instances refuse other operations before opening the system bus.
 - The review bot login is `github-actions`; every push restarts a full
   review round — batch fixes. Test rig persisted-device state makes
   `test_routing` fail with "already registered". Since #274 each of the two

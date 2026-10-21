@@ -1,0 +1,3 @@
+### Changed
+- **Canon EOS 600D ConformU validation** (AlpacaCore, issue #1077): add a user's Linux arm64 USB report from a Raspberry Pi 5 running AlpacaBridge 4.2.0; ConformU 4.5.2-rc.1 passed with 0 errors, 0 issues and 0 timing violations (5202x3464, MaxADU 13584, 4.3 micron pixels, `ExposureMax` 30 s). The user's bulb result on a 5.1.0 nightly (`ExposureMax` 3600 s, 40 s frames from NINA) has no log attached and is recorded as user-reported.
+- **ConformU README vendor list** (AlpacaCore, issue #1287): add the missing GPhoto and Altair lines to `AlpacaCore/conformu/README.md`, so every vendor folder under `AlpacaCore/conformu/` is listed.

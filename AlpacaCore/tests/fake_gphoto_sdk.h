@@ -97,8 +97,8 @@ inline std::string unique_test_model(const std::string& base) {
 /**
  * Scripted fake for GPhotoSDK (issue #489 fault-injection seam).
  *
- * KNOWN PARITY GAPS (AGENTS.md: a fake must be the harsher of the two; keep
- * this list exhaustive and prefer closing a gap to documenting it):
+ * KNOWN PARITY GAPS (docs/decisions/0015-sdk-seams.md rule 4, "The fake is the harsher of the
+ * two"; keep this list exhaustive and prefer closing a gap to documenting it):
  *  - `capture_result` defaults to an EMPTY `data` vector, where a real
  *    capture returns 20+ MB of RAW. Harmless only because FakeRawDecoder
  *    ignores the bytes; a test that exercises a real decoder path must fill
@@ -118,6 +118,11 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `drain_events` sleeps out its WHOLE budget where the real wrapper
  *    returns as each event lands and polls again; the fake is the slower of
  *    the two, so the hold loop's timing is exercised at its harshest.
+ *  - With `skip_sleeps` set, `drain_events` returns at once and a "not ready"
+ *    poll does not sleep either: a case then spends no real time in the bulb
+ *    loops and moves a FakeTaskClock from `before_call` instead. Real time no
+ *    longer bounds the loop, so such a case caps the calls and fails through
+ *    the cap.
  *  - `poll_bulb_file_and_download` answers instantly, where the real wrapper
  *    blocks up to its timeout for the file-added event. A "not ready" poll
  *    (`bulb_file_polls_before_ready`) sleeps at most 10 ms of the timeout so
@@ -151,15 +156,19 @@ public:
     std::vector<FakeCamera> cameras;
     std::set<std::string> throw_from;
     // Persistent, not a one-shot: runs before every call until it is cleared (after the call is counted, before
-    // throw_from), so a case can make one named call block. Null in every ordinary test; the contract sweep
-    // sets it on the connect call to hold a connect open.
+    // throw_from), so a case can make one named call block or move a FakeTaskClock. Null in every ordinary
+    // test; the contract sweep sets it on the connect call to hold a connect open, and the [taskclock] cases
+    // set it to drive the exposure and bulb loops.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
+    // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
+    // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
+    bool skip_sleeps{false};
     std::vector<std::string> call_log;
 
     int open_count{0};
     int close_count{0};
-    std::string gphoto_version{"2.5.31"};
+    std::string gphoto_version{"2.5.34"};
 
     // Canned result returned by capture_and_download / poll_bulb_file_and_download.
     vendor::gphoto::GPhotoCaptureResult capture_result;
@@ -167,6 +176,14 @@ public:
     // Records every set_toggle_value(handle, "bulb", on) call, in order, so
     // bulb-sequence tests can assert true-then-false-then-download ordering.
     std::vector<bool> bulb_toggle_history;
+
+    // Records every set_choice_value(handle, "eosremoterelease", value) call, in order (the Canon press/release
+    // bulb path), so tests can assert press-then-release ordering.
+    std::vector<std::string> remote_release_history;
+
+    // Widgets whose set_choice_value throws "I/O in progress", as a Canon body in mode dial B does for
+    // the shutter-speed widget (it owns the shutter and refuses the write).
+    std::vector<std::string> refuse_choice_writes;
 
     // drain_events() bookkeeping: how many hold slices the driver pumped and
     // their summed budget, so a test can pin that the bulb hold is spent
@@ -250,7 +267,16 @@ public:
     void set_choice_value(int handle, const std::string& name, const std::string& value) override {
         log_and_maybe_throw("set_choice_value");
         auto& cam = camera_for(handle);
+        for (const auto& refused : refuse_choice_writes) {
+            if (refused == name) {
+                throw AlpacaException("Failed to set " + name + " = " + value + ": I/O in progress",
+                                      AlpacaError::DriverException);
+            }
+        }
         cam.choice_value[name] = value;
+        if (name == "eosremoterelease") {
+            remote_release_history.push_back(value);
+        }
     }
 
     bool get_toggle_value(int handle, const std::string& name) override {
@@ -293,7 +319,7 @@ public:
         camera_for(handle);
         ++drain_events_calls;
         drained_budget += budget;
-        std::this_thread::sleep_for(budget);
+        if (!skip_sleeps) std::this_thread::sleep_for(budget);
     }
 
     std::optional<vendor::gphoto::GPhotoCaptureResult> poll_bulb_file_and_download(
@@ -304,7 +330,7 @@ public:
         bulb_file_poll_timeouts.push_back(timeout);
         if (bulb_file_polls_before_ready > 0) {
             --bulb_file_polls_before_ready;
-            std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
+            if (!skip_sleeps) std::this_thread::sleep_for(std::min(timeout, std::chrono::milliseconds(10)));
             return std::nullopt;
         }
         return capture_result;

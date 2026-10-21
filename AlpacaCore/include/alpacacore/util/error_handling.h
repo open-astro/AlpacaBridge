@@ -39,8 +39,27 @@ public:
     
     int error_code() const noexcept { return error_code_; }
 
+    /**
+     * @brief An InvalidOperation answer to a client that asked before the
+     * device had one (issue #1167): ImageArray before any exposure, or while
+     * one is still running.
+     *
+     * The ASCOM contract requires the error, so the router logs it at DEBUG
+     * rather than ERROR. The code and message sent to the client are those of
+     * any other InvalidOperation. Do not use it for an InvalidOperation that
+     * reports a fault (a failed or stopped exposure): that one stays at ERROR.
+     */
+    static AlpacaException asked_too_early(const std::string& message) {
+        AlpacaException e(message, AlpacaError::InvalidOperation);
+        e.asked_too_early_ = true;
+        return e;
+    }
+
+    bool is_asked_too_early() const noexcept { return asked_too_early_; }
+
 private:
     int error_code_;
+    bool asked_too_early_ = false;
 };
 
 } // namespace alpacacore

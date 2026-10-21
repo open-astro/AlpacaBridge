@@ -15,10 +15,16 @@
 #include <alpacacore/vendor/gemini/gemini_flatpanel_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <string>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_gemini_flatpanel.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -187,4 +193,292 @@ TEST_CASE("Gemini Flat Panel Driver - Create by index for auto-detect", "[gemini
     REQUIRE(driver->get_device_number() == 1);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_1");
+}
+
+// ---------------------------------------------------------------------------
+// Operation slots (the Rev2/Pro driver class): the cover and calibrator
+// background bodies run in util::AsyncOperation slots over the pty-backed
+// fake Pro panel (fake_gemini_flatpanel.h).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using alpacacore::CalibratorState;
+using alpacacore::CoverState;
+using alpacacore::test::FakeGeminiFlatPanel;
+using std::chrono::milliseconds;
+
+std::unique_ptr<alpacacore::CoverCalibratorDriver> connect_slot_pro(const FakeGeminiFlatPanel& panel) {
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+template <typename Pred>
+bool slot_wait_until(Pred pred, milliseconds limit) {
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(milliseconds(5));
+    }
+    return pred();
+}
+
+// A reply the wrapper rejects at once: longer than its 32-character limit
+// and never terminated.
+const std::string kOverlongReply(40, 'X');
+
+}  // namespace
+
+TEST_CASE("Gemini Flat Panel Slots - calibrator commands queued behind a cover move return at once and run in order",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">O#", milliseconds(1500));  // a long "mechanical" open holds the port
+    auto driver = connect_slot_pro(panel);
+
+    const auto t_cover = std::chrono::steady_clock::now();
+    driver->open_cover();
+    CHECK(std::chrono::steady_clock::now() - t_cover < milliseconds(150));
+    REQUIRE(slot_wait_until([&] { return panel.count(">O#") == 1; }, milliseconds(1000)));
+
+    // More commands than the slot keeps replaced bodies (3): none may block
+    // the caller for the slot's stale-reap wait or throw.
+    for (int level = 10; level <= 70; level += 10) {
+        const auto t0 = std::chrono::steady_clock::now();
+        REQUIRE_NOTHROW(driver->calibrator_on(level));
+        CHECK(std::chrono::steady_clock::now() - t0 < milliseconds(150));
+    }
+    CHECK(driver->get_calibrator_changing());
+    CHECK(driver->get_calibrator_state() == CalibratorState::NotReady);
+
+    REQUIRE(slot_wait_until([&] { return !driver->get_calibrator_changing(); }, milliseconds(6000)));
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 70);
+    CHECK(panel.brightness() == 70);
+
+    // Every queued pair reached the wire, after the cover command, in
+    // submission order.
+    int previous = panel.index_of(">O#");
+    for (int level = 10; level <= 70; level += 10) {
+        const int at = panel.index_of(">B" + std::to_string(level) + "#");
+        REQUIRE(at > previous);
+        previous = at;
+    }
+    CHECK(panel.count(">L#") == 7);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a cover body that fails reports Error until the next cover command",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_override(">O#", "*?#");  // the firmware refuses the open
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return !driver->get_cover_moving(); }, milliseconds(3000)));
+    // Never a live >S# read in between: Error from the moment the body ends.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(driver->get_cover_state() == CoverState::Error);
+        std::this_thread::sleep_for(milliseconds(20));
+    }
+    // The TTL cache window does not heal it.
+    std::this_thread::sleep_for(milliseconds(1100));
+    CHECK(driver->get_cover_state() == CoverState::Error);
+
+    // The next start of the family clears it; a command that succeeds leaves
+    // the live state.
+    driver->close_cover();
+    REQUIRE(
+        slot_wait_until([&] { return panel.count(">C#") == 1 && !driver->get_cover_moving(); }, milliseconds(3000)));
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - a calibrator body that fails reports Error until the next calibrator command",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">O#", milliseconds(300));
+    panel.set_reply_override(">L#", kOverlongReply);
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return panel.count(">O#") == 1; }, milliseconds(1000)));
+    driver->calibrator_on(80);  // background path: the cover holds the port
+    REQUIRE(slot_wait_until([&] { return !driver->get_calibrator_changing(); }, milliseconds(3000)));
+    CHECK(driver->get_calibrator_state() == CalibratorState::Error);
+    CHECK(driver->get_brightness() == 0);  // the failed command was not committed
+
+    // Next command (inline, the port is free): the Error is gone once it succeeds.
+    REQUIRE(slot_wait_until([&] { return !driver->get_cover_moving(); }, milliseconds(3000)));
+    panel.set_reply_override(">L#", "");
+    driver->calibrator_on(50);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(driver->get_brightness() == 50);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - disconnect drops queued commands, joins, and a reconnect starts clean",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">O#", milliseconds(700));
+    auto driver = connect_slot_pro(panel);
+
+    driver->open_cover();
+    REQUIRE(slot_wait_until([&] { return panel.count(">O#") == 1; }, milliseconds(1000)));
+    driver->calibrator_on(30);
+    driver->calibrator_on(40);
+    driver->calibrator_on(50);
+    REQUIRE(driver->get_calibrator_changing());
+
+    driver->set_connected(false);  // joins the cover body and drops the queued light commands
+    CHECK_FALSE(driver->get_connected());
+    // The first command may already be committed to the port when the
+    // disconnect lands (its transaction then finishes); the other two never go out.
+    CHECK(panel.count(">L#") <= 1);
+
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_calibrator_changing());
+    CHECK(driver->get_calibrator_state() == (panel.light_on() ? CalibratorState::Ready : CalibratorState::Off));
+    CHECK_FALSE(driver->get_cover_moving());
+    driver->calibrator_on(25);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    CHECK(panel.brightness() == 25);
+}
+
+TEST_CASE("Gemini Flat Panel Slots - disconnect cancels a cover body still waiting for a calibrator toggle",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    panel.set_reply_delay(">B", milliseconds(600));  // slow brightness ack holds the inline toggle
+    auto driver = connect_slot_pro(panel);
+
+    std::thread toggler([&] { driver->calibrator_on(200); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+    driver->open_cover();  // its body waits for the toggle to release the port
+    driver->set_connected(false);
+    toggler.join();
+
+    CHECK_FALSE(driver->get_connected());
+    CHECK(panel.count(">O#") == 0);  // cancelled before it reached the wire
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_cover_moving());
+}
+
+TEST_CASE("Gemini Flat Panel Slots - the idle CoverState cache ages on the injected clock",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_pro(0, panel.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    const int seeded = panel.count(">S#");
+    REQUIRE(seeded >= 1);
+    std::this_thread::sleep_for(milliseconds(1100));  // real time passing changes nothing
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    CHECK(panel.count(">S#") == seeded);
+
+    clock.advance(milliseconds(1100));
+    CHECK(driver->get_cover_state() == CoverState::Closed);
+    CHECK(panel.count(">S#") == seeded + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Lite (v1) class: Brightness / CalibratorState are published state and must
+// not wait for a CalibratorOn / CalibratorOff serial exchange (decision 0016).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::unique_ptr<alpacacore::CoverCalibratorDriver> connect_lite(const FakeGeminiFlatPanel& panel) {
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+}  // namespace
+
+TEST_CASE("Gemini Flat Panel Lite - Brightness and CalibratorState do not wait for a calibrator command",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+
+    SECTION("CalibratorOn in flight") {
+        panel.set_reply_delay(">L#", milliseconds(300));
+        std::jthread caller([&] { driver->calibrator_on(40); });
+        REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)driver->get_brightness();
+        (void)driver->get_calibrator_state();
+        CHECK(std::chrono::steady_clock::now() - t0 < milliseconds(20));
+        caller.join();
+        CHECK(driver->get_brightness() == 40);
+        CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    }
+
+    SECTION("CalibratorOff in flight") {
+        driver->calibrator_on(40);
+        panel.set_reply_delay(">D#", milliseconds(300));
+        std::jthread caller([&] { driver->calibrator_off(); });
+        REQUIRE(slot_wait_until([&] { return panel.count(">D#") == 1; }, milliseconds(1000)));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)driver->get_brightness();
+        (void)driver->get_calibrator_state();
+        CHECK(std::chrono::steady_clock::now() - t0 < milliseconds(20));
+        caller.join();
+        CHECK(driver->get_brightness() == 0);
+        CHECK(driver->get_calibrator_state() == CalibratorState::Off);
+    }
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a failed calibrator command restores the published state",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    driver->calibrator_on(40);
+
+    panel.set_reply_override(">B", kOverlongReply);
+    CHECK_THROWS(driver->calibrator_on(90));
+    CHECK(driver->get_brightness() == 40);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+}
+
+TEST_CASE("Gemini Flat Panel Lite - set_connected(false) returns promptly with a command in flight",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    panel.set_reply_delay(">L#", milliseconds(300));
+    std::jthread caller([&] {
+        try {
+            driver->calibrator_on(40);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+    CHECK_FALSE(driver->get_connected());
+    caller.join();
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a command finishing during a disconnect does not republish its state",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    panel.set_reply_delay(">L#", milliseconds(300));
+    std::jthread caller([&] { driver->calibrator_on(40); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+    driver->set_connected(false);
+    caller.join();
+
+    // A failing seed read leaves the cleared state in place on reconnect.
+    panel.set_reply_override(">S", kOverlongReply);
+    driver->set_connected(true);
+    CHECK(driver->get_brightness() == 0);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Off);
 }

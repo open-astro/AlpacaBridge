@@ -593,7 +593,7 @@ private:
         if (!util::tty_write_all(serial_fd_, cmd.c_str(), cmd.size())) {
             const int err = errno;
             // A write is as good a witness of a removed node as a read
-            // (AGENTS.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
+            // (driver-lifecycle.instructions.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
@@ -643,8 +643,9 @@ private:
             // reply is dropped by the next command's tcflush. Harmless in
             // practice (a one-poll lag in Position/IsMoving during a move,
             // ConformU-clean) because distinct-idx commands never collide and
-            // the caches above already coalesce rapid reads; revisit if the
-            // cache TTL or poll cadence changes.
+            // the driver's poll sends cmd_id 5 then cmd_id 4 each tick, so two
+            // position polls are never adjacent; revisit if the poll sends
+            // two commands with one idx back to back.
             if (idx == expected_idx || idx == alt_idx) return fields;
             ALPACA_LOG_DEBUG(kLogTag, "Q-Focuser reply idx " + std::to_string(idx) + " while waiting for " +
                                           std::to_string(expected_idx) + "; skipping");

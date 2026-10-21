@@ -83,6 +83,8 @@ public:
     }
     void release_wait_image() { hold_wait_image(false); }
     bool deliver_frame = false;
+    // What is_guiding() answers: the SDK side of a pulse the driver started.
+    bool guiding = false;
     std::optional<std::pair<unsigned, unsigned>> delivered_dimensions;
     std::vector<std::uint8_t> frame_bytes;
     // Thread-safe view of `calls` (the driver's background threads hit the
@@ -452,7 +454,7 @@ public:
     bool is_guiding(HToupcam h) override {
         hit("is_guiding");
         require_open(h);
-        return false;
+        return guiding;
     }
 
     std::vector<ToupFocuserInfo> enumerate_focusers() override {

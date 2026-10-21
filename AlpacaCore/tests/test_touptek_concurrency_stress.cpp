@@ -35,6 +35,12 @@
 #include "concurrency_stress.h"
 #include "fake_touptek_sdk.h"
 #include "locked_touptek_sdk.h"
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+#include <alpacacore/vendor/touptek/touptek_switch_driver.h>
+
+#include "fake_touptek_powerbox_sdk.h"
+#include "locked_touptek_powerbox_sdk.h"
+#endif
 
 using alpacacore::AlpacaDriver;
 using alpacacore::test::FakeToupTekSDK;
@@ -83,7 +89,7 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
     // open-astro#326: one guard per call. run_lifecycle_stress wraps the WHOLE
     // callback in a single try/catch, so a storm racing a disconnect used to
     // exercise get_camera_state() and skip the other five outright. This file
-    // is the one AGENTS.md points new authors at for the overall shape, which
+    // is the one ci-gates.instructions.md points new authors at for the overall shape, which
     // is why it had the most to gain from being fixed.
     // The set REPLACES the default {NotConnected} rather than extending it.
     // InvalidOperation belongs here because this callback both starts
@@ -106,6 +112,10 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
 
     // The driver must still be usable after the storm, and the ref-counted
     // open ledger must balance once we settle it disconnected.
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);
@@ -182,6 +192,10 @@ TEST_CASE("ToupTek AFW - concurrent connect/disconnect/operate stress", "[toupte
         },
         opt);
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-afw-0") == 0);
@@ -230,6 +244,10 @@ TEST_CASE("ToupTek AAF focuser - concurrent connect/disconnect/operate stress", 
         guard([&] { focuser.halt(); });
     });
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-aaf-0") == 0);
@@ -284,6 +302,10 @@ TEST_CASE("ToupTek thermal switch - concurrent connect/disconnect/operate stress
         guard([&] { static_cast<void>(sw.get_device_state()); });
     });
 
+    // Read before the settle below opens the device again: a nonzero count
+    // here means a connect really reached the SDK during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.physical_opens > 0);
     CHECK(alpacacore::test::settle_connected(*driver, true));
     CHECK(alpacacore::test::settle_connected(*driver, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);
@@ -333,6 +355,11 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     });
     camera_storm.join();
 
+    // Both storms are over: a nonzero count means a connect reached the SDK.
+    REQUIRE(alpacacore::test::wait_connect_idle(*camera));
+    REQUIRE(alpacacore::test::wait_connect_idle(*thermal));
+    CHECK(fake.physical_opens > 0);
+
     CHECK(alpacacore::test::settle_connected(*camera, false));
     CHECK(alpacacore::test::settle_connected(*thermal, false));
     CHECK(fake.ref_count("fake-cam-0") == 0);
@@ -346,3 +373,40 @@ TEST_CASE("ToupTek camera + thermal switch - shared open under concurrent lifecy
     CHECK(thermal_guard.unexpected_count() == 0);
     CHECK(thermal_guard.total_calls() > 0);
 }
+
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+// The StellaVita switch, connected: the fake power box opens, so the storm reaches get/set on live
+// ports instead of stopping at the connect-failure path. Wrapped in LockedTouptekPowerboxSDK so a
+// TSan report names the driver. (The thermal-switch registration already satisfies the gate, which
+// keys on vendor and type; this case adds TSan coverage of the StellaVita driver itself.)
+TEST_CASE("ToupTek StellaVita switch - concurrent connect/disconnect/operate stress", "[touptek][switch][stress]") {
+    alpacacore::test::FakeTouptekPowerboxSDK fake;
+    alpacacore::test::LockedTouptekPowerboxSDK box(fake);
+    auto driver = alpacacore::vendor::touptek::create_touptek_switch(
+        0, alpacacore::vendor::touptek::default_stellavita_config(), box);
+
+    // The set REPLACES the default {NotConnected}; a connected driver can only add NotConnected from a
+    // racing disconnect, which is already in it. No InvalidValue is expected: the ids and values are valid.
+    alpacacore::test::StressCallGuard guard;
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
+        auto& sw = static_cast<alpacacore::SwitchDriver&>(d);
+        guard([&] { static_cast<void>(sw.get_switch(0)); });
+        guard([&] { sw.set_switch(1, false); });
+        guard([&] { sw.set_switch(1, true); });
+        guard([&] { static_cast<void>(sw.get_switch_value(2)); });
+        guard([&] { static_cast<void>(sw.get_device_state()); });
+    });
+
+    // Read before the settle below opens the device again: a nonzero count here means a connect
+    // really reached the power box during the storm.
+    REQUIRE(alpacacore::test::wait_connect_idle(*driver));
+    CHECK(fake.open_calls() > 0);
+    CHECK(alpacacore::test::settle_connected(*driver, true));
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+    CHECK(fake.open_calls() >= fake.close_calls());
+
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+#endif

@@ -20,7 +20,9 @@ MoveAxis testing did not exercise that transform.
 Separate encoder-rate measurements, model self-consistency, and independent sky
 validation. Use plate solving for absolute pointing and physical pier-side claims.
 Cover both hemispheres and both Dec-axis branches for rate and pulse corrections.
-Do not change mechanical MoveAxis signs to imitate sky-coordinate rate semantics.
+MoveAxis was mechanical when this record was written; open-astro#297 later made it
+sky-referenced on purpose (see the Sky-Watcher instructions), so the mechanical layer
+below it (`start_speed_motion_locked`, goto deltas, AutoHome) still applies no sign.
 Retain corrected historical conclusions so the old tracking-direction change is not
 reintroduced from stale bring-up notes.
 

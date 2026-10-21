@@ -1,0 +1,2 @@
+### Added (tooling)
+- **Update checks for the ASCOM Alpaca standard documents** (`scripts/dependency_sdk_versions.json`): the dependency-updates workflow now watches the Alpaca Device API and Management API schemas and the Alpaca API Reference page on ascom-standards.org, so a new revision of the standard opens an "Upstream document changed" issue instead of waiting for a manual recheck. Until now only the ConformU beta tarball was watched from ascom-standards.org.

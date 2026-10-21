@@ -22,6 +22,7 @@
 
 #include <alpacacore/catalog/builtin_catalog.h>
 #include <alpacacore/filterwheel_driver.h>
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
@@ -888,7 +889,11 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
                                                       "focalLength",
                                                       "minAltitudeDeg",
                                                       "meridianLimitMinutes",
-                                                      "decAxisSense"};
+                                                      "decAxisSense",
+                                                      "backlashStepsRA",
+                                                      "backlashEnabledRA",
+                                                      "backlashStepsDec",
+                                                      "backlashEnabledDec"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -919,6 +924,10 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the SkyWatcher t
         {"minAltitudeDeg", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, -90.0, 90.0},
         {"meridianLimitMinutes", FieldRef::Kind::Double, Role::Plain, std::nullopt, 0.0, 0.0, 360.0},
         {"decAxisSense", FieldRef::Kind::String, Role::Plain, std::nullopt, std::string{"auto"}, {}, {}},
+        {"backlashStepsRA", FieldRef::Kind::Int, Role::Plain, std::nullopt, std::int64_t{0}, 0.0, 100000.0},
+        {"backlashEnabledRA", FieldRef::Kind::Bool, Role::Plain, std::nullopt, false, {}, {}},
+        {"backlashStepsDec", FieldRef::Kind::Int, Role::Plain, std::nullopt, std::int64_t{0}, 0.0, 100000.0},
+        {"backlashEnabledDec", FieldRef::Kind::Bool, Role::Plain, std::nullopt, false, {}, {}},
     };
     for (const Expect& e : expectations) {
         INFO(e.key);
@@ -1036,7 +1045,7 @@ TEST_CASE(
     // as "serial" (never "auto", #380: a saved unknown type must not
     // auto-probe) with a warning that keeps the arm's two fragments, which
     // the router wraps as "... config normalized: <warning>. ...".
-    for (const char* type : {"carrier-pigeon", "Network", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config = skywatcher_serial_with_site();
         config.set("connectionType", std::string{type});
@@ -1601,7 +1610,7 @@ TEST_CASE("Builtin catalog - OnStep normalize accepts '', auto and serial, and r
     no_site.set("connectionType", std::string{"auto"});
     CHECK_FALSE(catalog.normalize(kOnStepKey, no_site, Source::Api).rejection.has_value());
 
-    for (const char* type : {"network", "carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"network", "carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1667,8 +1676,8 @@ TEST_CASE("Builtin catalog - OnStep site range is per-field", "[catalog][onstep]
 }
 
 // ---------------------------------------------------------------------------
-// Celestron telescope. Serial, network and auto; the auto-detect factory
-// constructs without a scan (#659), so no port is opened here.
+// Celestron telescope. NexStar serial/network/auto and CGX direct USB; the
+// auto-detect factory constructs without a scan (#659), so no port is opened here.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1689,9 +1698,9 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the Celestron te
     CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
 
     const std::vector<std::string_view> expected_keys{
-        "connectionType", "mountIndex",        "portPath",         "baudRate",     "host",
-        "tcpPort",        "responseTimeoutMs", "alignmentMode",    "siteLatitude", "siteLongitude",
-        "siteElevation",  "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+        "protocol",      "connectionType", "mountIndex",        "portPath",         "baudRate",
+        "host",          "tcpPort",        "responseTimeoutMs", "alignmentMode",    "siteLatitude",
+        "siteLongitude", "siteElevation",  "syncTimeOnConnect", "apertureDiameter", "focalLength"};
     REQUIRE(v->fields.size() == expected_keys.size());
     for (std::size_t i = 0; i < expected_keys.size(); ++i) {
         CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
@@ -1737,6 +1746,20 @@ TEST_CASE("Builtin catalog - register_builtin_factories makes the Celestron tele
     auto network_driver = catalog.create(kCelestronKey, network, 6);
     REQUIRE(network_driver != nullptr);
     CHECK(network_driver->get_device_number() == 6);
+
+    DeviceConfig direct_usb;
+    direct_usb.set("protocol", std::string{"cgx-aux"});
+    direct_usb.set("connectionType", std::string{"serial"});
+    direct_usb.set("portPath", std::string{"/dev/ttyUSB-cgx"});
+    direct_usb.set("siteLatitude", 45.0);
+    direct_usb.set("siteLongitude", -75.0);
+    direct_usb.set("siteElevation", 0.0);
+    direct_usb.set("apertureDiameter", 0.2);
+    direct_usb.set("focalLength", 1.0);
+    auto direct_driver = catalog.create(kCelestronKey, direct_usb, 7);
+    REQUIRE(direct_driver != nullptr);
+    CHECK(direct_driver->get_device_number() == 7);
+    CHECK(direct_driver->get_description() == "Celestron CGX/CGX-L direct USB mount");
 #else
     CHECK_FALSE(v->available);
     try {
@@ -1766,7 +1789,7 @@ TEST_CASE("Builtin catalog - Celestron normalize accepts '', auto, serial and ne
         CHECK(persisted.warnings.empty());
     }
 
-    for (const char* type : {"carrier-pigeon", "SERIAL"}) {
+    for (const char* type : {"carrier-pigeon", "usb"}) {
         INFO(std::string("connectionType \"") + type + "\"");
         DeviceConfig config;
         config.set("connectionType", std::string{type});
@@ -1813,6 +1836,39 @@ TEST_CASE("Builtin catalog - Celestron normalize requires the endpoint from the 
     CHECK_FALSE(catalog.normalize(kCelestronKey, automatic, Source::Api).rejection.has_value());
 }
 
+TEST_CASE("Builtin catalog - Celestron CGX AUX protocol requires explicit serial configuration",
+          "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig direct;
+    direct.set("protocol", std::string{"cgx-aux"});
+    direct.set("connectionType", std::string{"serial"});
+    direct.set("portPath", std::string{"/dev/ttyUSB3"});
+    direct.set("siteLatitude", 45.0);
+    direct.set("siteLongitude", -75.0);
+    CHECK_FALSE(catalog.normalize(kCelestronKey, direct, Source::Api).rejection.has_value());
+
+    DeviceConfig no_site;
+    no_site.set("protocol", std::string{"cgx-aux"});
+    no_site.set("connectionType", std::string{"serial"});
+    no_site.set("portPath", std::string{"/dev/ttyUSB3"});
+    const auto missing_site = catalog.normalize(kCelestronKey, no_site, Source::Api);
+    REQUIRE(missing_site.rejection.has_value());
+    CHECK(*missing_site.rejection == "Direct Celestron CGX USB requires SiteLatitude and SiteLongitude");
+
+    DeviceConfig automatic;
+    automatic.set("protocol", std::string{"cgx-aux"});
+    automatic.set("connectionType", std::string{"auto"});
+    const auto api = catalog.normalize(kCelestronKey, automatic, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "Celestron CGX AUX requires Connection Type 'serial' and a USB port path");
+
+    const auto persisted = catalog.normalize(kCelestronKey, automatic, Source::Persisted);
+    CHECK(string_at(persisted.config, "connectionType") == "serial");
+    CHECK_FALSE(persisted.warnings.empty());
+}
+
 TEST_CASE("Builtin catalog - Celestron alignmentMode keeps a known value and drops an unknown one (#860)",
           "[catalog][celestron][unit]") {
     DeviceCatalog catalog;
@@ -1849,4 +1905,1960 @@ TEST_CASE("Builtin catalog - Celestron site range is per-field", "[catalog][cele
     CHECK(*api.rejection == "siteLongitude is out of range (min -180) (max 180)");
     config.set("siteLongitude", 180.0);
     CHECK_FALSE(catalog.normalize(kCelestronKey, config, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - Celestron optics and elevation retain setter ranges", "[catalog][celestron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct RangeCase {
+        const char* key;
+        double invalid;
+        double valid;
+        const char* message;
+    };
+    const RangeCase cases[]{{"siteElevation", -301.0, -300.0, "siteElevation is out of range (min -300) (max 10000)"},
+                            {"siteElevation", 10001.0, 10000.0, "siteElevation is out of range (min -300) (max 10000)"},
+                            {"apertureDiameter", -0.1, 0.0, "apertureDiameter is out of range (min 0)"},
+                            {"focalLength", -0.1, 0.0, "focalLength is out of range (min 0)"}};
+
+    for (const auto& test : cases) {
+        INFO(test.key);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set(test.key, test.invalid);
+        const auto api = catalog.normalize(kCelestronKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == test.message);
+
+        const auto persisted = catalog.normalize(kCelestronKey, config, Source::Persisted);
+        CHECK(persisted.config.find_value(test.key) == nullptr);
+        CHECK_FALSE(persisted.warnings.empty());
+
+        config.set(test.key, test.valid);
+        CHECK_FALSE(catalog.normalize(kCelestronKey, config, Source::Api).rejection.has_value());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SynScan telescope. Serial, network and auto; the auto-detect factory
+// constructs without a scan (#659), so no port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kSynScanKey{"synscan", DeviceType::Telescope};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the SynScan telescope in every build",
+          "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSynScanKey);
+    REQUIRE(v != nullptr);
+    CHECK(v->display_name == "SynScan");
+    CHECK(v->build_option == "ALPACACORE_ENABLE_SYNSCAN");
+    CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+
+    const std::vector<std::string_view> expected_keys{
+        "connectionType", "mountIndex",    "synscanVersion",    "portPath",         "baudRate",
+        "host",           "tcpPort",       "responseTimeoutMs", "alignmentMode",    "siteLatitude",
+        "siteLongitude",  "siteElevation", "syncTimeOnConnect", "apertureDiameter", "focalLength"};
+    REQUIRE(v->fields.size() == expected_keys.size());
+    for (std::size_t i = 0; i < expected_keys.size(); ++i) {
+        CHECK(std::string_view(v->fields[i].key) == expected_keys[i]);
+    }
+    const FieldRef* type = find_field(v->fields, "connectionType");
+    REQUIRE(type != nullptr);
+    CHECK(type->allowed_values.empty());  // normalize owns the rule (#380)
+    const FieldRef* tcp = find_field(v->fields, "tcpPort");
+    REQUIRE(tcp != nullptr);
+    CHECK(same_scalar(tcp->default_value, std::int64_t{11880}));
+    REQUIRE(tcp->applies_when.has_value());
+    CHECK(std::string_view(tcp->applies_when->value) == "network");
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the SynScan telescope available only when built",
+          "[catalog][synscan][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSynScanKey);
+    REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+    CHECK(v->available);
+    // Auto-detect is lazy: constructing it scans nothing and succeeds with no mount.
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    config.set("alignmentMode", std::string{"equatorial"});
+    auto driver = catalog.create(kSynScanKey, config, 4);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_type() == DeviceType::Telescope);
+    CHECK(driver->get_device_number() == 4);
+    CHECK_FALSE(driver->get_connected());
+
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    serial.set("portPath", std::string{"/dev/ttyUSB-no-such-synscan"});
+    auto serial_driver = catalog.create(kSynScanKey, serial, 5);
+    REQUIRE(serial_driver != nullptr);
+    CHECK(serial_driver->get_device_number() == 5);
+
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    network.set("host", std::string{"192.0.2.1"});
+    auto network_driver = catalog.create(kSynScanKey, network, 6);
+    REQUIRE(network_driver != nullptr);
+    CHECK(network_driver->get_device_number() == 6);
+#else
+    CHECK_FALSE(v->available);
+    try {
+        (void)catalog.create(kSynScanKey, DeviceConfig{}, 0);
+        FAIL("create() must throw when SynScan is not built");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_SYNSCAN") != std::string::npos);
+    }
+#endif
+}
+
+TEST_CASE("Builtin catalog - SynScan normalize accepts '', auto, serial and network, refuses others from the API",
+          "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* type : {"", "auto", "serial", "network"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        config.set("host", std::string{"192.0.2.1"});
+        const auto api = catalog.normalize(kSynScanKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        const auto persisted = catalog.normalize(kSynScanKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(persisted.warnings.empty());
+    }
+
+    for (const char* type : {"carrier-pigeon", "usb"}) {
+        INFO(std::string("connectionType \"") + type + "\"");
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        config.set("portPath", std::string{"/dev/ttyUSB3"});
+        const auto api = catalog.normalize(kSynScanKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "Invalid connection type. Use 'auto', 'serial', or 'network'");
+
+        // #380: a saved one is read as serial, never auto.
+        const auto persisted = catalog.normalize(kSynScanKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        CHECK(string_at(persisted.config, "connectionType") == "serial");
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0].find(std::string("has connectionType \"") + type + "\"") != std::string::npos);
+    }
+}
+
+TEST_CASE("Builtin catalog - SynScan normalize requires the endpoint from the API only", "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        const char* type;
+        const char* message;
+    };
+    for (const Case& c :
+         {Case{"serial", "Serial port path is required"}, Case{"network", "Host IP address is required"}}) {
+        INFO(c.type);
+        DeviceConfig config;
+        config.set("connectionType", std::string{c.type});
+        const auto api = catalog.normalize(kSynScanKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == c.message);
+        const auto persisted = catalog.normalize(kSynScanKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == c.message);
+    }
+
+    // Auto never needs an endpoint, and no site is required.
+    DeviceConfig automatic;
+    automatic.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kSynScanKey, automatic, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - SynScan alignmentMode keeps a known value and drops an unknown one (#860)",
+          "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    for (const char* mode : {"auto", "altaz", "equatorial"}) {
+        INFO(mode);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set("alignmentMode", std::string{mode});
+        for (Source source : {Source::Api, Source::Persisted}) {
+            const auto r = catalog.normalize(kSynScanKey, config, source);
+            CHECK_FALSE(r.rejection.has_value());
+            CHECK(string_at(r.config, "alignmentMode") == mode);
+        }
+    }
+    DeviceConfig unknown;
+    unknown.set("connectionType", std::string{"auto"});
+    unknown.set("alignmentMode", std::string{"wedge"});
+    for (Source source : {Source::Api, Source::Persisted}) {
+        const auto r = catalog.normalize(kSynScanKey, unknown, source);
+        CHECK_FALSE(r.rejection.has_value());
+        CHECK(r.config.find_value("alignmentMode") == nullptr);
+    }
+}
+
+TEST_CASE("Builtin catalog - SynScan site range is per-field", "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    DeviceConfig config;
+    config.set("connectionType", std::string{"auto"});
+    config.set("siteLongitude", 181.0);
+    const auto api = catalog.normalize(kSynScanKey, config, Source::Api);
+    REQUIRE(api.rejection.has_value());
+    CHECK(*api.rejection == "siteLongitude is out of range (min -180) (max 180)");
+    config.set("siteLongitude", 180.0);
+    CHECK_FALSE(catalog.normalize(kSynScanKey, config, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - SynScan synscanVersion defaults to auto and the factory builds for every spelling",
+          "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+    const DescriptorView* v = find_view(views, kSynScanKey);
+    REQUIRE(v != nullptr);
+    const FieldRef* version = find_field(v->fields, "synscanVersion");
+    REQUIRE(version != nullptr);
+    CHECK(same_scalar(version->default_value, std::string{"auto"}));
+    const FieldRef* baud = find_field(v->fields, "baudRate");
+    REQUIRE(baud != nullptr);
+    CHECK(same_scalar(baud->default_value, std::int64_t{9600}));
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+    const DeviceCatalog built = builtin_catalog();
+    int number = 10;
+    for (const char* spelling : {"auto", "v3", "V3", "3", "v4", "V4", "4", "bogus"}) {
+        INFO(spelling);
+        DeviceConfig config;
+        config.set("connectionType", std::string{"auto"});
+        config.set("synscanVersion", std::string{spelling});
+        auto driver = built.create(kSynScanKey, config, number);
+        REQUIRE(driver != nullptr);
+        CHECK(driver->get_device_number() == number++);
+    }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// QHY camera, filter wheel (integrated and CFW3) and Q-Focuser. The CFW3 and
+// Q-Focuser auto-detect factories construct without a scan (#659), so no port
+// is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+const DeviceKey kQhyCameraKey{"qhy", DeviceType::Camera};
+const DeviceKey kQhyWheelKey{"qhy", DeviceType::FilterWheel};
+const DeviceKey kQhyFocuserKey{"qhy", DeviceType::Focuser};
+
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the QHY devices in every build",
+          "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kQhyCameraKey, kQhyWheelKey, kQhyFocuserKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_QHY");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kQhyCameraKey)) == std::vector<std::string>{"cameraIndex", "cameraId"});
+    CHECK(keys_of(find_view(views, kQhyWheelKey)) == std::vector<std::string>{"wheelType", "connectionType", "portPath",
+                                                                              "filterwheelIndex", "cameraIndex",
+                                                                              "cameraId", "filterNames"});
+    CHECK(keys_of(find_view(views, kQhyFocuserKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "focuserIndex", "maxStep", "reverse", "speed",
+                                   "holdForce", "holdIhold", "holdIrun", "temperatureSource"});
+
+    const DescriptorView* wheel = find_view(views, kQhyWheelKey);
+    const FieldRef* names = find_field(wheel->fields, "filterNames");
+    REQUIRE(names != nullptr);
+    CHECK(names->kind == FieldRef::Kind::StringList);
+    const FieldRef* wheel_type = find_field(wheel->fields, "wheelType");
+    REQUIRE(wheel_type != nullptr);
+    CHECK(wheel_type->allowed_values.empty());  // normalize owns the rule, to keep its wording
+    CHECK(same_scalar(wheel_type->default_value, std::string{"integrated"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the QHY devices available only when built",
+          "[catalog][qhy][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kQhyCameraKey, kQhyWheelKey, kQhyFocuserKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_QHY
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when QHY is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_QHY") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_QHY
+    // Nothing here touches the SDK or a port: the CFW3 and Q-Focuser auto
+    // paths resolve at connect (#659), the camera and integrated wheel open at connect.
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    auto camera_driver = catalog.create(kQhyCameraKey, camera, 3);
+    REQUIRE(camera_driver != nullptr);
+    CHECK(camera_driver->get_device_type() == DeviceType::Camera);
+    CHECK(camera_driver->get_device_number() == 3);
+
+    DeviceConfig integrated;
+    integrated.set("cameraId", std::string{"QHY-TEST-1"});
+    integrated.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto integrated_driver = catalog.create(kQhyWheelKey, integrated, 4);
+    REQUIRE(integrated_driver != nullptr);
+    CHECK(integrated_driver->get_device_type() == DeviceType::FilterWheel);
+    {
+        // The factory's pass-through: filterNames reaches the driver.
+        const auto names = dynamic_cast<FilterWheelDriver&>(*integrated_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
+
+    DeviceConfig cfw3_auto;
+    cfw3_auto.set("wheelType", std::string{"cfw3-usb"});
+    cfw3_auto.set("connectionType", std::string{"auto"});
+    auto cfw3_driver = catalog.create(kQhyWheelKey, cfw3_auto, 5);
+    REQUIRE(cfw3_driver != nullptr);
+    CHECK_FALSE(cfw3_driver->get_connected());
+
+    DeviceConfig cfw3_serial;
+    cfw3_serial.set("wheelType", std::string{"cfw3-usb"});
+    cfw3_serial.set("connectionType", std::string{"serial"});
+    cfw3_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-cfw3"});
+    cfw3_serial.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto cfw3_serial_driver = catalog.create(kQhyWheelKey, cfw3_serial, 6);
+    REQUIRE(cfw3_serial_driver != nullptr);
+    {
+        const auto names = dynamic_cast<FilterWheelDriver&>(*cfw3_serial_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
+
+    DeviceConfig focuser_auto;
+    auto focuser_driver = catalog.create(kQhyFocuserKey, focuser_auto, 7);
+    REQUIRE(focuser_driver != nullptr);
+    CHECK(focuser_driver->get_device_type() == DeviceType::Focuser);
+    CHECK_FALSE(focuser_driver->get_connected());
+
+    DeviceConfig focuser_serial;
+    focuser_serial.set("connectionType", std::string{"serial"});
+    focuser_serial.set("portPath", std::string{"/dev/ttyACM-no-such-qfocuser"});
+    focuser_serial.set("maxStep", std::int64_t{30000});
+    auto focuser_serial_driver = catalog.create(kQhyFocuserKey, focuser_serial, 8);
+    REQUIRE(focuser_serial_driver != nullptr);
+    CHECK(dynamic_cast<FocuserDriver&>(*focuser_serial_driver).get_max_step() == 30000);
+
+    // A saved config normalize could only warn about is refused here, never
+    // built into a wheel that would auto-probe (it DTR-resets every CP210x).
+    DeviceConfig no_port;
+    no_port.set("wheelType", std::string{"cfw3-usb"});
+    no_port.set("connectionType", std::string{"serial"});
+    // #508 item 1: built anyway so a saved entry stays registered; its connect refuses (the wheel's
+    // own test pins the text).
+    CHECK(catalog.create(kQhyWheelKey, no_port, 9) != nullptr);
+    CHECK_THROWS_AS(catalog.create(kQhyCameraKey, DeviceConfig{}, 10), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - QHY camera and integrated wheel need a camera index or id", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        DeviceKey key;
+        const char* message;
+    };
+    for (const Case& c : {Case{kQhyCameraKey, "QHY camera requires cameraIndex or cameraId"},
+                          Case{kQhyWheelKey, "QHY filter wheel requires cameraIndex or cameraId"}}) {
+        INFO(c.message);
+        const auto api = catalog.normalize(c.key, DeviceConfig{}, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == c.message);
+
+        DeviceConfig negative;
+        negative.set("cameraIndex", std::int64_t{-1});
+        REQUIRE(catalog.normalize(c.key, negative, Source::Api).rejection.has_value());
+
+        // A saved config is warned about and kept.
+        const auto persisted = catalog.normalize(c.key, DeviceConfig{}, Source::Persisted);
+        CHECK_FALSE(persisted.rejection.has_value());
+        REQUIRE(persisted.warnings.size() == 1);
+        CHECK(persisted.warnings[0] == c.message);
+
+        DeviceConfig by_index;
+        by_index.set("cameraIndex", std::int64_t{0});
+        CHECK_FALSE(catalog.normalize(c.key, by_index, Source::Api).rejection.has_value());
+        DeviceConfig by_id;
+        by_id.set("cameraId", std::string{"QHY-TEST-1"});
+        CHECK_FALSE(catalog.normalize(c.key, by_id, Source::Api).rejection.has_value());
+    }
+}
+
+TEST_CASE("Builtin catalog - QHY CFW3 wheel normalize refuses a bad wheelType, connectionType or endpoint",
+          "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto cfw3 = [](const char* type) {
+        DeviceConfig config;
+        config.set("wheelType", std::string{"cfw3-usb"});
+        config.set("connectionType", std::string{type});
+        return config;
+    };
+
+    DeviceConfig bad_wheel;
+    bad_wheel.set("wheelType", std::string{"cfw2-usb"});
+    bad_wheel.set("cameraIndex", std::int64_t{0});
+    const auto bad_wheel_api = catalog.normalize(kQhyWheelKey, bad_wheel, Source::Api);
+    REQUIRE(bad_wheel_api.rejection.has_value());
+    CHECK(*bad_wheel_api.rejection == "QHY filter wheel wheelType must be \"integrated\" or \"cfw3-usb\"");
+
+    const auto bad_type = catalog.normalize(kQhyWheelKey, cfw3("network"), Source::Api);
+    REQUIRE(bad_type.rejection.has_value());
+    CHECK(*bad_type.rejection == "QHY CFW3 connectionType must be \"auto\" or \"serial\"");
+
+    const auto no_port = catalog.normalize(kQhyWheelKey, cfw3("serial"), Source::Api);
+    REQUIRE(no_port.rejection.has_value());
+    CHECK(*no_port.rejection == "QHY CFW3 connectionType \"serial\" requires portPath");
+    const auto no_port_saved = catalog.normalize(kQhyWheelKey, cfw3("serial"), Source::Persisted);
+    CHECK_FALSE(no_port_saved.rejection.has_value());
+    REQUIRE(no_port_saved.warnings.size() == 1);
+    CHECK(no_port_saved.warnings[0] == "QHY CFW3 connectionType \"serial\" requires portPath");
+
+    DeviceConfig negative_index = cfw3("auto");
+    negative_index.set("filterwheelIndex", std::int64_t{-1});
+    const auto negative = catalog.normalize(kQhyWheelKey, negative_index, Source::Api);
+    REQUIRE(negative.rejection.has_value());
+    CHECK(*negative.rejection == "QHY CFW3 filterwheelIndex must be 0 or greater");
+
+    // "auto" needs no endpoint; "serial" with a port is fine.
+    CHECK_FALSE(catalog.normalize(kQhyWheelKey, cfw3("auto"), Source::Api).rejection.has_value());
+    DeviceConfig serial = cfw3("serial");
+    serial.set("portPath", std::string{"/dev/ttyUSB7"});
+    CHECK_FALSE(catalog.normalize(kQhyWheelKey, serial, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - QHY Q-Focuser settings are range checked per field", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    struct Case {
+        const char* key;
+        std::int64_t value;
+    };
+    for (const Case& c : {Case{"maxStep", 0}, Case{"maxStep", 2000001}, Case{"speed", 0}, Case{"speed", 9},
+                          Case{"holdIhold", 17}, Case{"holdIhold", -1}, Case{"holdIrun", 31}}) {
+        INFO(std::string(c.key) + " " + std::to_string(c.value));
+        DeviceConfig config;
+        config.set(c.key, c.value);
+        const auto api = catalog.normalize(kQhyFocuserKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(api.rejection->find(c.key) != std::string::npos);
+        // A saved out-of-range value drops to unset, so the factory's default applies.
+        const auto persisted = catalog.normalize(kQhyFocuserKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.config.has(c.key));
+    }
+    for (const Case& c : {Case{"maxStep", 1}, Case{"maxStep", 2000000}, Case{"speed", 8}, Case{"holdIhold", 16},
+                          Case{"holdIrun", 30}, Case{"holdIrun", 0}}) {
+        INFO(std::string(c.key) + " " + std::to_string(c.value));
+        DeviceConfig config;
+        config.set(c.key, c.value);
+        CHECK_FALSE(catalog.normalize(kQhyFocuserKey, config, Source::Api).rejection.has_value());
+    }
+
+    DeviceConfig source;
+    source.set("temperatureSource", std::string{"probe"});
+    const auto bad_source = catalog.normalize(kQhyFocuserKey, source, Source::Api);
+    REQUIRE(bad_source.rejection.has_value());
+    CHECK(bad_source.rejection->find("temperatureSource") != std::string::npos);
+    source.set("temperatureSource", std::string{"chip"});
+    CHECK_FALSE(catalog.normalize(kQhyFocuserKey, source, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - QHY sanitize keeps the declared fields per device type", "[catalog][qhy][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig focuser;
+    focuser.set("connectionType", std::string{"serial"});
+    focuser.set("portPath", std::string{"/dev/ttyACM3"});
+    focuser.set("focuserIndex", std::int64_t{1});
+    focuser.set("maxStep", std::int64_t{30000});
+    focuser.set("reverse", true);
+    focuser.set("speed", std::int64_t{4});
+    focuser.set("holdForce", true);
+    focuser.set("holdIhold", std::int64_t{6});
+    focuser.set("holdIrun", std::int64_t{12});
+    focuser.set("temperatureSource", std::string{"chip"});
+    focuser.set("cameraIndex", std::int64_t{7});  // a camera key, not a focuser one
+    const DeviceConfig kept = catalog.sanitize(kQhyFocuserKey, focuser);
+    CHECK(kept.entries().size() == 10);
+    CHECK_FALSE(kept.has("cameraIndex"));
+    CHECK(string_at(kept, "portPath") == "/dev/ttyACM3");
+
+    DeviceConfig wheel;
+    wheel.set("wheelType", std::string{"cfw3-usb"});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    wheel.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_wheel = catalog.sanitize(kQhyWheelKey, wheel);
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("bogusKey"));
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("cameraId", std::string{"QHY-TEST-1"});
+    camera.set("portPath", std::string{"/dev/x"});
+    const DeviceConfig kept_camera = catalog.sanitize(kQhyCameraKey, camera);
+    CHECK(kept_camera.entries().size() == 2);
+}
+
+namespace {
+const DeviceKey kTouptekCameraKey{"touptek", DeviceType::Camera};
+const DeviceKey kTouptekFocuserKey{"touptek", DeviceType::Focuser};
+const DeviceKey kTouptekWheelKey{"touptek", DeviceType::FilterWheel};
+const DeviceKey kTouptekSwitchKey{"touptek", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the ToupTek devices in every build",
+          "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kTouptekCameraKey, kTouptekFocuserKey, kTouptekWheelKey, kTouptekSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_TOUPTEK");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kTouptekCameraKey)) == std::vector<std::string>{"cameraIndex"});
+    CHECK(keys_of(find_view(views, kTouptekFocuserKey)) == std::vector<std::string>{"focuserIndex", "focuserId"});
+    CHECK(keys_of(find_view(views, kTouptekWheelKey)) ==
+          std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
+    CHECK(keys_of(find_view(views, kTouptekSwitchKey)) ==
+          std::vector<std::string>{"switchType", "cameraIndex", "gpioChip", "pwmFrequencyHz", "ports"});
+
+    const FieldRef* names = find_field(find_view(views, kTouptekWheelKey)->fields, "filterNames");
+    REQUIRE(names != nullptr);
+    CHECK(names->kind == FieldRef::Kind::StringList);
+    const FieldRef* ports = find_field(find_view(views, kTouptekSwitchKey)->fields, "ports");
+    REQUIRE(ports != nullptr);
+    CHECK(ports->kind == FieldRef::Kind::RecordList);
+    REQUIRE(ports->record_fields.size() == 2);
+    CHECK(std::string_view(ports->record_fields[0].key) == "name");
+    CHECK(std::string_view(ports->record_fields[1].key) == "pwm");
+    const FieldRef* type = find_field(find_view(views, kTouptekSwitchKey)->fields, "switchType");
+    REQUIRE(type != nullptr);
+    CHECK(type->allowed_values.empty());  // normalize owns the rule, to keep its wording
+    CHECK(same_scalar(type->default_value, std::string{"stellavita"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the ToupTek devices available only when built",
+          "[catalog][touptek][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kTouptekCameraKey, kTouptekFocuserKey, kTouptekWheelKey, kTouptekSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when ToupTek is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_TOUPTEK") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    // Nothing here opens the SDK: every ToupTek driver binds at connect.
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    auto camera_driver = catalog.create(kTouptekCameraKey, camera, 3);
+    REQUIRE(camera_driver != nullptr);
+    CHECK(camera_driver->get_device_type() == DeviceType::Camera);
+    CHECK(camera_driver->get_device_number() == 3);
+
+    DeviceConfig focuser;
+    focuser.set("focuserId", std::string{"AAF-TEST-1"});
+    auto focuser_driver = catalog.create(kTouptekFocuserKey, focuser, 4);
+    REQUIRE(focuser_driver != nullptr);
+    CHECK(focuser_driver->get_device_type() == DeviceType::Focuser);
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    auto wheel_driver = catalog.create(kTouptekWheelKey, wheel, 5);
+    REQUIRE(wheel_driver != nullptr);
+    {
+        // The factory's pass-through: filterNames reaches the driver.
+        const auto names = dynamic_cast<FilterWheelDriver&>(*wheel_driver).get_names();
+        REQUIRE(names.size() >= 2);
+        CHECK(names[0] == "L");
+        CHECK(names[1] == "R");
+    }
+
+    DeviceConfig thermal;
+    thermal.set("switchType", std::string{"thermal"});
+    thermal.set("cameraIndex", std::int64_t{2});
+    auto thermal_driver = catalog.create(kTouptekSwitchKey, thermal, 6);
+    REQUIRE(thermal_driver != nullptr);
+    CHECK(thermal_driver->get_device_type() == DeviceType::Switch);
+
+    CHECK_THROWS_AS(catalog.create(
+                        kTouptekSwitchKey,
+                        [] {
+                            DeviceConfig bad;
+                            bad.set("switchType", std::string{"Thermal"});
+                            return bad;
+                        }(),
+                        7),
+                    AlpacaException);
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+    auto powerbox = catalog.create(kTouptekSwitchKey, DeviceConfig{}, 8);  // the default is stellavita
+    REQUIRE(powerbox != nullptr);
+    CHECK(powerbox->get_device_type() == DeviceType::Switch);
+#else
+    try {
+        (void)catalog.create(kTouptekSwitchKey, DeviceConfig{}, 8);
+        FAIL("a stellavita switch must throw when StellaVita is not built");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).find("ToupTek StellaVita switch not built") != std::string::npos);
+    }
+#endif
+#endif
+}
+
+TEST_CASE("Builtin catalog - ToupTek switch normalize accepts thermal and stellavita and refuses others",
+          "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    for (const char* ok : {"thermal", "stellavita"}) {
+        DeviceConfig cfg;
+        cfg.set("switchType", std::string{ok});
+        CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, cfg, Source::Api).rejection.has_value());
+    }
+    // Absent means stellavita, as the router arm defaulted it.
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, DeviceConfig{}, Source::Api).rejection.has_value());
+
+    for (const char* bad : {"Thermal", "", "powerbox"}) {
+        DeviceConfig cfg;
+        cfg.set("switchType", std::string{bad});
+        const auto api = catalog.normalize(kTouptekSwitchKey, cfg, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              std::string("Unknown ToupTek switchType '") + bad + "' (expected 'thermal' or 'stellavita')");
+    }
+}
+
+#ifdef ALPACACORE_TOUPTEK_STELLAVITA
+TEST_CASE("Builtin catalog - ToupTek stellavita gpioChip must be the board chip", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig board;
+    board.set("gpioChip", std::string{"/dev/gpiochip0"});
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, board, Source::Api).rejection.has_value());
+
+    DeviceConfig other;
+    other.set("gpioChip", std::string{"/dev/gpiochip1"});
+    const auto refused = catalog.normalize(kTouptekSwitchKey, other, Source::Api);
+    REQUIRE(refused.rejection.has_value());
+    CHECK(refused.rejection->rfind("Hardware config refused: 'gpioChip' must be '/dev/gpiochip0' for this board", 0) ==
+          0);
+
+    // The thermal backend opens no GPIO chip, so the field is not checked there.
+    other.set("switchType", std::string{"thermal"});
+    CHECK_FALSE(catalog.normalize(kTouptekSwitchKey, other, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - ToupTek stellavita factory refuses a foreign gpioChip", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    register_builtin_factories(catalog);
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    DeviceConfig cfg;
+    cfg.set("gpioChip", std::string{"/dev/gpiochip1"});
+    try {
+        (void)catalog.create(kTouptekSwitchKey, cfg, 9);
+        FAIL("a foreign gpioChip must be refused on the persisted path");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+    }
+#endif
+}
+#endif
+
+TEST_CASE("Builtin catalog - ToupTek sanitize keeps the declared fields per device type", "[catalog][touptek][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("focuserIndex", std::int64_t{5});  // a focuser key, not a camera one
+    const DeviceConfig kept_camera = catalog.sanitize(kTouptekCameraKey, camera);
+    CHECK(kept_camera.entries().size() == 1);
+    CHECK_FALSE(kept_camera.has("focuserIndex"));
+
+    DeviceConfig focuser;
+    focuser.set("focuserIndex", std::int64_t{2});
+    focuser.set("focuserId", std::string{"AAF-1"});
+    focuser.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_focuser = catalog.sanitize(kTouptekFocuserKey, focuser);
+    CHECK(kept_focuser.entries().size() == 2);
+    CHECK_FALSE(kept_focuser.has("bogusKey"));
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterwheelId", std::string{"AFW-1"});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    wheel.set("cameraIndex", std::int64_t{3});
+    const DeviceConfig kept_wheel = catalog.sanitize(kTouptekWheelKey, wheel);
+    CHECK(kept_wheel.entries().size() == 3);
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("cameraIndex"));
+
+    DeviceConfig sw;
+    sw.set("switchType", std::string{"stellavita"});
+    sw.set("cameraIndex", std::int64_t{2});
+    sw.set("gpioChip", std::string{"/dev/gpiochip0"});
+    sw.set("pwmFrequencyHz", std::int64_t{100});
+    DeviceConfig port;
+    port.set("name", std::string{"Flat Panel"});
+    port.set("pwm", true);
+    port.set("bogusKey", true);
+    sw.set("ports", std::vector<DeviceConfig>{port});
+    sw.set("bogusKey", std::int64_t{1});
+    const DeviceConfig kept_switch = catalog.sanitize(kTouptekSwitchKey, sw);
+    CHECK(kept_switch.entries().size() == 5);
+    CHECK_FALSE(kept_switch.has("bogusKey"));
+    const ConfigValue* ports_value = kept_switch.find_value("ports");
+    REQUIRE(ports_value != nullptr);
+    const auto* kept_ports = std::get_if<std::vector<DeviceConfig>>(ports_value);
+    REQUIRE(kept_ports != nullptr);
+    REQUIRE(kept_ports->size() == 1);
+    CHECK((*kept_ports)[0].has("name"));
+    CHECK((*kept_ports)[0].has("pwm"));
+    CHECK_FALSE((*kept_ports)[0].has("bogusKey"));
+}
+
+// ---------------------------------------------------------------------------
+// Gemini focuser, flat panel and Power & Data Hub switch. The focuser, flat
+// panel and hub auto-detect factories construct without a scan (#659), so no
+// port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kGeminiFocuserKey{"gemini", DeviceType::Focuser};
+const DeviceKey kGeminiPanelKey{"gemini", DeviceType::CoverCalibrator};
+const DeviceKey kGeminiSwitchKey{"gemini", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the Gemini devices in every build",
+          "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kGeminiFocuserKey, kGeminiPanelKey, kGeminiSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_GEMINI");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    CHECK(keys_of(find_view(views, kGeminiFocuserKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "focuserIndex"});
+    CHECK(keys_of(find_view(views, kGeminiPanelKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "flatPanelModel", "panelIndex"});
+    CHECK(keys_of(find_view(views, kGeminiSwitchKey)) ==
+          std::vector<std::string>{"switchType", "connectionType", "portPath", "baudRate", "hubIndex"});
+
+    // The hub's serial default differs from the focuser's and the panel's.
+    CHECK(same_scalar(find_field(find_view(views, kGeminiFocuserKey)->fields, "baudRate")->default_value,
+                      std::int64_t{9600}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiPanelKey)->fields, "baudRate")->default_value,
+                      std::int64_t{9600}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiSwitchKey)->fields, "baudRate")->default_value,
+                      std::int64_t{19200}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiPanelKey)->fields, "flatPanelModel")->default_value,
+                      std::string{"lite"}));
+    CHECK(same_scalar(find_field(find_view(views, kGeminiSwitchKey)->fields, "switchType")->default_value,
+                      std::string{"pdh-adv3"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the Gemini devices available only when built",
+          "[catalog][gemini][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kGeminiFocuserKey, kGeminiPanelKey, kGeminiSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_GEMINI
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when Gemini is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_GEMINI") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_GEMINI
+    // Nothing here opens a port: the by-index paths resolve at connect (#659).
+    auto focuser_auto = catalog.create(kGeminiFocuserKey, DeviceConfig{}, 3);
+    REQUIRE(focuser_auto != nullptr);
+    CHECK(focuser_auto->get_device_type() == DeviceType::Focuser);
+    CHECK(focuser_auto->get_device_number() == 3);
+    CHECK_FALSE(focuser_auto->get_connected());
+
+    DeviceConfig focuser_serial;
+    focuser_serial.set("connectionType", std::string{"serial"});
+    focuser_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+    REQUIRE(catalog.create(kGeminiFocuserKey, focuser_serial, 4) != nullptr);
+    // Serial with no port falls back to auto-detect, as the router arm did.
+    DeviceConfig focuser_no_port;
+    focuser_no_port.set("connectionType", std::string{"serial"});
+    REQUIRE(catalog.create(kGeminiFocuserKey, focuser_no_port, 5) != nullptr);
+
+    for (const char* model : {"lite", "v2", "pro", "unknown"}) {
+        INFO(model);
+        DeviceConfig panel;
+        panel.set("flatPanelModel", std::string{model});
+        auto by_index = catalog.create(kGeminiPanelKey, panel, 6);
+        REQUIRE(by_index != nullptr);
+        CHECK(by_index->get_device_type() == DeviceType::CoverCalibrator);
+        panel.set("connectionType", std::string{"serial"});
+        panel.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+        REQUIRE(catalog.create(kGeminiPanelKey, panel, 7) != nullptr);
+    }
+
+    auto hub_auto = catalog.create(kGeminiSwitchKey, DeviceConfig{}, 8);
+    REQUIRE(hub_auto != nullptr);
+    CHECK(hub_auto->get_device_type() == DeviceType::Switch);
+    DeviceConfig hub_serial;
+    hub_serial.set("connectionType", std::string{"serial"});
+    hub_serial.set("portPath", std::string{"/dev/ttyUSB-no-such-gemini"});
+    REQUIRE(catalog.create(kGeminiSwitchKey, hub_serial, 9) != nullptr);
+
+    // A serial hub with no port is built (#508 item 1) so a saved entry stays registered, but
+    // never into a hub that would auto-detect behind the user's back: its connect refuses.
+    DeviceConfig hub_no_port;
+    hub_no_port.set("connectionType", std::string{"serial"});
+    auto hub_unported = catalog.create(kGeminiSwitchKey, hub_no_port, 10);
+    REQUIRE(hub_unported != nullptr);
+    CHECK_THROWS_AS(hub_unported->set_connected(true), AlpacaException);
+    CHECK_FALSE(hub_unported->get_connected());
+    DeviceConfig hub_bad_type;
+    hub_bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kGeminiSwitchKey, hub_bad_type, 11), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - Gemini switch normalize refuses a bad switchType, a missing port or a negative hubIndex",
+          "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    CHECK_FALSE(catalog.normalize(kGeminiSwitchKey, DeviceConfig{}, Source::Api).rejection.has_value());
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    const auto bad = catalog.normalize(kGeminiSwitchKey, bad_type, Source::Api);
+    REQUIRE(bad.rejection.has_value());
+    CHECK(*bad.rejection == "Unknown Gemini switchType: not-a-backend (supported: pdh-adv3)");
+
+    DeviceConfig no_port;
+    no_port.set("connectionType", std::string{"serial"});
+    const auto no_port_api = catalog.normalize(kGeminiSwitchKey, no_port, Source::Api);
+    REQUIRE(no_port_api.rejection.has_value());
+    CHECK(*no_port_api.rejection == "portPath is required when connectionType is 'serial' (or use 'auto').");
+    // A saved config is kept and warned about, so it stays editable.
+    const auto no_port_saved = catalog.normalize(kGeminiSwitchKey, no_port, Source::Persisted);
+    CHECK_FALSE(no_port_saved.rejection.has_value());
+    REQUIRE(no_port_saved.warnings.size() == 1);
+
+    DeviceConfig negative;
+    negative.set("hubIndex", std::int64_t{-1});
+    const auto negative_api = catalog.normalize(kGeminiSwitchKey, negative, Source::Api);
+    REQUIRE(negative_api.rejection.has_value());
+    CHECK(*negative_api.rejection == "hubIndex must be >= 0.");
+    negative.set("hubIndex", std::int64_t{0});
+    CHECK_FALSE(catalog.normalize(kGeminiSwitchKey, negative, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - Gemini sanitize keeps the declared fields per device type", "[catalog][gemini][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig panel;
+    panel.set("connectionType", std::string{"serial"});
+    panel.set("portPath", std::string{"/dev/ttyUSB3"});
+    panel.set("baudRate", std::int64_t{19200});
+    panel.set("flatPanelModel", std::string{"pro"});
+    panel.set("panelIndex", std::int64_t{2});
+    panel.set("focuserIndex", std::int64_t{5});  // a focuser key, not a panel one
+    panel.set("hubIndex", std::int64_t{1});      // a switch key, not a panel one
+    const DeviceConfig kept_panel = catalog.sanitize(kGeminiPanelKey, panel);
+    CHECK(kept_panel.entries().size() == 5);
+    CHECK_FALSE(kept_panel.has("focuserIndex"));
+    CHECK_FALSE(kept_panel.has("hubIndex"));
+    CHECK(string_at(kept_panel, "flatPanelModel") == "pro");
+
+    DeviceConfig hub;
+    hub.set("switchType", std::string{"pdh-adv3"});
+    hub.set("connectionType", std::string{"auto"});
+    hub.set("hubIndex", std::int64_t{1});
+    hub.set("portPath", std::string{"/dev/ttyUSB3"});
+    hub.set("panelIndex", std::int64_t{2});
+    const DeviceConfig kept_hub = catalog.sanitize(kGeminiSwitchKey, hub);
+    CHECK(kept_hub.has("switchType"));
+    CHECK(kept_hub.has("hubIndex"));
+    CHECK(kept_hub.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
+    CHECK_FALSE(kept_hub.has("panelIndex"));
+
+    DeviceConfig focuser;
+    focuser.set("focuserIndex", std::int64_t{1});
+    focuser.set("flatPanelModel", std::string{"v2"});
+    const DeviceConfig kept_focuser = catalog.sanitize(kGeminiFocuserKey, focuser);
+    CHECK(kept_focuser.has("focuserIndex"));
+    CHECK_FALSE(kept_focuser.has("flatPanelModel"));
+}
+
+// ---------------------------------------------------------------------------
+// WandererAstro cover calibrator, rotator, filter wheel and WandererBox switch.
+// Every auto-detect factory constructs without a scan (#659), so no port is
+// opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kWandererCoverKey{"wandererastro", DeviceType::CoverCalibrator};
+const DeviceKey kWandererRotatorKey{"wandererastro", DeviceType::Rotator};
+const DeviceKey kWandererWheelKey{"wandererastro", DeviceType::FilterWheel};
+const DeviceKey kWandererBoxKey{"wandererastro", DeviceType::Switch};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the WandererAstro devices in every build",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kWandererCoverKey, kWandererRotatorKey, kWandererWheelKey, kWandererBoxKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_WANDERERASTRO");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+        CHECK(same_scalar(find_field(v->fields, "baudRate")->default_value, std::int64_t{19200}));
+    }
+    CHECK(keys_of(find_view(views, kWandererCoverKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "coverIndex"});
+    CHECK(keys_of(find_view(views, kWandererRotatorKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "baudRate", "rotatorIndex"});
+    CHECK(
+        keys_of(find_view(views, kWandererWheelKey)) ==
+        std::vector<std::string>{"connectionType", "portPath", "baudRate", "wandererFilterwheelIndex", "filterNames"});
+    CHECK(keys_of(find_view(views, kWandererBoxKey)) ==
+          std::vector<std::string>{"switchType", "connectionType", "portPath", "baudRate", "boxIndex"});
+
+    // filterNames is a declared string list, so the catalog (not the router) rejects a wrong type.
+    CHECK(find_field(find_view(views, kWandererWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
+    CHECK(same_scalar(find_field(find_view(views, kWandererBoxKey)->fields, "switchType")->default_value,
+                      std::string{"wandererbox-pro-v3"}));
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the WandererAstro devices available only when built",
+          "[catalog][wandererastro][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kWandererCoverKey, kWandererRotatorKey, kWandererWheelKey, kWandererBoxKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when WandererAstro is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_WANDERERASTRO") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    const std::pair<DeviceKey, DeviceType> keys[] = {{kWandererCoverKey, DeviceType::CoverCalibrator},
+                                                     {kWandererRotatorKey, DeviceType::Rotator},
+                                                     {kWandererWheelKey, DeviceType::FilterWheel},
+                                                     {kWandererBoxKey, DeviceType::Switch}};
+    for (const auto& [key, type] : keys) {
+        // Nothing here opens a port: the by-index paths resolve at connect (#659).
+        auto auto_mode = catalog.create(key, DeviceConfig{}, 3);
+        REQUIRE(auto_mode != nullptr);
+        CHECK(auto_mode->get_device_type() == type);
+        CHECK(auto_mode->get_device_number() == 3);
+        CHECK_FALSE(auto_mode->get_connected());
+
+        DeviceConfig serial;
+        serial.set("connectionType", std::string{"serial"});
+        serial.set("portPath", std::string{"/dev/ttyUSB-no-such-wanderer"});
+        REQUIRE(catalog.create(key, serial, 4) != nullptr);
+
+        // Serial mode means an explicit port: no silent auto-detect. A saved entry with none is
+        // still built (#508 item 1) and its connect refuses naming portPath.
+        DeviceConfig no_port;
+        no_port.set("connectionType", std::string{"serial"});
+        auto unported = catalog.create(key, no_port, 5);
+        REQUIRE(unported != nullptr);
+        CHECK_THROWS_AS(unported->set_connected(true), AlpacaException);
+        CHECK_FALSE(unported->get_connected());
+    }
+
+    DeviceConfig names;
+    names.set("filterNames", std::vector<std::string>{"L", "R", "G", "B", "Ha", "OIII", "SII", "Dark"});
+    auto wheel = catalog.create(kWandererWheelKey, names, 6);
+    REQUIRE(wheel != nullptr);
+    CHECK(wheel->get_device_type() == DeviceType::FilterWheel);
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kWandererBoxKey, bad_type, 7), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - WandererAstro normalize refuses a missing port, a negative index or a bad switchType",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const std::pair<DeviceKey, const char*> indexed[] = {{kWandererCoverKey, "coverIndex"},
+                                                         {kWandererRotatorKey, "rotatorIndex"},
+                                                         {kWandererWheelKey, "wandererFilterwheelIndex"},
+                                                         {kWandererBoxKey, "boxIndex"}};
+    for (const auto& [key, index_key] : indexed) {
+        INFO(index_key);
+        CHECK_FALSE(catalog.normalize(key, DeviceConfig{}, Source::Api).rejection.has_value());
+
+        DeviceConfig no_port;
+        no_port.set("connectionType", std::string{"serial"});
+        const auto no_port_api = catalog.normalize(key, no_port, Source::Api);
+        REQUIRE(no_port_api.rejection.has_value());
+        CHECK(*no_port_api.rejection == "portPath is required when connectionType is 'serial' (or use 'auto').");
+        // A saved config is kept and warned about, so it stays editable.
+        const auto no_port_saved = catalog.normalize(key, no_port, Source::Persisted);
+        CHECK_FALSE(no_port_saved.rejection.has_value());
+        REQUIRE(no_port_saved.warnings.size() == 1);
+
+        DeviceConfig negative;
+        negative.set(index_key, std::int64_t{-1});
+        const auto negative_api = catalog.normalize(key, negative, Source::Api);
+        REQUIRE(negative_api.rejection.has_value());
+        CHECK(*negative_api.rejection == std::string(index_key) + " must be >= 0.");
+        negative.set(index_key, std::int64_t{0});
+        CHECK_FALSE(catalog.normalize(key, negative, Source::Api).rejection.has_value());
+    }
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    const auto bad = catalog.normalize(kWandererBoxKey, bad_type, Source::Api);
+    REQUIRE(bad.rejection.has_value());
+    CHECK(*bad.rejection == "Unknown WandererAstro switchType: not-a-backend (supported: wandererbox-pro-v3)");
+
+    // filterNames of the wrong type is rejected by the declared StringList field.
+    DeviceConfig wrong_names;
+    wrong_names.set("filterNames", std::string{"L,R,G,B"});
+    CHECK(catalog.normalize(kWandererWheelKey, wrong_names, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - WandererAstro sanitize keeps the declared fields per device type",
+          "[catalog][wandererastro][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig cover;
+    cover.set("connectionType", std::string{"auto"});
+    cover.set("coverIndex", std::int64_t{1});
+    cover.set("rotatorIndex", std::int64_t{2});  // a rotator key, not a cover one
+    cover.set("filterNames", std::vector<std::string>{"L"});
+    const DeviceConfig kept_cover = catalog.sanitize(kWandererCoverKey, cover);
+    CHECK(kept_cover.has("coverIndex"));
+    CHECK_FALSE(kept_cover.has("rotatorIndex"));
+    CHECK_FALSE(kept_cover.has("filterNames"));
+
+    DeviceConfig wheel;
+    wheel.set("wandererFilterwheelIndex", std::int64_t{1});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    wheel.set("filterwheelIndex", std::int64_t{5});  // the ZWO key, not a Wanderer one
+    wheel.set("boxIndex", std::int64_t{2});
+    const DeviceConfig kept_wheel = catalog.sanitize(kWandererWheelKey, wheel);
+    CHECK(kept_wheel.has("wandererFilterwheelIndex"));
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("filterwheelIndex"));
+    CHECK_FALSE(kept_wheel.has("boxIndex"));
+
+    DeviceConfig box;
+    box.set("switchType", std::string{"wandererbox-pro-v3"});
+    box.set("boxIndex", std::int64_t{1});
+    box.set("portPath", std::string{"/dev/ttyUSB4"});
+    box.set("coverIndex", std::int64_t{3});
+    const DeviceConfig kept_box = catalog.sanitize(kWandererBoxKey, box);
+    CHECK(kept_box.has("switchType"));
+    CHECK(kept_box.has("boxIndex"));
+    CHECK(kept_box.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
+    CHECK_FALSE(kept_box.has("coverIndex"));
+}
+
+// ---------------------------------------------------------------------------
+// ZWO telescope, camera, EFW filter wheel, EAF focuser, CAA rotator and the switch
+// (dew heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568). Every create-based
+// factory constructs without touching the SDK or the bus; the camera binds
+// through its bind hook (test_zwo_camera_catalog.cpp).
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kZwoTelescopeKey{"zwo", DeviceType::Telescope};
+const DeviceKey kZwoCameraKey{"zwo", DeviceType::Camera};
+const DeviceKey kZwoWheelKey{"zwo", DeviceType::FilterWheel};
+const DeviceKey kZwoFocuserKey{"zwo", DeviceType::Focuser};
+const DeviceKey kZwoRotatorKey{"zwo", DeviceType::Rotator};
+const DeviceKey kZwoSwitchKey{"zwo", DeviceType::Switch};
+
+DeviceConfig zwo_port(std::int64_t gpio) {
+    DeviceConfig port;
+    port.set("gpio", gpio);
+    return port;
+}
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices in every build",
+          "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key :
+         {kZwoTelescopeKey, kZwoCameraKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_ZWO");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+        // A stored selector normalize drops is forgotten in the file (it replaces a router vendor test).
+        CHECK(v->forget_dropped_selectors);
+    }
+    // The camera's selectors are its own: unlike the dew heater switch's, they carry no applies_when.
+    CHECK(keys_of(find_view(views, kZwoCameraKey)) ==
+          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName"});
+    CHECK_FALSE(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->applies_when.has_value());
+    CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->role == Role::EnumerationIndex);
+    CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraId")->role == Role::DeviceId);
+
+    CHECK(keys_of(find_view(views, kZwoWheelKey)) ==
+          std::vector<std::string>{"filterwheelIndex", "filterwheelId", "filterNames"});
+    CHECK(keys_of(find_view(views, kZwoFocuserKey)) ==
+          std::vector<std::string>{"focuserIndex", "focuserId", "maxStep"});
+    CHECK(keys_of(find_view(views, kZwoRotatorKey)) == std::vector<std::string>{"rotatorIndex", "rotatorId"});
+    CHECK(keys_of(find_view(views, kZwoSwitchKey)) == std::vector<std::string>{"switchType", "cameraIndex", "cameraId",
+                                                                               "serialNumber", "gpioChip", "devicePath",
+                                                                               "pwmFrequencyHz", "ports"});
+    CHECK(find_field(find_view(views, kZwoWheelKey)->fields, "filterNames")->kind == FieldRef::Kind::StringList);
+    CHECK(find_field(find_view(views, kZwoSwitchKey)->fields, "ports")->kind == FieldRef::Kind::RecordList);
+    CHECK(same_scalar(find_field(find_view(views, kZwoSwitchKey)->fields, "switchType")->default_value,
+                      std::string{"dewheater"}));
+    CHECK(same_scalar(find_field(find_view(views, kZwoTelescopeKey)->fields, "tcpPort")->default_value,
+                      std::int64_t{4030}));
+}
+
+// open-astro#1152. Falsified by: zwo_fields.h kZwoFocuserMaxStep dropping .min = 1 (maxStep 0 is accepted)
+// or filling a default when the key is absent (the persisted config gains maxStep).
+TEST_CASE("Builtin catalog - the ZWO focuser maxStep is optional and range-checked", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig absent;
+    absent.set("focuserIndex", std::int64_t{0});
+    const auto unset = catalog.normalize(kZwoFocuserKey, absent, Source::Persisted);
+    CHECK(unset.warnings.empty());
+    CHECK_FALSE(unset.config.has("maxStep"));  // absent stays absent: no default is written
+    CHECK_FALSE(catalog.normalize(kZwoFocuserKey, absent, Source::Api).rejection.has_value());
+
+    for (const std::int64_t bad : {std::int64_t{0}, std::int64_t{-5}, std::int64_t{2000001}}) {
+        INFO(bad);
+        DeviceConfig config = absent;
+        config.set("maxStep", bad);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == "maxStep is out of range (min 1) (max 2000000)");
+        const auto persisted = catalog.normalize(kZwoFocuserKey, config, Source::Persisted);
+        CHECK_FALSE(persisted.config.has("maxStep"));  // dropped to unset
+    }
+    for (const std::int64_t good : {std::int64_t{1}, std::int64_t{60000}, std::int64_t{2000000}}) {
+        INFO(good);
+        DeviceConfig config = absent;
+        config.set("maxStep", good);
+        const auto api = catalog.normalize(kZwoFocuserKey, config, Source::Api);
+        CHECK_FALSE(api.rejection.has_value());
+        CHECK(api.config.has("maxStep"));
+    }
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the ZWO devices available only when built",
+          "[catalog][zwo][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key :
+         {kZwoTelescopeKey, kZwoCameraKey, kZwoWheelKey, kZwoFocuserKey, kZwoRotatorKey, kZwoSwitchKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_ZWO
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when ZWO is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_ZWO") != std::string::npos);
+        }
+#endif
+    }
+#ifdef ALPACACORE_ENABLE_ZWO
+    // SDK-bound types: an index or an id binds. An unbound factory result is
+    // also allowed so persisted entries with a dropped selector stay listed.
+    const std::tuple<DeviceKey, DeviceType, const char*, const char*> bound[] = {
+        {kZwoWheelKey, DeviceType::FilterWheel, "filterwheelIndex", "filterwheelId"},
+        {kZwoFocuserKey, DeviceType::Focuser, "focuserIndex", "focuserId"},
+        {kZwoRotatorKey, DeviceType::Rotator, "rotatorIndex", "rotatorId"}};
+    for (const auto& [key, type, index_key, id_key] : bound) {
+        INFO(index_key);
+        auto unbound = catalog.create(key, DeviceConfig{}, 1);
+        REQUIRE(unbound != nullptr);
+        CHECK(unbound->get_device_type() == type);
+        CHECK(unbound->get_device_number() == 1);
+        CHECK_FALSE(unbound->get_connected());
+        DeviceConfig by_index;
+        by_index.set(index_key, std::int64_t{0});
+        auto a = catalog.create(key, by_index, 2);
+        REQUIRE(a != nullptr);
+        CHECK(a->get_device_type() == type);
+        CHECK(a->get_device_number() == 2);
+        CHECK_FALSE(a->get_connected());
+        DeviceConfig by_id;
+        by_id.set(id_key, std::int64_t{3});
+        REQUIRE(catalog.create(key, by_id, 3) != nullptr);
+    }
+
+    DeviceConfig scope;
+    scope.set("connectionType", std::string{"serial"});
+    scope.set("portPath", std::string{"/dev/ttyUSB-no-such-zwo"});
+    auto telescope = catalog.create(kZwoTelescopeKey, scope, 4);
+    REQUIRE(telescope != nullptr);
+    CHECK(telescope->get_device_type() == DeviceType::Telescope);
+    CHECK_FALSE(telescope->get_connected());
+    // Auto mode scans at connect, never at registration.
+    REQUIRE(catalog.create(kZwoTelescopeKey, DeviceConfig{}, 5) != nullptr);
+
+    DeviceConfig dew;
+    dew.set("cameraIndex", std::int64_t{1});
+    auto dew_switch = catalog.create(kZwoSwitchKey, dew, 6);
+    REQUIRE(dew_switch != nullptr);
+    CHECK(dew_switch->get_device_type() == DeviceType::Switch);
+    auto unbound_dew = catalog.create(kZwoSwitchKey, DeviceConfig{}, 7);
+    REQUIRE(unbound_dew != nullptr);
+    CHECK(unbound_dew->get_device_type() == DeviceType::Switch);
+    CHECK_FALSE(unbound_dew->get_connected());
+
+    DeviceConfig names;
+    names.set("filterwheelIndex", std::int64_t{0});
+    names.set("filterNames", std::vector<std::string>{"L", "R", "G", "B", "Ha"});
+    REQUIRE(catalog.create(kZwoWheelKey, names, 8) != nullptr);
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"not-a-backend"});
+    CHECK_THROWS_AS(catalog.create(kZwoSwitchKey, bad_type, 9), AlpacaException);
+#endif
+}
+
+TEST_CASE("Builtin catalog - ZWO normalize keeps the arms' refusals and texts", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto refusal_of = [&](const DeviceKey& key, const DeviceConfig& config) {
+        const auto result = catalog.normalize(key, config, Source::Api);
+        return result.rejection.value_or("");
+    };
+
+    CHECK(refusal_of(kZwoWheelKey, DeviceConfig{}) == "ZWO filter wheel requires filterwheelIndex or filterwheelId");
+    CHECK(refusal_of(kZwoFocuserKey, DeviceConfig{}) == "ZWO EAF focuser requires focuserIndex or focuserId");
+    CHECK(refusal_of(kZwoRotatorKey, DeviceConfig{}) == "ZWO rotator requires rotatorIndex or rotatorId");
+    // A dew heater with no camera selector is Auto, so nothing is refused; a non-hex serial is.
+    CHECK(refusal_of(kZwoSwitchKey, DeviceConfig{}).empty());
+    DeviceConfig forged_serial;
+    forged_serial.set("serialNumber", std::string{"not-hex"});
+    CHECK(refusal_of(kZwoSwitchKey, forged_serial) == "Invalid value for serialNumber");
+    CHECK(refusal_of(kZwoCameraKey, DeviceConfig{}) == "ZWO camera requires cameraIndex or cameraId");
+
+    DeviceConfig index;
+    index.set("filterwheelIndex", std::int64_t{0});
+    CHECK(refusal_of(kZwoWheelKey, index).empty());
+    DeviceConfig id;
+    id.set("focuserId", std::int64_t{0});
+    CHECK(refusal_of(kZwoFocuserKey, id).empty());
+
+    // filterNames of the wrong type is rejected by the declared StringList field.
+    DeviceConfig wrong_names = index;
+    wrong_names.set("filterNames", std::string{"L,R,G,B"});
+    CHECK(catalog.normalize(kZwoWheelKey, wrong_names, Source::Api).rejection.has_value());
+
+    DeviceConfig bad_type;
+    bad_type.set("switchType", std::string{"nope"});
+    CHECK(refusal_of(kZwoSwitchKey, bad_type) ==
+          "ZWO switchType must be 'dewheater', 'asiair', 'asiair-plus-picm4', or 'asiair-plus-rk3568'");
+    // The match is case-insensitive, as the arm's was.
+    DeviceConfig upper;
+    upper.set("switchType", std::string{"ASIAIR"});
+    CHECK(refusal_of(kZwoSwitchKey, upper).empty());
+
+    DeviceConfig rk;
+    rk.set("switchType", std::string{"asiair-plus-rk3568"});
+    rk.set("devicePath", std::string{"/dev/null"});
+    CHECK(refusal_of(kZwoSwitchKey, rk).rfind("Hardware config refused: 'devicePath'", 0) == 0);
+
+    DeviceConfig chip;
+    chip.set("switchType", std::string{"asiair"});
+    chip.set("gpioChip", std::string{"/dev/gpiochip3"});
+    CHECK(refusal_of(kZwoSwitchKey, chip).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+    chip.set("switchType", std::string{"asiair-plus-picm4"});
+    CHECK(refusal_of(kZwoSwitchKey, chip).rfind("Hardware config refused: 'gpioChip'", 0) == 0);
+
+    DeviceConfig ports;
+    ports.set("switchType", std::string{"asiair"});
+    ports.set("ports", std::vector<DeviceConfig>{DeviceConfig{}});
+    CHECK(refusal_of(kZwoSwitchKey, ports) == "ASIAIR port entry requires integer 'gpio'");
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(5)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).rfind("Hardware config refused: 'ports[].gpio'", 0) == 0);
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(12), zwo_port(12)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).find("at most once") != std::string::npos);
+    ports.set("ports", std::vector<DeviceConfig>{zwo_port(12), zwo_port(13), zwo_port(26), zwo_port(18)});
+    CHECK(refusal_of(kZwoSwitchKey, ports).empty());
+    // The RK3568 layout ignores gpio.
+    DeviceConfig rk_ports;
+    rk_ports.set("switchType", std::string{"asiair-plus-rk3568"});
+    rk_ports.set("ports", std::vector<DeviceConfig>{DeviceConfig{}});
+    CHECK(refusal_of(kZwoSwitchKey, rk_ports).empty());
+}
+
+TEST_CASE("Builtin catalog - ZWO telescope connection type and endpoint rules", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // An empty or absent connectionType is "auto" for every mount, this one included (#508 item 3): accepted from
+    // the API and read as auto when saved, with no "not one this driver knows" warning.
+    const auto type_of = [](const NormalizeResult& r) {
+        const ConfigValue* v = r.config.find_value("connectionType");
+        return v ? std::get<std::string>(*v) : std::string{"<unset>"};
+    };
+    DeviceConfig empty_type;
+    empty_type.set("connectionType", std::string{});
+    for (const DeviceConfig& config : {DeviceConfig{}, empty_type}) {
+        for (const Source source : {Source::Api, Source::Persisted}) {
+            const auto result = catalog.normalize(kZwoTelescopeKey, config, source);
+            CHECK_FALSE(result.rejection.has_value());
+            CHECK(result.warnings.empty());
+            CHECK(type_of(result) == "auto");
+        }
+    }
+
+    DeviceConfig autod;
+    autod.set("connectionType", std::string{"auto"});
+    CHECK_FALSE(catalog.normalize(kZwoTelescopeKey, autod, Source::Api).rejection.has_value());
+
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    const auto no_port = catalog.normalize(kZwoTelescopeKey, serial, Source::Api);
+    REQUIRE(no_port.rejection.has_value());
+    CHECK(*no_port.rejection == "Serial port path is required");
+    CHECK_FALSE(catalog.normalize(kZwoTelescopeKey, serial, Source::Persisted).rejection.has_value());
+
+    DeviceConfig network;
+    network.set("connectionType", std::string{"network"});
+    const auto no_host = catalog.normalize(kZwoTelescopeKey, network, Source::Api);
+    REQUIRE(no_host.rejection.has_value());
+    CHECK(*no_host.rejection == "Host IP address is required");
+
+    DeviceConfig bogus;
+    bogus.set("connectionType", std::string{"usb"});
+    const auto bogus_api = catalog.normalize(kZwoTelescopeKey, bogus, Source::Api);
+    REQUIRE(bogus_api.rejection.has_value());
+    CHECK(*bogus_api.rejection == "Invalid connection type. Use 'serial', 'network', or 'auto'");
+    // A non-empty unknown saved value is unchanged: warned about and read as serial.
+    const auto bogus_saved = catalog.normalize(kZwoTelescopeKey, bogus, Source::Persisted);
+    CHECK_FALSE(bogus_saved.rejection.has_value());
+    REQUIRE_FALSE(bogus_saved.warnings.empty());
+    CHECK(bogus_saved.warnings.front().find("has connectionType \"usb\"") != std::string::npos);
+    CHECK(type_of(bogus_saved) == "serial");
+}
+
+TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device type", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig wheel;
+    wheel.set("filterwheelIndex", std::int64_t{1});
+    wheel.set("filterwheelId", std::int64_t{5});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    wheel.set("focuserIndex", std::int64_t{2});  // a focuser key, not a wheel one
+    const DeviceConfig kept_wheel = catalog.sanitize(kZwoWheelKey, wheel);
+    CHECK(kept_wheel.has("filterwheelIndex"));
+    CHECK(kept_wheel.has("filterwheelId"));
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK_FALSE(kept_wheel.has("focuserIndex"));
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{1});
+    camera.set("cameraId", std::int64_t{7});
+    camera.set("serialNumber", std::string{"0c190e111d020900"});
+    camera.set("cameraName", std::string{"ZWO ASI533MC Pro"});
+    camera.set("uniqueId", std::string{"ZWO_UID_00112233445566ff"});
+    camera.set("switchType", std::string{"asiair"});  // a switch key, not a camera one
+    const DeviceConfig kept_camera = catalog.sanitize(kZwoCameraKey, camera);
+    for (const char* key : {"cameraIndex", "cameraId", "serialNumber", "cameraName"}) {
+        INFO(key);
+        CHECK(kept_camera.has(key));
+    }
+    CHECK_FALSE(kept_camera.has("switchType"));
+    // uniqueId is the router's key for every device (decision 0018), not a ZWO camera field.
+    CHECK_FALSE(kept_camera.has("uniqueId"));
+
+    DeviceConfig scope;
+    scope.set("connectionType", std::string{"network"});
+    scope.set("host", std::string{"192.168.4.1"});
+    scope.set("tcpPort", std::int64_t{4030});
+    scope.set("rotatorId", std::int64_t{1});
+    const DeviceConfig kept_scope = catalog.sanitize(kZwoTelescopeKey, scope);
+    CHECK(kept_scope.has("host"));
+    CHECK(kept_scope.has("tcpPort"));
+    CHECK_FALSE(kept_scope.has("rotatorId"));
+
+    DeviceConfig port;
+    port.set("gpio", std::int64_t{12});
+    port.set("name", std::string{"Mount"});
+    port.set("pwm", true);
+    port.set("secretish", std::string{"x"});
+    DeviceConfig sw;
+    sw.set("switchType", std::string{"asiair"});
+    sw.set("gpioChip", std::string{"/dev/gpiochip0"});
+    sw.set("ports", std::vector<DeviceConfig>{port});
+    sw.set("focuserId", std::int64_t{1});
+    const DeviceConfig kept_sw = catalog.sanitize(kZwoSwitchKey, sw);
+    CHECK(kept_sw.has("switchType"));
+    CHECK(kept_sw.has("gpioChip"));
+    CHECK_FALSE(kept_sw.has("focuserId"));
+    const ConfigValue* ports_value = kept_sw.find_value("ports");
+    REQUIRE(ports_value != nullptr);
+    const auto* kept_ports = std::get_if<std::vector<DeviceConfig>>(ports_value);
+    REQUIRE(kept_ports != nullptr);
+    REQUIRE(kept_ports->size() == 1);
+    CHECK((*kept_ports)[0].has("gpio"));
+    CHECK((*kept_ports)[0].has("pwm"));
+    CHECK_FALSE((*kept_ports)[0].has("secretish"));
+}
+
+TEST_CASE("Builtin catalog - ZWO camera identity strings and selector rule", "[catalog][zwo][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig by_index;
+    by_index.set("cameraIndex", std::int64_t{1});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_index, Source::Api).rejection.has_value());
+    // A serial or a model name alone also names a camera, as the arm allowed.
+    DeviceConfig by_serial;
+    by_serial.set("serialNumber", std::string{"0c190e111d020900"});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_serial, Source::Api).rejection.has_value());
+    DeviceConfig by_name;
+    by_name.set("cameraName", std::string{"ZWO ASI533MC Pro"});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, by_name, Source::Api).rejection.has_value());
+    // The sentinel -1 is "not set", so it is not a selector.
+    DeviceConfig sentinel;
+    sentinel.set("cameraIndex", std::int64_t{-1});
+    sentinel.set("cameraId", std::int64_t{-1});
+    CHECK(catalog.normalize(kZwoCameraKey, sentinel, Source::Api).rejection.value_or("") ==
+          "ZWO camera requires cameraIndex or cameraId");
+    // A saved entry without a selector registers anyway, so it stays listed and editable.
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, DeviceConfig{}, Source::Persisted).rejection.has_value());
+
+    struct Bad {
+        const char* field;
+        const char* value;
+    };
+    const Bad bad[] = {{"serialNumber", "not-hex!"},
+                       {"serialNumber", "0c19\nforged"},
+                       {"cameraName", "ZWO\nASI"},
+                       {"cameraName", "ZWO\x7f"}};
+    for (const Bad& b : bad) {
+        INFO(b.field << "=" << b.value);
+        DeviceConfig config = by_index;
+        config.set(b.field, std::string{b.value});
+        const auto api = catalog.normalize(kZwoCameraKey, config, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection == std::string("Invalid value for ") + b.field);
+
+        // A saved entry loses the bad key (to be relearned) and still registers.
+        const auto saved = catalog.normalize(kZwoCameraKey, config, Source::Persisted);
+        CHECK_FALSE(saved.rejection.has_value());
+        CHECK_FALSE(saved.config.has(b.field));
+        CHECK(saved.config.has("cameraIndex"));
+        REQUIRE(saved.warnings.size() == 1);
+        CHECK(saved.warnings.front().find(b.field) == 0);
+    }
+
+    // 64 hex digits are the limit; 65 are refused.
+    DeviceConfig long_serial = by_index;
+    long_serial.set("serialNumber", std::string(64, 'a'));
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, long_serial, Source::Api).rejection.has_value());
+    long_serial.set("serialNumber", std::string(65, 'a'));
+    CHECK(catalog.normalize(kZwoCameraKey, long_serial, Source::Api).rejection.has_value());
+
+    // The selector range is -1 to INT_MAX and keeps the arm's text, cameraId read before cameraIndex.
+    struct Range {
+        const char* field;
+        std::int64_t value;
+    };
+    for (const Range& r : {Range{"cameraIndex", std::int64_t{1} << 32}, Range{"cameraId", -2},
+                           Range{"cameraIndex", std::int64_t{std::numeric_limits<int>::max()} + 1}}) {
+        INFO(r.field << "=" << r.value);
+        DeviceConfig out_of_range;
+        out_of_range.set(r.field, r.value);
+        const auto api = catalog.normalize(kZwoCameraKey, out_of_range, Source::Api);
+        REQUIRE(api.rejection.has_value());
+        CHECK(*api.rejection ==
+              std::string("Invalid value for ") + r.field + ": expected an integer from -1 to 2147483647");
+        // A saved entry loses the selector and still registers.
+        const auto saved = catalog.normalize(kZwoCameraKey, out_of_range, Source::Persisted);
+        CHECK_FALSE(saved.rejection.has_value());
+        CHECK_FALSE(saved.config.has(r.field));
+        REQUIRE(saved.warnings.size() == 1);
+        CHECK(saved.warnings.front().find(r.field) == 0);
+    }
+    DeviceConfig both_bad;
+    both_bad.set("cameraIndex", std::int64_t{-2});
+    both_bad.set("cameraId", std::int64_t{-2});
+    CHECK(catalog.normalize(kZwoCameraKey, both_bad, Source::Api).rejection.value_or("").find("cameraId") !=
+          std::string::npos);
+    // INT_MAX itself is a valid selector.
+    DeviceConfig max_index;
+    max_index.set("cameraIndex", std::int64_t{std::numeric_limits<int>::max()});
+    CHECK_FALSE(catalog.normalize(kZwoCameraKey, max_index, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - connectionType is folded to lower case (#508 item 2)", "[catalog][synscan][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    const auto folded = [&](const char* given, Source source, const char* extra_key = nullptr,
+                            const char* extra_value = nullptr) {
+        DeviceConfig in;
+        in.set("connectionType", std::string{given});
+        if (extra_key) in.set(extra_key, std::string{extra_value});
+        return catalog.normalize(kSynScanKey, in, source);
+    };
+    const auto stored = [](const NormalizeResult& r) {
+        const ConfigValue* v = r.config.find_value("connectionType");
+        REQUIRE(v != nullptr);
+        return std::get<std::string>(*v);
+    };
+
+    for (const Source source : {Source::Api, Source::Persisted}) {
+        const auto network = folded("Network", source, "host", "192.0.2.60");
+        CHECK_FALSE(network.rejection.has_value());
+        CHECK(network.warnings.empty());
+        CHECK(stored(network) == "network");
+
+        const auto serial = folded("SERIAL", source, "portPath", "/dev/ttyUSB9");
+        CHECK_FALSE(serial.rejection.has_value());
+        CHECK(serial.warnings.empty());
+        CHECK(stored(serial) == "serial");
+
+        const auto autod = folded("Auto", source);
+        CHECK_FALSE(autod.rejection.has_value());
+        CHECK(autod.warnings.empty());
+        CHECK(stored(autod) == "auto");
+    }
+
+    // The folded form still gets its endpoint rule, and an unknown value is still unknown.
+    const auto no_host = folded("Network", Source::Api);
+    REQUIRE(no_host.rejection.has_value());
+    CHECK(*no_host.rejection == "Host IP address is required");
+    CHECK(folded("Carrier-Pigeon", Source::Api).rejection.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// iOptron telescope, iMate PowerBox switch, iEAF focuser, iEFW filter wheel and
+// iCAM camera. Every auto-detect factory constructs without a scan (#659), so no
+// port is opened here.
+// ---------------------------------------------------------------------------
+
+namespace {
+const DeviceKey kIoptronTelescopeKey{"ioptron", DeviceType::Telescope};
+const DeviceKey kIoptronSwitchKey{"ioptron", DeviceType::Switch};
+const DeviceKey kIoptronFocuserKey{"ioptron", DeviceType::Focuser};
+const DeviceKey kIoptronFilterWheelKey{"ioptron", DeviceType::FilterWheel};
+const DeviceKey kIoptronCameraKey{"ioptron", DeviceType::Camera};
+}  // namespace
+
+TEST_CASE("Builtin catalog - register_builtin_schemas describes the iOptron devices in every build",
+          "[catalog][ioptron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+    const auto views = catalog.describe();
+
+    const auto keys_of = [](const DescriptorView* v) {
+        std::vector<std::string> keys;
+        for (const FieldRef& f : v->fields) keys.emplace_back(f.key);
+        return keys;
+    };
+    for (const DeviceKey& key : {kIoptronTelescopeKey, kIoptronSwitchKey, kIoptronFocuserKey, kIoptronFilterWheelKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+        CHECK(v->build_option == "ALPACACORE_ENABLE_IOPTRON");
+        CHECK_FALSE(v->available);  // schemas only: no factory has been registered yet
+    }
+    // The iCAM is a rebadged Player One: it follows that option, not the iOptron one.
+    const DescriptorView* camera = find_view(views, kIoptronCameraKey);
+    REQUIRE(camera != nullptr);
+    CHECK(camera->build_option == "ALPACACORE_ENABLE_PLAYERONE");
+    CHECK_FALSE(camera->available);
+    CHECK(keys_of(camera) == std::vector<std::string>{"cameraIndex"});
+    // No range: the arm this replaces never validated the index.
+    CHECK_FALSE(find_field(camera->fields, "cameraIndex")->min.has_value());
+
+    CHECK(keys_of(find_view(views, kIoptronTelescopeKey)) ==
+          std::vector<std::string>{"connectionType", "mountIndex", "portPath", "baudRate", "host", "tcpPort",
+                                   "responseTimeoutMs", "siteLatitude", "siteLongitude", "siteElevation",
+                                   "syncTimeOnConnect", "apertureDiameter", "focalLength"});
+    CHECK(keys_of(find_view(views, kIoptronSwitchKey)) ==
+          std::vector<std::string>{"gpioChip", "pwmFrequencyHz", "ports"});
+    CHECK(keys_of(find_view(views, kIoptronFocuserKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "focuserIndex", "model"});
+    CHECK(keys_of(find_view(views, kIoptronFilterWheelKey)) ==
+          std::vector<std::string>{"connectionType", "portPath", "filterwheelIndex", "model", "filterNames"});
+
+    const DescriptorView* telescope = find_view(views, kIoptronTelescopeKey);
+    CHECK(same_scalar(find_field(telescope->fields, "baudRate")->default_value, std::int64_t{115200}));
+    CHECK(same_scalar(find_field(telescope->fields, "tcpPort")->default_value, std::int64_t{4030}));
+    CHECK(same_scalar(find_field(telescope->fields, "responseTimeoutMs")->default_value, std::int64_t{5000}));
+    CHECK(same_scalar(find_field(find_view(views, kIoptronFocuserKey)->fields, "model")->default_value,
+                      std::string{"ieaf"}));
+    CHECK(same_scalar(find_field(find_view(views, kIoptronFilterWheelKey)->fields, "model")->default_value,
+                      std::string{"iefw15"}));
+    CHECK(same_scalar(find_field(find_view(views, kIoptronSwitchKey)->fields, "gpioChip")->default_value,
+                      std::string{"/dev/gpiochip1"}));
+    const FieldRef* ports = find_field(find_view(views, kIoptronSwitchKey)->fields, "ports");
+    REQUIRE(ports != nullptr);
+    CHECK(ports->kind == FieldRef::Kind::RecordList);
+    const FieldRef* names = find_field(find_view(views, kIoptronFilterWheelKey)->fields, "filterNames");
+    REQUIRE(names != nullptr);
+    CHECK(names->kind == FieldRef::Kind::StringList);
+}
+
+TEST_CASE("Builtin catalog - register_builtin_factories makes the iOptron devices available only when built",
+          "[catalog][ioptron][unit]") {
+    const DeviceCatalog catalog = builtin_catalog();
+    const auto views = catalog.describe();
+    for (const DeviceKey& key : {kIoptronTelescopeKey, kIoptronSwitchKey, kIoptronFocuserKey, kIoptronFilterWheelKey}) {
+        const DescriptorView* v = find_view(views, key);
+        REQUIRE(v != nullptr);
+#ifdef ALPACACORE_ENABLE_IOPTRON
+        CHECK(v->available);
+#else
+        CHECK_FALSE(v->available);
+        try {
+            (void)catalog.create(key, DeviceConfig{}, 0);
+            FAIL("create() must throw when iOptron is not built");
+        } catch (const std::runtime_error& e) {
+            CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_IOPTRON") != std::string::npos);
+        }
+#endif
+    }
+    const DescriptorView* camera = find_view(views, kIoptronCameraKey);
+    REQUIRE(camera != nullptr);
+#ifdef ALPACACORE_ENABLE_PLAYERONE
+    CHECK(camera->available);
+#else
+    CHECK_FALSE(camera->available);
+    try {
+        (void)catalog.create(kIoptronCameraKey, DeviceConfig{}, 0);
+        FAIL("create() must throw when Player One is not built");
+    } catch (const std::runtime_error& e) {
+        CHECK(std::string(e.what()).find("ALPACACORE_ENABLE_PLAYERONE") != std::string::npos);
+    }
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    // Nothing here opens a port: the auto paths resolve at connect (#659).
+    for (const char* type : {"auto", "serial", "network"}) {
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});  // serial: no port yet; network: no host, sweeps at connect
+        auto telescope = catalog.create(kIoptronTelescopeKey, config, 3);
+        REQUIRE(telescope != nullptr);
+        CHECK(telescope->get_device_type() == DeviceType::Telescope);
+        CHECK(telescope->get_device_number() == 3);
+        CHECK_FALSE(telescope->get_connected());
+    }
+    DeviceConfig serial_focuser;
+    serial_focuser.set("connectionType", std::string{"serial"});
+    serial_focuser.set("portPath", std::string{"/dev/ttyUSB-no-such-ioptron"});
+    serial_focuser.set("model", std::string{"iafs2"});
+    auto focuser = catalog.create(kIoptronFocuserKey, serial_focuser, 4);
+    REQUIRE(focuser != nullptr);
+    CHECK(focuser->get_device_type() == DeviceType::Focuser);
+    // Serial with no port falls back to auto-detect, as the router arm did.
+    DeviceConfig focuser_no_port;
+    focuser_no_port.set("connectionType", std::string{"serial"});
+    REQUIRE(catalog.create(kIoptronFocuserKey, focuser_no_port, 5) != nullptr);
+
+    auto wheel = catalog.create(kIoptronFilterWheelKey, DeviceConfig{}, 6);
+    REQUIRE(wheel != nullptr);
+    CHECK(wheel->get_device_type() == DeviceType::FilterWheel);
+    DeviceConfig named_wheel;
+    named_wheel.set("filterNames", std::vector<std::string>{"L", "R", "G"});
+    auto named = catalog.create(kIoptronFilterWheelKey, named_wheel, 7);
+    REQUIRE(named != nullptr);
+    CHECK(named->get_device_number() == 7);
+    // The factory refuses what normalize refuses: a serial wheel with no port.
+    DeviceConfig wheel_no_port;
+    wheel_no_port.set("connectionType", std::string{"serial"});
+    CHECK_THROWS_AS(catalog.create(kIoptronFilterWheelKey, wheel_no_port, 8), AlpacaException);
+
+    // The switch is registered whether or not libgpiod was found.
+    DeviceConfig sw;
+    sw.set("gpioChip", std::string{"/dev/gpiochip7"});
+#ifdef ALPACACORE_IOPTRON_POWERBOX
+    try {
+        (void)catalog.create(kIoptronSwitchKey, sw, 9);
+        FAIL("a gpioChip off the board's list must be refused");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).find("gpioChip") != std::string::npos);
+    }
+    DeviceConfig ports_cfg;
+    DeviceConfig port;
+    port.set("name", std::string{"Mount"});
+    port.set("pwm", true);
+    ports_cfg.set("ports", std::vector<DeviceConfig>{DeviceConfig{}, port});
+    auto hub = catalog.create(kIoptronSwitchKey, ports_cfg, 10);
+    REQUIRE(hub != nullptr);
+    CHECK(hub->get_device_type() == DeviceType::Switch);
+#else
+    try {
+        (void)catalog.create(kIoptronSwitchKey, sw, 9);
+        FAIL("the PowerBox is not built here");
+    } catch (const AlpacaException& e) {
+        CHECK(std::string(e.what()).find("iMate PowerBox switch not built") != std::string::npos);
+    }
+#endif
+#endif
+}
+
+TEST_CASE("Builtin catalog - iOptron telescope normalize keeps the arm's refusals and texts",
+          "[catalog][ioptron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    // An unknown connectionType: refused from the API, read as serial when saved (#380).
+    DeviceConfig bad_type;
+    bad_type.set("connectionType", std::string{"carrier-pigeon"});
+    const auto bad = catalog.normalize(kIoptronTelescopeKey, bad_type, Source::Api);
+    REQUIRE(bad.rejection.has_value());
+    CHECK(*bad.rejection == "Invalid connection type. Use 'auto', 'serial', or 'network'");
+    const auto saved = catalog.normalize(kIoptronTelescopeKey, bad_type, Source::Persisted);
+    CHECK_FALSE(saved.rejection.has_value());
+    CHECK(string_at(saved.config, "connectionType") == "serial");
+    REQUIRE_FALSE(saved.warnings.empty());
+
+    // "", auto and network pass with no endpoint: an empty network host sweeps the subnet at connect.
+    for (const char* type : {"", "auto", "network"}) {
+        DeviceConfig config;
+        config.set("connectionType", std::string{type});
+        const auto result = catalog.normalize(kIoptronTelescopeKey, config, Source::Api);
+        INFO(type);
+        CHECK_FALSE(result.rejection.has_value());
+        CHECK(result.warnings.empty());
+    }
+
+    // Serial needs a port from the API; a saved one is warned about and kept.
+    DeviceConfig serial;
+    serial.set("connectionType", std::string{"serial"});
+    const auto serial_api = catalog.normalize(kIoptronTelescopeKey, serial, Source::Api);
+    REQUIRE(serial_api.rejection.has_value());
+    CHECK(*serial_api.rejection == "Serial port path is required");
+    const auto serial_saved = catalog.normalize(kIoptronTelescopeKey, serial, Source::Persisted);
+    CHECK_FALSE(serial_saved.rejection.has_value());
+    CHECK(serial_saved.warnings == std::vector<std::string>{"Serial port path is required"});
+
+    // The site range is checked first, per field, with the router's wording.
+    DeviceConfig site;
+    site.set("connectionType", std::string{"carrier-pigeon"});
+    site.set("siteLatitude", 200.0);
+    site.set("siteLongitude", -33.0);
+    const auto site_api = catalog.normalize(kIoptronTelescopeKey, site, Source::Api);
+    REQUIRE(site_api.rejection.has_value());
+    CHECK(*site_api.rejection == "siteLatitude 200 is out of range: must be between -90 and 90 degrees");
+    const auto site_saved = catalog.normalize(kIoptronTelescopeKey, site, Source::Persisted);
+    CHECK_FALSE(site_saved.rejection.has_value());
+    CHECK(site_saved.config.find_value("siteLatitude") == nullptr);   // dropped to unset
+    CHECK(site_saved.config.find_value("siteLongitude") != nullptr);  // the in-range one stays
+    site.set("siteLatitude", -90.0);
+    site.set("siteLongitude", 180.5);
+    const auto longitude = catalog.normalize(kIoptronTelescopeKey, site, Source::Api);
+    REQUIRE(longitude.rejection.has_value());
+    CHECK(*longitude.rejection == "siteLongitude 180.5 is out of range: must be between -180 and 180 degrees");
+    // No range on the elevation, as the arm had none.
+    DeviceConfig elevation;
+    elevation.set("connectionType", std::string{"auto"});
+    elevation.set("siteElevation", 99999.0);
+    CHECK_FALSE(catalog.normalize(kIoptronTelescopeKey, elevation, Source::Api).rejection.has_value());
+}
+
+TEST_CASE("Builtin catalog - iOptron filter wheel and PowerBox normalize refuse what the arms refused",
+          "[catalog][ioptron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    CHECK_FALSE(catalog.normalize(kIoptronFilterWheelKey, DeviceConfig{}, Source::Api).rejection.has_value());
+    DeviceConfig no_port;
+    no_port.set("connectionType", std::string{"serial"});
+    const auto no_port_api = catalog.normalize(kIoptronFilterWheelKey, no_port, Source::Api);
+    REQUIRE(no_port_api.rejection.has_value());
+    CHECK(*no_port_api.rejection == "portPath is required when connectionType is 'serial' (or use 'auto').");
+    DeviceConfig negative;
+    negative.set("filterwheelIndex", std::int64_t{-1});
+    const auto negative_api = catalog.normalize(kIoptronFilterWheelKey, negative, Source::Api);
+    REQUIRE(negative_api.rejection.has_value());
+    CHECK(*negative_api.rejection == "filterwheelIndex must be >= 0.");
+    // The index only matters off the serial path, as before.
+    negative.set("connectionType", std::string{"serial"});
+    negative.set("portPath", std::string{"/dev/ttyUSB1"});
+    CHECK_FALSE(catalog.normalize(kIoptronFilterWheelKey, negative, Source::Api).rejection.has_value());
+
+#ifdef ALPACACORE_IOPTRON_POWERBOX
+    DeviceConfig sw;
+    sw.set("gpioChip", std::string{"/dev/gpiochip0"});  // the stock BSP kernel's name for the bank
+    CHECK_FALSE(catalog.normalize(kIoptronSwitchKey, sw, Source::Api).rejection.has_value());
+    sw.set("gpioChip", std::string{"/dev/mem"});
+    const auto bad_chip = catalog.normalize(kIoptronSwitchKey, sw, Source::Api);
+    REQUIRE(bad_chip.rejection.has_value());
+    CHECK(bad_chip.rejection->find("gpioChip") != std::string::npos);
+    CHECK(bad_chip.rejection->find("'/dev/gpiochip1' or '/dev/gpiochip0'") != std::string::npos);
+#endif
+}
+
+TEST_CASE("Builtin catalog - iOptron sanitize keeps the declared fields per device type", "[catalog][ioptron][unit]") {
+    DeviceCatalog catalog;
+    register_builtin_schemas(catalog);
+
+    DeviceConfig focuser;
+    focuser.set("connectionType", std::string{"auto"});
+    focuser.set("portPath", std::string{"/dev/ttyUSB7"});
+    focuser.set("focuserIndex", std::int64_t{2});
+    focuser.set("model", std::string{"iafs2"});
+    focuser.set("baudRate", std::int64_t{9});  // the focuser has a fixed baud
+    focuser.set("filterwheelIndex", std::int64_t{1});
+    const DeviceConfig kept_focuser = catalog.sanitize(kIoptronFocuserKey, focuser);
+    CHECK(kept_focuser.has("portPath"));  // a declared field is kept whatever connectionType is (ADR 0004)
+    CHECK(kept_focuser.has("focuserIndex"));
+    CHECK(string_at(kept_focuser, "model") == "iafs2");
+    CHECK_FALSE(kept_focuser.has("baudRate"));
+    CHECK_FALSE(kept_focuser.has("filterwheelIndex"));
+
+    DeviceConfig port;
+    port.set("name", std::string{"Camera"});
+    port.set("pwm", true);
+    port.set("bogusKey", std::int64_t{1});
+    DeviceConfig sw;
+    sw.set("gpioChip", std::string{"/dev/gpiochip1"});
+    sw.set("pwmFrequencyHz", std::int64_t{100});
+    sw.set("ports", std::vector<DeviceConfig>{port});
+    sw.set("cameraIndex", std::int64_t{1});
+    const DeviceConfig kept_switch = catalog.sanitize(kIoptronSwitchKey, sw);
+    CHECK(kept_switch.has("gpioChip"));
+    CHECK(kept_switch.has("pwmFrequencyHz"));
+    CHECK_FALSE(kept_switch.has("cameraIndex"));
+    const ConfigValue* ports_value = kept_switch.find_value("ports");
+    REQUIRE(ports_value != nullptr);
+    const auto* kept_ports = std::get_if<std::vector<DeviceConfig>>(ports_value);
+    REQUIRE(kept_ports != nullptr);
+    REQUIRE(kept_ports->size() == 1);
+    CHECK((*kept_ports)[0].has("name"));
+    CHECK((*kept_ports)[0].has("pwm"));
+    CHECK_FALSE((*kept_ports)[0].has("bogusKey"));
+
+    DeviceConfig wheel;
+    wheel.set("connectionType", std::string{"serial"});
+    wheel.set("portPath", std::string{"/dev/ttyUSB8"});
+    wheel.set("filterNames", std::vector<std::string>{"L", "R"});
+    wheel.set("host", std::string{"h"});
+    const DeviceConfig kept_wheel = catalog.sanitize(kIoptronFilterWheelKey, wheel);
+    CHECK(kept_wheel.has("filterNames"));
+    CHECK(kept_wheel.has("portPath"));
+    CHECK_FALSE(kept_wheel.has("host"));
+
+    DeviceConfig camera;
+    camera.set("cameraIndex", std::int64_t{2});
+    camera.set("connectionType", std::string{"serial"});
+    const DeviceConfig kept_camera = catalog.sanitize(kIoptronCameraKey, camera);
+    CHECK(kept_camera.has("cameraIndex"));
+    CHECK_FALSE(kept_camera.has("connectionType"));
 }

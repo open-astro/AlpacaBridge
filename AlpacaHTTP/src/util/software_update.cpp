@@ -20,6 +20,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -169,6 +170,30 @@ std::optional<std::string> find_package_version(std::string_view packages_index,
 }
 
 // ---------------------------------------------------------------------------
+// Channel mapping: the one place that ties the check URL, the apt component
+// and the helper unit instance together (test_software_update pins them).
+// ---------------------------------------------------------------------------
+
+const char* channel_name(UpdateChannel channel) { return channel == UpdateChannel::Beta ? "beta" : "stable"; }
+
+std::optional<UpdateChannel> parse_channel(std::string_view name) {
+    if (name == "stable") return UpdateChannel::Stable;
+    if (name == "beta") return UpdateChannel::Beta;
+    return std::nullopt;
+}
+
+const char* channel_apt_component(UpdateChannel channel) { return channel == UpdateChannel::Beta ? "beta" : "main"; }
+
+std::string channel_packages_url(UpdateChannel channel) {
+    return std::string("https://apt.openastro.net/dists/trixie/") + channel_apt_component(channel) +
+           "/binary-arm64/Packages";
+}
+
+const char* channel_unit_name(UpdateChannel channel) {
+    return channel == UpdateChannel::Beta ? "alpacabridge-channel@beta.service" : "alpacabridge-channel@stable.service";
+}
+
+// ---------------------------------------------------------------------------
 // Production backend: libcurl + sd-bus + transcript file
 // ---------------------------------------------------------------------------
 
@@ -270,8 +295,12 @@ int last_result_marker(const std::string& log) {
 
 }  // namespace
 
-SystemSoftwareUpdateBackend::SystemSoftwareUpdateBackend(std::string unit, std::string log_path)
-    : unit_(std::move(unit)), log_path_(std::move(log_path)) {}
+SystemSoftwareUpdateBackend::SystemSoftwareUpdateBackend(std::string unit, std::string log_path,
+                                                         std::string channel_marker_path, std::string channel_log_path)
+    : unit_(std::move(unit)),
+      log_path_(std::move(log_path)),
+      channel_marker_path_(std::move(channel_marker_path)),
+      channel_log_path_(std::move(channel_log_path)) {}
 
 std::string SystemSoftwareUpdateBackend::fetch_url(const std::string& url, std::chrono::milliseconds timeout) {
     ensure_curl_global_init();
@@ -316,21 +345,24 @@ std::string SystemSoftwareUpdateBackend::fetch_url(const std::string& url, std::
     return body;
 }
 
-void SystemSoftwareUpdateBackend::start_installer() {
+namespace {
+
+// Ask systemd to start `unit` (the polkit rules name the allowed units).
+void start_systemd_unit(const std::string& unit, const char* what) {
     BusHandle bus;
     int r = sd_bus_open_system(&bus.bus);
     if (r < 0) {
-        throw SoftwareUpdateError(
-            ErrorCode::DRIVER_ERROR,
-            "Update install failed: cannot reach systemd on the system bus: " + alpacacore::util::errno_string(-r));
+        throw SoftwareUpdateError(ErrorCode::DRIVER_ERROR, std::string(what) +
+                                                               " failed: cannot reach systemd on the system bus: " +
+                                                               alpacacore::util::errno_string(-r));
     }
     BusError err;
     BusMessage reply;
     r = sd_bus_call_method(bus.bus, kSystemdService, kSystemdManagerPath, kSystemdManagerIface, "StartUnit", &err.err,
-                           &reply.msg, "ss", unit_.c_str(), "replace");
+                           &reply.msg, "ss", unit.c_str(), "replace");
     if (r < 0) {
         const std::string name = err.name();
-        std::string message = "Update install failed: could not start " + unit_ + ": " + err.message(r);
+        std::string message = std::string(what) + " failed: could not start " + unit + ": " + err.message(r);
         if (name == "org.freedesktop.systemd1.NoSuchUnit" || name == "org.freedesktop.systemd1.LoadFailed") {
             message +=
                 ". The helper unit ships in the alpacabridge .deb; on a source build run 'sudo apt update && "
@@ -343,7 +375,20 @@ void SystemSoftwareUpdateBackend::start_installer() {
         }
         throw SoftwareUpdateError(ErrorCode::DRIVER_ERROR, message);
     }
-    log_info("Software update: started " + unit_);
+    log_info("Software update: started " + unit);
+}
+
+}  // namespace
+
+void SystemSoftwareUpdateBackend::start_installer() { start_systemd_unit(unit_, "Update install"); }
+
+void SystemSoftwareUpdateBackend::start_channel_switch(UpdateChannel channel) {
+    start_systemd_unit(channel_unit_name(channel), "Channel switch");
+}
+
+UpdateChannel SystemSoftwareUpdateBackend::read_channel() {
+    std::error_code ec;
+    return std::filesystem::exists(channel_marker_path_, ec) && !ec ? UpdateChannel::Beta : UpdateChannel::Stable;
 }
 
 InstallerState classify_installer_state(const std::string& active_state, const std::string& sub_state,
@@ -384,16 +429,27 @@ InstallerState classify_installer_state(const std::string& active_state, const s
     return state;
 }
 
-InstallerState SystemSoftwareUpdateBackend::installer_state() {
-    InstallerState state;
-    state.log = read_log_tail(log_path_, SoftwareUpdateManager::kLogTailBytes);
+namespace {
 
+// One unit's properties as systemd reports them. `unavailable` carries the
+// reason in `detail` (bus unreachable, unit file missing).
+struct UnitSnapshot {
+    bool unavailable = false;
+    std::string detail;
+    std::string active;
+    std::string sub;
+    std::string result;
+    bool job_pending = false;
+};
+
+UnitSnapshot read_unit_snapshot(const std::string& unit) {
+    UnitSnapshot snap;
     BusHandle bus;
     int r = sd_bus_open_system(&bus.bus);
     if (r < 0) {
-        state.state = "unavailable";
-        state.detail = "cannot reach systemd on the system bus: " + alpacacore::util::errno_string(-r);
-        return state;
+        snap.unavailable = true;
+        snap.detail = "cannot reach systemd on the system bus: " + alpacacore::util::errno_string(-r);
+        return snap;
     }
     // LoadUnit rather than GetUnit: a unit that has never been started (or
     // that systemd garbage-collected after a run) is not loaded, and GetUnit
@@ -402,46 +458,103 @@ InstallerState SystemSoftwareUpdateBackend::installer_state() {
     BusError err;
     BusMessage reply;
     r = sd_bus_call_method(bus.bus, kSystemdService, kSystemdManagerPath, kSystemdManagerIface, "LoadUnit", &err.err,
-                           &reply.msg, "s", unit_.c_str());
+                           &reply.msg, "s", unit.c_str());
     if (r < 0) {
-        state.state = "unavailable";
-        state.detail = unit_ + ": " + err.message(r);
-        return state;
+        snap.unavailable = true;
+        snap.detail = unit + ": " + err.message(r);
+        return snap;
     }
     const char* path = nullptr;
     if (sd_bus_message_read(reply.msg, "o", &path) <= 0 || !path) {
-        state.state = "unavailable";
-        state.detail = unit_ + ": systemd returned no object path";
-        return state;
+        snap.unavailable = true;
+        snap.detail = unit + ": systemd returned no object path";
+        return snap;
     }
     const std::string unit_path(path);
 
     const std::string load_state = unit_property_string(bus.bus, unit_path, kSystemdUnitIface, "LoadState");
     if (load_state != "loaded") {
-        state.state = "unavailable";
-        state.detail = unit_ + " is not installed on this host (LoadState=" + (load_state.empty() ? "?" : load_state) +
-                       "); on a source build update with apt instead";
-        return state;
+        snap.unavailable = true;
+        snap.detail = unit + " is not installed on this host (LoadState=" + (load_state.empty() ? "?" : load_state) +
+                      "); on a source build update with apt instead";
+        return snap;
     }
-    const std::string active = unit_property_string(bus.bus, unit_path, kSystemdUnitIface, "ActiveState");
-    const std::string sub = unit_property_string(bus.bus, unit_path, kSystemdUnitIface, "SubState");
-    const std::string result = unit_property_string(bus.bus, unit_path, kSystemdServiceIface, "Result");
+    snap.active = unit_property_string(bus.bus, unit_path, kSystemdUnitIface, "ActiveState");
+    snap.sub = unit_property_string(bus.bus, unit_path, kSystemdUnitIface, "SubState");
+    snap.result = unit_property_string(bus.bus, unit_path, kSystemdServiceIface, "Result");
     // Job: (uo) with id 0 when nothing is queued. Right after StartUnit the
     // unit can still read inactive while its start job waits on
     // network-online.target, before the helper truncates the old transcript;
     // without this the previous run's marker would be reported as the result.
-    bool job_pending = false;
-    {
-        BusError job_err;
-        BusMessage job_msg;
-        if (sd_bus_get_property(bus.bus, kSystemdService, unit_path.c_str(), kSystemdUnitIface, "Job", &job_err.err,
-                                &job_msg.msg, "(uo)") >= 0) {
-            std::uint32_t job_id = 0;
-            const char* job_path = nullptr;
-            if (sd_bus_message_read(job_msg.msg, "(uo)", &job_id, &job_path) > 0) job_pending = job_id != 0;
+    BusError job_err;
+    BusMessage job_msg;
+    if (sd_bus_get_property(bus.bus, kSystemdService, unit_path.c_str(), kSystemdUnitIface, "Job", &job_err.err,
+                            &job_msg.msg, "(uo)") >= 0) {
+        std::uint32_t job_id = 0;
+        const char* job_path = nullptr;
+        if (sd_bus_message_read(job_msg.msg, "(uo)", &job_id, &job_path) > 0) snap.job_pending = job_id != 0;
+    }
+    return snap;
+}
+
+bool snapshot_running(const UnitSnapshot& snap) {
+    return snap.job_pending || snap.active == "activating" || snap.active == "active" ||
+           snap.active == "deactivating" || snap.active == "reloading";
+}
+
+}  // namespace
+
+InstallerState SystemSoftwareUpdateBackend::installer_state() {
+    InstallerState state;
+    state.log = read_log_tail(log_path_, SoftwareUpdateManager::kLogTailBytes);
+    const UnitSnapshot snap = read_unit_snapshot(unit_);
+    if (snap.unavailable) {
+        state.state = "unavailable";
+        state.detail = snap.detail;
+        return state;
+    }
+    const InstallerState classified =
+        classify_installer_state(snap.active, snap.sub, snap.result, snap.job_pending, state.log);
+    state.state = classified.state;
+    state.detail = classified.detail;
+    return state;
+}
+
+InstallerState classify_channel_switch_log(const std::string& log) {
+    InstallerState state = classify_installer_state("inactive", "dead", "", false, log);
+    // No unit is running, so the made-up systemd snapshot says nothing; the
+    // helper's own result line (it carries the apt exit code) does.
+    if (last_result_marker(log) != 0) {
+        const std::string tag = "=== RESULT: ";
+        const auto pos = log.rfind(tag);
+        if (pos != std::string::npos) {
+            auto end = log.find('\n', pos);
+            if (end == std::string::npos) end = log.size();
+            state.detail = log.substr(pos + tag.size(), end - pos - tag.size());
         }
     }
-    const InstallerState classified = classify_installer_state(active, sub, result, job_pending, state.log);
+    return state;
+}
+
+InstallerState SystemSoftwareUpdateBackend::channel_switch_state() {
+    InstallerState state;
+    state.log = read_log_tail(channel_log_path_, SoftwareUpdateManager::kLogTailBytes);
+    // Both instances are one helper. A template instance that failed weeks
+    // ago stays ActiveState=failed until reset, so a finished run is judged
+    // by the transcript (each run truncates it) and never by an instance's
+    // failed state; only "running" comes from systemd.
+    const UnitSnapshot stable = read_unit_snapshot(channel_unit_name(UpdateChannel::Stable));
+    const UnitSnapshot beta = read_unit_snapshot(channel_unit_name(UpdateChannel::Beta));
+    if (stable.unavailable || beta.unavailable) {
+        state.state = "unavailable";
+        state.detail = stable.unavailable ? stable.detail : beta.detail;
+        return state;
+    }
+    const UnitSnapshot& busy = snapshot_running(stable) ? stable : beta;
+    const InstallerState classified =
+        snapshot_running(stable) || snapshot_running(beta)
+            ? classify_installer_state(busy.active, busy.sub, busy.result, busy.job_pending, state.log)
+            : classify_channel_switch_log(state.log);
     state.state = classified.state;
     state.detail = classified.detail;
     return state;
@@ -486,23 +599,38 @@ SoftwareUpdateManager::SoftwareUpdateManager(SoftwareUpdateSettings settings,
                                              std::unique_ptr<SoftwareUpdateBackend> backend)
     : settings_(std::move(settings)), backend_(std::move(backend)) {}
 
-bool SoftwareUpdateManager::update_available_locked() const {
+bool SoftwareUpdateManager::overridden() const {
+    return !settings_.packages_url.empty() && settings_.packages_url != kDefaultPackagesUrl;
+}
+
+std::string SoftwareUpdateManager::effective_url(UpdateChannel channel) const {
+    if (settings_.packages_url.empty() || overridden()) return settings_.packages_url;
+    return channel_packages_url(channel);
+}
+
+bool SoftwareUpdateManager::update_available_locked(UpdateChannel channel) const {
+    // A result fetched for the other channel says nothing about this one.
+    if (!overridden() && checked_channel_ != channel) return false;
     return latest_version_ && compare_debian_versions(*latest_version_, settings_.installed_version) > 0;
 }
 
-nlohmann::json SoftwareUpdateManager::status_locked(const InstallerState& installer) {
-    const bool available = update_available_locked();
+nlohmann::json SoftwareUpdateManager::status_locked(const InstallerState& installer,
+                                                    const InstallerState& channel_switch, UpdateChannel channel) {
+    const bool available = update_available_locked(channel);
+    const bool fresh = overridden() || checked_channel_ == channel;
     nlohmann::json out;
     out["InstalledVersion"] = settings_.installed_version;
-    out["LatestVersion"] = latest_version_ ? nlohmann::json(*latest_version_) : nlohmann::json(nullptr);
+    out["LatestVersion"] = latest_version_ && fresh ? nlohmann::json(*latest_version_) : nlohmann::json(nullptr);
     out["UpdateAvailable"] = available;
     out["CheckedAt"] =
         checked_at_
             ? nlohmann::json(std::chrono::duration_cast<std::chrono::seconds>(checked_at_->time_since_epoch()).count())
             : nlohmann::json(nullptr);
     out["CheckError"] = check_error_ ? nlohmann::json(*check_error_) : nlohmann::json(nullptr);
-    out["PackagesUrl"] = settings_.packages_url;
+    out["PackagesUrl"] = effective_url(channel);
     out["CheckEnabled"] = !settings_.packages_url.empty();
+    out["Channel"] = channel_name(channel);
+    out["ChannelOverridden"] = overridden();
     out["ReleaseNotes"] = available && release_notes_ ? nlohmann::json(*release_notes_) : nlohmann::json(nullptr);
     // `available` implies latest_version_ is set; spelled out for clang-tidy.
     const std::string latest = latest_version_.value_or("");
@@ -513,13 +641,17 @@ nlohmann::json SoftwareUpdateManager::status_locked(const InstallerState& instal
                             ? nlohmann::json(expand_version_template(settings_.release_url_template, latest))
                             : nlohmann::json(nullptr);
     out["Installer"] = nlohmann::json{{"State", installer.state}, {"Detail", installer.detail}, {"Log", installer.log}};
+    out["ChannelSwitch"] =
+        nlohmann::json{{"State", channel_switch.state}, {"Detail", channel_switch.detail}, {"Log", channel_switch.log}};
     return out;
 }
 
 nlohmann::json SoftwareUpdateManager::status() {
+    const UpdateChannel channel = backend_->read_channel();
     const InstallerState installer = backend_->installer_state();
+    const InstallerState channel_switch = backend_->channel_switch_state();
     std::lock_guard<std::mutex> lock(mutex_);
-    return status_locked(installer);
+    return status_locked(installer, channel_switch, channel);
 }
 
 nlohmann::json SoftwareUpdateManager::check() {
@@ -555,9 +687,11 @@ nlohmann::json SoftwareUpdateManager::check() {
     // a status poll from the page must not queue behind a slow mirror. The
     // settings are immutable after construction, so they are read lock-free;
     // only the cached result is written under the lock.
+    const UpdateChannel channel = backend_->read_channel();
+    const std::string packages_url = effective_url(channel);
     std::string index;
     try {
-        index = backend_->fetch_url(settings_.packages_url, kFetchTimeout);
+        index = backend_->fetch_url(packages_url, kFetchTimeout);
     } catch (const SoftwareUpdateError& e) {
         std::lock_guard<std::mutex> lock(mutex_);
         checked_at_ = std::chrono::system_clock::now();
@@ -568,7 +702,7 @@ nlohmann::json SoftwareUpdateManager::check() {
     const auto version = find_package_version(index, settings_.package);
     if (!version) {
         SoftwareUpdateError error(ErrorCode::DRIVER_ERROR, "Update check failed: no '" + settings_.package +
-                                                               "' package listed at " + settings_.packages_url);
+                                                               "' package listed at " + packages_url);
         std::lock_guard<std::mutex> lock(mutex_);
         checked_at_ = std::chrono::system_clock::now();
         check_error_ = error.what();
@@ -596,24 +730,29 @@ nlohmann::json SoftwareUpdateManager::check() {
     }
 
     const InstallerState installer = backend_->installer_state();
+    const InstallerState channel_switch = backend_->channel_switch_state();
     std::lock_guard<std::mutex> lock(mutex_);
     latest_version_ = *version;
+    checked_channel_ = channel;
     checked_at_ = std::chrono::system_clock::now();
     check_error_.reset();
     release_notes_ = std::move(notes);
-    return status_locked(installer);
+    return status_locked(installer, channel_switch, channel);
 }
 
 nlohmann::json SoftwareUpdateManager::install() {
+    const UpdateChannel channel = backend_->read_channel();
     std::string latest;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!update_available_locked()) {
+        if (!update_available_locked(channel)) {
             throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION,
                                       "No update is available to install; check for updates first");
         }
-        if (install_in_flight_) {
-            throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION, "An update is already being installed");
+        if (install_in_flight_ || switch_in_flight_) {
+            throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION, switch_in_flight_
+                                                                        ? "The update channel is being switched"
+                                                                        : "An update is already being installed");
         }
         install_in_flight_ = true;
         latest = latest_version_.value_or("");
@@ -636,12 +775,60 @@ nlohmann::json SoftwareUpdateManager::install() {
         throw SoftwareUpdateError(ErrorCode::NOT_IMPLEMENTED,
                                   "Update install is not available on this host: " + current.detail);
     }
+    if (backend_->channel_switch_state().state == "running") {
+        throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION, "The update channel is being switched");
+    }
     log_info("Software update: installing " + settings_.package + " " + latest + " over " +
              settings_.installed_version);
     backend_->start_installer();
     const InstallerState started = backend_->installer_state();
+    const InstallerState channel_switch = backend_->channel_switch_state();
     std::lock_guard<std::mutex> lock(mutex_);
-    return status_locked(started);
+    return status_locked(started, channel_switch, channel);
+}
+
+nlohmann::json SoftwareUpdateManager::set_channel(UpdateChannel channel) {
+    if (overridden()) {
+        throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION,
+                                  "The update channel is set by update_packages_url in the server configuration");
+    }
+    {
+        // One locked step for both flags: an install and a switch must not
+        // both get past their checks.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (install_in_flight_ || switch_in_flight_) {
+            throw SoftwareUpdateError(
+                ErrorCode::INVALID_OPERATION,
+                install_in_flight_ ? "An update is being installed" : "The update channel is already being switched");
+        }
+        switch_in_flight_ = true;
+    }
+    struct ClearInFlight {
+        SoftwareUpdateManager& self;
+        ~ClearInFlight() {
+            std::lock_guard<std::mutex> lock(self.mutex_);
+            self.switch_in_flight_ = false;
+        }
+    } clear_in_flight{*this};
+
+    if (backend_->installer_state().state == "running") {
+        throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION, "An update is being installed");
+    }
+    const InstallerState current = backend_->channel_switch_state();
+    if (current.state == "running") {
+        throw SoftwareUpdateError(ErrorCode::INVALID_OPERATION, "The update channel is already being switched");
+    }
+    if (current.state == "unavailable") {
+        throw SoftwareUpdateError(ErrorCode::NOT_IMPLEMENTED,
+                                  "Switching the update channel is not available on this host: " + current.detail);
+    }
+    log_info(std::string("Software update: switching the update channel to ") + channel_name(channel));
+    backend_->start_channel_switch(channel);
+    const UpdateChannel now = backend_->read_channel();
+    const InstallerState installer = backend_->installer_state();
+    const InstallerState started = backend_->channel_switch_state();
+    std::lock_guard<std::mutex> lock(mutex_);
+    return status_locked(installer, started, now);
 }
 
 }  // namespace alpacahttp::util

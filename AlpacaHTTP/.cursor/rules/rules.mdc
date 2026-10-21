@@ -200,7 +200,7 @@ Examples:
 
 ```
 GET /api/v1/camera/0/canconnect
-PUT /api/v1/mount/0/slewto?RightAscension=1.5&Declination=-20.3
+PUT /api/v1/telescope/0/slewtocoordinates?RightAscension=1.5&Declination=-20.3
 ```
 
 Routing must decode:

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "sidereal_time_check.h"
 
 #ifndef _WIN32
 #include "concurrency_stress.h"
@@ -277,7 +278,7 @@ TEST_CASE("SynScan Telescope Driver - ASCOM Error Codes", "[synscan][telescope][
 }
 
 // open-astro#769: PulseGuide and MoveAxis validate their arguments before the
-// connection check (AGENTS.md error precedence), so a disconnected driver
+// connection check (driver-lifecycle.instructions.md error precedence), so a disconnected driver
 // answers a bad argument with InvalidValue rather than NotConnected.
 TEST_CASE("SynScan Telescope Driver - motion argument errors precede NotConnected", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
@@ -672,7 +673,7 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
         CHECK(axis_stops == 4);  // each axis gets both stop directions
     }
 
-    SECTION("a dropped link throws DriverException and leaves Slewing true") {
+    SECTION("a dropped link throws DriverException and keeps the slew error observable") {
         REQUIRE(server.drop_connections());
         try {
             driver->abort_slew();
@@ -681,10 +682,26 @@ TEST_CASE("SynScan Telescope Driver - AbortSlew reports a stop it could not send
             CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
             CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
         }
-        CHECK(driver->get_slewing());
+        try {
+            (void)driver->get_slewing();
+            FAIL("Slewing returned a completion value after the stop failed");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).rfind("AbortSlew stop failed: ", 0) == 0);
+        }
     }
 
     driver->set_connected(false);
 }
 
 #endif  // _WIN32
+
+// #1298: the LST helper cut UTC to whole seconds.
+TEST_CASE("SynScan Telescope Driver - SiderealTime follows the clock to under a second", "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+}

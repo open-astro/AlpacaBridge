@@ -2,18 +2,29 @@
 #
 # Local CI pre-flight for AlpacaBridge.
 #
-# Reproduces the PR gates in .github/workflows/ci.yml on this (arm64) machine so
-# a branch can be proven clean *before* it is pushed and a PR is opened. The
-# /submit-pr skill calls this; it is also runnable by hand:
+# Reproduces the PR gates in .github/workflows/ci.yml on this machine so a
+# branch can be proven clean *before* it is pushed and a PR is opened. The
+# /submit-pr skill calls this; it is also runnable by hand.
 #
-#   ./scripts/ci_preflight.sh                 # base = main
+# The default run is the QUICK set: every gate that needs no build (clang-format,
+# the Python gates, the beta VERSION split, cppcheck, shellcheck, the web UI
+# JavaScript and zizmor), in about a minute. The build and test gates (both
+# run_all_tests.sh passes, clang-tidy and the ASan+UBSan pass) run only with
+# PREFLIGHT_FULL=1 and are reported [SKIP] otherwise. CI runs every one of them on
+# each PR, and the review bot waits for those CI jobs before it reviews, so a red
+# build costs CI minutes, not a review round.
+#
+#   ./scripts/ci_preflight.sh                 # quick set, base = main
+#   PREFLIGHT_FULL=1 ./scripts/ci_preflight.sh # also the build and test gates (arm64)
 #   PREFLIGHT_BASE=upstream/main ./scripts/ci_preflight.sh   # fork contributors
 #     (a <remote>/<branch> base is fetched first; a failed fetch or a local-branch base warns)
 #     (a base that does not resolve, or shares no history with HEAD, is a hard failure)
-#   RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # SKIP the ASan+UBSan job (on by default)
+#   PREFLIGHT_FULL=1 RUN_SANITIZERS=0 ./scripts/ci_preflight.sh # full, without ASan+UBSan
 #   RUN_TSAN=1 ./scripts/ci_preflight.sh       # also run the TSan concurrency stress job
 #   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
+#     (RUN_TSAN and RUN_SCAN_BUILD build their own trees and work in either mode)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
+#   ./scripts/ci_preflight.sh --self-test      # bash 3.2 and quick-run guards (see below)
 #
 # Missing analysis tools (clang-tidy, cppcheck, shellcheck, clang-format, node)
 # are auto-installed via `sudo apt-get` unless PREFLIGHT_NO_INSTALL=1, in which case
@@ -24,6 +35,14 @@
 # ZIZMOR_VER / ZIZMOR_SHA256 below in sync with .github/workflows/ci.yml.
 #
 # Exit status: 0 only if every mandatory check passed.
+#
+# --self-test (issue #1453, run by the CI shellcheck job) re-runs the script under
+# /bin/bash -u and checks that: read_lines keeps lines literal and gives 0 elements
+# on empty input; the script has no bash 4 construct; an empty diff (PREFLIGHT_BASE=HEAD)
+# makes every change-scoped gate record SKIP, aborts nowhere and lists every gate; and
+# a quick run records the quick-run SKIP for the build+test gates and sanitizers, and
+# clang-tidy, sanitizers and both build+test gates are only reached through full_only.
+# It needs no network and no compiler. It exits non-zero and names each failed check.
 
 # Intentionally NOT using `set -e`: we want to run every gate and report a full
 # summary rather than abort on the first failure. -u and pipefail still apply.
@@ -33,6 +52,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}" || exit 1
 
 BASE="${PREFLIGHT_BASE:-main}"
+FULL="${PREFLIGHT_FULL:-0}"
 
 if command -v nproc >/dev/null 2>&1; then
   PARALLEL="$(nproc)"
@@ -42,10 +62,10 @@ fi
 
 # --- ccache (issue #529) ---------------------------------------------------
 #
-# run_all_tests.sh does `rm -rf build` and a full clean rebuild, and this
-# script runs it twice (vendors OFF, then ON) plus the ASan+UBSan pass, which
-# is on by default, plus a fourth clean build when RUN_TSAN=1, so every
-# pre-flight recompiles the whole tree 3-4 times from scratch. Route those
+# run_all_tests.sh does `rm -rf` of its build tree and a full clean rebuild, and a
+# PREFLIGHT_FULL=1 run runs it twice (vendors OFF, then ON) plus the ASan+UBSan
+# pass, which is on by default there, plus a fourth clean build when RUN_TSAN=1,
+# so every full pre-flight recompiles the whole tree 3-4 times from scratch. Route those
 # compiles through ccache when it is available: CMake reads
 # CMAKE_{C,CXX}_COMPILER_LAUNCHER at configure time, so exporting them here
 # covers run_all_tests.sh's configures and the clang-tidy compile DB without
@@ -57,10 +77,10 @@ fi
 # neither the ASan+UBSan pass nor the TSan one is made cheaper by the ordinary
 # builds, though successive runs of each still hit. The TSan build dir is the
 # one reused across runs (the ASan pass goes through run_all_tests.sh, which
-# wipes build/ every time), and there the launcher is only a cache-variable
+# wipes AlpacaHTTP/build every time), and there the launcher is only a cache-variable
 # DEFAULT, so it is also passed explicitly (CCACHE_CMAKE_ARGS) or an older build-tsan/
 # would never pick it up. Invariant: every OTHER build dir is deleted before
-# it is configured (run_all_tests.sh rm -rf's build/ and AlpacaHTTP/build/),
+# it is configured (run_all_tests.sh rm -rf's AlpacaHTTP/build/, its one tree since #1251),
 # which is the only reason the env var alone is enough there; a future gate
 # that reuses a build tree needs "${CCACHE_CMAKE_ARGS[@]}" on its configure
 # too. The scan-build gate must NOT use the launcher: a
@@ -97,6 +117,16 @@ record() { # <status: PASS|FAIL|SKIP> <name>
 
 section() { printf '\n========== %s ==========\n' "$1"; }
 
+# full_only <name>: true in a PREFLIGHT_FULL=1 run. In the quick run it records
+# <name> as SKIP, naming how to run it and that CI always does, and returns false.
+full_only() {
+  if [ "${FULL}" = "1" ]; then
+    return 0
+  fi
+  record SKIP "$1 (quick run; PREFLIGHT_FULL=1 runs it, CI always does)"
+  return 1
+}
+
 # --- tool auto-install -----------------------------------------------------
 
 APT_UPDATED=0
@@ -117,6 +147,11 @@ ensure_tool() {
   fi
   if [ "${PREFLIGHT_NO_INSTALL:-0}" = "1" ]; then
     echo ">> ${cmd} missing and PREFLIGHT_NO_INSTALL=1 -- not installing."
+    return 1
+  fi
+  if ! command -v apt-get >/dev/null 2>&1; then
+    # macOS and other non-Debian hosts: never reach sudo for a tool apt cannot install.
+    echo ">> ${cmd} missing and there is no apt-get here -- install ${pkg} yourself."
     return 1
   fi
   echo ">> Installing ${pkg} (provides ${cmd})..."
@@ -152,6 +187,11 @@ ensure_zizmor() {
   if [ "${PREFLIGHT_NO_INSTALL:-0}" = "1" ]; then
     return 1
   fi
+  # The pinned download is the Linux aarch64 build, the one CI runs.
+  if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "aarch64" ]; then
+    echo ">> zizmor missing; the pinned download is for Linux aarch64 only -- install zizmor ${ZIZMOR_VER} yourself." >&2
+    return 1
+  fi
   mkdir -p "${cache_dir}"
   tgz="${cache_dir}/zizmor-${ZIZMOR_VER}.tar.gz"
   url="https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VER}/zizmor-aarch64-unknown-linux-gnu.tar.gz"
@@ -181,6 +221,113 @@ ensure_zizmor() {
 }
 
 # --- changed-file sets -----------------------------------------------------
+
+# read_lines <array name>: sets the named array to the lines of stdin. The bash 4
+# array builtin is not used: macOS ships bash 3.2, where the quick run must work too.
+read_lines() {
+  local _line
+  eval "$1=()"
+  while IFS= read -r _line; do
+    eval "$1+=(\"\${_line}\")"
+  done
+}
+
+# --- self-test (issue #1453) -----------------------------------------------
+
+# The single-quoted test strings are meant literally ($(...) must not expand).
+# shellcheck disable=SC2016
+self_test() {
+  local failed=0 out n
+  st_fail() { echo "SELF-TEST FAIL: $1" >&2; failed=1; }
+  st_ok() { echo "SELF-TEST ok: $1"; }
+
+  # Run under the system bash (macOS: 3.2) where one exists and is not this shell.
+  if [ -x /bin/bash ] && [ "${BASH:-}" != "/bin/bash" ] && [ -z "${PREFLIGHT_SELF_TEST_REEXEC:-}" ]; then
+    PREFLIGHT_SELF_TEST_REEXEC=1 exec /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" --self-test
+  fi
+  echo "Self-test shell: ${BASH_VERSION:-unknown}"
+
+  # Check 1: read_lines is literal and handles empty input.
+  local -a got=()
+  read_lines got < <(printf '%s\n' 'a b' '$(echo pwned)' "it's \"q\"" '`x`' '  lead' 'trail  ' 'a:b')
+  if [ "${#got[@]}" -eq 7 ] && [ "${got[0]}" = 'a b' ] && [ "${got[1]}" = '$(echo pwned)' ] \
+    && [ "${got[2]}" = "it's \"q\"" ] && [ "${got[3]}" = '`x`' ] \
+    && [ "${got[4]}" = '  lead' ] && [ "${got[5]}" = 'trail  ' ] && [ "${got[6]}" = 'a:b' ]; then
+    st_ok "read_lines keeps spaces, \$(...) and quotes literal"
+  else
+    st_fail "read_lines: a line differs or the count is ${#got[@]}, expected 7"
+  fi
+  read_lines got < <(printf '')
+  if [ "${#got[@]}" -eq 0 ]; then
+    st_ok "read_lines gives 0 elements on empty input"
+  else
+    st_fail "read_lines: empty input gave ${#got[@]} elements"
+  fi
+
+  # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
+  # this pattern from matching its own line).
+  local hits
+  if hits="$(grep -nE 'map[f]ile|read[a]rray|declare +-[a-zA-Z]*A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|[&]|[&]>>' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
+    st_fail "bash 4 construct in scripts/ci_preflight.sh:"
+    echo "${hits}" >&2
+  else
+    st_ok "no bash 4 construct in scripts/ci_preflight.sh"
+  fi
+
+  # Check 2, static half: bash 3.2 aborts on an empty array expanded bare under -u
+  # (bash 4.4+ does not, so the run below cannot see it). CHANGED can be empty; every
+  # expansion must be the ${CHANGED[@]+"${CHANGED[@]}"} form.
+  if grep -nE '(^|[^"]|[^+]")\$\{CHANGED\[[@*]\]\}' "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+    st_fail "CHANGED expanded without the empty-array guard"
+  else
+    st_ok "CHANGED is only expanded with the empty-array guard"
+  fi
+
+  # Checks 2 and 3: a quick run against an empty diff (base = HEAD).
+  out="$(PREFLIGHT_BASE=HEAD PREFLIGHT_NO_INSTALL=1 PREFLIGHT_FULL=0 PREFLIGHT_SELF_TEST_REEXEC='' \
+    /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" 2>&1 </dev/null)" || true
+  if printf '%s\n' "${out}" | grep -qE 'unbound variable|(map[f]ile|read[a]rray): command not found'; then
+    st_fail "empty-diff run aborted:"
+    printf '%s\n' "${out}" | grep -E 'unbound variable|(map[f]ile|read[a]rray): command not found' >&2
+  else
+    st_ok "empty-diff run has no unbound-variable or bash 4 builtin error"
+  fi
+  local summary
+  summary="$(printf '%s\n' "${out}" | sed -n '/Pre-flight summary/,$p')"
+  for n in 'clang-format' 'clang-tidy' 'cppcheck' 'shellcheck' 'javascript' 'zizmor'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n} \(no "; then
+      st_fail "empty diff: ${n} did not record SKIP (no ... changes)"
+    fi
+  done
+  for n in 'unicode scan' 'stress-test registration' 'falsified-by' 'pr-template' 'ConformU report validation' \
+    'docs drift check' 'connect-error hook' 'serial port ownership' 'layering gate' 'contract sweep registration' \
+    'beta VERSION split'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[(PASS|SKIP|FAIL)\] ${n}"; then
+      st_fail "summary does not list ${n}"
+    fi
+  done
+  for n in 'build\+test \(vendors OFF\)' 'build\+test \(vendors ON\)' 'sanitizers'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n} \(quick run; PREFLIGHT_FULL=1 runs it, CI always does\)"; then
+      st_fail "quick run: ${n} did not record the quick-run SKIP"
+    fi
+  done
+  # Check 3, clang-tidy: the empty diff never reaches its full_only call (no C++ changes),
+  # so check statically that each build gate is only run through full_only "<name>".
+  for n in 'build+test (vendors OFF)' 'build+test (vendors ON)' 'clang-tidy' 'sanitizers'; do
+    if ! grep -qF "full_only \"${n}\"" "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+      st_fail "build gate ${n} is not guarded by full_only"
+    fi
+  done
+  if [ "${failed}" -eq 0 ]; then
+    st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
+  fi
+  return "${failed}"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit $?
+fi
 
 # Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
 # when its prefix is a configured remote; a failed fetch is a warning, not fatal,
@@ -228,37 +375,37 @@ if ! MERGE_BASE="$(git merge-base "${BASE}" HEAD 2>/dev/null)"; then
 fi
 echo "Diff base: ${BASE} (merge-base ${MERGE_BASE})"
 
-mapfile -t CHANGED < <(git diff --name-only "${MERGE_BASE}" HEAD)
+read_lines CHANGED < <(git diff --name-only "${MERGE_BASE}" HEAD)
 
 # C/C++ files anywhere in the diff (for clang-format).
 have_cpp_changes() {
-  printf '%s\n' "${CHANGED[@]}" | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
+  printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$'
 }
 
 # C/C++ files under our authored src/include trees (for clang-tidy / cppcheck).
-mapfile -t SRC_CPP_FILES < <(
+read_lines SRC_CPP_FILES < <(
   git diff --name-only --diff-filter=ACMR "${MERGE_BASE}" HEAD -- \
     AlpacaCore/src AlpacaCore/include AlpacaHTTP/src AlpacaHTTP/include \
     | grep -E '\.(c|cc|cpp|cxx|h|hpp|hxx)$' || true
 )
 
 # Shell scripts we author (mirrors the shellcheck job's selection).
-mapfile -t SH_FILES < <(
+read_lines SH_FILES < <(
   {
-    printf '%s\n' "${CHANGED[@]}" | grep -E '\.sh$' | grep -v '^AlpacaCore/external/'
-    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
-      printf '%s\n' "${CHANGED[@]}" | grep -qx "${f}" && echo "${f}"
+    printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -E '\.sh$' | grep -v '^AlpacaCore/external/'
+    for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update debian/alpacabridge-set-update-channel; do
+      printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -qx "${f}" && echo "${f}"
     done
   } | sort -u
 )
 
 # Hand-written web UI JavaScript (served static, no build step) and its tests.
-mapfile -t JS_FILES < <(
-  printf '%s\n' "${CHANGED[@]}" | grep -E '^(AlpacaHTTP/web/.*\.js|AlpacaHTTP/tests/web/.*\.js)$' || true
+read_lines JS_FILES < <(
+  printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -E '^(AlpacaHTTP/web/.*\.js|AlpacaHTTP/tests/web/.*\.js)$' || true
 )
 
 have_workflow_changes() {
-  printf '%s\n' "${CHANGED[@]}" | grep -qE '^\.github/workflows/'
+  printf '%s\n' ${CHANGED[@]+"${CHANGED[@]}"} | grep -qE '^\.github/workflows/'
 }
 
 # --- gate 1: clang-format (changed lines) ----------------------------------
@@ -365,7 +512,10 @@ if python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs
    && python3 scripts/changelog_fragments.py --check \
    && python3 scripts/changelog_to_deb.py --self-test \
    && python3 scripts/release_tag.py --self-test \
-   && python3 scripts/merge_down.py --self-test; then
+   && python3 scripts/merge_down.py --self-test \
+   && python3 scripts/dependency_snapshot.py --self-test \
+   && python3 scripts/dependency_snapshot.py --check \
+   && python3 scripts/dependency_updates.py --self-test; then
   record PASS "docs drift check"
 else
   record FAIL "docs drift check"
@@ -409,11 +559,21 @@ fi
 
 # --- gate 3: build + unit tests, vendor-neutral ----------------------------
 
-section "Build + tests (vendors OFF)"
-if ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
-  record PASS "build+test (vendors OFF)"
-else
-  record FAIL "build+test (vendors OFF)"
+if full_only "build+test (vendors OFF)"; then
+  section "Build + tests (vendors OFF)"
+  # Catch2 probe (issue #593): without it AlpacaCore/tests/CMakeLists.txt returns
+  # early and ctest can only say "No tests were found", so name the cause here.
+  if ! compgen -G "/usr/lib/cmake/Catch2" >/dev/null \
+     && ! compgen -G "/usr/lib/*/cmake/Catch2" >/dev/null \
+     && ! compgen -G "/usr/local/lib/cmake/Catch2" >/dev/null \
+     && ! compgen -G "/usr/share/cmake/Catch2" >/dev/null; then
+    echo "Catch2 not found: install catch2 (apt) or the AlpacaCore tests will not configure"
+  fi
+  if ALPACACORE_ENABLE_ALL_VENDORS=OFF ./run_all_tests.sh; then
+    record PASS "build+test (vendors OFF)"
+  else
+    record FAIL "build+test (vendors OFF)"
+  fi
 fi
 
 # --- gate 3b: the beta VERSION split ---------------------------------------
@@ -431,11 +591,18 @@ fi
 
 # --- gate 4: build + unit tests, all vendors -------------------------------
 
-section "Build + tests (vendors ON)"
-if ALPACACORE_ENABLE_ALL_VENDORS=ON ./run_all_tests.sh; then
-  record PASS "build+test (vendors ON)"
-else
-  record FAIL "build+test (vendors ON)"
+if full_only "build+test (vendors ON)"; then
+  section "Build + tests (vendors ON)"
+  # The gphoto driver links the bundled libgphoto2 (decision 0012): hint when
+  # it is not installed instead of leaving a bare CMake error.
+  if [ ! -e /usr/lib/alpacabridge/libgphoto2/lib/libgphoto2.so ]; then
+    echo "bundled libgphoto2 not installed: run 'sudo scripts/build_bundled_gphoto.sh' once before the vendors-ON gates"
+  fi
+  if ALPACACORE_ENABLE_ALL_VENDORS=ON ./run_all_tests.sh; then
+    record PASS "build+test (vendors ON)"
+  else
+    record FAIL "build+test (vendors ON)"
+  fi
 fi
 
 # --- gate 5: clang-tidy (changed lines) ------------------------------------
@@ -444,6 +611,8 @@ section "clang-tidy (changed lines)"
 if [ "${#SRC_CPP_FILES[@]}" -eq 0 ]; then
   echo "No changed C/C++ source files -- skipping."
   record SKIP "clang-tidy (no source changes)"
+elif ! full_only "clang-tidy"; then
+  echo "Needs the all-vendors build -- skipped in the quick run."
 elif ensure_tool clang-tidy clang-tidy; then
   # Compile DB covering both trees (AlpacaHTTP pulls AlpacaCore in as a subdir).
   # Vendors ON so vendor sources get real compile commands (mirrors CI; with
@@ -455,6 +624,7 @@ elif ensure_tool clang-tidy clang-tidy; then
   cmake -S AlpacaHTTP -B AlpacaHTTP/build \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     -DALPACAHTTP_BUILD_TESTS=ON \
+    -DALPACACORE_BUILD_TESTS=ON \
     -DALPACACORE_ENABLE_ALL_VENDORS=ON >/dev/null
   cmake --build AlpacaHTTP/build --parallel "${PARALLEL}" >/dev/null
   tidy_diff="$(dpkg -L clang-tidy 2>/dev/null | grep -m1 -E 'clang-tidy-diff.*\.py' || true)"
@@ -558,7 +728,7 @@ elif ensure_tool node nodejs; then
   # Explicit file list, not `node --test <dir>`: the directory form works on
   # Node 20 but Node 22 resolves the path as a module and dies with
   # MODULE_NOT_FOUND. Kept identical to the CI step for that reason.
-  mapfile -t JS_TEST_FILES < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
+  read_lines JS_TEST_FILES < <(git ls-files 'AlpacaHTTP/tests/web/*.test.js')
   if [ "${js_ok}" -eq 1 ] && [ "${#JS_TEST_FILES[@]}" -eq 0 ]; then
     # FAIL, not skip: CI's step exits 1 on an empty list, so skipping here
     # would let a branch that renames the tests out of the glob pass locally
@@ -601,9 +771,11 @@ else
   fi
 fi
 
-# --- sanitizers (ASan+UBSan, on by default; RUN_SANITIZERS=0 opts out) -----
+# --- sanitizers (ASan+UBSan: on by default in a full run; RUN_SANITIZERS=0 opts out) -----
 
-if [ "${RUN_SANITIZERS:-1}" = "1" ]; then
+if ! full_only "sanitizers"; then
+  :
+elif [ "${RUN_SANITIZERS:-1}" = "1" ]; then
   section "Sanitizers (ASan + UBSan, vendors OFF)"
   if CXXFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all" \
      LDFLAGS="-fsanitize=address,undefined" \
@@ -744,7 +916,9 @@ if [ "${CCACHE_ACTIVE}" = "1" ]; then
 fi
 
 echo
-if [ "${OVERALL}" -eq 0 ]; then
+if [ "${OVERALL}" -eq 0 ] && [ "${FULL}" != "1" ]; then
+  echo "All quick checks passed. Safe to push: CI runs the build and test gates."
+elif [ "${OVERALL}" -eq 0 ]; then
   echo "All mandatory checks passed. Safe to push."
 else
   echo "One or more checks FAILED -- do not push until fixed."

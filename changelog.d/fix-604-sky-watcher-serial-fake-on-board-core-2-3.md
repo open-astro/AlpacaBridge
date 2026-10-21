@@ -1,0 +1,3 @@
+### Changed (tests)
+
+- **Sky-Watcher serial fake runs on the shared `FakeSkyWatcherBoard` core** (AlpacaCore tests, issue #604, slice 2 of 3): `FakeSkyWatcherSerialBoard` in `AlpacaCore/tests/fake_skywatcher_serial_board.h` now derives from the core and keeps only the pty transport and the serial-only knobs, so one axis model and `:` command handler serve both transports. The core gains `set_counts`, `set_axis_running`, `axis_speed_mode` and `set_init_done`. Two serial answers change to the core's: `:E` on a running axis replies `!2`, and `:f` character 0 carries the direction and fast bits. The serial, link-loss and contract-sweep suites pass with no assertion changed. No product code is changed.

@@ -1,0 +1,3 @@
+### Changed
+
+- **Bisque pulse guide runs in an operation slot**, Bisque telescope, issue #1336. The guide body that sends DirectGuide to TheSkyX now runs in a `util::AsyncOperation` instead of a hand-rolled thread; disconnect and the destructor cancel and join it, and a failed guide is still reported by `IsPulseGuiding` until the next `PulseGuide` or connect, and an AbortSlew or disconnect retires a guide under the driver lock so it neither sends nor records an error afterwards (code: the request id checks in `PulseGuide`'s slot body; tests `Bisque PulseGuide - a failed DirectGuide is reported until the next guide` and `Bisque PulseGuide - a failed guide's error is dropped by disconnect and reconnect`).

@@ -61,7 +61,7 @@ external/                       # Vendor SDK folders or vendored SDK assets (pol
 │   └─ ASI_Camera_SDK/          # ZWO SDK subset (vendored)
 │       └─ SDK files...
 ├─ QHY/
-│   └─ sdk_linux_arm64_26.06.04/  # QHY SDK, unpacked as shipped (usr/local/...)
+│   └─ sdk_linux_arm64_26.07.28/  # QHY SDK, unpacked as shipped (usr/local/...)
 │       └─ SDK files...
 
 include/alpacacore/
@@ -113,7 +113,7 @@ external/
    └─ README.md
 ```
 
-**Important**: Use the SDK structure exactly as provided by the vendor, and do not rename or flatten it — folder layouts differ per vendor (`ZWO/ASI_Camera_SDK/`, `QHY/sdk_linux_arm64_26.06.04/usr/local/`). Nothing searches for it: each vendor's `src/vendors/<vendor>/CMakeLists.txt` sets its SDK root as a literal path and fails at configure time when the header is not there. Adding a vendor, or bumping an SDK to a new versioned folder, means editing that path.
+**Important**: Use the SDK structure exactly as provided by the vendor, and do not rename or flatten it — folder layouts differ per vendor (`ZWO/ASI_Camera_SDK/`, `QHY/sdk_linux_arm64_26.07.28/usr/local/`). Nothing searches for it: each vendor's `src/vendors/<vendor>/CMakeLists.txt` sets its SDK root as a literal path and fails at configure time when the header is not there. Adding a vendor, or bumping an SDK to a new versioned folder, means editing that path.
 
 **Vendoring option**: If the vendor license allows, you may commit the **minimal required SDK files**
 (headers + platform libraries) into `external/` to remove manual SDK downloads. Document exactly
@@ -638,7 +638,7 @@ closed.
 
 ### QHY Camera Driver
 
-**SDK Location**: `external/QHY/sdk_linux_arm64_26.06.04/` — a fixed, versioned path, not a folder name that varies.
+**SDK Location**: `external/QHY/sdk_linux_arm64_26.07.28/` — a fixed, versioned path, not a folder name that varies.
 
 **Required Files** (within the SDK folder):
 - `usr/local/include/qhyccd.h`

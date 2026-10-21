@@ -1,0 +1,3 @@
+### Fixed
+
+- **ZWO EAF focuser connects again with a stored max step of 0, and clamps a Max Step above the unit's step range**, ZWO focuser driver, issue #1194. A unit that stores max step 0 with no `maxStep` set connects as before the setting existed (`MaxStep` reads 0, no write, each `Move` refused, one WARN; test `ZWO EAF Focuser Driver - A stored max step of 0 with none configured still connects`). A `maxStep` above `EAFStepRange` is written once as the range value with one WARN naming both numbers, and the focuser connects (test `ZWO EAF Focuser Driver - A configured max step above the unit's step range is clamped to it`).

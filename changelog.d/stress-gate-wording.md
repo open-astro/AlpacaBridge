@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Stress-gate wording matches an empty `ALLOWLIST`** (`scripts/check_stress_registration.py`, `.claude/commands/driver-build.md`, `AGENTS.md`): the QHY camera registration (#963) emptied the gate's `ALLOWLIST`, so the docstring, the rule-1 failure message and `/driver-build` Step 7b no longer describe it as the list of pre-gate drivers. AGENTS.md drops the stale "15 merged registrations" count, and `/driver-build` notes Player One as the one SDK seam whose fake locks internally instead of having a `locked_<vendor>_sdk.h` decorator.

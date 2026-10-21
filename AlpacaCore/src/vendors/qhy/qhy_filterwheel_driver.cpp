@@ -38,10 +38,10 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     QHYFilterWheelDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
-                         QHYSDK& sdk, SettleClock clock = &std::chrono::steady_clock::now)
+                         QHYSDK& sdk, util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("QHY"),
           sdk_(sdk),
-          clock_(std::move(clock)),
+          clock_(clock),
           device_number_(device_number),
           camera_id_(std::move(camera_id)),
           camera_index_(camera_index),
@@ -83,7 +83,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_id_.has_value()) {
             return "QHY_CFW_" + camera_id_.value();
@@ -277,7 +277,7 @@ public:
             // Not the target. A repeating reading held for kSettleTime is the
             // wheel at rest on another slot (stalled or stopped short): end
             // the pending state and report where it is, instead of -1 forever.
-            const auto now = clock_();
+            const auto now = clock_.now();
             if (!rest_candidate_.has_value() || rest_candidate_.value() != pos) {
                 rest_candidate_ = pos;
                 rest_since_ = now;
@@ -303,7 +303,7 @@ public:
 
     void set_position(int position) override {
         // Range validation precedes the connection check (ASCOM precedence,
-        // per AGENTS.md): a negative position is unconditionally invalid, so
+        // per driver-lifecycle.instructions.md): a negative position is unconditionally invalid, so
         // it is InvalidValue even while disconnected. The upper bound depends
         // on the slot count (unknown until connect), so it is checked below.
         if (position < 0) {
@@ -477,7 +477,7 @@ private:
     }
 
     QHYSDK& sdk_;
-    SettleClock clock_;
+    util::TaskClock& clock_;
     int device_number_;
     std::optional<std::string> camera_id_;
     std::optional<int> camera_index_;
@@ -496,7 +496,7 @@ private:
     mutable std::optional<int> pending_target_;
     // Rest detection for a move that ends on a non-target slot (guarded by mutex_).
     mutable std::optional<int> rest_candidate_;
-    mutable std::chrono::steady_clock::time_point rest_since_{};
+    mutable util::TaskClock::clock::time_point rest_since_{};
     mutable int rest_reads_ = 0;
     std::atomic<bool> connected_;
     mutable std::mutex mutex_;
@@ -526,8 +526,8 @@ std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, con
 }
 
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel(int device_number, const std::string& camera_id, QHYSDK& sdk,
-                                                          SettleClock clock) {
-    return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt, sdk, std::move(clock));
+                                                          util::TaskClock& clock) {
+    return std::make_unique<QHYFilterWheelDriver>(device_number, camera_id, std::nullopt, sdk, clock);
 }
 
 std::unique_ptr<FilterWheelDriver> create_qhy_filterwheel_by_index(int device_number, int camera_index, QHYSDK& sdk) {

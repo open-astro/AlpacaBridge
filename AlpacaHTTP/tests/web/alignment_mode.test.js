@@ -44,6 +44,31 @@ for (const vendor of ['synscan', 'celestron']) {
     });
 }
 
+test('Celestron protocol picker distinguishes the handset and direct CGX USB transports', () => {
+    const select = html.match(
+        /<select id="celestron-protocol"[^>]*name="celestronProtocol"[^>]*>([\s\S]*?)<\/select>/);
+    assert.ok(select, 'no Celestron protocol selector');
+    const values = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(values, ['nexstar', 'cgx-aux']);
+    assert.ok(html.includes('CGX / CGX-L direct USB (no hand controller)'));
+    assert.ok(html.includes('id="celestron-cgx-site-latitude"'));
+    assert.ok(html.includes('id="celestron-cgx-site-longitude"'));
+});
+
+test('Celestron direct USB config persists protocol and uses the fixed serial transport', () => {
+    assert.ok(app.includes("setFormValue('celestron-protocol', protocol);"));
+    assert.ok(app.includes("deviceData.protocol = formData.get('celestronProtocol') || 'nexstar';"));
+    assert.ok(app.includes("deviceData.protocol === 'cgx-aux'"));
+    assert.ok(app.includes("baudGroup.style.display = directUsb ? 'none' : 'block';"));
+    assert.ok(app.includes("setFormValue('celestron-cgx-site-latitude', config.siteLatitude);"));
+    assert.ok(app.includes("Site latitude and longitude are required for direct CGX USB."));
+});
+
+test('Celestron visibility is recalculated whenever its form section is reselected', () => {
+    assert.match(app, /vendor === 'celestron'\) \{\s*document\.getElementById\('celestron-config'\)\.style\.display = 'block';\s*updateCelestronConnectionFields\(\);/);
+    assert.match(app, /function resetDeviceForm\(\)[\s\S]*?updateVendorOptions\(\);/);
+});
+
 test('known alignment modes pass through', () => {
     assert.equal(normalizeAlignmentMode('auto'), 'auto');
     assert.equal(normalizeAlignmentMode('altaz'), 'altaz');

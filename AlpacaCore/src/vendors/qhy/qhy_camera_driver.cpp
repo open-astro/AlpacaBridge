@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -91,9 +92,11 @@ public:
 
     QHYCameraDriver(int device_number, std::optional<std::string> camera_id, std::optional<int> camera_index,
                     QHYSDK& sdk, QHYWorkerStartHook on_worker_start = {},
-                    std::chrono::seconds watchdog_margin = std::chrono::seconds(60))
+                    std::chrono::seconds watchdog_margin = std::chrono::seconds(60),
+                    util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("QHY"),
           sdk_(sdk),
+          clock_(clock),
           watchdog_margin_(watchdog_margin),
           on_worker_start_(std::move(on_worker_start)),
           device_number_(device_number),
@@ -167,7 +170,7 @@ public:
         return DeviceType::Camera;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_id_.has_value()) {
             return "QHY_" + camera_id_.value();
@@ -311,7 +314,7 @@ private:
 
             std::lock_guard<std::mutex> lock(mutex_);
             // Clear driver state and cached capabilities BEFORE the SDK close
-            // (AGENTS.md): a throwing close must not leave the driver
+            // (driver-lifecycle.instructions.md): a throwing close must not leave the driver
             // half-connected serving a previous camera's caps/ranges. Keep the
             // model string so the web UI device name survives a disconnect
             // (see the constructor comment).
@@ -558,7 +561,7 @@ public:
     // holds mutex_. Returns true when it just expired the exposure.
     bool expire_overdue_exposure_locked() const {
         if (exposure_status_ != QHYExposureStatus::Working || !exposure_deadline_valid_ ||
-            std::chrono::steady_clock::now() < exposure_deadline_) {
+            clock_.now() < exposure_deadline_) {
             return false;
         }
         ALPACA_LOG_WARN("QHY", "Exposure deadline exceeded; marking exposure failed.");
@@ -570,9 +573,7 @@ public:
     }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) {
-            return CameraState::Idle;
-        }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         switch (exposure_status_) {
         case QHYExposureStatus::Working:
@@ -728,7 +729,7 @@ public:
         // if it throws (e.g. thread limit), nothing was spawned to ever clear
         // the flag, so publishing it early would wedge cooler-off forever.
         auto running_flag = std::make_shared<std::atomic<bool>>(true);
-        cooler_off_thread_ = std::thread([this, running_flag, sdk = &sdk_]() {
+        cooler_off_thread_ = std::thread([this, running_flag, sdk = &sdk_, clock = &clock_]() {
             // Clear the in-flight flag on every exit path, including throws.
             // The GUARD below holds only the shared_ptr -- the enclosing lambda
             // does capture `this`, but the guard's destructor deliberately does
@@ -772,20 +773,18 @@ public:
                 // and can occasionally run long on real hardware (ConformU
                 // finding) -- worth being able to see how long after the fact.
                 // Safe to call after a detach: only touches local state.
-                const auto call_start = std::chrono::steady_clock::now();
+                const auto call_start = clock->now();
                 ALPACA_LOG_INFO("QHY", "Calling SetQHYCCDParam(MANULPWM,0)...");
                 try {
                     sdk->set_param(cam_id_for_pwm, control::MANULPWM, 0.0);
-                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                std::chrono::steady_clock::now() - call_start)
-                                                .count();
+                    const auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - call_start).count();
                     ALPACA_LOG_INFO(
                         "QHY", "SetQHYCCDParam(MANULPWM,0) returned OK after " + std::to_string(elapsed_ms) + "ms");
                 } catch (const std::exception& e) {
                     // MANULPWM may not be writable on all cameras — ignore
-                    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                std::chrono::steady_clock::now() - call_start)
-                                                .count();
+                    const auto elapsed_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(clock->now() - call_start).count();
                     ALPACA_LOG_INFO("QHY", "SetQHYCCDParam(MANULPWM,0) threw after " + std::to_string(elapsed_ms) +
                                                "ms: " + e.what());
                 }
@@ -921,7 +920,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         expire_overdue_exposure_locked();
         if (!last_exposure_valid_) {
-            throw AlpacaException("No exposure has been taken", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("No exposure has been taken");
         }
         if (exposure_status_ == QHYExposureStatus::Success) {
             try {
@@ -942,8 +941,7 @@ public:
         }
         // Still exposing (or idle): there is no image to return, and waiting
         // would hold the HTTP request for the whole exposure.
-        throw AlpacaException("No image is ready; poll ImageReady until the exposure completes",
-                              AlpacaError::InvalidOperation);
+        throw AlpacaException::asked_too_early("No image is ready; poll ImageReady until the exposure completes");
     }
 
     std::string get_image_array_variant() const override {
@@ -978,7 +976,7 @@ public:
         // pulse_guide's fresh flag/end-time write and falsely report
         // "not guiding" mid-pulse (Player One camera, PR #119 round 4).
         std::lock_guard<std::mutex> lock(mutex_);
-        if (std::chrono::steady_clock::now() >= pulse_guiding_end_) {
+        if (clock_.now() >= pulse_guiding_end_) {
             pulse_guiding_->store(false);
             return false;
         }
@@ -1080,9 +1078,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) {
-            return 0.0;
-        }
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (exposure_status_ == QHYExposureStatus::Success) {
             return 100.0;
@@ -1296,8 +1292,7 @@ public:
         // (same shape as the Player One camera, PR #119).
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            pulse_guiding_end_ = std::chrono::steady_clock::now() +
-                                 std::chrono::milliseconds(duration);
+            pulse_guiding_end_ = clock_.now() + std::chrono::milliseconds(duration);
             pulse_guiding_->store(true);
         }
 
@@ -1313,7 +1308,7 @@ public:
         //
         // The thread captures NO object state — only the copied camera ID
         // and the shared_ptr flag — so it cannot dereference a destroyed
-        // driver if the object is torn down mid-pulse (AGENTS.md: never
+        // driver if the object is torn down mid-pulse (driver-lifecycle.instructions.md: never
         // detach a thread that touches `this`; the Player One camera fixed
         // this exact bug with the same shared_ptr pattern).
         std::thread([cam_id, qhy_dir, dur_ms, flag = pulse_guiding_, sdk = &sdk_]() {
@@ -1490,12 +1485,14 @@ public:
             image_ready_ = false;
             exposure_failure_.clear();
             exposure_status_ = QHYExposureStatus::Working;
-            exposure_deadline_ = std::chrono::steady_clock::now() +
-                                 std::chrono::microseconds(static_cast<long long>(exposure_us)) + watchdog_margin_;
+            exposure_deadline_ =
+                clock_.now() + std::chrono::microseconds(static_cast<long long>(exposure_us)) + watchdog_margin_;
             exposure_deadline_valid_ = true;
             exposure_buffer_.clear();
             exposure_width_ = 0;
             exposure_height_ = 0;
+            image_width_ = 0;
+            image_height_ = 0;
             exposure_bpp_ = 0;
             exposure_channels_ = 0;
         }
@@ -1542,7 +1539,8 @@ public:
         // 4s exposure cleanly -- the one thing that sample does that this
         // driver didn't was keep Exp and Get on the SAME thread). QHY's SDK
         // appears to keep thread-affine state for a single-frame session.
-        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded, sdk_ptr = &sdk_]() {
+        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded, sdk_ptr = &sdk_,
+                                        clock = &clock_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
                 ~RunningGuard() { flag->store(false); }
@@ -1594,7 +1592,7 @@ public:
             // this settle time to finish transitioning into a readable state.
             if (!read_directly) {
                 ALPACA_LOG_DEBUG("QHY", "exposure worker: sleeping 1s before GetMemLength/GetSingleFrame...");
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                clock->sleep_for(std::chrono::seconds(1));
             }
 
             // Fetched here (after Exp, like the sample), not before arming:
@@ -1715,7 +1713,7 @@ public:
                 constexpr double kMinTransferBytesPerSecond = 500'000.0;
                 auto min_transfer = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                     std::chrono::duration<double>(static_cast<double>(mem_length) / kMinTransferBytesPerSecond));
-                auto extended_deadline = std::chrono::steady_clock::now() + min_transfer + std::chrono::seconds(15);
+                auto extended_deadline = clock->now() + min_transfer + std::chrono::seconds(15);
                 if (!exposure_superseded->load()) {
                     // Re-checked immediately after acquiring the lock -- see
                     // the start_single_frame failure branch above for why
@@ -1799,6 +1797,10 @@ public:
                     exposure_buffer_ = std::move(local_buf);
                     exposure_width_ = w;
                     exposure_height_ = h;
+                    // ROI size is frozen while Working; keep it for ImageArray
+                    // so a later NumX/NumY change cannot reshape this frame.
+                    image_width_ = num_x_;
+                    image_height_ = num_y_;
                     exposure_bpp_ = bpp;
                     exposure_channels_ = channels;
                     try {
@@ -1887,6 +1889,10 @@ private:
     // and that is UB either way. Bound these workers' lifetimes; do not read
     // the raw-pointer rule as making detachment safe.
     QHYSDK& sdk_;
+    // Declared before every member that is built from it (the worker stop
+    // signals below). Workers that can be detached capture &clock_ by value,
+    // like sdk_, and never reach it through `this`.
+    util::TaskClock& clock_;
     const std::chrono::seconds watchdog_margin_;
     // Test-only (issue #510): see QHYWorkerStartHook in the header. Empty in
     // production, and never reassigned after construction.
@@ -1933,6 +1939,8 @@ private:
     std::vector<uint8_t> exposure_buffer_;
     uint32_t exposure_width_{};
     uint32_t exposure_height_{};
+    int image_width_{};  // NumX/NumY captured when the frame completed
+    int image_height_{};
     uint32_t exposure_bpp_{};
     uint32_t exposure_channels_{};
     double last_exposure_duration_;
@@ -1982,6 +1990,11 @@ private:
     // the signal by shared_ptr keeps the mutex and cv alive for exactly as
     // long as some worker might still be sleeping on them.
     struct WorkerStopSignal {
+        explicit WorkerStopSignal(util::TaskClock& task_clock) : clock(&task_clock) {}
+
+        // The driver's clock, not owned: it outlives the driver and any
+        // detached worker, so waiting on it never reaches `this`.
+        util::TaskClock* clock;
         std::mutex mutex;
         std::condition_variable cv;
         std::atomic<bool> stop{false};
@@ -2000,7 +2013,7 @@ private:
         /// Returns true if it was stopped.
         bool wait_for(std::chrono::milliseconds d) {
             std::unique_lock<std::mutex> lock(mutex);
-            return cv.wait_for(lock, d, [this] { return stop.load(); });
+            return clock->wait_for(lock, cv, d, [this] { return stop.load(); });
         }
     };
 
@@ -2009,12 +2022,12 @@ private:
     // own and can occasionally run well past its documented ~10s PID-loop
     // figure (ConformU finding), so join_temp_thread() below bounds the wait
     // and detaches on timeout. A detached thread must never touch `this`
-    // (AGENTS.md) -- these shared_ptrs, plus the immediate stop-flag
+    // (driver-lifecycle.instructions.md) -- these shared_ptrs, plus the immediate stop-flag
     // recheck in start_temp_control_thread() right after the blocking call,
     // are what make that safe. Same pattern as pulse_guiding_/
     // cooler_off_running_.
     std::thread temp_thread_;
-    std::shared_ptr<WorkerStopSignal> temp_thread_stop_{std::make_shared<WorkerStopSignal>()};
+    std::shared_ptr<WorkerStopSignal> temp_thread_stop_{std::make_shared<WorkerStopSignal>(clock_)};
     // True for the temp thread's entire lifetime (spawn to natural exit);
     // lets join_temp_thread() know whether a detach is actually needed.
     std::shared_ptr<std::atomic<bool>> temp_thread_running_{std::make_shared<std::atomic<bool>>(false)};
@@ -2029,7 +2042,7 @@ private:
     // indefinitely on real hardware with no SDK-side timeout (ConformU
     // finding), so join_cooler_off_thread() bounds its wait and detaches on
     // timeout. A detached thread must never touch `this` once it might
-    // outlive the driver (AGENTS.md) — the shared_ptr keeps this flag alive
+    // outlive the driver (driver-lifecycle.instructions.md) — the shared_ptr keeps this flag alive
     // independent of `this`, same pattern as pulse_guiding_ below.
     std::shared_ptr<std::atomic<bool>> cooler_off_running_{std::make_shared<std::atomic<bool>>(false)};
 
@@ -2043,7 +2056,7 @@ private:
     // open-astro#323: shared_ptr like the temp worker's, and for the same
     // reason -- the telemetry join is now bounded and can detach, so a zombie
     // must be able to observe its stop signal without touching `this`.
-    std::shared_ptr<WorkerStopSignal> telemetry_thread_stop_{std::make_shared<WorkerStopSignal>()};
+    std::shared_ptr<WorkerStopSignal> telemetry_thread_stop_{std::make_shared<WorkerStopSignal>(clock_)};
     // True for the telemetry thread's whole lifetime; lets the bounded join
     // know whether a detach is actually needed. Mirrors temp_thread_running_.
     std::shared_ptr<std::atomic<bool>> telemetry_thread_running_{std::make_shared<std::atomic<bool>>(false)};
@@ -2077,7 +2090,7 @@ private:
     // GetQHYCCDSingleFrame holding no lock, so a mid-exposure write would race
     // the live integration and corrupt the frame or the buffer geometry.
     // Checked under mutex_ — the same lock start_exposure publishes
-    // exposure_status_ under (AGENTS.md TOCTOU rule). Caller must hold mutex_.
+    // exposure_status_ under (driver-lifecycle.instructions.md TOCTOU rule). Caller must hold mutex_.
     void ensure_not_exposing_locked() const {
         if (exposure_status_ == QHYExposureStatus::Working) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
@@ -2168,6 +2181,8 @@ private:
         exposure_buffer_.clear();
         exposure_width_    = 0;
         exposure_height_   = 0;
+        image_width_ = 0;
+        image_height_ = 0;
         exposure_bpp_      = 0;
         exposure_channels_ = 0;
     }
@@ -2183,9 +2198,9 @@ private:
         if (!exposure_thread_.joinable()) {
             return;
         }
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (exposure_thread_running_->load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        auto deadline = clock_.now() + std::chrono::seconds(2);
+        while (exposure_thread_running_->load() && clock_.now() < deadline) {
+            clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (exposure_thread_running_->load()) {
             ALPACA_LOG_WARN("QHY", "Exposure download worker exceeded 2s reap timeout; detaching.");
@@ -2217,9 +2232,9 @@ private:
         // this point runs through cooler_off_running_ (a shared_ptr, not
         // `this` -- see the RunningGuard in set_cooler_on), so detaching here
         // can never touch a driver that outlives it.
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (cooler_off_running_->load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        auto deadline = clock_.now() + std::chrono::seconds(2);
+        while (cooler_off_running_->load() && clock_.now() < deadline) {
+            clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (cooler_off_running_->load()) {
             ALPACA_LOG_WARN("QHY", "cooler-off worker exceeded 2s timeout; detaching");
@@ -2259,7 +2274,7 @@ private:
             ALPACA_LOG_WARN("QHY", "Telemetry thread join failed during shutdown: " + std::string(e.what()));
         }
         // Wake a worker parked in GetQHYCCDSingleFrame before joining, or the
-        // join blocks for the whole remaining exposure (AGENTS.md abort rule).
+        // join blocks for the whole remaining exposure (driver-lifecycle.instructions.md abort rule).
         if (exposure_thread_.joinable()) {
             std::string cancel_id;
             {
@@ -2301,7 +2316,7 @@ private:
             // (review finding). Captured into a local under the same lock
             // that publishes it to the member, so the lambda below never
             // has to re-read the (possibly concurrently reassigned) member.
-            stop_flag = std::make_shared<WorkerStopSignal>();
+            stop_flag = std::make_shared<WorkerStopSignal>(clock_);
             temp_thread_stop_ = stop_flag;
             id = camera_id_.value_or("");
         }
@@ -2388,9 +2403,9 @@ private:
         if (!t.joinable()) {
             return;
         }
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-        while (running_flag->load() && std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        auto deadline = clock_.now() + std::chrono::seconds(2);
+        while (running_flag->load() && clock_.now() < deadline) {
+            clock_.sleep_for(std::chrono::milliseconds(20));
         }
         if (running_flag->load()) {
             ALPACA_LOG_WARN("QHY", std::string(label) + " thread exceeded 2s timeout; detaching");
@@ -2431,7 +2446,7 @@ private:
             // never re-reads a member that another writer could reassign,
             // and the running flag is constructed true so a disconnect
             // interleaving here never observes a published-but-false flag.
-            stop_flag = std::make_shared<WorkerStopSignal>();
+            stop_flag = std::make_shared<WorkerStopSignal>(clock_);
             running_flag = std::make_shared<std::atomic<bool>>(true);
             telemetry_thread_stop_ = stop_flag;
             telemetry_thread_running_ = running_flag;
@@ -2678,15 +2693,15 @@ private:
 
     ImageArray build_image_array_locked() const {
         ImageArray image;
-        image.width  = num_x_;
-        image.height = num_y_;
+        image.width = image_width_;
+        image.height = image_height_;
 
         if (image.width <= 0 || image.height <= 0 || exposure_buffer_.empty()) {
             alpacacore::util::throw_invalid_camera_image("invalid QHY dimensions or empty frame buffer");
         }
 
-        const uint32_t eff_w = exposure_width_  > 0 ? exposure_width_  : static_cast<uint32_t>(num_x_);
-        const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(num_y_);
+        const uint32_t eff_w = exposure_width_ > 0 ? exposure_width_ : static_cast<uint32_t>(image_width_);
+        const uint32_t eff_h = exposure_height_ > 0 ? exposure_height_ : static_cast<uint32_t>(image_height_);
         const uint32_t bpp   = exposure_bpp_;
         const uint32_t ch    = exposure_channels_;
 
@@ -2800,19 +2815,23 @@ std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int 
     return create_qhy_camera_by_index(device_number, camera_index, QHYSDKWrapper::instance());
 }
 
-std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk) {
-    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk);
+std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
+                                                util::TaskClock& clock) {
+    return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, QHYWorkerStartHook{},
+                                             std::chrono::seconds(60), clock);
 }
 
-std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk) {
-    return std::make_unique<QHYCameraDriver>(device_number, std::nullopt, camera_index, sdk);
+std::unique_ptr<CameraDriver> create_qhy_camera_by_index(int device_number, int camera_index, QHYSDK& sdk,
+                                                         util::TaskClock& clock) {
+    return std::make_unique<QHYCameraDriver>(device_number, std::nullopt, camera_index, sdk, QHYWorkerStartHook{},
+                                             std::chrono::seconds(60), clock);
 }
 
 std::unique_ptr<CameraDriver> create_qhy_camera(int device_number, const std::string& camera_id, QHYSDK& sdk,
                                                 QHYWorkerStartHook on_worker_start,
-                                                std::chrono::seconds watchdog_margin) {
+                                                std::chrono::seconds watchdog_margin, util::TaskClock& clock) {
     return std::make_unique<QHYCameraDriver>(device_number, camera_id, std::nullopt, sdk, std::move(on_worker_start),
-                                             watchdog_margin);
+                                             watchdog_margin, clock);
 }
 
 } // namespace alpacacore::vendor::qhy

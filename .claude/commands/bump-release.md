@@ -92,7 +92,7 @@ gh release list --limit 1
   release has been cut; go to Step 6 (tag) if no tag exists, otherwise report and stop.
 - Run `python3 scripts/changelog_fragments.py --check` (it must pass), then
   `python3 scripts/changelog_fragments.py --bump --version "$(tr -d '[:space:]' < VERSION)"`: it prints the proposed `X.Y.Z` from the latest
-  dated release, counting fragments and a legacy UNRELEASED section's categories (its label and a beta `VERSION` are floors) per the SemVer rule in AGENTS.md ("Version
+  dated release, counting fragments and a legacy UNRELEASED section's categories (its label and a beta `VERSION` are floors) per the SemVer rule in `.github/instructions/packaging-release.instructions.md` ("Version
   bump policy"): a `Breaking changes` subsection means major, an unqualified `Added` means minor,
   otherwise patch. `X.Y.Z` must be greater than the latest release tag; use the proposal unless
   the user names a higher one. `--preview` prints the section that Step 2 will write.
@@ -187,7 +187,8 @@ entry.
 
 ## Step 5 — Commit, PR, review loop, merge
 
-1. Run `./scripts/ci_preflight.sh`. It must pass; fix anything it flags on this branch.
+1. Run `./scripts/ci_preflight.sh` (the quick set; a release PR changes no code, so CI's build
+   and test jobs are the rest of the check). It must pass; fix anything it flags on this branch.
 2. Show the user the diff summary and this commit message, and wait for approval:
 
    ```

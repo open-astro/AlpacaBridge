@@ -30,6 +30,7 @@
 #include <alpacacore/safetymonitor_driver.h>
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/error_handling.h>
 
 #include <chrono>
 #include <optional>
@@ -47,7 +48,7 @@ using namespace alpacacore;
     int get_device_number() const override { return number_; }                                              \
     std::string get_name() const override { return "Route Table Stub " LABEL; }                             \
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::DEVICE_TYPE; } \
-    std::string get_unique_id() const override { return "route-table-stub-" LABEL; }                        \
+    std::string fallback_unique_id() const override { return "route-table-stub-" LABEL; }                   \
     std::string get_description() const override { return "fake device"; }                                  \
     std::string get_driver_info() const override { return "fake driver"; }                                  \
     std::string get_driver_version() const override { return "0.0.1"; }                                     \
@@ -67,6 +68,10 @@ public:
     ROUTE_TABLE_STUB_COMMON(Camera, "camera")
 
     void set_image_array(ImageArray image) { image_array_ = std::move(image); }
+    // ImageArray throws this instead of returning the image while set.
+    void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
+        image_array_error_ = std::move(error);
+    }
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -102,7 +107,10 @@ public:
     std::vector<std::string> get_gains() const override { return std::vector<std::string>{}; }
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
-    ImageArray get_image_array() const override { return image_array_; }
+    ImageArray get_image_array() const override {
+        if (image_array_error_) throw *image_array_error_;
+        return image_array_;
+    }
     std::string get_image_array_variant() const override { return std::string{}; }
     bool get_image_ready() const override { return bool{}; }
     bool get_is_pulse_guiding() const override { return bool{}; }
@@ -147,6 +155,7 @@ private:
     int number_;
     bool connected_ = false;
     ImageArray image_array_;
+    std::optional<alpacacore::AlpacaException> image_array_error_;
 };
 
 class TelescopeStub final : public alpacacore::TelescopeDriver {
@@ -320,7 +329,6 @@ public:
     bool get_can_set_park() const override { return bool{}; }
     bool get_can_set_shutter() const override { return bool{}; }
     bool get_can_slave() const override { return bool{}; }
-    bool get_can_slew() const override { return bool{}; }
     bool get_can_sync_azimuth() const override { return bool{}; }
     double get_azimuth() const override { return double{}; }
     bool get_at_home() const override { return bool{}; }
@@ -344,7 +352,7 @@ private:
     bool connected_ = false;
 };
 
-class SwitchStub final : public alpacacore::SwitchDriver {
+class SwitchStub : public alpacacore::SwitchDriver {
 public:
     explicit SwitchStub(int number) : number_(number) {}
     ROUTE_TABLE_STUB_COMMON(Switch, "switch")
@@ -409,7 +417,6 @@ public:
     double get_sky_brightness() const override { return double{}; }
     double get_sky_quality() const override { return double{}; }
     double get_sky_temperature() const override { return double{}; }
-    double get_seeing() const override { return double{}; }
     double get_star_fwhm() const override { return double{}; }
     double get_temperature() const override { return double{}; }
     double get_wind_direction() const override { return double{}; }

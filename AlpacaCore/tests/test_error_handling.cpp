@@ -27,3 +27,22 @@ TEST_CASE("AlpacaException stores message and code", "[error_handling]") {
     REQUIRE(std::string(default_error.what()) == "driver error");
     REQUIRE(default_error.error_code() == AlpacaError::DriverException);
 }
+
+TEST_CASE("AlpacaException asked_too_early is a flagged InvalidOperation", "[error_handling]") {
+    using namespace alpacacore;
+
+    // Issue #1167: the router logs this one at DEBUG; the client sees an ordinary InvalidOperation.
+    const AlpacaException early = AlpacaException::asked_too_early("Image not ready");
+    CHECK(std::string(early.what()) == "Image not ready");
+    CHECK(early.error_code() == AlpacaError::InvalidOperation);
+    CHECK(early.is_asked_too_early());
+
+    // A copy (what a catch by value or a rethrow holds) keeps the flag.
+    const AlpacaException copy = early;
+    CHECK(copy.is_asked_too_early());
+
+    // An InvalidOperation built the usual way is not flagged, so a fault stays at ERROR.
+    const AlpacaException fault("Exposure stopped during image retrieval", AlpacaError::InvalidOperation);
+    CHECK_FALSE(fault.is_asked_too_early());
+    CHECK_FALSE(AlpacaException("driver error").is_asked_too_early());
+}

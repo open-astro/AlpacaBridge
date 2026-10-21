@@ -14,10 +14,14 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <limits>
+#include <thread>
 
 #include "catch2_compat.h"
+#include "fake_svbony_sdk.h"
+#include "locked_svbony_sdk.h"
 
 namespace {
 
@@ -70,7 +74,7 @@ TEST_CASE("SVBONY Camera Driver - Not connected throws", "[svbony][camera][unit]
 TEST_CASE("SVBONY Camera Driver - Disconnected state", "[svbony][camera][unit]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
@@ -120,9 +124,133 @@ TEST_CASE("SVBONY Camera Driver - ASCOM Error Codes", "[svbony][camera][unit]") 
 TEST_CASE("SVBONY Camera Driver - State Machine Contracts", "[svbony][camera][unit]") {
     auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
     REQUIRE(driver->get_can_stop_exposure() == false);
+}
+
+// --- SDK seam: driver over FakeSVBSDK / LockedSVBSDK --------------------------
+
+TEST_CASE("SVBONY Camera Driver - connects over an injected SDK", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+
+    // The version comes from the injected SDK, not the singleton.
+    REQUIRE(driver->get_device_sdk_version().value_or("") == "fake-svbony-sdk");
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(fake.open_count() == 1);
+    CHECK(driver->get_device_firmware().value_or("") == "fake-firmware");
+    CHECK(driver->get_camera_x_size() == 16);
+    CHECK(driver->get_camera_y_size() == 8);
+
+    driver->set_connected(false);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.open_count() == 0);
+    CHECK(fake.call_count("close_camera") == 1);
+}
+
+TEST_CASE("SVBONY Camera Driver - failed connect closes the opened camera", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    fake.fail_next("get_serial_number");
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(fake.call_count("open_camera") == 1);
+    CHECK(fake.call_count("close_camera") == 1);
+    CHECK(fake.open_count() == 0);
+}
+
+TEST_CASE("SVBONY Camera Driver - no camera detected refuses the connect", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    fake.set_camera_present(false);
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK(fake.call_count("open_camera") == 0);
+}
+
+TEST_CASE("SVBONY Camera Driver - camera index out of range is InvalidValue", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 5, fake);
+
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::InvalidValue);
+    CHECK(fake.call_count("open_camera") == 0);
+}
+
+TEST_CASE("SVBONY Camera Driver - exposure delivers the fake frame", "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    alpacacore::test::LockedSVBSDK sdk(fake);
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    driver->start_exposure(0.05, true);
+    for (int i = 0; i < 200 && !driver->get_image_ready(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(driver->get_image_ready());
+    CHECK(fake.call_count("start_video_capture") >= 1);
+    CHECK(fake.call_count("get_video_data") >= 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("FakeSVBSDK behind LockedSVBSDK - forwards every entry point", "[svbony][unit][fake-sdk]") {
+    using namespace alpacacore::vendor::svbony;
+    alpacacore::test::FakeSVBSDK fake;
+    alpacacore::test::LockedSVBSDK sdk(fake);
+    SVBCameraInfo info;
+    long value = 0;
+    bool is_auto = true;
+    std::vector<std::uint8_t> buf(16 * 8, 0);
+
+    CHECK(sdk.enumerate_cameras().size() == 1);
+    CHECK(sdk.get_camera_info_by_index(0, info));
+    CHECK_FALSE(sdk.get_camera_info_by_index(3, info));
+    sdk.open_camera(17);
+    CHECK(sdk.get_control_caps(17).size() == 5);
+    sdk.set_control_value(17, SVBControlType::Gain, 42, false);
+    CHECK(sdk.get_control_value(17, SVBControlType::Gain, value, is_auto));
+    CHECK(value == 42);
+    sdk.set_roi_format(17, 0, 0, 16, 8, 1);
+    CHECK(sdk.get_roi_format(17).width == 16);
+    sdk.set_output_image_type(17, SVBImageType::Raw8);
+    CHECK(sdk.get_output_image_type(17) == SVBImageType::Raw8);
+    sdk.start_video_capture(17);
+    CHECK(sdk.get_video_data(17, buf.data(), static_cast<long>(buf.size()), 10) == SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+    sdk.pulse_guide(17, SVBGuideDirection::North, 10);
+    CHECK(sdk.get_sensor_pixel_size(17) > 3.0F);
+    CHECK(sdk.get_serial_number(17) == "fake-17");
+    CHECK(sdk.get_sdk_version() == "fake-svbony-sdk");
+    CHECK(sdk.get_firmware_version(17) == "fake-firmware");
+    sdk.set_camera_mode_normal(17);
+    sdk.set_auto_save_param(17, false);
+    sdk.restore_default_param(17);
+    sdk.close_camera(17);
+
+    for (const char* name :
+         {"enumerate_cameras",   "get_camera_info_by_index", "open_camera",           "close_camera",
+          "get_control_caps",    "get_control_value",        "set_control_value",     "get_roi_format",
+          "set_roi_format",      "get_output_image_type",    "set_output_image_type", "start_video_capture",
+          "stop_video_capture",  "get_video_data",           "pulse_guide",           "get_sensor_pixel_size",
+          "get_serial_number",   "get_sdk_version",          "get_firmware_version",  "set_camera_mode_normal",
+          "set_auto_save_param", "restore_default_param"}) {
+        INFO(name);
+        CHECK(fake.call_count(name) >= 1);
+    }
+}
+
+TEST_CASE("SVBONY Camera Driver - default factory still works without an SDK argument",
+          "[svbony][camera][unit][fake-sdk]") {
+    // The two-argument factory binds the real wrapper singleton; the driver reaches the SDK only on connect.
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(2, 0);
+    REQUIRE(driver != nullptr);
+    CHECK(driver->get_device_number() == 2);
+    CHECK_FALSE(driver->get_connected());
 }

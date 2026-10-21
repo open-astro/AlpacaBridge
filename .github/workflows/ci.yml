@@ -11,18 +11,19 @@
 # Jobs:
 #   build-test     build vendor-neutral core + run unit tests (the base gate)
 #   build-vendors  stage in-tree vendor SDK .so libs, build+test with all
-#                  vendors ON
+#                  vendors ON, instrumented for gcov; per-component + combined
+#                  line coverage in the job summary, HTML/JSON artifact (no
+#                  threshold)
 #   sanitizers     build+test under AddressSanitizer + UndefinedBehaviorSanitizer
 #   sanitizers-tsan  build all-vendors under ThreadSanitizer + run the [stress]
 #                  connect/disconnect/operate concurrency suite (issue #101),
 #                  plus [stress-guard] (the harness's own self-tests, issue #322)
-#   coverage       informational gcovr line coverage, all vendors ON, per
-#                  component + combined in the job summary, HTML/JSON artifact
-#                  (no threshold, not a required check; bound 30 min)
 #   format         clang-format check, PR changed lines only
 #   clang-tidy     clang-tidy static analysis, PR changed lines only
+#   package-deb    build the .deb in debian:trixie, install it, run
+#                  scripts/check_bundled_gphoto.sh (bundled libgphoto2 loader path)
 #   unicode        scan sources for Trojan-Source / invisible Unicode
-#   shellcheck     lint the project's shell scripts
+#   shellcheck     lint the project's shell scripts; run ci_preflight.sh --self-test
 #   javascript     node --check AND node --test the hand-written web UI JavaScript
 #   cppcheck       second C/C++ static-analysis engine, PR changed files only
 #   zizmor         security audit of these GitHub Actions workflows
@@ -48,7 +49,7 @@ concurrency:
   cancel-in-progress: true
 
 # Single source of truth for the vendored libgpiod build dependency — the
-# build-vendors, sanitizers-tsan, coverage and clang-tidy jobs consume these,
+# build-vendors, sanitizers-tsan and clang-tidy jobs consume these,
 # so a version bump can't skew them (tarball + README in AlpacaCore/external/libgpiod/).
 env:
   LIBGPIOD_VER: "2.2.4"
@@ -77,6 +78,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -93,10 +95,36 @@ jobs:
           cmake --version
           g++ --version
 
+      - name: Restore the compiler cache
+        # ccache keyed per job, because each job compiles with its own flags. Only
+        # a push to main or stable/** saves it (the save step below), so a pull
+        # request reuses its base branch's cache and never writes one. The
+        # directory is ccache's default, outside the build tree run_all_tests.sh
+        # deletes on entry.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-test-${{ github.sha }}
+          restore-keys: ccache-build-test-
+
       - name: Build + run tests (vendor-neutral core)
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-build-test-${{ github.sha }}
 
       - name: Check the beta VERSION split
         # Pins the ~betaN split both CMakeLists share
@@ -106,9 +134,13 @@ jobs:
         run: scripts/check_beta_configure.sh
 
   build-vendors:
+    # The all-vendors suite runs once, instrumented for coverage: the build,
+    # the tests and the gcovr report are this one job (the separate coverage
+    # job ran the same 2413 tests a second time, also at -O0). The report is
+    # informational: no --fail-under threshold.
     name: Build + test (all vendors, arm64)
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -128,6 +160,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -135,11 +168,14 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
-            libcurl4-openssl-dev
+            libcurl4-openssl-dev \
+            gcovr
 
       - name: Build libgpiod v2 from source
         # The ZWO switch drivers require libgpiod >= 2.0 (gpiod_chip_request_lines),
@@ -166,6 +202,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Stage vendor SDK shared libraries
         # Mirrors run_system_setup() in build_and_run.sh: copy the in-tree
         # arm64 vendor .so files onto the loader path so the vendor-ON build
@@ -178,9 +224,9 @@ jobs:
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -192,10 +238,112 @@ jobs:
           done
           sudo ldconfig
 
-      - name: Build + run tests (all vendors)
+      - name: Wrap the compilers for -fprofile-update=atomic
+        # See the script: ccache cannot cache a compile that carries the option.
+        run: .github/scripts/coverage-compilers.sh
+
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job. A new prefix, because the
+        # objects are now built with --coverage.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+          restore-keys: ccache-all-vendors-coverage-
+
+      - name: Build + run tests with coverage (all vendors)
+        # CMake takes CXXFLAGS / LDFLAGS on a fresh configure and
+        # run_all_tests.sh wipes its build tree first. -fprofile-update=atomic
+        # comes from the compiler wrappers (CC/CXX), not CXXFLAGS.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
           ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-        run: ./run_all_tests.sh
+          CXXFLAGS: "--coverage -O0 -g"
+          LDFLAGS: "--coverage"
+        # Zeroed first: the statistics live in the cached directory, so they
+        # would otherwise add up every run since the cache was first saved.
+        run: |
+          ccache --zero-stats
+          ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        # --verbose lists why calls were uncacheable.
+        if: always()
+        run: ccache --show-stats --verbose
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+
+      - name: Generate coverage report
+        # Over the one tree run_all_tests.sh builds: AlpacaHTTP/build holds
+        # AlpacaCore as a subdirectory, and both suites write the same .gcda
+        # files there (issue #1251).
+        run: |
+          set -euo pipefail
+          mkdir -p coverage/html
+          excludes=(
+            --exclude '.*/tests/'
+            --exclude '.*/external/'
+            --exclude '.*/examples/'
+            --exclude '.*/build[^/]*/'
+          )
+          # gcov runs once, for the combined report, which also writes the
+          # raw data as JSON; the two component reports are filtered from that
+          # JSON (-a) instead of running gcov over every .gcda again.
+          gcovr --root . -j "$(nproc)" "${excludes[@]}" \
+            --gcov-ignore-parse-errors=all \
+            --filter 'AlpacaCore/(src|include)/' \
+            --filter 'AlpacaHTTP/(src|include)/' \
+            --json coverage/combined-raw.json \
+            --txt coverage/combined.txt \
+            --json-summary-pretty --json-summary coverage/combined.json \
+            --html-details coverage/html/index.html \
+            AlpacaHTTP/build
+          report() {
+            local name="$1"
+            shift
+            gcovr --root . -a coverage/combined-raw.json "$@" \
+              --txt "coverage/${name}.txt" \
+              --json-summary-pretty --json-summary "coverage/${name}.json"
+          }
+          report alpacacore --filter 'AlpacaCore/(src|include)/'
+          report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
+          cat coverage/combined.txt
+          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json
+          rows = [("AlpacaCore", "alpacacore"), ("AlpacaHTTP", "alpacahttp"),
+                  ("Combined", "combined")]
+          print("## Line coverage (all vendors, arm64)\n")
+          print("| Component | Lines covered | Lines total | Line % |")
+          print("|---|---:|---:|---:|")
+          totals = {}
+          for label, name in rows:
+              with open(f"coverage/{name}.json") as f:
+                  s = json.load(f)
+              totals[name] = s['line_total']
+              print(f"| {label} | {s['line_covered']} | {s['line_total']} "
+                    f"| {s['line_percent']:.1f} |")
+          # The component reports are filtered from the combined JSON (gcovr
+          # -a). The two filters are disjoint, so they must add up to the
+          # combined total; if they do not, gcovr stopped applying --filter to
+          # a tracefile and the component rows are wrong.
+          if totals["alpacacore"] + totals["alpacahttp"] != totals["combined"]:
+              raise SystemExit(f"component line totals {totals} do not add up")
+          PY
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
 
   sanitizers:
     name: Sanitizers (ASan + UBSan, arm64)
@@ -216,6 +364,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -227,18 +376,43 @@ jobs:
             zlib1g-dev \
             libcurl4-openssl-dev
 
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job. Not `ccache-sanitizers-`: that
+        # prefix also matches the TSan job's keys, and a restore by prefix takes
+        # the newest match, so this job restored the TSan cache and missed every
+        # compile (issue #1355; docs-drift check 20).
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-asan-${{ github.sha }}
+          restore-keys: ccache-asan-
+
       - name: Build + run tests with sanitizers (vendor-neutral)
         # CMake seeds CMAKE_CXX_FLAGS / linker flags from CXXFLAGS / LDFLAGS on
-        # a fresh configure, and run_all_tests.sh wipes build/ first, so these
+        # a fresh configure, and run_all_tests.sh wipes its build tree first, so these
         # instrument the whole tree. -fno-sanitize-recover makes any detected
         # UB a hard test failure rather than a logged warning.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           ALPACACORE_ENABLE_ALL_VENDORS: "OFF"
           CXXFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all"
           LDFLAGS: "-fsanitize=address,undefined"
           ASAN_OPTIONS: "abort_on_error=1:detect_leaks=1"
           UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
         run: ./run_all_tests.sh
+
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-asan-${{ github.sha }}
 
   sanitizers-tsan:
     name: Sanitizers (TSan concurrency stress, arm64)
@@ -260,6 +434,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             catch2 \
             pkg-config \
@@ -267,7 +442,9 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -289,6 +466,16 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
       - name: Stage vendor SDK shared libraries
         # Mirrors the build-vendors job: the vendor-ON build links the in-tree
         # arm64 vendor .so files from the loader path.
@@ -299,9 +486,9 @@ jobs:
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
             "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
+            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
+            "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
           )
           for lib in "${libs[@]}"; do
             if compgen -G "${lib}*" > /dev/null; then
@@ -312,6 +499,14 @@ jobs:
             fi
           done
           sudo ldconfig
+
+      - name: Restore the compiler cache
+        # Keyed per job; see the build-test job.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-tsan-${{ github.sha }}
+          restore-keys: ccache-sanitizers-tsan-
 
       - name: Build AlpacaCore tests with TSan and run the concurrency stress suite
         # The [stress] tests (issue #101) hammer connect()/disconnect()/
@@ -325,6 +520,9 @@ jobs:
         # mutes the uninstrumented proprietary vendor blobs, whose internals
         # we can neither see nor fix.
         env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
           TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1 suppressions=${{ github.workspace }}/scripts/tsan_suppressions.txt"
         run: |
           set -euo pipefail
@@ -372,139 +570,16 @@ jobs:
           ./AlpacaCore/build-tsan/tests/alpacacore_tests "[stress-guard]" | tee stress-guard-run.log
           grep -qE '^(All tests passed \([0-9]+ assertions? in [1-9][0-9]* test cases?\)|test cases: *[1-9])' stress-guard-run.log
 
-  coverage:
-    # Informational only: no --fail-under threshold and not a required check.
-    # A separate job so instrumentation adds no time to build-test or
-    # build-vendors; it runs in parallel with them.
-    name: Line coverage (gcovr, all vendors, arm64)
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: Compiler cache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save the compiler cache
+        if: always() && github.event_name == 'push'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
-          persist-credentials: false
-
-      - name: Install build dependencies
-        # Same set as build-vendors (libgpiod-dev omitted, built from source
-        # below; catch2 required, issue #586), plus gcovr for the report.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            g++ \
-            catch2 \
-            pkg-config \
-            libusb-1.0-0-dev \
-            libudev-dev \
-            libsystemd-dev \
-            libhidapi-dev \
-            libgphoto2-dev \
-            libraw-dev \
-            nlohmann-json3-dev \
-            zlib1g-dev \
-            libcurl4-openssl-dev \
-            gcovr
-
-      - name: Build libgpiod v2 from source
-        # Copied from build-vendors; see the comments there.
-        run: |
-          set -euo pipefail
-          cp "AlpacaCore/external/libgpiod/libgpiod-${LIBGPIOD_VER}.tar.xz" /tmp/libgpiod.tar.xz
-          echo "${LIBGPIOD_SHA256}  /tmp/libgpiod.tar.xz" \
-            | sha256sum -c -
-          mkdir -p /tmp/libgpiod
-          tar -xf /tmp/libgpiod.tar.xz -C /tmp/libgpiod --strip-components=1
-          cd /tmp/libgpiod
-          ./configure --prefix=/usr/local --enable-tools=no --enable-bindings-cxx=no
-          make -j"$(nproc)"
-          sudo make install
-          sudo ldconfig
-
-      - name: Stage vendor SDK shared libraries
-        # Copied from build-vendors; keep the two lists in step.
-        run: |
-          set -euo pipefail
-          core="AlpacaCore/external"
-          libs=(
-            "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
-            "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
-            "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64/libPlayerOneCamera.so"
-            "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
-            "$core/QHY/sdk_linux_arm64_26.06.04/usr/local/lib/libqhyccd.so"
-          )
-          for lib in "${libs[@]}"; do
-            if compgen -G "${lib}*" > /dev/null; then
-              echo "Staging $(basename "$lib")*"
-              sudo cp -a "${lib}"* /usr/local/lib/
-            else
-              echo "WARNING: ${lib}* not found — skipping"
-            fi
-          done
-          sudo ldconfig
-
-      - name: Build + run tests with coverage (all vendors)
-        # Same seeding as the sanitizers job: CMake takes CXXFLAGS / LDFLAGS
-        # on a fresh configure and run_all_tests.sh wipes build/ first.
-        # -fprofile-update=atomic because the [stress] cases are
-        # multi-threaded and plain counter updates would race.
-        env:
-          ALPACACORE_ENABLE_ALL_VENDORS: "ON"
-          CXXFLAGS: "--coverage -O0 -g -fprofile-update=atomic"
-          LDFLAGS: "--coverage"
-        run: ./run_all_tests.sh
-
-      - name: Generate coverage report
-        # One gcovr call per component plus a combined total, each over BOTH
-        # build dirs: AlpacaHTTP/build compiles AlpacaCore's sources again as
-        # a subdirectory, and gcovr merges the two per source file.
-        run: |
-          set -euo pipefail
-          mkdir -p coverage/html
-          excludes=(
-            --exclude '.*/tests/'
-            --exclude '.*/external/'
-            --exclude '.*/examples/'
-            --exclude '.*/build[^/]*/'
-          )
-          report() {
-            local name="$1"
-            shift
-            gcovr --root . -j "$(nproc)" "$@" "${excludes[@]}" \
-              --gcov-ignore-parse-errors=all \
-              --txt "coverage/${name}.txt" \
-              --json-summary-pretty --json-summary "coverage/${name}.json" \
-              AlpacaCore/build AlpacaHTTP/build
-          }
-          report alpacacore --filter 'AlpacaCore/(src|include)/'
-          report alpacahttp --filter 'AlpacaHTTP/(src|include)/'
-          report combined \
-            --filter 'AlpacaCore/(src|include)/' \
-            --filter 'AlpacaHTTP/(src|include)/' \
-            --html-details coverage/html/index.html
-          cat coverage/combined.txt
-          python3 - >> "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json
-          rows = [("AlpacaCore", "alpacacore"), ("AlpacaHTTP", "alpacahttp"),
-                  ("Combined", "combined")]
-          print("## Line coverage (all vendors, arm64)\n")
-          print("| Component | Lines covered | Lines total | Line % |")
-          print("|---|---:|---:|---:|")
-          for label, name in rows:
-              with open(f"coverage/{name}.json") as f:
-                  s = json.load(f)
-              print(f"| {label} | {s['line_covered']} | {s['line_total']} "
-                    f"| {s['line_percent']:.1f} |")
-          PY
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          name: coverage
-          path: coverage/
-          if-no-files-found: error
+          path: ~/.cache/ccache
+          key: ccache-sanitizers-tsan-${{ github.sha }}
 
   format:
     name: clang-format (changed lines)
@@ -568,6 +643,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
+            ccache \
             g++ \
             clang-tidy \
             pkg-config \
@@ -575,7 +651,9 @@ jobs:
             libudev-dev \
             libsystemd-dev \
             libhidapi-dev \
-            libgphoto2-dev \
+            libltdl-dev \
+            libexif-dev \
+            libjpeg-dev \
             libraw-dev \
             nlohmann-json3-dev \
             zlib1g-dev \
@@ -605,6 +683,33 @@ jobs:
           sudo make install
           sudo ldconfig
 
+      - name: Build bundled libgphoto2
+        # The gphoto driver links the vendored libgphoto2 (AlpacaCore/external/
+        # libgphoto2/), never the distro copy. The script verifies the tarball's
+        # sha256 pin and installs into /usr/lib/alpacabridge/libgphoto2, where the
+        # executables' rpath finds it. The build tree goes under RUNNER_TEMP so
+        # sudo leaves no root-owned files in the checkout.
+        run: |
+          set -euo pipefail
+          sudo scripts/build_bundled_gphoto.sh --build-dir "${RUNNER_TEMP}/gphoto-src" --jobs "$(nproc)"
+
+      - name: Wrap the compilers like build-vendors
+        # Keep paired with CCACHE_COMPILERCHECK=content and the restore below:
+        # without the wrappers every lookup misses, silently.
+        run: .github/scripts/coverage-compilers.sh
+
+      - name: Restore the compiler cache
+        # Restore only, from build-vendors' cache: run_all_tests.sh configures
+        # AlpacaHTTP/build with the same options (vendors ON, tests ON), and
+        # this job builds with the same wrappers and flags, so the objects
+        # match. This job runs on pull requests only, and a cache saved there
+        # would be visible to that PR alone, so it saves nothing.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/ccache
+          key: ccache-all-vendors-coverage-${{ github.sha }}
+          restore-keys: ccache-all-vendors-coverage-
+
       - name: Generate compile_commands.json (all vendors)
         # AlpacaHTTP pulls AlpacaCore in as a subdirectory, so this single
         # configure+build yields a compile DB covering both source trees and
@@ -613,13 +718,34 @@ jobs:
         # vendors OFF they are absent from the DB and clang-tidy interpolates a
         # command without the vendored SDK include dirs, failing on e.g.
         # <PlayerOnePW.h> with a spurious clang-diagnostic-error.
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
+          CCACHE_MAXSIZE: 2G
+          CCACHE_COMPILERCHECK: content
+          CXXFLAGS: "--coverage -O0 -g"
+          LDFLAGS: "--coverage"
         run: |
           set -euo pipefail
+          ccache --zero-stats
           cmake -S AlpacaHTTP -B AlpacaHTTP/build \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DALPACAHTTP_BUILD_TESTS=ON \
+            -DALPACACORE_BUILD_TESTS=ON \
             -DALPACACORE_ENABLE_ALL_VENDORS=ON
           cmake --build AlpacaHTTP/build --parallel "$(nproc)"
+          ccache --show-stats
+          # A low hit rate means this build no longer matches build-vendors'
+          # (wrapper step, flags or configure drifted) and the cache is dead
+          # weight. Warn rather than fail: a cold main cache is legitimate.
+          ccache --print-stats | awk -F'\t' '
+            $1 == "direct_cache_hit" || $1 == "preprocessed_cache_hit" { hits += $2 }
+            $1 == "cache_miss" { misses += $2 }
+            END {
+              total = hits + misses
+              if (total > 0 && hits * 2 < total)
+                printf "::warning::clang-tidy build hit the compiler cache for %d of %d compiles\n", hits, total
+            }'
 
       - name: Run clang-tidy on changed lines
         run: |
@@ -652,6 +778,50 @@ jobs:
             exit 1
           fi
           echo "clang-tidy OK"
+
+  package-deb:
+    # Builds the .deb in the target distribution (no libgphoto2-dev installed),
+    # installs it and runs the bundled-libgphoto2 acceptance checks, so a change
+    # that breaks the packaged loader path fails before release.
+    name: package-deb
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    timeout-minutes: 40
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 dpkg-dev binutils
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        # Read from debian/control so the package's Build-Depends stay the one list.
+        run: |
+          set -euo pipefail
+          apt-get build-dep -y ./
+
+      - name: Build the .deb
+        run: |
+          set -euo pipefail
+          scripts/build_deb.sh
+          ls -l ../alpacabridge_*_arm64.deb
+          dpkg-deb --info ../alpacabridge_*_arm64.deb
+
+      - name: Install the .deb
+        # Recommends (NetworkManager, polkit) are not needed to run the checks.
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends ../alpacabridge_*_arm64.deb
+
+      - name: Check the bundled libgphoto2
+        run: scripts/check_bundled_gphoto.sh
 
   unicode:
     name: Unicode scan
@@ -694,6 +864,14 @@ jobs:
         # silently degrading the gate to its floor.
         run: python3 scripts/check_docs_drift.py --self-test
 
+      - name: Self-test the decision-record gate scripts
+        # check_adr_authorization.py runs from the default branch in
+        # decision-records.yml and check_adr_scope.py in pr-body.yml and the
+        # review bot; a broken copy would otherwise reach main first.
+        run: |
+          python3 scripts/check_adr_authorization.py --self-test
+          python3 scripts/check_adr_scope.py --self-test
+
       - name: Check docs/config for self-inconsistency
         # Catches drift between the repo's own docs and its actual config
         # that nothing previously caught automatically. The script's module
@@ -701,6 +879,19 @@ jobs:
         # this comment deliberately does not repeat it (a summary here went
         # stale twice, issue #455).
         run: python3 scripts/check_docs_drift.py
+
+      - name: Self-test and check the dependency snapshot inventory
+        # dependency-submission.yml reports debian/control, the CMake fetches
+        # and AlpacaCore/external/ to the dependency graph. --check fails a
+        # directory under AlpacaCore/external/ that
+        # scripts/dependency_sdk_versions.json does not list, so a new SDK
+        # cannot reach the graph unreported. dependency_updates.py (run weekly by
+        # dependency-updates.yml and osv-scan.yml) is self-tested here so a
+        # broken checker fails the PR, not the next scheduled run.
+        run: |
+          python3 scripts/dependency_snapshot.py --self-test
+          python3 scripts/dependency_snapshot.py --check
+          python3 scripts/dependency_updates.py --self-test
 
       - name: Self-test the release-notes extractor
         # release.yml runs this too, but only on a tag push; here a broken
@@ -724,10 +915,30 @@ jobs:
         # the PR that caused it instead of the first beta tag.
         run: python3 scripts/release_tag.py --self-test
 
+      - name: Self-test the nightly version
+        # nightly-build.yml runs it only on main once a night; here a change to
+        # it is tested by the PR that makes it.
+        run: python3 scripts/nightly_version.py --self-test
+
+      - name: Self-test the cache pruning rule
+        # cache-prune.yml runs it only after a run on main; here a change to
+        # which caches it deletes fails the PR that makes it.
+        run: python3 scripts/prune_actions_caches.py --self-test
+
       - name: Self-test the merge-down exemption
         # pr-body.yml runs it on every PR as well; here a change to it is
         # tested by the PR that makes it, whatever that PR's head is named.
         run: python3 scripts/merge_down.py --self-test
+
+      - name: Self-test the stable-PR issue closer
+        # close-linked-issues.yml runs the script only on a merged stable PR;
+        # here a change to its keyword parser fails the PR that makes it.
+        run: python3 scripts/close_linked_issues.py --self-test
+
+      - name: Self-test the scheduled-run issue reporter
+        # scheduled-failure.yml runs it only after a scheduled run on main;
+        # here a change to when it opens or closes an issue fails the PR.
+        run: python3 scripts/scheduled_run_issue.py --self-test
 
   connect-error-hook:
     name: Connect-error hook
@@ -805,7 +1016,7 @@ jobs:
         run: python3 scripts/check_stress_registration.py --self-test
 
       - name: Check [stress] coverage, and that neither stress tag is misplaced
-        # AGENTS.md requires a [stress] TEST_CASE for every driver exercised
+        # The ci-gates instructions require a [stress] TEST_CASE for every driver exercised
         # by the sanitizers-tsan job; this was previously enforced only by
         # code review. See scripts/check_stress_registration.py.
         run: python3 scripts/check_stress_registration.py
@@ -890,11 +1101,14 @@ jobs:
             esac
             scripts+=("$f")
           done < <(git ls-files '*.sh')
-          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update; do
+          for f in debian/alpacabridge.postinst debian/alpacabridge.postrm debian/alpacabridge.prerm debian/alpacabridge-software-update debian/alpacabridge-set-update-channel; do
             [ -f "$f" ] && scripts+=("$f")
           done
           echo "Linting: ${scripts[*]}"
           shellcheck "${scripts[@]}"
+
+      - name: ci_preflight.sh self-test (bash 3.2 guards, quick-run SKIPs)
+        run: ./scripts/ci_preflight.sh --self-test
 
   javascript:
     name: JavaScript syntax + unit tests
@@ -955,15 +1169,33 @@ jobs:
 
   cppcheck:
     name: cppcheck (changed files)
-    if: github.event_name == 'pull_request'
+    # Runs on pushes too, but only to build and save the cppcheck cache: a cache
+    # saved by a pull request is visible to that PR alone, one saved on main to
+    # every PR. The analysis step stays pull-request only.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
+    env:
+      CPPCHECK_PREFIX: /home/runner/.local/cppcheck
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Restore the cppcheck build
+        id: cppcheck-cache
+        # The pin lives in the next step's ver=/sha256= lines (scripts/
+        # dependency_snapshot.py reads it there), so the key follows ci.yml and
+        # restore-keys falls back to an older entry. The next step decides
+        # whether that entry is usable: it rebuilds unless the restored binary
+        # reports the pinned version. The prefix is fixed because cppcheck
+        # compiles its data directory path in.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CPPCHECK_PREFIX }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: cppcheck-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Build cppcheck 2.17.x from source
         # The ubuntu-24.04 runner ships cppcheck 2.13, which classifies some
@@ -975,21 +1207,41 @@ jobs:
         # pattern below); the tarball is checksum-verified before it is unpacked.
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential cmake g++
           ver=2.17.1
           sha256=bfd681868248ec03855ca7c2aea7bcb1f39b8b18860d76aec805a92a967b966c
+          if [ -x "${CPPCHECK_PREFIX}/bin/cppcheck" ] \
+             && [ "$("${CPPCHECK_PREFIX}/bin/cppcheck" --version)" = "Cppcheck ${ver}" ]; then
+            echo "Restored cppcheck ${ver} from the cache; not rebuilding."
+            exit 0
+          fi
+          rm -rf "${CPPCHECK_PREFIX}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake g++
           curl -fsSL "https://github.com/danmar/cppcheck/archive/refs/tags/${ver}.tar.gz" \
             -o /tmp/cppcheck.tar.gz
           echo "${sha256}  /tmp/cppcheck.tar.gz" | sha256sum --check --strict -
           mkdir -p /tmp/cppcheck
           tar -xf /tmp/cppcheck.tar.gz -C /tmp/cppcheck --strip-components=1
-          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release
+          cmake -S /tmp/cppcheck -B /tmp/cppcheck/build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${CPPCHECK_PREFIX}"
           cmake --build /tmp/cppcheck/build --parallel "$(nproc)"
-          sudo cmake --install /tmp/cppcheck/build
-          cppcheck --version
+          cmake --install /tmp/cppcheck/build
+
+      - name: Save the cppcheck build
+        if: github.event_name == 'push' && steps.cppcheck-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ env.CPPCHECK_PREFIX }}
+          key: cppcheck-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Put cppcheck on the PATH
+        run: |
+          set -euo pipefail
+          echo "${CPPCHECK_PREFIX}/bin" >> "$GITHUB_PATH"
+          "${CPPCHECK_PREFIX}/bin/cppcheck" --version
 
       - name: Analyze changed C/C++ files
+        if: github.event_name == 'pull_request'
         # A second static-analysis engine alongside clang-tidy — it catches
         # different defects. Scoped to files this PR changes so the existing
         # tree is not bulk-flagged (same policy as clang-tidy/clang-format);

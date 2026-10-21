@@ -34,6 +34,8 @@
 // The kFakeConnectableRoster at the bottom lists the drivers that can connect to
 // an in-process fake; scripts/check_docs_drift.py pins it to the fake_*.h files on
 // disk in both directions.
+// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; rule 6 of
+// scripts/check_contract_sweep.py holds it to that table and to the snapshot hooks in test_contract_sweep.cpp.
 
 #pragma once
 
@@ -66,6 +68,7 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -90,6 +93,8 @@
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
+#include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
+#include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/vendor/celestron/celestron_telescope_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -101,6 +106,9 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_switch_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
+#endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#include <alpacacore/vendor/altair/altair_camera_driver.h>
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
 #include <alpacacore/vendor/playerone/playerone_camera_driver.h>
@@ -230,13 +238,16 @@ inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_swit
 
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
     "assumption: the factory arguments are placeholders copied from the vendor Defaults case, not a hardware run";
 inline constexpr const char* kSrcAgentsAxis =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 "
-    "tertiary not); "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis "
+    "(axes 0/1 movable, 2 tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
+inline constexpr const char* kSrcCelestronCgx =
+    "protocol document: Celestron AUX MC_MOVE_POS/MC_MOVE_NEG expose fixed rates but not measured degrees/second; "
+    "assumption: MoveAxis stays unavailable until CGX motor rates are hardware-calibrated";
 
 #ifdef ALPACACORE_ENABLE_ZWO
 inline ContractEntry contract_entry_zwo_camera() {
@@ -286,8 +297,8 @@ inline ContractEntry contract_entry_zwo_switch() {
             [](int n) -> std::unique_ptr<AlpacaDriver> {
                 return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
             },
-            "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-            "router arm have their own entries below"),
+            "protocol document: driver-lifecycle.instructions.md + ASCOM ISwitchV3; assumption: the ASIAIR switch "
+            "drivers behind the same descriptor have their own entries below"),
         DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
         "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
         "ensure_connected()");
@@ -333,7 +344,7 @@ inline ContractEntry contract_entry_qhy_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::qhy::create_qhy_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
-// Second backend behind the same (qhy, filterwheel) router pair: the standalone CFW3 on a serial port.
+// Second backend behind the same (qhy, filterwheel) catalog pair: the standalone CFW3 on a serial port.
 inline ContractEntry contract_entry_qhy_filterwheel_cfw3() {
     return make_entry(
         "qhy_filterwheel_cfw3", "qhy", "filterwheel", DeviceType::FilterWheel,
@@ -376,6 +387,13 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iefw_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
+// The iGuider guide camera has its own catalog vendor ("iguider") but is an
+// iOptron driver built under the iOptron flag (GUARD_OVERRIDE in the gate).
+inline ContractEntry contract_entry_iguider_camera() {
+    return make_entry(
+        "iguider_camera", "iguider", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iguider_camera(n); }, kSrcAgents);
+}
 #endif
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
@@ -406,8 +424,8 @@ inline ContractEntry contract_entry_ioptron_camera() {
     return with_playerone_actions(make_entry(
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
-        "assumption: the router's ioptron/camera arm reuses the Player One camera driver (router.cpp); "
-        "protocol document: AGENTS.md contract"));
+        "assumption: the ioptron/camera descriptor reuses the Player One camera driver (playerone_catalog.cpp); "
+        "protocol document: driver-lifecycle.instructions.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {
     return with_playerone_actions(make_entry(
@@ -488,6 +506,32 @@ inline ContractEntry contract_entry_celestron_telescope() {
         },
         kSrcAgentsAxis));
 }
+inline ContractEntry contract_entry_celestron_cgx_telescope() {
+    ContractEntry entry = make_entry(
+        "celestron_telescope_cgx", "celestron", "telescope", DeviceType::Telescope,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            vendor::celestron::CelestronCgxConnectionInfo info;
+            info.port_path = "/dev/null";
+            info.site_latitude_degrees = 0.0;
+            info.site_longitude_degrees = 0.0;
+            return vendor::celestron::create_celestron_cgx_telescope(n, info);
+        },
+        kSrcCelestronCgx);
+    entry.can_move_axis = {false, false, false};
+    return entry;
+}
+inline ContractEntry contract_entry_celestron_focuser() {
+    auto entry = make_entry(
+        "celestron_focuser", "celestron", "focuser", DeviceType::Focuser,
+        [](int n) -> std::unique_ptr<AlpacaDriver> {
+            return vendor::celestron::create_celestron_focuser(n, "/dev/ttyUSB0");
+        },
+        kSrcAgents);
+    // Action list read from celestron_focuser_driver.cpp get_supported_actions() (assumption: not
+    // checked against a hardware run).
+    entry.actions = {"Calibrate", "AbortCalibration", "CalibrationStatus"};
+    return entry;
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_BISQUE
@@ -526,7 +570,7 @@ inline ContractEntry contract_entry_gemini_covercalibrator() {
         },
         kSrcAgents);
 }
-// Second and third backends behind the same (gemini, covercalibrator) router pair: the Flat Panel v2 and
+// Second and third backends behind the same (gemini, covercalibrator) catalog pair: the Flat Panel v2 and
 // the Motorized Flat Panel V3 (Pro). The entry above is the Cover Lite (create_gemini_flatpanel).
 inline ContractEntry contract_entry_gemini_covercalibrator_v2() {
     return make_entry(
@@ -579,6 +623,16 @@ inline ContractEntry contract_entry_gphoto_camera() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ALTAIR
+// Built on the real Altair SDK singleton, disconnected: like touptek_camera,
+// construction enumerates but opens nothing.
+inline ContractEntry contract_entry_altair_camera() {
+    return make_entry(
+        "altair_camera", "altair", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::altair::create_altair_camera(n, 0); }, kSrcAgents);
+}
+#endif
+
 #ifdef ALPACACORE_ENABLE_TOUPTEK
 inline ContractEntry contract_entry_touptek_camera() {
     return make_entry(
@@ -603,7 +657,7 @@ inline ContractEntry contract_entry_touptek_focuser() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_TOUPTEK
-// Second backend behind the same (touptek, switch) router pair; needs no libgpiod.
+// Second backend behind the same (touptek, switch) catalog pair; needs no libgpiod.
 inline ContractEntry contract_entry_touptek_switch_thermal() {
     return with_switch_caps(
         make_entry(
@@ -708,7 +762,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel)
+#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel) X(iguider_camera)
 #else
 #define CS_IOPTRON(X)
 #endif
@@ -738,7 +792,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_ONSTEP(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-#define CS_CELESTRON(X) X(celestron_telescope)
+#define CS_CELESTRON(X) X(celestron_telescope) X(celestron_cgx_telescope) X(celestron_focuser)
 #else
 #define CS_CELESTRON(X)
 #endif
@@ -780,6 +834,11 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #else
 #define CS_TOUPTEK(X)
 #endif
+#ifdef ALPACACORE_ENABLE_ALTAIR
+#define CS_ALTAIR(X) X(altair_camera)
+#else
+#define CS_ALTAIR(X)
+#endif
 #if defined(ALPACACORE_ENABLE_TOUPTEK) && defined(ALPACACORE_TOUPTEK_STELLAVITA)
 #define CS_TOUPTEK_STELLAVITA(X) X(touptek_switch)
 #else
@@ -816,6 +875,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
     CS_GPHOTO(X) \
     CS_TOUPTEK(X) \
     CS_TOUPTEK_STELLAVITA(X) \
+    CS_ALTAIR(X) \
     CS_WANDERERASTRO(X) \
     CS_ASTROASIS(X)
 // clang-format on
@@ -841,7 +901,8 @@ inline std::vector<ContractEntry> contract_entries() {
 // case "Contract sweep tier 2 - hosts match kFakeConnectableRoster" pins the two
 // together. Every row hosts every applicable case and no case is registered where it would assert
 // nothing: target flags on telescopes only, InvalidValue only on types with a static out-of-range probe
-// (invalid_probe_reason_for() states why the others have none). A row whose fake cannot hold a connect
+// (invalid_probe_reason_for() states why the others have none), ImageArray before any exposure on cameras
+// only (issue #1167). A row whose fake cannot hold a connect
 // open states why and the source in its connecting_unobservable reason there instead of skipping the
 // Connecting check silently. A row whose fake covers
 // less than its registry entry says so inline.
@@ -857,11 +918,19 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"skywatcher", "telescope", "fake_skywatcher_mount.h"},
     {"skywatcher", "telescope", "fake_skywatcher_serial_board.h"},  // hosted as skywatcher_telescope_serial
     {"zwo", "telescope", "fake_mount_server.h"},
+    {"zwo", "camera", "fake_zwo_sdk.h"},
+    {"zwo", "filterwheel", "fake_zwo_efw_sdk.h"},
+    {"zwo", "focuser", "fake_zwo_eaf_sdk.h"},
+    {"zwo", "rotator", "fake_zwo_caa_sdk.h"},
     {"celestron", "telescope", "fake_mount_server.h"},
+    {"celestron", "telescope", "fake_celestron_cgx_mount.h"},  // direct USB backend
+    {"celestron", "focuser", "fake_celestron_focuser.h"},
     {"synscan", "telescope", "fake_mount_server.h"},
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"iguider", "camera", "fake_iguider_v4l2.h"},
+    {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
     {"gemini", "switch", "fake_gemini_pdh.h"},
@@ -869,12 +938,42 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"qhy", "filterwheel", "fake_qhy_cfw3.h"},  // CFW3 serial backend: qhy_filterwheel_cfw3
     {"qhy", "focuser", "fake_qhy_qfocuser.h"},
     {"playerone", "camera", "fake_playerone_sdk.h"},
-    {"svbony", "camera", "fake_svbony_sdk.h"},
+    {"playerone", "filterwheel", "fake_playerone_pw_sdk.h"},
     {"touptek", "camera", "fake_touptek_sdk.h"},
+    // The StellaVita backend; the thermal switch has no fake.
+    {"touptek", "switch", "fake_touptek_powerbox_sdk.h"},
+    {"altair", "camera", "fake_touptek_sdk.h"},  // the ToupTek camera driver behind the Altair factory
+    {"svbony", "camera", "fake_svbony_sdk.h"},
     {"gphoto", "camera", "fake_gphoto_sdk.h"},
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},
     {"wandererastro", "switch", "fake_serial_streamer.h"},
+};
+
+// ---------------------------------------------------------------------------
+// Snapshot-adopter roster (decision 0010, rule 6): the drivers whose Adoption row in
+// docs/decisions/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
+// guard. scripts/check_contract_sweep.py (rule 6) fails when an `adopted` row has no entry here, when an entry
+// is not `adopted`, or when an entry has no CONTRACT_SWEEP_SNAPSHOT_ADOPTERS hook in test_contract_sweep.cpp (and
+// the reverse). `source` is the
+// ADR row's Source column, verbatim; `vendor` is the router vendor string.
+// ---------------------------------------------------------------------------
+
+struct SnapshotAdopterRow {
+    const char* id;
+    const char* vendor;
+    const char* source;
+};
+
+inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
+    {"skywatcher_telescope", "skywatcher", "AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp"},
+    {"celestron_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp"},
+    {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
+    {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
+    {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
+    {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
+    {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
+    {"celestron_focuser", "celestron", "AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

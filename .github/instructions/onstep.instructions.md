@@ -36,33 +36,42 @@ it is never reachable through `router.cpp` or the web UI.
   the mount stops the pulse itself. `IsPulseGuiding` is tracked from the known requested
   duration, not polled from the mount. Unlike SynScan (no native pulse guide), this driver does
   **not** need a background stop-thread.
-- **SideOfPier must be computed from hour angle, not read from `:GU#`'s `E`/`W` flag** — the same
+- **SideOfPier must be computed from hour angle, not read from `:GU#`'s pier-side letter** — the same
   lesson iOptron already learned from its `:GEP#` raw pier value (see the [iOptron notes](ioptron.instructions.md)):
   a mount's raw physical-pier-side report does not match the ASCOM convention once tracking past
-  the meridian. `:GU#` does encode pier side directly (confirmed on real hardware, firmware
-  "On-Step" v10.23a, characters `E`/`W`), and an earlier version of this driver preferred that
-  flag over the hour-angle computation, falling back to hour angle only when neither character
-  was present. This parsed correctly (verified against the exact character table below) but
-  failed ConformU's SideofPier check on real hardware: `Reported SideofPier at HA -9, +9: EE`
-  (constant, reflecting the physical side, which only changes on an actual mechanical meridian
-  flip) instead of the required `WE` (flips with HA sign — ASCOM's pointing-state contract).
-  `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`); `:GU#`'s `E`/`W`
-  is parsed and available in `MountStatus` but intentionally unused for this property. Do not
+  the meridian. An earlier version of this driver preferred the `:GU#` flag over the hour-angle
+  computation and failed ConformU's SideofPier check on real hardware: `Reported SideofPier at
+  HA -9, +9: EE` instead of the required `WE` (flips with HA sign — ASCOM's pointing-state
+  contract). That `EE` was not the physical pier side: the driver read `E`, which OnStepX writes
+  for the mount type (GEM) on every reply, as "pier east" (#1217). The pier side is `T`/`W`/`o`
+  (table below). `get_side_of_pier()` now always computes from hour angle (`LST − synced RA`);
+  `:GU#`'s pier side is parsed into `MountStatus` but intentionally unused for this property. Do not
   reintroduce a firmware-flag-preferred branch here without re-validating against ConformU's
   SideofPier/DestinationSideofPier checks. Also avoid forcing a live position refresh inside
-  `get_side_of_pier()` (a `:GRa#`/`:GDe#` round trip, ~0.13s each on this serial link, can push
-  the read over ConformU's 0.1s FAST target) — hour-angle *sign* tolerates a couple of seconds of
+  `get_side_of_pier()` (a `:GRa#`/`:GDe#` pair, ~25 ms each on the HM-17 at 9600 baud, so ~50 ms,
+  uses about half of a FAST read's 0.1s budget; it was ~0.16s each while `read_response()` slept
+  10 ms after every reply character, #1242) — hour-angle *sign* tolerates a couple of seconds of
   RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated.
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what
   the INDI driver's comments implied, and was the single biggest early bug in this driver).
-  `H` = at home, `P`/`p` = parked/not parked, `E`/`W` = pier side east/west. Any other character
-  is ignored (forward-compatible with firmware revisions); only a total non-response is a fault.
+  `H` = at home, `P`/`p` = parked/not parked, `I` = parking in progress, `F` = park failed,
+  `h` = homing, `g` = a guide move is running (`guide.active()`: a `:Mn#/:Ms#/:Me#/:Mw#` move, so a `MoveAxis`, and also a home or spiral guide; not a pulse guide),
+  `G` = a pulse guide is running. `N` covers a GOTO only: a `MoveAxis` never clears it. The mount type follows (`E` GEM, `K` fork, `A` alt-az, `L` alt-alt), then the
+  pier side: `T` east, `W` west, `o` none (OnStepX `Status.command.cpp`; HM-17 traces `nNpEW180`
+  = pier west, `nNpET1:0` = pier east, `nNPHEo180` = parked at home). `e` means "sync to
+  encoders only": unpark, home and sync set it and the next GOTO clears it, and it matters only
+  with external encoders. The last three characters are `'0' + n` for the pulse-guide rate, the
+  guide rate and the general error code (`:` is 10). Error `7` is `ERR_MERIDIAN`: after it,
+  OnStepX acknowledges GOTO, park and home commands but does not move, and a manual move back
+  inside the limit clears it (the HM-17's limits are ±60 min, `:GXE9#`/`:GXEA#`). Any other
+  character is ignored (forward-compatible with firmware revisions); only a total non-response
+  is a fault.
 - **RA/Dec position reads use the high-precision variants**: `:GRa#`/`:GDe#` (fractional
   seconds/arcseconds: `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSSS#`), not `:GR#`/`:GD#` (whole-second/
   whole-arcsecond resolution). The whole-second RA resolution (~15″ at the equator) is far too
-  coarse for ConformU's 0.07″ PulseGuide tolerance on short (2-5s) guide pulses — confirmed via
+  coarse for ConformU's 0.07 s PulseGuide tolerance on short (2-5s) guide pulses — confirmed via
   ConformU issue count dropping from 8 to 0-2 after switching. `parse_sexagesimal()` handles the
   fractional last field transparently (`std::stod` on a run of digits+`.`), no parser change
   needed.
@@ -86,6 +95,56 @@ it is never reachable through `router.cpp` or the web UI.
   half-max) is still called once at connect as a harmless safe default, but the real rate for
   every `MoveAxis` call is set immediately before each `:Mn#/:Ms#/:Me#/:Mw#` via the mechanism
   above.
+- **A running `MoveAxis` is re-sent every 7 s** (#1378): OnStepX ends a `:Mn#/:Ms#/:Me#/:Mw#` move
+  after `GUIDE_TIME_LIMIT` (default 10 s; 1-120 s, or 0 for none, set at firmware build), and every
+  repeat restarts that timer (`Guide::startAxis1`). A background task (`move_axis_resend_`, an
+  `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
+  `AbortSlew`, a GOTO, park, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
+  itself fails. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
+  that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
+  `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
+  between ticks. A skipped tick (a failed read, `G`, or near a limit) therefore puts the next
+  attempt about 14 s after the last send, past the default 10 s limit: the move ends there. The re-send needs a `GUIDE_TIME_LIMIT` of 8 s or more; with less the move lapses
+  between re-sends and reads as ended. Seen on the HM-17 before the fix: `MoveAxis(0, 0.5)` held
+  for 20 s moved for about 10 s.
+  - **On the task clock (decision 0005).** The driver takes a `util::TaskClock&` (factories
+    `create_onstep_telescope()` / `create_onstep_telescope_with_site()`, default the real clock),
+    the re-send slot waits through it, and the other deadlines read it too: the 2 s status and
+    position cache ages, the slew grace, the pulse-guide end, the synchronous-slew poll and settle
+    sleeps, the elapsed time since a UTCDate write (a `util::UtcOffset`, decision 0014, cleared on
+    connect and on disconnect), and the #521 relink outage:
+    the driver hands its clock to the process-wide wrapper at connect
+    (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
+    when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
+    clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
+    `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
+    slew, 2 s past the relink window, 60 s past a UTCDate write).
+  - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
+    that read shows `g` (a guide-style move runs, either axis). A move the firmware let lapse stays
+    ended: its time limit, or the 5 s `GUIDE_TIME_NO_LIMITS` cap it applies while its soft limits
+    are off (`Guide::finalizeTimeLimit`), which asks for a fresh command on purpose. `G` (a pulse
+    guide runs) hides `g`; that tick sends nothing and ends nothing. OnStepX keeps `G` until both
+    axes are idle (`Guide::poll`), so after a pulse guide during a move the move ends at the
+    firmware's time limit. Once the firmware has shown
+    `g` since this connect, a `:GU#` read taken after the move started with no `g` (and no `G`)
+    means the move ended at the mount (a hand controller or another app sent a stop, or a limit):
+    the re-send ends and `Slewing` reads false. Firmware that never sends `g` gets no re-send, and
+    `Slewing` stays true until the client stops the move, as before.
+  - **Braking (HM-17, OnStepX 10.23a, 2026-10-20):** after a stop `g` stays set while the axis
+    brakes (`GA_BREAK`; about 0.4 s at 0.5 deg/s), and a move command in that time restarts the
+    move at full rate (`Axis::autoSlew` "resum"). A stop at the mount is therefore undone when a
+    tick lands in the braking; the 7 s interval keeps that rare. On an equatorial mount, with both
+    axes moving, a stop of one axis alone keeps `g` set and that axis is re-sent.
+  - **Altitude limits:** on an equatorial mount OnStepX stops at the horizon and overhead limits
+    only on the crossing, and accepts a custom-rate move past them afterwards. The re-send
+    therefore reads `:GA#`, `:Gh#` and `:Go#` and sends nothing unless the altitude is at least
+    1 degree inside both limits (90 overhead means none); a move started below the horizon limit
+    gets none either. `:GA#` strips refraction, so it reads at or below the altitude the firmware
+    tests; the margin also covers whole-degree limits and a small pointing model. A failed or
+    out-of-range read sends nothing. The firmware then ends the move after its time limit. The meridian, axis and switch
+    limits need no check: OnStepX enforces them on every poll and refuses a move further out.
+  - A client that goes silent is stopped by the server's 30 s motion watchdog instead of the
+    firmware's 10 s.
 - **Tracking on/off**: confirmed on real hardware to be `:ST60.164275#` (start — sets tracking
   rate to exact sidereal, `60.164275 = 60.0 × 1.00273790935`) / `:ST0#` (stop — any rate below
   0.1 Hz reads as `TrackingNone`). `:To#`/`:Tn#` (this driver's original guess, inferred from the
@@ -124,9 +183,49 @@ it is never reachable through `router.cpp` or the web UI.
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
   stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
-  pushed `AbortSlew` to 1.04s, just over budget. The fd is non-blocking (`util::SerialLink`), so a
-  port another program retunes to `VMIN=1` can no longer park the drain after a blind command
-  (the TeSeek HM-17 hang reported on #1202).
+  pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
+  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17. The fd is
+  non-blocking (`util::SerialLink`), so a port another program retunes to `VMIN=1` can no longer park
+  the drain after a blind command (the TeSeek HM-17 hang reported on #1202).
+- **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
+  the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
+  lost when that path is gone or points elsewhere, or when a read or write on the fd fails with
+  `EIO`/`ENXIO`/`ENODEV`/`EBADF`. Lost means `Connected` false, `NotConnected` instead of a
+  generic "Failed to send command to mount" while `Connected` still read true (a reply cut off
+  mid-read no longer waits out the response timeout either), the fd closed (so the replugged
+  CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
+  then reconnects. OnStepX keeps running a GOTO while the cable is out, and a `MoveAxis` for up to
+  about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
+  2.5 degrees at 0.25 deg/s in #1241; from the home position it did not move at all, though the
+  call succeeded), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
+  sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
+  loss, stops nothing (#521). The stops also end a park that was running, as AbortSlew's do.
+  The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
+  the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
+  an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
+  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s), and the router reads `Connected` before every Connect, so the first to notice
+  can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
+  lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
+  still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that
+  lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
+  a Disconnect bumps the generation before it closes the port; the close that follows a recorded loss
+  re-checks under `mutex_` that the link is still connected and still lost (#1289).
+- **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
+  `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
+  `Tracking` reads false, after the parked check and coordinate validation and before any target or
+  GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
+  just written counts as off. `SlewToAltAz(Async)` skips the check: it converts to RA/Dec and calls
+  `start_slew_locked()` directly. The firmware itself turns tracking on at the end of a GOTO (HM-17,
+  2026-10-18: tracking off, GOTO, `Tracking` read true after it), so the refusal is the interface
+  contract, not a fix for an untracked landing. No exception is needed for a retarget of a GOTO in
+  flight: `:GU#` kept the tracking flag through a whole GOTO, and OnStepX answers `:MS#` with an error
+  while a GOTO runs, so a second slew is refused by the mount either way.
+- **`Connected` is read lock-free** (#910): `set_connected(true)` holds `mutex_` for the whole connect
+  (port open, handshake, site and time sync, cache warm-up, an auto-detect scan with no explicit port),
+  so `get_connected()` reads the atomic `published_connected_` instead, plus `link_alive()`, which takes
+  no lock a connect holds. The flag is raised only after the warm-up and dropped before any disconnect,
+  so `Connected` stays false while `Connecting` is true (the tier-2 contract sweep checks it). The
+  internal `connected_` still flips at the old point, because the warm-up's own helpers check it.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
   immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first
@@ -138,45 +237,57 @@ it is never reachable through `router.cpp` or the web UI.
   ConformU log, where `Park`/`FindHome` also take ~30s in wall-clock terms but show `0.001s ✓
   (EXTENDED)` in the timing table). Real GEM mounts physically cannot park/home in 1 second;
   fire-and-forget is the only way to pass this target with genuine hardware.
-- **`DeviceState`'s first post-Connect call routinely exceeds the 0.1s FAST target (~0.65s),
-  and this is NOT fixable by warming caches during `connect()`**: two different warm-up
-  strategies (locked, then a mutex-released ToupTek-AFW-style version) were tried against real
-  hardware and neither moved the measured time at all — ConformU's Connect()/Connected preamble
-  (`Connected=True` → `Connected=False` → `Connect()`) calls `DeviceState` fast enough after the
-  final reconnect that the live `:GA#/:GZ#/:GU#/:GRa#/:GDe#` round trips always land inside its
-  measurement window regardless of what connect-time work has or hasn't finished. Treat this as
-  an accepted, inherent one-time cold-start cost, not a bug to keep chasing.
-- **The same connect-adjacent cold-start window can land on other FAST members too, not just
-  `DeviceState`** (re-confirmed on real hardware, ConformU 4.5.0, after the driver-branch update
-  that ported this driver's auto-detect to the shared `serial_by_id_scan.h` helper): two
-  consecutive runs both showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
-  `EquatorialSystem` (~0.136s), and `SideOfPier Read` (~0.140s) OUTSIDE the 0.1s FAST target,
-  every time, at nearly identical values (±0.003s) — including `AlignmentMode`/`EquatorialSystem`,
-  which are compile-time constants with no wire I/O at all. This is the same phenomenon as the
-  `DeviceState` note above, not a regression from that auto-detect change (which only touches
-  `enumerate_onstep_ports()`, never called on this code path): manually repeating the same calls
-  a few seconds after `Connect()` (well outside ConformU's rapid-fire post-Connect property sweep)
-  answers in ~0.003s every time, confirming it's a transient connect-adjacent window, not a
-  permanent per-call cost. Which members land inside that window depends on ConformU's exact call
-  order/pacing for a given version, so don't be surprised if it isn't `DeviceState` specifically.
-  Same conclusion applies: treat as accepted, not a bug to chase-fix via caching.
-- **`PulseGuide` East/West shows 1-2 residual ConformU issues per run, right at the 0.07″
-  tolerance boundary, and this is inherent hardware noise, not a driver bug**: root-caused via
-  four independent tests, all on real hardware — (1) A/B test with OnStep's refraction
-  rate-compensation feature (`:Tr#`/`:Tn#`) on vs. off: no correlation, disabling it made the
-  residual *worse*; (2) mount unloaded vs. with the real telescope mounted and balanced: no
-  measurable difference; (3) attempted testing far from the celestial pole: blocked by ConformU's
-  own `Park()`/`FindHome()` always returning the mount near the pole regardless of test
-  settings; (4) the same residual reappears at a different member (sometimes `-9.0`, sometimes
-  `+9.0`, North or South) across repeated runs, and all 4 rate labels (`-9.0`/`-3.0`/`+3.0`/
-  `+9.0`) drive the *same* physical pulse (`GuideRateDeclination`/`RightAscension` are fixed,
-  `CanSetGuideRates=false`) — i.e. these are 4 repetitions of one experiment, and a noise floor
-  straddling a tight tolerance will intermittently cross it. Do not attempt to "fix" this by
-  loosening tolerances or by re-adding rate-compensation toggling.
+- **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
+  ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
+  poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's
+  warm-up fills the status and position caches (ConformU, which adds its own client overhead,
+  times it at 0.025s in the HM-17 report). A slow one appears when another ClientID is still
+  connected (the web UI, a script, NINA): the server keeps the device open for it, so ConformU's
+  `Connected=False` and `Connect()` change nothing, the caches are past their 2 s TTL, and
+  `DeviceState` refreshes `:GA#`/`:GZ#`/`:GU#`/`:GRa#`/`:GDe#`. That measured ~0.65s while each
+  reply cost ~10 ms per character on top of ~20-25 ms per command (the sleep fixed in #1242). On the HM-17 those five
+  commands now take ~0.11s together (each timed through the wrapper; the five took ~0.66s before),
+  still over the 0.1s target. For a validation run, connect nothing else to the
+  mount before ConformU starts; with an explicit port there is no auto-detect scan to pre-pay.
+- **Other slow first FAST reads in old ConformU 4.5.0 runs were not a cold-start window
+  either.** Two runs showed `AlignmentMode` (~0.135s), `Declination` (~0.318s),
+  `EquatorialSystem` (~0.136s) and `SideOfPier Read` (~0.140s) outside the 0.1s FAST target.
+  `AlignmentMode` and `EquatorialSystem` are compile-time constants with no serial I/O, so that
+  time is spent in ConformU, not the driver; these two and `SideOfPier` are the first reads of
+  an enum type, which matches ConformU's first-use JIT cost on enum-typed members
+  (`.github/instructions/ioptron.instructions.md`; worse in the arm64 4.5.0 build, see "ConformU version" in `.github/instructions/testing.instructions.md`).
+  `Declination` is a live position refresh, a `:GRa#`/`:GDe#` pair, and its ~0.318s is consistent
+  with ~0.16s each, what that pair measured on the HM-17 while the per-character sleep fixed in
+  #1242 was in place. The HM-17 run on ConformU 4.5.2-rc.1, with nothing else connected, has every member
+  within its timing target.
+- **`PulseGuide` residual ConformU issues: North/South at HA ±9 is refraction, the rest is
+  noise.** The `-9.0`/`-3.0`/`+3.0`/`+9.0` in ConformU's PulseGuide member names are the **hour
+  angles** of the test position (`TestPulseGuide(ha)` in `TelescopeTester.cs`), not guide rates.
+  - *North/South at HA ±9* (`East-West movement was outside test tolerance` on a North or South
+    pulse, RA change 0.07–0.12 s): ConformU picks the test Dec with the highest elevation under
+    65° on a 10° grid, which from latitude +40.5° (the HM-17 site) is Dec +85 at HA ±9 and Dec +55
+    at HA ±3; other latitudes give other positions. OnStepX removes refraction from the RA/Dec it
+    reports (topocentric coordinates, `:GXEE#` = `1`), and at that position a 37.6″
+    Dec pulse shifts the reported RA by ~0.08 s, while ConformU's RA tolerance is 0.07 s (0.09″ on
+    the sky at Dec +85) and does not allow for refraction. Proven on the TeSeek HM-17 (2026-10-16)
+    by repeating the pulses outside ConformU at three firmware pressures (`:SX9B,n#`, a diagnostic
+    only): the RA change matched OnStepX's own refraction formula (measured = 1.00 × predicted),
+    fell to the noise level at 100 hPa, and the raw RA axis angle (`:GX42#`) moved only at the
+    sidereal rate. The sign flips between North and South and between HA −9 and +9; HA ±3 is
+    clean. Upstream: ASCOMInitiative/ConformU#35 (allow for refraction when `DoesRefraction` is
+    true, #1216). The maintainer fixed it in ConformU 4.5.2-rc.1 (build 56111) by keeping the test
+    declinations within ±65°. A run with an older build still shows these 4 issues; note them in
+    the saved report instead of changing the tolerance.
+  - *Other residuals* (East/West at the 0.07 s boundary): treated as hardware noise after (1) an
+    A/B test with refraction rate compensation (`:Tr#`/`:Tn#`) on vs. off, no correlation; (2) mount
+    unloaded vs. loaded, no difference; (3) testing far from the pole was blocked by ConformU's own
+    `Park()`/`FindHome()` returning near the pole. The earlier reading that all four labels drive
+    one repeated experiment was wrong (the labels are hour angles, see above).
+  - Do not "fix" either case by loosening tolerances or by re-adding rate-compensation toggling.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
   telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
-  by an ordinary equatorial slew (the router refuses synchronous `SlewToAltAz` with
+  by an ordinary GOTO that skips the Tracking check (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
@@ -186,11 +297,23 @@ it is never reachable through `router.cpp` or the web UI.
   also `false` — custom tracking-rate commands were not confirmed against real OnStep firmware
   during this implementation, so the setters throw `PropertyNotImplemented` rather than
   advertise support that might silently no-op.
-- **ConformU-validated on real hardware** (Generic OnStep DIY harmonic-drive mount, firmware
-  "On-Step" v10.23a, Linux arm64, ConformU 4.4.0): 0 errors, 0 timing violations in the saved
-  run. The only remaining findings are the 2 PulseGuide East/West residual issues documented
-  above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
-  runs during this same validation session also hit the DeviceState-cold-start-style FAST
-  timing risk described above (via `get_side_of_pier()`'s live position round trip, since
-  fixed), which is why that failure mode is documented even though the saved log is clean of it.
-  See `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.
+- **`DoesRefraction` comes from the firmware, not a local flag** (#1216): OnStepX applies
+  refraction to every RA/Dec it reports unless it was built for observed-place coordinates, and
+  `:GXEE#` says which: it replies `MOUNT_COORDS - 1` as one bare digit with no `#` (`0` observed
+  place, `1` topocentric, `2` topocentric strict). The driver asks at connect, on firmware 10 or
+  later only, because legacy OnStep answers any unknown command with `0` too. It reports `True`
+  for `1`/`2`, and a write of the other value throws `PropertyNotImplemented`, since the mode is
+  fixed when the firmware is built. Legacy firmware, or no answer, keeps the settable local flag.
+  The TeSeek HM-17 (OnStepX 10.23a) answers `1`.
+- **ConformU-validated on real hardware**: the TeSeek HM-17 (OnStepX 10.23a) on Linux arm64,
+  ConformU 4.5.2-rc.1 (build 56111): 0 errors, 0 issues, all members within their timing targets
+  (`AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`). The older Generic OnStep DIY
+  harmonic-drive mount report (firmware "On-Step" v10.23a) is a ConformU 4.5.0 run on x86-64
+  (Linux Mint 22.3), not arm64 as its `Linux-arm64.txt` name suggests, made before validation
+  became arm64-only: 0 errors, 0 timing violations in the saved run. The only remaining
+  findings are the 2 PulseGuide East/West residual issues documented above as an accepted, inherent hardware-noise limitation rather than a driver bug — earlier
+  runs during this same validation session also had slow first FAST reads (see the notes
+  above; one came from `get_side_of_pier()`'s live position round trip, since fixed), which is
+  why they are documented even though the saved log is clean of them.
+  See `AlpacaCore/conformu/OnStep/TeSeek HM-17/Linux-arm64.txt`,
+  `AlpacaCore/conformu/OnStep/Generic OnStep/Linux-arm64.txt` and `SUPPORTED-DRIVERS.md`.

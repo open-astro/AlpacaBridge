@@ -150,8 +150,8 @@ std::vector<DescriptorView> DeviceCatalog::describe() const {
     std::vector<DescriptorView> views;
     views.reserve(schemas_.size());
     for (const Schema& s : schemas_) {
-        views.push_back(
-            {s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields, s.vendor_label});
+        views.push_back({s.key, s.display_name, s.build_option, find_factory(s.key) != nullptr, s.fields,
+                         s.vendor_label, s.forget_dropped_selectors});
     }
     return views;
 }
@@ -160,14 +160,17 @@ std::vector<DeviceKey> DeviceCatalog::factory_keys() const {
     std::vector<DeviceKey> keys;
     keys.reserve(factories_.size());
     for (const Factory& f : factories_) {
-        if (f.create) keys.push_back(f.key);
+        if (f.create || f.bind) keys.push_back(f.key);
     }
     return keys;
 }
 
 NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfig& in, Source source) const {
     NormalizeResult result;
-    result.config = in;
+    // #508 item 2: one fold rule. "Network" and "SERIAL" mean what their lower-case forms mean.
+    DeviceConfig folded = in;
+    fold_connection_type(folded);
+    result.config = folded;
     const Schema* schema = find_schema(key);
     if (!schema) {
         std::string msg = "unknown device " + describe_key(key);
@@ -179,7 +182,7 @@ NormalizeResult DeviceCatalog::normalize(const DeviceKey& key, const DeviceConfi
     }
 
     std::vector<std::string> messages;
-    DeviceConfig normalized = normalize_fields(schema->fields, in, "", messages);
+    DeviceConfig normalized = normalize_fields(schema->fields, folded, "", messages);
     if (source == Source::Api) {
         if (!messages.empty()) {
             result.rejection = messages.front();
@@ -213,18 +216,41 @@ DeviceConfig DeviceCatalog::sanitize(const DeviceKey& key, const DeviceConfig& i
     return schema ? sanitize_fields(schema->fields, in) : DeviceConfig{};
 }
 
-std::unique_ptr<AlpacaDriver> DeviceCatalog::create(const DeviceKey& key, const DeviceConfig& normalized,
-                                                    int device_number) const {
-    const Schema* schema = find_schema(key);
+namespace {
+// The factory for a key that has a schema, or the error create() and bind() share.
+const Factory& require_factory(const Schema* schema, const Factory* factory, const DeviceKey& key) {
     if (!schema) {
         throw std::runtime_error("cannot create unknown device " + describe_key(key));
     }
-    const Factory* factory = find_factory(key);
-    if (!factory || !factory->create) {
+    if (!factory) {
         throw std::runtime_error("device " + describe_key(key) + " is not available in this build (built without " +
                                  std::string(schema->build_option) + ")");
     }
-    return factory->create(normalized, device_number);
+    return *factory;
+}
+}  // namespace
+
+std::unique_ptr<AlpacaDriver> DeviceCatalog::create(const DeviceKey& key, const DeviceConfig& normalized,
+                                                    int device_number) const {
+    const Factory& factory = require_factory(find_schema(key), find_factory(key), key);
+    if (!factory.create) {
+        throw std::runtime_error("device " + describe_key(key) + " is created through bind(), not create()");
+    }
+    return factory.create(normalized, device_number);
+}
+
+bool DeviceCatalog::has_bind(const DeviceKey& key) const {
+    const Factory* factory = find_factory(key);
+    return factory && factory->bind;
+}
+
+BindResult DeviceCatalog::bind(const DeviceKey& key, const DeviceConfig& normalized, int device_number,
+                               const BindContext& context) const {
+    const Factory& factory = require_factory(find_schema(key), find_factory(key), key);
+    if (factory.bind) return factory.bind(normalized, device_number, context);
+    BindResult result;
+    result.driver = factory.create(normalized, device_number);
+    return result;
 }
 
 void DeviceCatalog::add(Schema schema) {
@@ -275,7 +301,7 @@ const Schema* DeviceCatalog::find_schema(const DeviceKey& key) const {
 const Factory* DeviceCatalog::find_factory(const DeviceKey& key) const {
     for (const Factory& f : factories_) {
         // A factory with nothing to call is not a factory: describe().available and create() must agree.
-        if (f.key == key) return f.create ? &f : nullptr;
+        if (f.key == key) return (f.create || f.bind) ? &f : nullptr;
     }
     return nullptr;
 }

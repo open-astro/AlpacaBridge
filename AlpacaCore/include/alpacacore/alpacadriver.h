@@ -19,9 +19,11 @@
 #include <cstdio>
 #include <ctime>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace alpacacore {
@@ -54,11 +56,41 @@ public:
     virtual DeviceType get_device_type() const = 0;
 
     /**
-     * @brief Get the device unique ID.
+     * @brief The device's UniqueID, as the management API lists it.
      *
-     * This is a unique identifier for the device instance.
+     * Decision 0018: the router assigns the GUID persisted for this configured
+     * device right after it builds the driver (assign_unique_id()). Until then,
+     * which in practice means a driver a unit test builds directly, the driver's
+     * own fallback_unique_id() answers. Not virtual: no driver builds its ID.
+     * The fallback runs outside unique_id_mutex_, so a driver may call this
+     * while holding its own mutex and its fallback may take that mutex.
      */
-    virtual std::string get_unique_id() const = 0;
+    std::string get_unique_id() const {
+        {
+            std::lock_guard<std::mutex> lock(unique_id_mutex_);
+            if (!assigned_unique_id_.empty()) return assigned_unique_id_;
+        }
+        return fallback_unique_id();
+    }
+
+    /**
+     * @brief Assign the persisted GUID (decision 0018). The router calls this
+     * once, after construction and before the driver is registered.
+     */
+    void assign_unique_id(std::string unique_id) {
+        std::lock_guard<std::mutex> lock(unique_id_mutex_);
+        assigned_unique_id_ = std::move(unique_id);
+    }
+
+    /**
+     * @brief Move state saved under the driver-built ID to the assigned GUID
+     * (decision 0018). The router calls this once, after registration, at the
+     * start that gives a stored entry its first GUID: the upgrade. Never at
+     * connect and never for a device added later, so a device configured on a
+     * reused device number cannot take over what the old one saved under that
+     * number. Default: nothing to move.
+     */
+    virtual void adopt_legacy_state() {}
 
     /**
      * @brief Get the device description.
@@ -158,8 +190,9 @@ public:
      * Same contract as get_last_connect_error(): cheap, never touches the
      * hardware and never starts an exchange (it reads the latch a driver
      * already keeps, issue #237 / #505). `Connected` stays true while a link is
-     * faulted, so the management listing reports this beside it and the web
-     * UI shows a connected-but-silent device as red rather than green.
+     * faulted and younger than the staleness bound (decision 0009; a driver
+     * that adopted it keeps the last text after the link is lost), so the management listing reports this beside it and
+     * the web UI shows a connected-but-silent device as red rather than green.
      */
     virtual std::string get_link_fault() const { return {}; }
 
@@ -227,6 +260,27 @@ public:
      * @return Command result
      */
     virtual std::string command_string(std::string_view command, bool raw = false) = 0;
+
+protected:
+    /**
+     * @brief The ID a driver reports when no GUID was assigned (decision 0018):
+     * a driver a unit test builds directly. Production drivers are always
+     * assigned one by the router.
+     */
+    virtual std::string fallback_unique_id() const = 0;
+
+    /**
+     * @brief The GUID the router assigned, or empty when none was. Never calls
+     * fallback_unique_id(), so it is safe under the driver's own mutex.
+     */
+    std::string assigned_unique_id() const {
+        std::lock_guard<std::mutex> lock(unique_id_mutex_);
+        return assigned_unique_id_;
+    }
+
+private:
+    mutable std::mutex unique_id_mutex_;
+    std::string assigned_unique_id_;
 };
 
 /**
@@ -240,9 +294,8 @@ public:
  * unit (including the per-vendor static libraries) without a link-order
  * dependency on the core library.
  */
-inline std::string device_state_timestamp() {
+inline std::string device_state_timestamp(std::chrono::system_clock::time_point now) {
     using clock = std::chrono::system_clock;
-    const auto now = clock::now();
     const std::time_t secs = clock::to_time_t(now);
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
 
@@ -260,5 +313,8 @@ inline std::string device_state_timestamp() {
     std::snprintf(out, sizeof(out), "%s.%03lldZ", date_buf, static_cast<long long>(ms));
     return out;
 }
+
+/// The request-time form: the TimeStamp of a state taken now.
+inline std::string device_state_timestamp() { return device_state_timestamp(std::chrono::system_clock::now()); }
 
 } // namespace alpacacore

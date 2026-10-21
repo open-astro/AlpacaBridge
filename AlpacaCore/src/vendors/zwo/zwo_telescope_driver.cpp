@@ -199,7 +199,7 @@ double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point u
                                          double longitude_degrees) {
     using namespace std::chrono;
     const double unix_epoch_jd = 2440587.5;
-    const double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
+    const double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     const double jd = unix_epoch_jd + days_since_epoch;
     const double t = (jd - 2451545.0) / 36525.0;
     double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
@@ -341,7 +341,7 @@ public:
         return DeviceType::Telescope;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!mount_info_.empty()) {
             return "ZWO_MOUNT_" + sanitize_identifier(mount_info_) + "_" + std::to_string(device_number_);
@@ -365,8 +365,9 @@ public:
         // Gate on caches_ready_ so clients (ConformU) only see Connected=true
         // once the telemetry caches have been warmed after connect — the first
         // property reads after connect then hit warm caches and stay under the
-        // ASCOM FAST 0.1 s target. connected_ itself is set early (inside the
-        // lock) to keep concurrent Connected=true requests on the no-op path.
+        // ASCOM FAST 0.1 s target. connected_ itself is set early (right after
+        // the link opens) to keep concurrent Connected=true requests on the no-op
+        // path; check_connected() applies the same gate to the operations.
         return connected_.load() && caches_ready_.load();
     }
 
@@ -467,16 +468,21 @@ public:
             disconnect_thread_.join();
         }
 
-        std::unique_lock<std::mutex> lock(mutex_);
+        // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
+        // its I/O lock: the handshake below runs under them and never under mutex_, which each step
+        // takes for the short state publish only (decision 0016).
         auto& protocol = ZWOMountProtocolWrapper::instance();
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
+            std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slew_force_until_ = std::chrono::steady_clock::time_point{};
             pulse_guiding_end_ = std::chrono::steady_clock::time_point{};
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
-            clear_last_slew_error_locked();
+            if (!keep_telemetry_caches) {
+                clear_last_slew_error_locked();
+            }
             if (!keep_telemetry_caches) {
                 // open-astro#409: once per REAL connection. The
                 // keep_telemetry_caches=true caller is the "Connected=true
@@ -530,23 +536,39 @@ public:
             pulse_generation_.store(0);
         };
         auto apply_or_load_site_info = [&]() {
+            // Held across the whole send and read-back, so a setter's write lands before or after this
+            // exchange and the read-back never overwrites it.
+            std::lock_guard<std::mutex> site_write(site_write_mutex_);
+            std::optional<double> pending_latitude;
+            std::optional<double> pending_longitude;
+            bool coords_valid = false;
+            double known_latitude = 0.0;
+            double known_longitude = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_latitude = pending_site_latitude_;
+                pending_longitude = pending_site_longitude_;
+                coords_valid = site_coords_valid_;
+                known_latitude = site_latitude_deg_;
+                known_longitude = site_longitude_deg_;
+            }
             std::optional<SiteInfo> preferred_site;
-            if (pending_site_latitude_.has_value() || pending_site_longitude_.has_value() || site_coords_valid_) {
+            if (pending_latitude.has_value() || pending_longitude.has_value() || coords_valid) {
                 SiteInfo site;
                 bool has_latitude = false;
                 bool has_longitude = false;
-                if (pending_site_latitude_.has_value()) {
-                    site.latitude_degrees = pending_site_latitude_.value();
+                if (pending_latitude.has_value()) {
+                    site.latitude_degrees = pending_latitude.value();
                     has_latitude = true;
-                } else if (site_coords_valid_) {
-                    site.latitude_degrees = site_latitude_deg_;
+                } else if (coords_valid) {
+                    site.latitude_degrees = known_latitude;
                     has_latitude = true;
                 }
-                if (pending_site_longitude_.has_value()) {
-                    site.longitude_degrees = pending_site_longitude_.value();
+                if (pending_longitude.has_value()) {
+                    site.longitude_degrees = pending_longitude.value();
                     has_longitude = true;
-                } else if (site_coords_valid_) {
-                    site.longitude_degrees = site_longitude_deg_;
+                } else if (coords_valid) {
+                    site.longitude_degrees = known_longitude;
                     has_longitude = true;
                 }
                 if (has_latitude && has_longitude) {
@@ -557,6 +579,7 @@ public:
             if (preferred_site.has_value()) {
                 try {
                     protocol.set_site_info(preferred_site.value());
+                    std::lock_guard<std::mutex> lock(mutex_);
                     site_latitude_deg_ = preferred_site->latitude_degrees;
                     site_longitude_deg_ = preferred_site->longitude_degrees;
                     site_coords_valid_ = true;
@@ -570,10 +593,17 @@ public:
 
             try {
                 const SiteInfo site = protocol.get_site_info();
+                std::lock_guard<std::mutex> lock(mutex_);
                 site_latitude_deg_ = site.latitude_degrees;
                 site_longitude_deg_ = site.longitude_degrees;
                 site_coords_valid_ = true;
             } catch (const std::exception&) {
+            }
+        };
+        auto apply_pending_elevation = [&]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pending_site_elevation_.has_value()) {
+                site_elevation_m_ = pending_site_elevation_.value();
             }
         };
         auto sync_mount_time_if_configured = [&]() {
@@ -582,17 +612,28 @@ public:
             }
 
             const auto now = std::chrono::system_clock::now();
-            if (site_coords_valid_) {
-                SiteInfo site;
-                site.latitude_degrees = site_latitude_deg_;
-                site.longitude_degrees = site_longitude_deg_;
-                protocol.set_site_info(site);
+            {
+                // Snapshot and send under the site write lock, so a concurrent setter's value is not re-sent stale.
+                std::lock_guard<std::mutex> site_write(site_write_mutex_);
+                std::optional<SiteInfo> site;
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (site_coords_valid_) {
+                        site = SiteInfo{};
+                        site->latitude_degrees = site_latitude_deg_;
+                        site->longitude_degrees = site_longitude_deg_;
+                    }
+                }
+                if (site.has_value()) {
+                    protocol.set_site_info(site.value());
+                }
             }
 
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
             protocol.set_time_info(info);
+            std::lock_guard<std::mutex> lock(mutex_);
             last_utc_set_ = now;
             last_utc_set_monotonic_ = std::chrono::steady_clock::now();
             last_utc_valid_ = true;
@@ -613,16 +654,13 @@ public:
             // link), which blows the ASCOM FAST 0.1 s target during ConformU.
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
             apply_or_load_site_info();
-            if (pending_site_elevation_.has_value()) {
-                site_elevation_m_ = pending_site_elevation_.value();
-            }
+            apply_pending_elevation();
             try {
                 sync_mount_time_if_configured();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
-            lock.unlock();
             refresh_cached_values();
             start_poll_thread();
             start_pulse_thread();
@@ -638,36 +676,47 @@ public:
                     reason.empty() ? "Failed to connect to ZWO mount" : "Failed to connect to ZWO mount: " + reason,
                     AlpacaError::NotConnected);
             }
-            // Publish connected_ immediately (inside the lock) so a concurrent
-            // Connected=true request takes the no-op path below instead of
-            // re-entering protocol.connect() and tearing down this fresh link.
-            // get_connected() additionally gates on caches_ready_, so clients
-            // only observe Connected=true once the telemetry caches below are
-            // warm — preserving the FAST-target ordering (first property reads
+            // Publish connected_ immediately so a concurrent Connected=true
+            // request takes the no-op path above instead of re-entering
+            // protocol.connect() and tearing down this fresh link.
+            // get_connected() and check_connected() additionally gate on
+            // caches_ready_, so clients only observe Connected=true, and the
+            // getters only run, once the telemetry caches below are warm —
+            // preserving the FAST-target ordering (first property reads
             // after connect hit warm caches, not live ~95 ms serial reads).
             connected_.store(true);
             caches_ready_.store(false);
             reset_session_state_for_connect();
 
+            std::string mount_info;
             try {
-                mount_info_ = protocol.get_mount_info();
+                mount_info = protocol.get_mount_info();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                mount_info_.clear();
+                mount_info.clear();
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                mount_info_ = mount_info;
             }
 
             apply_or_load_site_info();
+            apply_pending_elevation();
 
-            if (pending_site_elevation_.has_value()) {
-                site_elevation_m_ = pending_site_elevation_.value();
+            // A client write that lands while the read below is on the wire is newer than the reading, so the
+            // publish skips when set_guide_rate() bumped the counter in between.
+            std::uint64_t guide_rate_writes_seen = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                guide_rate_writes_seen = guide_rate_writes_;
             }
-
             bool guide_rate_set = false;
+            GuideRate guide_rate{};
             for (int attempt = 0; attempt < 3 && !guide_rate_set; ++attempt) {
                 try {
                     const double guide_rate_multiple = protocol.get_guide_rate();
                     const double guide_rate_deg_per_sec = guide_rate_multiple * kSiderealRateDegPerSec;
-                    guide_rate_ = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
+                    guide_rate = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
                     guide_rate_set = true;
                 } catch (const std::exception&) {
                     if (attempt == 0) {
@@ -679,11 +728,19 @@ public:
                 const double fallback_multiple = 1.00;
                 const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
                 ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
-                guide_rate_ = {fallback_deg_per_sec, fallback_deg_per_sec};
+                guide_rate = {fallback_deg_per_sec, fallback_deg_per_sec};
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (guide_rate_writes_ == guide_rate_writes_seen) {
+                    guide_rate_ = guide_rate;
+                }
             }
 
             try {
-                tracking_rate_cached_ = protocol.get_tracking_rate();
+                const int tracking_rate = protocol.get_tracking_rate();
+                std::lock_guard<std::mutex> lock(mutex_);
+                tracking_rate_cached_ = tracking_rate;
                 tracking_rate_valid_ = true;
             } catch (const std::exception&) {
             }
@@ -697,7 +754,6 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
             }
-            lock.unlock();
             // Warm every telemetry cache before advertising Connected=true (via
             // caches_ready_) so a client that reads properties immediately after
             // seeing Connected hits warm caches instead of live serial reads.
@@ -1020,6 +1076,9 @@ public:
         const auto now = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!tracking) {
+                goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
+            }
             if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
                 tracking_state_cached_ == tracking) {
                 return;
@@ -1137,11 +1196,13 @@ public:
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
             std::lock_guard<std::mutex> lock(mutex_);
             guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+            ++guide_rate_writes_;
             return;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = {effective, effective};
+        ++guide_rate_writes_;
     }
 
     double get_right_ascension() const override {
@@ -1345,25 +1406,36 @@ public:
     void set_site_latitude(double latitude) override {
         validate_latitude(latitude);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Capture whether a longitude is already known BEFORE publishing this
-        // latitude: setting site_coords_valid_ first made has_longitude
-        // unconditionally true, so a latitude-only set wrote longitude 0.0 to
-        // the mount (M10). Partial site data must never be sent.
-        const bool has_longitude = pending_site_longitude_.has_value() || site_coords_valid_;
-        const double longitude = pending_site_longitude_.has_value() ? pending_site_longitude_.value() : site_longitude_deg_;
-        site_latitude_deg_ = latitude;
-        pending_site_latitude_ = latitude;
-        if (has_longitude) {
-            site_coords_valid_ = true;
+        // One site write at a time, so two concurrent setters, or a setter and the connect's site apply/re-send, reach
+        // the mount in the order they published. No getter takes it.
+        std::lock_guard<std::mutex> site_write(site_write_mutex_);
+        std::optional<SiteInfo> to_send;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Capture whether a longitude is already known BEFORE publishing this
+            // latitude: setting site_coords_valid_ first made has_longitude
+            // unconditionally true, so a latitude-only set wrote longitude 0.0 to
+            // the mount (M10). Partial site data must never be sent.
+            const bool has_longitude = pending_site_longitude_.has_value() || site_coords_valid_;
+            const double longitude =
+                pending_site_longitude_.has_value() ? pending_site_longitude_.value() : site_longitude_deg_;
+            site_latitude_deg_ = latitude;
+            pending_site_latitude_ = latitude;
+            if (has_longitude) {
+                site_coords_valid_ = true;
+            }
+            if (connected_.load() && has_longitude) {
+                to_send = SiteInfo{};
+                to_send->latitude_degrees = site_latitude_deg_;
+                to_send->longitude_degrees = longitude;
+            }
         }
-        if (connected_.load() && has_longitude) {
-            SiteInfo site;
-            site.latitude_degrees = site_latitude_deg_;
-            site.longitude_degrees = longitude;
-            ZWOMountProtocolWrapper::instance().set_site_info(site);
-            pending_site_longitude_ = site.longitude_degrees;
-            site_longitude_deg_ = site.longitude_degrees;
+        // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
+        if (to_send.has_value()) {
+            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_site_longitude_ = to_send->longitude_degrees;
+            site_longitude_deg_ = to_send->longitude_degrees;
         }
     }
 
@@ -1378,24 +1450,33 @@ public:
     void set_site_longitude(double longitude) override {
         validate_longitude(longitude);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Mirror of set_site_latitude (M10): capture whether a latitude is
-        // already known BEFORE publishing this longitude, so a longitude-only
-        // set never writes latitude 0.0 to the mount.
-        const bool has_latitude = pending_site_latitude_.has_value() || site_coords_valid_;
-        const double latitude = pending_site_latitude_.has_value() ? pending_site_latitude_.value() : site_latitude_deg_;
-        site_longitude_deg_ = longitude;
-        pending_site_longitude_ = longitude;
-        if (has_latitude) {
-            site_coords_valid_ = true;
+        std::lock_guard<std::mutex> site_write(site_write_mutex_);  // see set_site_latitude
+        std::optional<SiteInfo> to_send;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Mirror of set_site_latitude (M10): capture whether a latitude is
+            // already known BEFORE publishing this longitude, so a longitude-only
+            // set never writes latitude 0.0 to the mount.
+            const bool has_latitude = pending_site_latitude_.has_value() || site_coords_valid_;
+            const double latitude =
+                pending_site_latitude_.has_value() ? pending_site_latitude_.value() : site_latitude_deg_;
+            site_longitude_deg_ = longitude;
+            pending_site_longitude_ = longitude;
+            if (has_latitude) {
+                site_coords_valid_ = true;
+            }
+            if (connected_.load() && has_latitude) {
+                to_send = SiteInfo{};
+                to_send->latitude_degrees = latitude;
+                to_send->longitude_degrees = site_longitude_deg_;
+            }
         }
-        if (connected_.load() && has_latitude) {
-            SiteInfo site;
-            site.latitude_degrees = latitude;
-            site.longitude_degrees = site_longitude_deg_;
-            ZWOMountProtocolWrapper::instance().set_site_info(site);
-            pending_site_latitude_ = site.latitude_degrees;
-            site_latitude_deg_ = site.latitude_degrees;
+        // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
+        if (to_send.has_value()) {
+            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_site_latitude_ = to_send->latitude_degrees;
+            site_latitude_deg_ = to_send->latitude_degrees;
         }
     }
 
@@ -1968,18 +2049,24 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
-        // reset_position_offsets; avoid redundant mount queries here.
+        // reset_position_offsets; avoid redundant mount queries here. The Tracking
+        // gate runs first, though: the target setters below write to the mount.
+        validate_ra(ra, "RightAscension");
+        validate_dec(dec, "Declination");
+        check_equatorial_slew_allowed("SlewToCoordinates");
         set_target_right_ascension(ra);
         set_target_declination(dec);
         slew_to_target();
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        // Validation only; slew_to_target_async() handles ensure_not_parked and
-        // reset_position_offsets — calling them here would add redundant mount
-        // round-trips that push Wi-Fi response times past the STANDARD 1.0s target.
+        // slew_to_target_async() handles reset_position_offsets and the target
+        // checks. The parked and Tracking gate runs here too, before the target
+        // is replaced: both read cached state, and Tracking reads the mount (":GAT")
+        // only when its 2 s cache has aged out.
         validate_ra(ra, "RightAscension");
         validate_dec(dec, "Declination");
+        check_equatorial_slew_allowed("SlewToCoordinatesAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             target_ra_hours_ = ra;
@@ -2017,31 +2104,28 @@ public:
         // reset_position_offsets use only cached state / atomics, so pausing
         // the poll thread first is safe and avoids contention on Wi-Fi links.
         poll_pause_.store(true);
-        // Sibling of the move_axis M9 fix: ensure_not_parked can throw
-        // (Parked) — never leave poll_pause_ stuck true.
-        try {
-            ensure_not_parked("SlewToTargetAsync");
-            reset_position_offsets();
-        } catch (...) {
-            poll_pause_.store(false);
-            throw;
-        }
-
+        // Sibling of the move_axis M9 fix: every gate below can throw -- never
+        // leave poll_pause_ stuck true.
         double target_ra = 0.0;
         double target_dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                poll_pause_.store(false);
-                throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
-            }
-            target_ra = target_ra_hours_;
-            target_dec = target_dec_degrees_;
-        }
-
         try {
+            ensure_not_parked("SlewToTargetAsync");
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!target_ra_set_ || !target_dec_set_) {
+                    throw AlpacaException("Target coordinates not set", AlpacaError::ValueNotSet);
+                }
+                target_ra = target_ra_hours_;
+                target_dec = target_dec_degrees_;
+            }
             validate_ra(target_ra, "RightAscension");
             validate_dec(target_dec, "Declination");
+            // ITelescopeV4: an equatorial slew with Tracking false is
+            // InvalidOperation (open-astro#1274; see require_tracking_for_slew),
+            // checked before reset_position_offsets() cancels a pulse in
+            // flight, so a refused slew leaves that motion alone.
+            require_tracking_for_slew("SlewToTargetAsync");
+            reset_position_offsets();
         } catch (...) {
             poll_pause_.store(false);
             throw;
@@ -2055,6 +2139,7 @@ public:
             manual_axis_tracking_restore_[0] = std::nullopt;
             manual_axis_tracking_restore_[1] = std::nullopt;
             slew_force_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            goto_active_ = true;
             // open-astro#575: a fresh initiator is a clean start -- a client
             // that retries a rejected goto must not be told the OLD goto
             // failed.
@@ -2097,6 +2182,7 @@ public:
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (slew_error_epoch_ == slew_epoch) {
                         slew_force_until_ = std::chrono::steady_clock::time_point{};
+                        goto_active_ = false;
                     }
                 }
                 resume_poll();
@@ -2546,9 +2632,46 @@ private:
         return message.find("e4") != std::string::npos;
     }
 
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Read as the Tracking getter reads it, except during
+    // this driver's own GOTO: ":GU" may drop the tracking flag while a GOTO
+    // runs, and a retarget of it must not be refused for that.
+    void require_tracking_for_slew(const char* who) const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (own_goto_in_flight_locked()) {
+                return;
+            }
+        }
+        if (!get_tracking()) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+    }
+
+    // Set by slew_to_target_async(); the force window covers the GOTO's start,
+    // then the polled ":GU" (no 'N': the mount is slewing) its flight. A
+    // rejected GOTO (last_slew_error_) is not in flight.
+    bool own_goto_in_flight_locked() const {
+        if (!goto_active_ || !last_slew_error_.empty()) {
+            return false;
+        }
+        if (slew_force_until_ > std::chrono::steady_clock::now()) {
+            return true;
+        }
+        return cached_status_.has_value() && !cached_status_->stop_or_tracking;
+    }
+
+    // The gate the coordinate forms run before they touch the target: they
+    // write it to the mount, which a refused slew must not.
+    void check_equatorial_slew_allowed(const char* who) const {
+        check_connected();
+        ensure_not_parked(who);
+        require_tracking_for_slew(who);
+    }
+
     void reset_position_offsets() {
         // Signal cancellation first so the pulse thread's reconciliation read
-        // (which holds mutex_) can exit early, avoiding lock contention.
+        // (which runs outside mutex_) can exit early, avoiding lock contention.
         pulse_cancel_.store(true);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2652,8 +2775,10 @@ private:
         return true;
     }
 
+    // Same condition as get_connected(): a getter that runs mid-handshake would issue its own serial
+    // exchange before the caches are warm, now that connect no longer holds mutex_ across it.
     void check_connected() const {
-        if (!connected_.load()) {
+        if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
     }
@@ -2692,6 +2817,10 @@ private:
             if (status.has_value()) {
                 cached_status_ = status.value();
                 cached_status_at_ = now;
+                // The driver's GOTO has landed only once its arrival is published (#1312, #1428).
+                if (status->stop_or_tracking && slew_force_until_ <= now) {
+                    goto_active_ = false;
+                }
             }
         } catch (const std::exception&) {
         }
@@ -2993,11 +3122,18 @@ private:
     // mutex, so a join under either deadlocks. Does not reset goto_cancel_;
     // only slew_to_target_async() does, under goto_mutex_.
     void cancel_and_join_goto_thread() {
-        std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
-        cancel_goto_thread_request();
-        if (goto_thread_.joinable()) {
-            goto_thread_.join();
+        {
+            std::lock_guard<std::mutex> reap_lock(goto_reap_mutex_);
+            cancel_goto_thread_request();
+            if (goto_thread_.joinable()) {
+                goto_thread_.join();
+            }
         }
+        // Every caller starts other motion or none (Park, FindHome, MoveAxis,
+        // AbortSlew, disconnect): the driver's GOTO is no longer in flight.
+        // Taken after the reap lock is released, never nested in it.
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_active_ = false;
     }
 
     const int device_number_;
@@ -3010,6 +3146,10 @@ private:
     std::atomic<bool> caches_ready_;
 
     mutable std::mutex mutex_;
+    // Serialises every site write to the mount: the latitude/longitude setters, and the connect's site apply,
+    // read-back and re-send. No getter takes it. Order: set_connected_mutex_, then this, then the protocol
+    // wrapper's mutex, then mutex_.
+    std::mutex site_write_mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     std::string mount_info_;
@@ -3034,6 +3174,8 @@ private:
     int slew_settle_time_s_;
 
     mutable GuideRate guide_rate_;
+    // Bumped under mutex_ by every set_guide_rate(); the connect publishes its reading only when unchanged.
+    std::uint64_t guide_rate_writes_{0};
     mutable int tracking_rate_cached_;
     mutable bool tracking_rate_valid_;
     mutable bool tracking_state_cached_;
@@ -3063,6 +3205,9 @@ private:
     std::array<bool, 2> manual_axis_slewing_;
     std::array<std::optional<bool>, 2> manual_axis_tracking_restore_;
     std::chrono::steady_clock::time_point slew_force_until_;
+    // A GOTO this driver started may still be in flight (open-astro#1274):
+    // see own_goto_in_flight_locked(). Under mutex_.
+    mutable bool goto_active_ = false;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, logged and forgotten by the setup thread) used
     // to leave Slewing read FALSE once slew_force_until_ expired --
@@ -3085,7 +3230,7 @@ private:
     std::atomic<bool> pulse_cancel_;
     // Async teardown spawned by set_connected(false) — a joinable member so
     // the destructor can join it (a detached thread touching `this` is a
-    // use-after-free if the driver dies mid-teardown; AGENTS.md rule).
+    // use-after-free if the driver dies mid-teardown; driver-lifecycle.instructions.md rule).
     std::thread disconnect_thread_;
     // Serializes set_connected() bodies (sync PUT / async task / refresh) so
     // poll_thread_/pulse_thread_/disconnect_thread_ join+assign and their

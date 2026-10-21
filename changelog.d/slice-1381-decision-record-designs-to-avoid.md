@@ -1,0 +1,2 @@
+### Changed (docs)
+- **New decision record 0013 lists the designs to avoid** (docs, issue #1381): a universal `VendorAdapter`, a universal telescope driver, protocol inheritance, JSON inside AlpacaCore, a base class per helper, and pre-built Dome and SafetyMonitor abstractions. Each section gives what it is, why it was rejected and what to do instead, and links the accepted records; the decisions README lists it.

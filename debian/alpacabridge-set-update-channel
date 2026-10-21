@@ -1,0 +1,113 @@
+#!/bin/bash
+# AlpacaBridge update channel helper (docs/software-update.md).
+#
+# Runs as root under alpacabridge-channel@<channel>.service, which the daemon
+# starts over D-Bus when the operator picks Stable or Beta in the web UI. The
+# one argument is the channel, taken from the unit instance name; the polkit
+# rule allows only the two instances alpacabridge-channel@stable.service and
+# alpacabridge-channel@beta.service, and this script refuses anything else
+# before it touches apt.
+#
+#   beta   writes the deb822 source /etc/apt/sources.list.d/alpacabridge-beta.sources,
+#          which enables the apt `beta` component beside the stock `main` line.
+#   stable removes that file.
+#
+# openastro.list is never edited. The file's presence is the host's effective
+# channel: the daemon reads it (kChannelDropInPath in
+# AlpacaHTTP/include/alpacahttp/software_update.h) and test_software_update
+# checks the two agree, and that the Components line below names the same apt
+# component as the check URL for the channel (channel_apt_component).
+#
+# The transcript goes to /var/log/alpacabridge-update/channel.log, the unit's
+# own LogsDirectory= (root:root 0755), for the reason update.log does: never a
+# directory the alpacabridge user owns. It ends with one of
+#   === RESULT: success ...
+#   === RESULT: failure ...
+
+set -u
+
+DROPIN_DIR=/etc/apt/sources.list.d
+DROPIN="$DROPIN_DIR/alpacabridge-beta.sources"
+LOG=/var/log/alpacabridge-update/channel.log
+
+export DEBIAN_FRONTEND=noninteractive
+
+stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Validate before anything else (no log, no apt, no file) on a bad argument.
+if [ "$#" -ne 1 ]; then
+    echo "usage: set-update-channel stable|beta" >&2
+    exit 2
+fi
+CHANNEL="$1"
+case "$CHANNEL" in
+    stable|beta) ;;
+    *)
+        echo "set-update-channel: unknown channel" >&2
+        exit 2
+        ;;
+esac
+
+: > "$LOG"
+chmod 0644 "$LOG"
+exec >>"$LOG" 2>&1
+
+echo "=== AlpacaBridge update channel switch started $(stamp)"
+echo "=== channel: $CHANNEL"
+
+fail() {
+    [ -z "${backup:-}" ] || rm -f "$backup"
+    echo "=== RESULT: failure $(stamp) $1"
+    exit 1
+}
+
+# Keep what was there so a failed apt-get update can put it back.
+backup=""
+if [ -e "$DROPIN" ]; then
+    backup="$(mktemp "$DROPIN_DIR/.alpacabridge-beta.XXXXXX")" || fail "mktemp"
+    cp -p "$DROPIN" "$backup" || { rm -f "$backup"; fail "backup"; }
+fi
+
+if [ "$CHANNEL" = beta ]; then
+    tmp="$(mktemp "$DROPIN_DIR/.alpacabridge-beta.XXXXXX")" || fail "mktemp"
+    if ! cat >"$tmp" <<'SOURCE'
+Types: deb
+URIs: https://apt.openastro.net
+Suites: trixie
+Components: beta
+Architectures: arm64
+Signed-By: /usr/share/keyrings/openastro-archive-keyring.gpg
+SOURCE
+    then
+        rm -f "$tmp"
+        fail "write"
+    fi
+    chmod 0644 "$tmp" || { rm -f "$tmp"; fail "chmod"; }
+    mv -f "$tmp" "$DROPIN" || { rm -f "$tmp"; fail "mv"; }
+    echo "=== wrote $DROPIN"
+else
+    rm -f "$DROPIN" || fail "rm"
+    echo "=== removed $DROPIN"
+fi
+
+# Refresh the package lists so the next check and install see the new source.
+echo "=== apt-get update"
+apt-get update -o DPkg::Lock::Timeout=120
+rc=$?
+echo "=== apt-get update exit $rc"
+if [ "$rc" -ne 0 ]; then
+    # A source apt cannot verify or reach must not stay behind: put the
+    # drop-in back as it was before this run.
+    if [ -n "$backup" ]; then
+        mv -f "$backup" "$DROPIN"
+    else
+        rm -f "$DROPIN"
+    fi
+    echo "=== restored the previous channel source"
+    echo "=== RESULT: failure $(stamp) apt-get update exit $rc"
+    exit "$rc"
+fi
+[ -z "$backup" ] || rm -f "$backup"
+
+echo "=== RESULT: success $(stamp) channel $CHANNEL"
+exit 0

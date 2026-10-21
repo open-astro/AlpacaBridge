@@ -25,9 +25,9 @@ mid-line or on a ` * ` continuation line) still counts, so the gate cannot be do
 CMake rules (open-astro#710; source: AGENTS.md "Core Architecture", ADR 0004).
 `alpacacore` is vendor-neutral, so the vendor libraries and the built-in
 descriptor composition (`alpacacore_builtins`) link DOWN to it and it links to
-none of them. Read from every CMakeLists.txt and *.cmake under AlpacaCore/ and
-AlpacaHTTP/ except below an `external/` or `build*` directory, comments NOT
-stripped:
+none of them. Read every CMakeLists.txt and *.cmake file under AlpacaCore/ and
+AlpacaHTTP/, except below `external/`, `build*` or `cmake-build-*` directories;
+comments are NOT stripped:
   - L1: no `target_link_libraries(alpacacore ...)` (target name exactly
     `alpacacore`; `alpacacore_tests` or any other prefix match is not it)
     names `alpacacore_<name>` where <name> is a directory under
@@ -77,7 +77,7 @@ SOURCE_GLOBS = ("*.cpp", "*.h", "*.hpp")
 # Lowered by each vendor descriptor slice of ADR 0004 in the PR that deletes
 # that vendor's includes from AlpacaHTTP/src/http/router.cpp; the last slice
 # sets it to 0. Never raise it.
-MAX_ALPACAHTTP_VENDOR_INCLUDES = 30
+MAX_ALPACAHTTP_VENDOR_INCLUDES = 0
 # ADR 0004: <vendor>_schema.cpp compiles in every build and includes no vendor
 # header. Never rises.
 MAX_CATALOG_SCHEMA_VENDOR_INCLUDES = 0
@@ -181,8 +181,8 @@ def vendor_dirs(root: pathlib.Path) -> list[str]:
 
 
 def cmake_files(root: pathlib.Path) -> list[pathlib.Path]:
-    """Every CMakeLists.txt and *.cmake under AlpacaCore/ and AlpacaHTTP/, except
-    below an `external/` directory or a `build*` directory (matched on whole
+    """CMakeLists.txt and *.cmake files under AlpacaCore/ and AlpacaHTTP/, except
+    below `external/`, `build*` or `cmake-build-*` directories (matched on whole
     path components under the root, never on the file name)."""
     files: set[pathlib.Path] = set()
     for top in ("AlpacaCore", "AlpacaHTTP"):
@@ -190,9 +190,10 @@ def cmake_files(root: pathlib.Path) -> list[pathlib.Path]:
         for pattern in ("CMakeLists.txt", "*.cmake"):
             for path in base.rglob(pattern):
                 dirs = path.relative_to(base).parts[:-1]
-                if any(d == "external" or d.startswith("build") for d in dirs):
+                if any(d == "external" or d.startswith(("build", "cmake-build-")) for d in dirs):
                     continue
-                files.add(path)
+                if path.is_file():
+                    files.add(path)
     return sorted(files)
 
 
@@ -696,6 +697,14 @@ def self_test() -> int:
         _write(r, "AlpacaHTTP/build-x/CMakeLists.txt", bad_link)
         rc, err = _run(r, base)
         case("scope: external/ and build* directories are not scanned", rc == 0 and err == "")
+
+    t, r = cmake_fixture()
+    with t:
+        _write(r, "AlpacaCore/cmake-build-debug/CMakeLists.txt", bad_link)
+        _write(r, "AlpacaCore/cmake-build-debug/generated.cmake", bad_link)
+        (r / "AlpacaCore" / "cmake-build-debug" / ".cmake").mkdir()
+        rc, err = _run(r, base)
+        case("scope: cmake-build-* output, including a .cmake directory, is not scanned", rc == 0 and err == "")
 
     t, r = cmake_fixture()
     with t:

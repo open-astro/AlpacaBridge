@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -82,6 +83,24 @@ public:
         state.detail = "ActiveState=activating SubState=start";
     }
     InstallerState installer_state() override { return state; }
+
+    // Channel seam: the host's channel, the switches asked for, and the
+    // state the channel helper reports. A switch starts "running" and does
+    // not change `channel` (the test finishes it by hand).
+    alpacahttp::util::UpdateChannel channel = alpacahttp::util::UpdateChannel::Stable;
+    std::vector<alpacahttp::util::UpdateChannel> switches;
+    bool switch_throws = false;
+    InstallerState channel_state;
+    alpacahttp::util::UpdateChannel read_channel() override { return channel; }
+    void start_channel_switch(alpacahttp::util::UpdateChannel requested) override {
+        if (switch_throws) {
+            throw SoftwareUpdateError(alpacahttp::util::ErrorCode::DRIVER_ERROR,
+                                      "Channel switch failed: could not start unit: Access denied");
+        }
+        switches.push_back(requested);
+        channel_state.state = "running";
+    }
+    InstallerState channel_switch_state() override { return channel_state; }
 };
 
 // The index the live repository served on 2026-09-27, with the dbgsym stanza
@@ -591,6 +610,9 @@ int main() {
             }
             void start_installer() override {}
             InstallerState installer_state() override { return {}; }
+            alpacahttp::util::UpdateChannel read_channel() override { return alpacahttp::util::UpdateChannel::Stable; }
+            void start_channel_switch(alpacahttp::util::UpdateChannel) override {}
+            InstallerState channel_switch_state() override { return {}; }
         };
         auto backend = std::make_unique<BlockingBackend>();
         auto* blocking = backend.get();
@@ -671,6 +693,9 @@ int main() {
             }
             void start_installer() override {}
             InstallerState installer_state() override { return {}; }
+            alpacahttp::util::UpdateChannel read_channel() override { return alpacahttp::util::UpdateChannel::Stable; }
+            void start_channel_switch(alpacahttp::util::UpdateChannel) override {}
+            InstallerState channel_switch_state() override { return {}; }
         };
         auto backend = std::make_unique<BlockingBackend>();
         auto* blocking = backend.get();
@@ -725,6 +750,9 @@ int main() {
                 std::lock_guard<std::mutex> lock(m);
                 return state;
             }
+            alpacahttp::util::UpdateChannel read_channel() override { return alpacahttp::util::UpdateChannel::Stable; }
+            void start_channel_switch(alpacahttp::util::UpdateChannel) override {}
+            InstallerState channel_switch_state() override { return {}; }
             InstallerState state;
         };
         auto backend = std::make_unique<BlockingInstallBackend>();
@@ -796,6 +824,301 @@ int main() {
         EXPECT(idle.detail == "ActiveState=inactive SubState=dead Result=success");
         EXPECT(idle.log.empty());
         EXPECT(classify_installer_state("inactive", "dead", "success", false, ok).log == ok);
+    }
+
+    {
+        // case: a finished channel switch reports the helper's result line as its detail
+        using alpacahttp::util::classify_channel_switch_log;
+        const auto failed = classify_channel_switch_log(
+            "=== started\n=== RESULT: failure 2026-09-30T00:00:00Z apt-get update exit 100\n");
+        EXPECT(failed.state == "failed");
+        EXPECT(failed.detail == "failure 2026-09-30T00:00:00Z apt-get update exit 100");
+        EXPECT(classify_channel_switch_log("").state == "idle");
+    }
+
+    // --- update channel (issue #1103) ---
+    using alpacahttp::util::channel_apt_component;
+    using alpacahttp::util::channel_name;
+    using alpacahttp::util::channel_packages_url;
+    using alpacahttp::util::channel_unit_name;
+    using alpacahttp::util::kDefaultPackagesUrl;
+    using alpacahttp::util::parse_channel;
+    using alpacahttp::util::UpdateChannel;
+    const std::filesystem::path repo_root = ALPACAHTTP_REPO_ROOT;
+    const auto read_file = [](const std::filesystem::path& file) {
+        std::ifstream in(file);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+
+    {
+        // case: polkit rule names the three units by exact string and nothing else
+        const std::string rules = read_file(repo_root / "debian" / "alpacabridge-update.polkit-rules");
+        EXPECT(!rules.empty());
+        EXPECT(rules.find("unit !== \"alpacabridge-update.service\"") != std::string::npos);
+        for (const auto channel : {UpdateChannel::Stable, UpdateChannel::Beta}) {
+            EXPECT(rules.find(std::string("unit !== \"") + channel_unit_name(channel) + "\"") != std::string::npos);
+        }
+        EXPECT(rules.find("action.lookup(\"verb\") === \"start\"") != std::string::npos);
+        // Exactly three unit names appear in the code (comments excluded).
+        std::string code;
+        std::istringstream lines(rules);
+        for (std::string line; std::getline(lines, line);) {
+            if (line.rfind("//", 0) != 0) code += line + "\n";
+        }
+        // No prefix, regex or substring matching: string equality only.
+        for (const char* forbidden : {"indexOf", "match(", "RegExp", "startsWith", "endsWith", "test(", "search("}) {
+            EXPECT(code.find(forbidden) == std::string::npos);
+        }
+        std::size_t units = 0;
+        for (std::size_t pos = 0; (pos = code.find("alpacabridge-", pos)) != std::string::npos; ++pos) ++units;
+        EXPECT(units == 3);
+    }
+
+    {
+        // case: channel helper refuses any argument but stable or beta before touching anything
+        const std::string helper = (repo_root / "debian" / "alpacabridge-set-update-channel").string();
+        const auto run = [&](const std::string& args) {
+            // stderr goes to the null device: the usage message is expected.
+            return std::system(("bash " + helper + " " + args + " >/dev/null 2>&1").c_str());
+        };
+        EXPECT(run("") != 0);
+        EXPECT(run("bogus") != 0);
+        EXPECT(run("beta stable") != 0);
+        EXPECT(run("'beta;touch x'") != 0);
+        EXPECT(run("Beta") != 0);
+        EXPECT(run("../beta") != 0);
+        const std::string text = read_file(helper);
+        // The validation precedes the first write: the case statement comes
+        // before the transcript is opened and before apt runs.
+        const auto validated = text.find(std::string(channel_name(UpdateChannel::Stable)) + "|" +
+                                         channel_name(UpdateChannel::Beta) + ") ;;");
+        EXPECT(validated != std::string::npos);
+        EXPECT(validated < text.find(": > \"$LOG\""));
+        EXPECT(validated < text.find("apt-get update"));
+        // Never edits openastro.list; both ends of the result marker exist.
+        EXPECT(text.find("> /etc/apt/sources.list.d/openastro.list") == std::string::npos);
+        EXPECT(text.find("=== RESULT: success") != std::string::npos);
+        EXPECT(text.find("=== RESULT: failure") != std::string::npos);
+        EXPECT(text.find("mktemp \"$DROPIN_DIR/") != std::string::npos);
+        EXPECT(text.find("chmod 0644 \"$tmp\"") != std::string::npos);
+        EXPECT(text.find("mv -f \"$tmp\" \"$DROPIN\"") != std::string::npos);
+        EXPECT(text.find("rm -f \"$DROPIN\"") != std::string::npos);
+        // A failing apt-get update is a failed switch: the exit status is
+        // kept, the drop-in is put back, and the marker carries the status.
+        const auto apt = text.find("apt-get update -o");
+        EXPECT(apt != std::string::npos);
+        const auto after_apt = text.substr(apt);
+        EXPECT(after_apt.find("rc=$?") != std::string::npos);
+        EXPECT(after_apt.find("if [ \"$rc\" -ne 0 ]") != std::string::npos);
+        EXPECT(after_apt.find("=== RESULT: failure $(stamp) apt-get update exit $rc") != std::string::npos);
+        EXPECT(after_apt.find("exit \"$rc\"") != std::string::npos);
+        EXPECT(after_apt.find("mv -f \"$backup\" \"$DROPIN\"") != std::string::npos);
+        EXPECT(after_apt.find("=== RESULT: failure") < after_apt.find("=== RESULT: success"));
+    }
+
+    {
+        // case: channel mapping ties the check URL, the apt component and the unit name
+        EXPECT(parse_channel("stable") == UpdateChannel::Stable);
+        EXPECT(parse_channel("beta") == UpdateChannel::Beta);
+        EXPECT(!parse_channel("Beta").has_value());
+        EXPECT(!parse_channel("stable.service").has_value());
+        EXPECT(!parse_channel("").has_value());
+        EXPECT(std::string(channel_name(UpdateChannel::Beta)) == "beta");
+        EXPECT(channel_packages_url(UpdateChannel::Stable) == kDefaultPackagesUrl);
+        for (const auto channel : {UpdateChannel::Stable, UpdateChannel::Beta}) {
+            // Issue acceptance item 2: the check URL component and the apt
+            // drop-in Components: are the same string, for each channel.
+            const std::string component = channel_apt_component(channel);
+            EXPECT(channel_packages_url(channel) ==
+                   "https://apt.openastro.net/dists/trixie/" + component + "/binary-arm64/Packages");
+            EXPECT(std::string(channel_unit_name(channel)) ==
+                   std::string("alpacabridge-channel@") + channel_name(channel) + ".service");
+        }
+        EXPECT(std::string(channel_apt_component(UpdateChannel::Beta)) == "beta");
+        EXPECT(std::string(channel_apt_component(UpdateChannel::Stable)) == "main");
+
+        // The helper writes the Components: line for beta, and the paths it and
+        // the unit use are the ones the daemon reads.
+        const std::string helper = read_file(repo_root / "debian" / "alpacabridge-set-update-channel");
+        EXPECT(!helper.empty());
+        EXPECT(helper.find(std::string("Components: ") + channel_apt_component(UpdateChannel::Beta) + "\n") !=
+               std::string::npos);
+        EXPECT(helper.find(std::string("DROPIN=\"$DROPIN_DIR/") +
+                           std::filesystem::path(alpacahttp::util::kChannelDropInPath).filename().string() + "\"\n") !=
+               std::string::npos);
+        EXPECT(helper.find(
+                   "DROPIN_DIR=" + std::filesystem::path(alpacahttp::util::kChannelDropInPath).parent_path().string() +
+                   "\n") != std::string::npos);
+        EXPECT(helper.find(std::string("LOG=") + alpacahttp::util::kChannelLogPath + "\n") != std::string::npos);
+        const std::string unit = read_file(repo_root / "debian" / "alpacabridge-channel@.service");
+        EXPECT(unit.find("ExecStart=/usr/libexec/alpacabridge/set-update-channel %i\n") != std::string::npos);
+        EXPECT(unit.find("Type=oneshot\n") != std::string::npos);
+        EXPECT(unit.find("LogsDirectory=alpacabridge-update\n") != std::string::npos);
+        EXPECT(unit.find("LogsDirectoryMode=0755\n") != std::string::npos);
+        EXPECT(unit.find("PrivateTmp=true\n") != std::string::npos);
+        EXPECT(unit.find("TimeoutStartSec=") != std::string::npos);
+        EXPECT(unit.find("\n[Install]") == std::string::npos);
+    }
+
+    {
+        // case: the check URL follows the channel unless update_packages_url overrides it
+        auto backend = std::make_unique<FakeBackend>();
+        auto* fake = backend.get();
+        fake->index = "Package: alpacabridge\nVersion: 5.0.0~beta5\n";
+        SoftwareUpdateManager manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(backend));
+        auto status = manager.check();
+        EXPECT(fake->last_url == channel_packages_url(UpdateChannel::Stable));
+        EXPECT(status["Channel"] == "stable");
+        EXPECT(status["ChannelOverridden"] == false);
+        EXPECT(status["PackagesUrl"] == channel_packages_url(UpdateChannel::Stable));
+        fake->channel = UpdateChannel::Beta;
+        status = manager.check();
+        EXPECT(fake->last_url == channel_packages_url(UpdateChannel::Beta));
+        EXPECT(status["Channel"] == "beta");
+        EXPECT(status["PackagesUrl"] == channel_packages_url(UpdateChannel::Beta));
+        EXPECT(status["CheckEnabled"] == true);
+
+        auto custom_backend = std::make_unique<FakeBackend>();
+        auto* custom = custom_backend.get();
+        custom->index = "Package: alpacabridge\nVersion: 5.0.0~beta5\n";
+        custom->channel = UpdateChannel::Beta;
+        SoftwareUpdateManager overridden(settings("5.0.0~beta4", "https://mirror.example/Packages"),
+                                         std::move(custom_backend));
+        status = overridden.check();
+        EXPECT(custom->last_url == "https://mirror.example/Packages");
+        EXPECT(status["ChannelOverridden"] == true);
+        EXPECT(status["PackagesUrl"] == "https://mirror.example/Packages");
+
+        // Empty still disables the check and is not an override.
+        SoftwareUpdateManager disabled(settings("5.0.0~beta4", ""), std::make_unique<FakeBackend>());
+        EXPECT(disabled.status()["CheckEnabled"] == false);
+        EXPECT(disabled.status()["ChannelOverridden"] == false);
+    }
+
+    {
+        // case: a check made for the other channel is not offered after a switch
+        auto backend = std::make_unique<FakeBackend>();
+        auto* fake = backend.get();
+        fake->channel = UpdateChannel::Beta;
+        fake->index = "Package: alpacabridge\nVersion: 5.0.0~beta5\n";
+        SoftwareUpdateManager manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(backend));
+        EXPECT(manager.check()["UpdateAvailable"] == true);
+        fake->channel = UpdateChannel::Stable;
+        const auto status = manager.status();
+        EXPECT(status["UpdateAvailable"] == false);
+        EXPECT(status["LatestVersion"].is_null());
+        EXPECT(status["ReleaseNotesUrl"].is_null());
+        EXPECT(status["Channel"] == "stable");
+        EXPECT(manager.status()["UpdateAvailable"] == false);
+        bool threw = false;
+        try {
+            manager.install();
+        } catch (const SoftwareUpdateError& e) {
+            threw = e.alpaca_error() == alpacahttp::util::ErrorCode::INVALID_OPERATION;
+        }
+        EXPECT(threw);
+        EXPECT(fake->starts == 0);
+    }
+
+    {
+        // case: set_channel starts the unit instance from the table and refuses while busy
+        const auto expect_refused = [](SoftwareUpdateManager& manager, UpdateChannel channel, std::int32_t code) {
+            try {
+                manager.set_channel(channel);
+            } catch (const SoftwareUpdateError& e) {
+                return e.alpaca_error() == code;
+            }
+            return false;
+        };
+        const std::int32_t invalid_operation = alpacahttp::util::ErrorCode::INVALID_OPERATION;
+
+        auto backend = std::make_unique<FakeBackend>();
+        auto* fake = backend.get();
+        SoftwareUpdateManager manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(backend));
+        auto status = manager.set_channel(UpdateChannel::Beta);
+        EXPECT(fake->switches.size() == 1);
+        EXPECT(fake->switches[0] == UpdateChannel::Beta);
+        EXPECT(status["ChannelSwitch"]["State"] == "running");
+        // A second switch, and an install, are refused while one is running.
+        EXPECT(expect_refused(manager, UpdateChannel::Stable, invalid_operation));
+        EXPECT(fake->switches.size() == 1);
+        // Finished: another switch goes through, and the update installer is not refused by it.
+        fake->channel_state.state = "succeeded";
+        manager.set_channel(UpdateChannel::Stable);
+        EXPECT(fake->switches.size() == 2);
+        EXPECT(fake->switches[1] == UpdateChannel::Stable);
+
+        // The update installer running refuses a switch.
+        auto busy_backend = std::make_unique<FakeBackend>();
+        busy_backend->state.state = "running";
+        auto* busy = busy_backend.get();
+        SoftwareUpdateManager busy_manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(busy_backend));
+        EXPECT(expect_refused(busy_manager, UpdateChannel::Beta, invalid_operation));
+        EXPECT(busy->switches.empty());
+
+        // An explicit update_packages_url pins the channel.
+        auto pinned_backend = std::make_unique<FakeBackend>();
+        auto* pinned = pinned_backend.get();
+        SoftwareUpdateManager pinned_manager(settings("5.0.0~beta4", "https://mirror.example/Packages"),
+                                             std::move(pinned_backend));
+        EXPECT(expect_refused(pinned_manager, UpdateChannel::Beta, invalid_operation));
+        EXPECT(pinned->switches.empty());
+
+        // No helper unit on this host: NOT_IMPLEMENTED, nothing started.
+        auto missing_backend = std::make_unique<FakeBackend>();
+        missing_backend->channel_state.state = "unavailable";
+        auto* missing = missing_backend.get();
+        SoftwareUpdateManager missing_manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(missing_backend));
+        EXPECT(expect_refused(missing_manager, UpdateChannel::Beta, alpacahttp::util::ErrorCode::NOT_IMPLEMENTED));
+        EXPECT(missing->switches.empty());
+
+        // A refusal from systemd/polkit reaches the caller and does not wedge
+        // the manager: the next switch is attempted.
+        auto denied_backend = std::make_unique<FakeBackend>();
+        auto* denied = denied_backend.get();
+        denied->switch_throws = true;
+        SoftwareUpdateManager denied_manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(denied_backend));
+        EXPECT(expect_refused(denied_manager, UpdateChannel::Beta, alpacahttp::util::ErrorCode::DRIVER_ERROR));
+        denied->switch_throws = false;
+        denied_manager.set_channel(UpdateChannel::Beta);
+        EXPECT(denied->switches.size() == 1);
+    }
+
+    {
+        // case: an update installer run refuses nothing it did not before, but waits for a running switch
+        auto backend = std::make_unique<FakeBackend>();
+        auto* fake = backend.get();
+        fake->index = "Package: alpacabridge\nVersion: 5.0.0\n";
+        SoftwareUpdateManager manager(settings("5.0.0~beta4", kDefaultPackagesUrl), std::move(backend));
+        manager.check();
+        fake->channel_state.state = "running";
+        bool refused = false;
+        try {
+            manager.install();
+        } catch (const SoftwareUpdateError& e) {
+            refused = e.alpaca_error() == alpacahttp::util::ErrorCode::INVALID_OPERATION;
+        }
+        EXPECT(refused);
+        EXPECT(fake->starts == 0);
+        fake->channel_state.state = "idle";
+        manager.install();
+        EXPECT(fake->starts == 1);
+    }
+
+    {
+        // case: the system backend reads the channel from the drop-in marker file
+        const std::filesystem::path dir = std::filesystem::temp_directory_path() / "alpacabridge-channel-marker-test";
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        const std::string marker = (dir / "alpacabridge-beta.sources").string();
+        alpacahttp::util::SystemSoftwareUpdateBackend backend("alpacabridge-update.service", (dir / "u.log").string(),
+                                                              marker, (dir / "c.log").string());
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
+        std::ofstream(marker) << "Types: deb\n";
+        EXPECT(backend.read_channel() == UpdateChannel::Beta);
+        std::filesystem::remove(marker);
+        EXPECT(backend.read_channel() == UpdateChannel::Stable);
+        std::filesystem::remove_all(dir);
     }
 
     std::cout << "All software update tests passed!\n";

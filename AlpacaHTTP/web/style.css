@@ -1256,7 +1256,7 @@ header > .server-clock {
 .update-notes-body li { margin: 4px 0; }
 .update-notes-body pre { margin: 6px 0; padding: 8px; overflow: auto; border-radius: 6px; background: rgba(0, 0, 0, 0.25); font-size: 12px; }
 #update-status-line.update-available { color: var(--accent); font-weight: 600; }
-#update-message.error, #update-installer-line.error { color: #f08a7a; }
+#update-message.error, #update-installer-line.error, #update-channel-line.error { color: #f08a7a; }
 
 /* Help lines under a server setting. */
 .info-note {

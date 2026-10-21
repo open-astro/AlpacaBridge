@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -127,12 +129,14 @@ public:
     static SkyWatcherProtocolWrapper& instance();
 
     bool connect(const ConnectionInfo& info);
+    // Why the last connect() returned false (e.g. "No such file or directory",
+    // "the mount did not reply to the handshake"); empty after a success.
+    std::string connect_failure() const;
     void disconnect();
     bool is_connected() const;
-    // Operator-facing reason the last connect() returned false (e.g. the
-    // serial port is held by another connected device, #1202); empty when it
-    // gave none.
-    std::string last_connect_error() const;
+    // Decision 0009: the clock the staleness bound and the link-lost stamp run
+    // on. Real by default; the driver passes its own TaskClock.
+    void set_task_clock(util::TaskClock& clock);
     // open-astro#445: is_connected() without I/O and without waiting on an
     // exchange, that also notices a serial device which has gone away (and
     // closes the dead link when it can). Safe to call from a Connected poll.
@@ -145,7 +149,10 @@ public:
     // fault instead. Non-empty fault means the caller must refuse to serve its
     // CACHE (DriverException "communications compromised"), never that it
     // should stop talking: on a polled link the reads are the only traffic
-    // that can clear the latch. Connected stays true throughout, per #237.
+    // that can clear the latch. Connected stays true while the fault is younger
+    // than util::kLinkStalenessBound (30 s); past it the link is LOST
+    // (decision 0009): link_alive() reads false, the transport is closed and
+    // the last fault text stays here until the next connect or disconnect.
     // Cheap and lock-free enough for a read path (own leaf mutex, no I/O).
     virtual std::string link_fault();
     virtual bool link_faulted();
@@ -163,6 +170,13 @@ public:
     // connect sees nullopt and takes the safe branch.
     virtual std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
 
+    // Closes a link that was flagged lost while an exchange held the I/O lock
+    // (the loss path only try-locks). Call with no exchange of your own in
+    // flight. No-op unless a loss is pending.
+    void finish_lost_close();
+    // Stamps the lost-at time from the driver's own evidence (first stamp wins).
+    void note_link_lost_at(std::chrono::steady_clock::time_point at);
+
     // Low-level framed exchange: sends ":<cmd><axis><data>\r", returns the
     // payload of a "=" response (without the leading "=" or trailing CR).
     // Throws AlpacaException on transport failure or a "!" error reply.
@@ -175,6 +189,9 @@ public:
     std::string get_motor_board_version();         // ":e" axis 1 (firmware only)
     MotorBoardInfo get_motor_board_info();         // ":e" axis 1, decoded
     AxisParameters get_axis_parameters(int axis);  // ":a"/":b"/":g"
+    // ":s" (microsteps per worm revolution). Throws on a board that rejects the
+    // inquiry; a board may also answer 0 (EQ-AL55i), which callers read as unknown.
+    uint32_t get_steps_per_worm(int axis);
     uint32_t inquire_position(int axis);           // ":j" (24-bit counts)
     AxisStatus inquire_status(int axis);           // ":f"
 

@@ -1,0 +1,2 @@
+### Changed
+- **Web UI: clearer device status dot wording** (AlpacaHTTP web UI): the yellow dot now reads "Idle, no client connected" instead of "Loaded, not connected", and green reads "Client connected". Red reasons name themselves instead of a shared "Error:" prefix: "Driver failed to load, see the server log", "Last connect failed: <reason>" (the reason stays until the next connect attempt, so a retry may work), "Device not responding: <link fault>", and "Status unavailable". Colors are unchanged.

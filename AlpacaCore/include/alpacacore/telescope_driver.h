@@ -69,12 +69,14 @@ public:
     // property getters (omit-on-throw keeps DeviceState consistent with the GET
     // endpoints) plus a TimeStamp. A disconnected driver returns the empty list, with no TimeStamp.
     // Inline so the vtable stays weak and the per-vendor static libraries link
-    // without a base-library ordering dependency. UTCDate is intentionally omitted to avoid format drift versus
-    // the /utcdate endpoint; it is optional ("if known").
+    // without a base-library ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};
         }
+        // Read once, before the getters: the age of the served state, so the
+        // TimeStamp names when it was measured (decision 0010).
+        const auto age = device_state_age();
         std::vector<DeviceState> state;
         auto add = [&state](const char* name, auto getter) {
             try {
@@ -88,13 +90,18 @@ public:
         add("AtPark", [this] { return get_at_park(); });
         add("Azimuth", [this] { return get_azimuth(); });
         add("Declination", [this] { return get_declination(); });
-        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
         add("RightAscension", [this] { return get_right_ascension(); });
         add("SideOfPier", [this] { return static_cast<std::int32_t>(get_side_of_pier()); });
+        // Keep coordinate reads together before potentially slow live guide-status queries.
+        add("IsPulseGuiding", [this] { return get_is_pulse_guiding(); });
         add("SiderealTime", [this] { return get_sidereal_time(); });
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        add("UTCDate", [this] { return device_state_timestamp(get_utc_date()); });
+        state.push_back({"TimeStamp", age ? device_state_timestamp(
+                                                std::chrono::system_clock::now() -
+                                                std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                                          : device_state_timestamp()});
         return state;
     }
 
@@ -313,7 +320,7 @@ public:
                 any_stop_succeeded = true;
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 // Swallow rather than let it escape from a background timer
-                // thread and terminate the process (AGENTS.md concurrency
+                // thread and terminate the process (driver-lifecycle.instructions.md concurrency
                 // checklist: an async tail that can throw must be caught
                 // inline).
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -770,12 +777,20 @@ public:
      */
     virtual void sync_to_alt_az(double altitude, double azimuth) = 0;
 
+protected:
+    /// How old the state get_device_state() serves is, when the driver serves
+    /// it from a snapshot (decision 0010): the TimeStamp is then the time the
+    /// state was measured. nullopt (the default) stamps the request time. The
+    /// age, not a time point, crosses this hook so a driver's steady task
+    /// clock is never mixed with wall time.
+    virtual std::optional<std::chrono::nanoseconds> device_state_age() const { return std::nullopt; }
+
 private:
     // open-astro#547. Atomics, not a mutex: note_client_activity() is
     // called from HTTP worker threads on the hot path, and
     // stop_motion_if_client_silent() from the server's timer thread; a new
     // lock here would sit outside the documented driver-mutex_ order
-    // (AGENTS.md concurrency checklist). The three watchdog atomics use the
+    // (driver-lifecycle.instructions.md concurrency checklist). The three watchdog atomics use the
     // default sequentially consistent ordering, not relaxed: the timer
     // thread's clear-then-recheck of silence_check_pending_ relies on
     // seeing a request thread's timestamp store no later than its flag

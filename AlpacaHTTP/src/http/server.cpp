@@ -62,7 +62,8 @@ Server::Server(const Config& config)
     router_.set_software_update_manager(std::make_unique<util::SoftwareUpdateManager>(
         util::SoftwareUpdateSettings{alpacahttp::kVersion, config_.update_packages_url(), util::kDefaultPackageName,
                                      config_.update_release_notes_url(), config_.update_release_url()},
-        std::make_unique<util::SystemSoftwareUpdateBackend>(util::kDefaultInstallerUnit, util::kUpdateLogPath)));
+        std::make_unique<util::SystemSoftwareUpdateBackend>(util::kDefaultInstallerUnit, util::kUpdateLogPath,
+                                                            util::kChannelDropInPath, util::kChannelLogPath)));
 
     // The reactor's wake pipe lives as long as the Server. Non-blocking on
     // both ends: a wake is one byte, and a full pipe already means a wake is

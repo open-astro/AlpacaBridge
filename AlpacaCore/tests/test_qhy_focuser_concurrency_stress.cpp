@@ -60,6 +60,11 @@ TEST_CASE("QHY Q-Focuser - concurrent connect/disconnect/operate stress", "[qhy]
     alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) { focuser_operate(guard, d); });
 
+    // A connect must still succeed once the storm ends. Every in-storm failure
+    // is swallowed by design, so a change that made every connect fail would
+    // otherwise leave this case green while it only exercised fail-fast paths.
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+
     REQUIRE(alpacacore::test::settle_connected(*driver, false, std::chrono::seconds(10)));
     CHECK(driver->get_connected() == false);
 
@@ -69,12 +74,12 @@ TEST_CASE("QHY Q-Focuser - concurrent connect/disconnect/operate stress", "[qhy]
 }
 
 TEST_CASE("QHY Q-Focuser - destruction races an in-flight connect", "[qhy][focuser][stress]") {
-    FakeQhyQFocuser fake;
-    const std::string port = fake.slave_path();
     // 25 iterations, not the default 100: every iteration reaches a real
-    // handshake whose first attempt sleeps 100 ms before its read.
-    alpacacore::test::run_destruction_during_connect_stress(
-        [&port]() { return alpacacore::vendor::qhy::create_qhy_focuser(0, port); }, 25);
+    // handshake whose first attempt sleeps 100 ms before its read. Fresh fake
+    // per iteration.
+    alpacacore::test::run_destruction_during_connect_stress_fresh_fake(
+        []() { return std::make_unique<FakeQhyQFocuser>(); },
+        [](FakeQhyQFocuser& fake) { return alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path()); }, 25);
 }
 
 TEST_CASE("QHY Q-Focuser - racing disconnect is never dropped", "[qhy][focuser][stress]") {

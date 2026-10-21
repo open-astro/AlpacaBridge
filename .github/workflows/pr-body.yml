@@ -8,6 +8,10 @@
 #   pr-template    the body keeps every section of
 #                  .github/PULL_REQUEST_TEMPLATE.md, each filled in
 #                  (scripts/check_pr_template.py); bot PRs (Dependabot) skip it
+#   decision-records  the body's `## Decision records` section names every
+#                  decision record the PR changes, and the job log lists the
+#                  records whose Rules the diff falls under
+#                  (scripts/check_adr_scope.py); bot PRs skip it
 
 name: PR body
 
@@ -83,3 +87,24 @@ jobs:
         run: |
           python3 scripts/check_pr_template.py --self-test
           python3 scripts/check_pr_template.py
+
+  decision-records:
+    name: decision-records (PR body)
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check the Decision records section
+        # Untrusted text: the body reaches the script only through env.
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          FALSIFIED_BASE: merge-parent
+        run: |
+          python3 scripts/check_adr_scope.py --self-test
+          python3 scripts/check_adr_scope.py

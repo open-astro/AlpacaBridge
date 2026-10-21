@@ -1,0 +1,2 @@
+### Fixed (tooling)
+- **The decision-records PR-body check no longer reads an issue number as a record** (`scripts/check_adr_scope.py`, from the #1416 review): a `#NNNN` issue or PR reference in the `## Decision records` section could stand in for a record number. A fixture failed before the fix. The CI-gates instructions also put the new authorization bullet back below the PR-body bullet it had split.

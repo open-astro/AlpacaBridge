@@ -28,12 +28,88 @@ jobs:
         || contains(github.event.pull_request.labels.*.name, 'safe-to-review')
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Up to 45 min waiting for CI (below) plus up to 45 for the review itself.
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
       id-token: write
+      checks: read
+      actions: read
     steps:
+      # Review only a head whose build and test jobs passed: a red build would
+      # otherwise pay for a full review the next push throws away. The names
+      # are the `name:` of those jobs in ci.yml (a check run carries the job's
+      # name, not its id); renaming one there fails this step at once with
+      # "never reported". A newer push cancels this wait through the
+      # concurrency group above. The job fails here, before the action runs,
+      # and /pr-checker and /submit-pr read that as "fix CI", not as a broken
+      # review workflow. Only `success` is green: a job that was skipped,
+      # neutral or ended any other way counts as red, so a needs: or if: that
+      # skips one cannot let the review run on a red head.
+      - name: Wait for the CI build and test jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          required=(
+            "Build + test (arm64)"
+            "Build + test (all vendors, arm64)"
+            "Sanitizers (ASan + UBSan, arm64)"
+            "Sanitizers (TSan concurrency stress, arm64)"
+          )
+          deadline=$(( $(date +%s) + 45 * 60 ))
+          while :; do
+            # filter=latest keeps the newest run per name, so a re-run job counts.
+            runs="$(gh api --paginate "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100&filter=latest" \
+              | jq -s '[.[].check_runs[] | select(.app.slug == "github-actions")]')" || runs='[]'
+            waiting=(); missing=(); failed=()
+            for name in "${required[@]}"; do
+              state="$(jq -r --arg n "${name}" \
+                '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" elif .status != "completed" then "pending" else .conclusion end' \
+                <<<"${runs}")"
+              case "${state}" in
+                success) ;;
+                pending) waiting+=("${name}") ;;
+                missing) missing+=("${name}") ;;
+                *) failed+=("${name}: ${state}") ;;
+              esac
+            done
+            if [ "${#failed[@]}" -gt 0 ]; then
+              printf '::error::CI is red on %s, so the review is skipped. The review needs every waited-for job to run green; a job that is skipped, neutral or anything but success counts as red (a needs: or if: that skips one must not let the review run on a red head). Fix CI and push again: %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${failed[*]}")"
+              exit 1
+            fi
+            if [ "${#waiting[@]}" -eq 0 ] && [ "${#missing[@]}" -eq 0 ]; then
+              echo "CI build and test jobs passed on ${HEAD_SHA}."
+              exit 0
+            fi
+            # Every other ci.yml job on this head has finished and a required
+            # name is still absent: it was renamed in ci.yml. Only ci.yml's own
+            # check suites count: a pull_request_target workflow
+            # (decision-records) finishes in seconds on a fork PR whose CI still
+            # waits for approval, and must not read as "CI finished". A failed
+            # lookup leaves ci_suites empty, so a rename then surfaces as the
+            # 45-minute timeout instead of at once; that errs toward waiting.
+            ci_suites="$(gh api --paginate "repos/${REPO}/actions/runs?head_sha=${HEAD_SHA}&per_page=100" \
+              --jq '.workflow_runs[] | select(.path == ".github/workflows/ci.yml") | .check_suite_id' \
+              | jq -s .)" || ci_suites='[]'
+            others_running="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status != "completed")] | length' <<<"${runs}")"
+            others_done="$(jq --argjson s "${ci_suites}" '[.[] | select(.check_suite.id | IN($s[])) | select(.status == "completed")] | length' <<<"${runs}")"
+            if [ "${#missing[@]}" -gt 0 ] && [ "${others_running}" = 0 ] && [ "${others_done}" -gt 0 ]; then
+              printf '::error::CI finished on %s but these jobs never reported (renamed in ci.yml?): %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${missing[*]}")"
+              exit 1
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              printf '::error::CI did not finish on %s within 45 minutes (a fork PR whose CI waits for approval stays here): %s\n' \
+                "${HEAD_SHA}" "$(IFS=';'; echo "${waiting[*]} ${missing[*]}")"
+              exit 1
+            fi
+            sleep 30
+          done
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Review the head the author pushed, not the base branch or merge ref.
@@ -91,7 +167,36 @@ jobs:
           fi
           git status --short
 
-      - uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea  # v1
+      # Which decision-record rules the diff falls under, computed by the base
+      # branch's scripts over the base branch's records (restored above), so a
+      # PR cannot change what it is checked against. Only lines of the form
+      # `NNNN-slug.md: rules 1, 2` reach the prompt.
+      - name: List the decision-record rules in scope
+        id: adr_scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          base_tree="${RUNNER_TEMP}/adr-base"
+          rm -rf "${base_tree}" && mkdir -p "${base_tree}"
+          records="none (the scope could not be computed; read docs/decisions/ directly)"
+          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null \
+              && git archive "${BASE_SHA}" scripts docs/decisions | tar -x -C "${base_tree}" \
+              && [ -f "${base_tree}/scripts/check_adr_scope.py" ]; then
+            listed="$(gh pr diff "${PR_NUMBER}" --repo "${REPO}" --name-only \
+              | python3 -I "${base_tree}/scripts/check_adr_scope.py" --list --root "${base_tree}" \
+              | grep -E '^[0-9]{4}-[a-z0-9-]+\.md: rules [0-9, ]+$' || true)"
+            records="${listed:-none}"
+          fi
+          {
+            echo "records<<ADR_SCOPE_EOF"
+            echo "${records}"
+            echo "ADR_SCOPE_EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: anthropics/claude-code-action@f27be6b65a4652f08a2ba3cff79114829b588967  # v1
         env:
           # allowed_non_write_users turns on subprocess secret scrubbing, which
           # strips the GitHub token the agent's `gh` calls need. The label is
@@ -143,11 +248,21 @@ jobs:
               from the changed lines.
             - Blocking device I/O, a lock wait, or a serial round trip added
               to a property getter, a DeviceState read, or an asynchronous
-              initiator that AGENTS.md documents as cheap or non-blocking.
+              initiator that AGENTS.md or a shared topic file under
+              .github/instructions/ documents as cheap or non-blocking.
             - A PR description that does not describe the diff.
-            - A vendor driver that reimplements a mechanism AGENTS.md says
+            - A vendor driver that reimplements a mechanism the instructions say
               lives in one place (connection-thread lifecycle: inherit
               AsyncConnectable, never a driver-local connection_thread_).
+            - A changed line that breaks a decision-record rule the diff falls
+              under. The records and rule numbers in scope are listed under
+              DECISION RECORDS IN SCOPE below; read each listed rule in
+              docs/decisions/ (the base branch's copy) and cite the record
+              file and rule number. A rule with "Checked by: review" is yours
+              to check. An Adoption row that a change makes wrong is a defect
+              too. A PR that changes a record is checked against the base
+              copy; the change to the rule itself needs a reason in the PR
+              description, not a defect.
             Each defect names the file, the line, and the input or scenario
             that shows it, so the builder can reproduce it before fixing.
 
@@ -159,6 +274,9 @@ jobs:
             from the changed lines, is a NOTE that says "pre-existing, open an
             issue", unless the PR's change is what makes it reachable. Skip
             style and formatting; linters and clang-format handle those.
+
+            DECISION RECORDS IN SCOPE:
+            ${{ steps.adr_scope.outputs.records }}
 
             Review the lines this PR changes, what they directly call, the
             call sites of anything whose signature or contract this PR

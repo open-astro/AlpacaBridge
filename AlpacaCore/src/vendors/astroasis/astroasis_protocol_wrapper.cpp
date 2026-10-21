@@ -49,9 +49,9 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // I/O (and every enumeration) behind one device's transaction for no safety
 // gain.
 //
-// Lock order (AGENTS.md "driver mutex_ -> operation lock -> SDK-wrapper
-// mutex"): driver mutex_ -> Impl::mutex_ -> this. Nothing may take Impl::mutex_
-// while holding it; enumerate_astroasis_focusers() takes only this one.
+// Lock order (driver-lifecycle.instructions.md "One fixed lock order everywhere"): driver transition_mutex_ ->
+// Impl::mutex_ -> this. Nothing may take Impl::mutex_ while holding it;
+// enumerate_astroasis_focusers() takes only this one.
 //
 // File-local because Astroasis is the only vendor linking hidapi. If a second
 // one ever does, this must be promoted to a shared header -- two separate
@@ -62,9 +62,10 @@ constexpr int kHandshakeTimeoutMs = 1000;  // cmd 0x11 gets the long timeout in 
 // that must be copied out before hid_free_enumeration), so a by-index device
 // creation on an HTTP thread can stall another focuser's connect/disconnect for
 // tens of milliseconds on a busy USB tree -- and, since AstroasisFocuserDriver
-// holds its own mutex_ across protocol_.connect()/disconnect(), every property
-// read on that focuser queued behind them for the same duration. Bounded,
-// never a deadlock. (2) A
+// holds its own transition_mutex_ across protocol_.connect()/disconnect(), a
+// connect or disconnect on that focuser waits the same duration. Getters read
+// the driver's state snapshot and never reach the wrapper; only the poll body
+// (and move/halt) does, queuing on Impl::mutex_. Bounded, never a deadlock. (2) A
 // function-local static is destroyed at exit, before any static-lifetime object
 // constructed earlier. What keeps that unreachable is NOT heap ownership: the
 // DeviceRegistry singleton is constructed at startup registration and this mutex
@@ -116,15 +117,56 @@ int raw_digital_to_centidegrees(std::int16_t raw) {
     return static_cast<int>(std::lround(static_cast<double>(raw) * 0.0625 * 100.0));
 }
 
+// hidapi-backed transport. Library-level calls (init, open, close) take
+// hid_global_mutex(); per-handle write/read do not (see the comment there).
+class HidapiTransport final : public AstroasisHidTransport {
+public:
+    ~HidapiTransport() override { close(); }
+
+    bool open(const std::string& hid_path) override {
+        std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
+        // Checked, like the enumerate path: a failed init would otherwise
+        // surface one call later as an indistinguishable "failed to open"
+        // naming the path, which sends the reader after a cabling or
+        // permissions problem that isn't there.
+        if (hid_init() != 0) {
+            throw AlpacaException("hidapi initialization failed", AlpacaError::NotConnected);
+        }
+        device_ = hid_open_path(hid_path.c_str());
+        return device_ != nullptr;
+    }
+
+    void close() override {
+        if (!device_) {
+            return;
+        }
+        std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
+        hid_close(device_);
+        device_ = nullptr;
+    }
+
+    int write(const std::uint8_t* data, std::size_t length) override { return hid_write(device_, data, length); }
+
+    int read(std::uint8_t* data, std::size_t length, int timeout_ms) override {
+        return hid_read_timeout(device_, data, length, timeout_ms);
+    }
+
+private:
+    hid_device* device_ = nullptr;
+};
+
 }  // namespace
 
 class AstroasisProtocolWrapper::Impl {
 public:
+    explicit Impl(std::unique_ptr<AstroasisHidTransport> transport)
+        : transport_(transport ? std::move(transport) : std::make_unique<HidapiTransport>()) {}
+
     ~Impl() { disconnect(); }
 
     void connect(const std::string& hid_path) {
         std::lock_guard<std::mutex> lock(mutex_);
-        // The caller (the driver's own mutex_, AsyncConnectable obligations
+        // The caller (the driver's transition_mutex_, AsyncConnectable obligations
         // 4/5) is what actually guarantees a single in-flight connect; this
         // makes that invariant local instead of only living in the caller's
         // head. A throw, not a silent guard that closes and reopens: closing
@@ -134,22 +176,12 @@ public:
         // <cassert> use, and an assert here would abort the whole process in
         // every NDEBUG-undefined build (CI, dev, the TSan job) -- worse than
         // the bug it guards against.
-        if (device_) {
+        if (open_) {
             throw AlpacaException("Astroasis focuser: connect() called while already connected (caller bug)",
                                   AlpacaError::DriverException);
         }
-        {
-            std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
-            // Checked, like the enumerate path: a failed init would otherwise
-            // surface one call later as an indistinguishable "failed to open"
-            // naming the path, which sends the reader after a cabling or
-            // permissions problem that isn't there.
-            if (hid_init() != 0) {
-                throw AlpacaException("hidapi initialization failed", AlpacaError::NotConnected);
-            }
-            device_ = hid_open_path(hid_path.c_str());
-        }
-        if (!device_) {
+        open_ = transport_->open(hid_path);
+        if (!open_) {
             throw AlpacaException("Failed to open Astroasis focuser HID device: " + hid_path,
                                   AlpacaError::NotConnected);
         }
@@ -170,8 +202,8 @@ public:
             send_command(0x10, nullptr, 0, 4, kDefaultTimeoutMs);
         } catch (...) {
             // connected_ is already false here: it's only ever true when
-            // device_ != nullptr, and the already-connected throw above
-            // guarantees device_ was nullptr on entry, in every build.
+            // open_, and the already-connected throw above
+            // guarantees open_ was false on entry, in every build.
             close_device_locked();
             throw;
         }
@@ -262,20 +294,19 @@ private:
     // Caller must hold mutex_ and must NOT hold hid_global_mutex() -- it is
     // non-recursive, so widening a global-lock scope over a call site of this
     // (verified by mutation: all of connect()) self-deadlocks right here.
-    // Closes under hid_global_mutex() and clears
-    // device_ so the two close sites (the connect handshake's failure path and
+    // Closes through the transport (the hidapi one takes hid_global_mutex())
+    // and clears open_ so the two close sites (the connect handshake's failure path and
     // disconnect()) cannot drift apart on either the lock or the clear.
     void close_device_locked() {
-        if (!device_) {
+        if (!open_) {
             return;
         }
-        std::lock_guard<std::mutex> hid_lock(hid_global_mutex());
-        hid_close(device_);
-        device_ = nullptr;
+        transport_->close();
+        open_ = false;
     }
 
     void require_connected() const {
-        if (!connected_ || !device_) {
+        if (!connected_ || !open_) {
             throw AlpacaException("Astroasis focuser not connected", AlpacaError::NotConnected);
         }
     }
@@ -298,9 +329,9 @@ private:
         // Drain any stale input report before writing, matching the vendor
         // SDK's transact() helper (a non-blocking read right before the write).
         std::array<std::uint8_t, kReportSize - 1> drain{};
-        hid_read_timeout(device_, drain.data(), drain.size(), 0);
+        transport_->read(drain.data(), drain.size(), 0);
 
-        const int written = hid_write(device_, out.data(), out.size());
+        const int written = transport_->write(out.data(), out.size());
         if (written < 0) {
             throw AlpacaException("Astroasis HID write failed", AlpacaError::DriverException);
         }
@@ -309,7 +340,7 @@ private:
         // byte for a report-ID-0 device, so in[0] is the device's echoed cmd
         // byte directly -- unverified against real hardware.
         std::array<std::uint8_t, kReportSize - 1> in{};
-        const int bytes_read = hid_read_timeout(device_, in.data(), in.size(), timeout_ms);
+        const int bytes_read = transport_->read(in.data(), in.size(), timeout_ms);
         if (bytes_read <= 0) {
             throw AlpacaException("Astroasis HID read timed out", AlpacaError::DriverException);
         }
@@ -329,11 +360,14 @@ private:
     }
 
     mutable std::mutex mutex_;
-    hid_device* device_ = nullptr;
+    std::unique_ptr<AstroasisHidTransport> transport_;
+    bool open_ = false;
     bool connected_ = false;
 };
 
-AstroasisProtocolWrapper::AstroasisProtocolWrapper() : impl_(std::make_unique<Impl>()) {}
+AstroasisProtocolWrapper::AstroasisProtocolWrapper() : impl_(std::make_unique<Impl>(nullptr)) {}
+AstroasisProtocolWrapper::AstroasisProtocolWrapper(std::unique_ptr<AstroasisHidTransport> transport)
+    : impl_(std::make_unique<Impl>(std::move(transport))) {}
 AstroasisProtocolWrapper::~AstroasisProtocolWrapper() = default;
 
 void AstroasisProtocolWrapper::connect(const std::string& hid_path) { impl_->connect(hid_path); }

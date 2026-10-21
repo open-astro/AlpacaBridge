@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Decision 0006 (async operation ownership) is accepted** (docs): the record stayed `proposed` until a Sky-Watcher rig ConformU run, and that run passed on 2026-10-11 (EQM-35 Pro, ConformU 4.5.1, 0 errors, 0 issues, 0 timing issues) on a build with the operation slots; the record now says so and notes that the slots are on `main` only and first ship in the next release cut from `main` after 5.0, since `stable/5.0` and the 5.0.0 betas keep the hand-rolled threads.

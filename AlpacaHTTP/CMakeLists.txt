@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.15)
+cmake_minimum_required(VERSION 3.18)
 
 # Read version from workspace VERSION file: project() takes the numeric part
 # (ALPACABRIDGE_BASE_VERSION), the version defines below keep the full string
@@ -177,6 +177,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/CMakeLists.txt")
     if(TARGET alpacacore_astroasis)
         add_definitions(-DALPACACORE_ENABLE_ASTROASIS)
     endif()
+    if(TARGET alpacacore_altair)
+        add_definitions(-DALPACACORE_ENABLE_ALTAIR)
+    endif()
 else()
     # AlpacaCore is installed system-wide
     find_package(AlpacaCore REQUIRED)
@@ -239,6 +242,9 @@ else()
     endif()
     if(TARGET alpacacore_astroasis)
         add_definitions(-DALPACACORE_ENABLE_ASTROASIS)
+    endif()
+    if(TARGET alpacacore_altair)
+        add_definitions(-DALPACACORE_ENABLE_ALTAIR)
     endif()
 endif()
 
@@ -345,10 +351,18 @@ install(DIRECTORY include/alpacahttp
 # Example application
 add_executable(alpacahttp_server examples/simple_server/main.cpp)
 target_link_libraries(alpacahttp_server alpacahttp)
+# --version prints alpacacore::kVersion, which needs the definition AlpacaCore sets directory-scoped.
+target_compile_definitions(alpacahttp_server PRIVATE ALPACACORE_VERSION="${ALPACABRIDGE_VERSION}")
 
 # Tests
 if(ALPACAHTTP_BUILD_TESTS)
     enable_testing()
+    if(TARGET alpacacore_svbony)
+        add_test(NAME svbony_server_symbol_isolation
+            COMMAND "${CMAKE_NM}" -D --defined-only "$<TARGET_FILE:alpacahttp_server>")
+        set_tests_properties(svbony_server_symbol_isolation PROPERTIES
+            FAIL_REGULAR_EXPRESSION "[ \t]libusb_")
+    endif()
     
     # Test executables
     add_executable(test_routing tests/test_routing.cpp)
@@ -447,6 +461,15 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_link_libraries(test_log_text alpacahttp)
     add_test(NAME test_log_text COMMAND test_log_text)
 
+    # open-astro#1333: log level of the router's line for a driver exception.
+    # Own working directory, like test_routing: constructing a Router reads
+    # config/registered_devices.json relative to the cwd.
+    add_executable(test_router_log_level tests/test_router_log_level.cpp)
+    target_link_libraries(test_router_log_level alpacahttp)
+    set(TEST_ROUTER_LOG_LEVEL_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_router_log_level_cwd)
+    file(MAKE_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
+    add_test(NAME test_router_log_level COMMAND test_router_log_level WORKING_DIRECTORY ${TEST_ROUTER_LOG_LEVEL_DIR})
+
     add_executable(test_yaml_comment tests/test_yaml_comment.cpp)
     target_link_libraries(test_yaml_comment alpacahttp)
     add_test(NAME test_yaml_comment COMMAND test_yaml_comment)
@@ -473,4 +496,33 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_compile_definitions(test_software_update PRIVATE
         ALPACAHTTP_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/..")
     add_test(NAME test_software_update COMMAND test_software_update)
+
+    # Issue #1015: the server binary's command line. --help and --version must
+    # print and exit before anything starts (TIMEOUT: a regression that starts
+    # the server hangs, so it fails instead); a flag it does not know and an
+    # unreadable config path must exit non-zero.
+    # PASS_REGULAR_EXPRESSION would make CTest ignore the exit status, so every
+    # case goes through sh and pins the exact exit status and the stream.
+    # $1 server, $2 expected exit status, $3 expected text, rest the arguments.
+    set(SERVER_CLI_EXPECT_OUT [=[server=$1; want=$2; text=$3; shift 3
+out=$("$server" "$@" 2>/dev/null); rc=$?
+test "$rc" = "$want" && printf '%s' "$out" | tr '\n' ' ' | grep -q -- "$text"]=])
+    set(SERVER_CLI_EXPECT [=[server=$1; want=$2; text=$3; shift 3
+err=$("$server" "$@" 2>&1 >/dev/null); rc=$?
+test "$rc" = "$want" && printf '%s' "$err" | grep -q -- "$text"]=])
+    add_test(NAME server_cli_help
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "Usage: alpacabridge.*ALPACAHTTP_PORT" --help)
+    add_test(NAME server_cli_help_short
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "Usage: alpacabridge" -h)
+    add_test(NAME server_cli_version
+        COMMAND sh -c "${SERVER_CLI_EXPECT_OUT}" sh $<TARGET_FILE:alpacahttp_server> 0 "^[0-9]*[.][0-9]*[.][0-9]*" --version)
+    set_tests_properties(server_cli_help server_cli_help_short server_cli_version PROPERTIES TIMEOUT 20)
+    add_test(NAME server_cli_unknown_option
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "unknown option '--bogus'" --bogus)
+    add_test(NAME server_cli_extra_argument
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 2 "at most one" a b)
+    add_test(NAME server_cli_missing_config
+        COMMAND sh -c "${SERVER_CLI_EXPECT}" sh $<TARGET_FILE:alpacahttp_server> 1 "cannot read config file"
+            ${CMAKE_CURRENT_BINARY_DIR}/no_such_config.yaml)
+    set_tests_properties(server_cli_unknown_option server_cli_extra_argument server_cli_missing_config PROPERTIES TIMEOUT 20)
 endif()

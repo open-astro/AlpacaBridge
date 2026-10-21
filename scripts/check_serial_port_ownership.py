@@ -102,8 +102,8 @@ def main() -> int:
             print(f"{rel}: stale ALLOWLIST entry (file does not exist)")
             failures += 1
     if failures:
-        print(f"\nSerial port ownership check FAILED: {failures} finding(s). See issue #1202 and "
-              "AGENTS.md 'Serial / socket I/O'.")
+        print(f"\nSerial port ownership check FAILED: {failures} finding(s). See issue #1202, decision 0017 "
+              "and .github/instructions/serial-autodetect.instructions.md 'Serial / socket I/O'.")
         return 1
     print(f"Serial port ownership check OK ({scanned} file(s) scanned).")
     return 0

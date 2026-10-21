@@ -45,6 +45,18 @@
 
 -
 
+## Decision records
+
+<!--
+  Required. Name, by number, every decision record in docs/decisions/ this
+  pull request implements, changes or adopts (for example "0005: adds the
+  ZWO telescope Adoption row"), or write "None". A PR that edits a record
+  must name it here (decision-records job), and a collaborator must comment
+  `ADR authorized <head sha>` before it can merge.
+-->
+
+-
+
 ## Verification
 
 <!--
@@ -55,7 +67,7 @@
   example: whole ctest suite, sanitizers, arm64 build -> pull request CI).
   Hardware: name the device, firmware and platform, or say "not tested on
   hardware". Driver pull requests: name the vendor and device model, give
-  the unit-test case and assertion counts (AGENTS.md: at least 8 cases and
+  the unit-test case and assertion counts (testing rules: at least 8 cases and
   30 assertions per driver), the ConformU result and the report path
   (AlpacaCore/conformu/<Vendor>/<Model>/<arch>/).
   Web UI changes: add a Before / After screenshot table.

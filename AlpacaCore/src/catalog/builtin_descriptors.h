@@ -19,14 +19,20 @@
 // (compiles in every build, also no vendor header); register_astroasis_factory()
 // is defined in astroasis_catalog.cpp (vendor header allowed, compiled only
 // under ALPACACORE_ENABLE_ASTROASIS). The Sky-Watcher pair (open-astro#744),
-// WeeWX (open-astro#731), SVBONY, gphoto, Player One, Bisque, OnStep and Celestron follow the same split, e.g. WeeWX in
-// weewx_schema.cpp and weewx_catalog.cpp. All are called only from
-// builtin_catalog.cpp (the alpacacore_builtins library, open-astro#710).
+// WeeWX (open-astro#731), SVBONY, gphoto, Player One, Bisque, OnStep, Celestron, SynScan, QHY, ToupTek, Gemini,
+// WandererAstro, ZWO, Altair and iOptron follow the same split, e.g. WeeWX in weewx_schema.cpp and weewx_catalog.cpp.
+// All are called only from builtin_catalog.cpp (the alpacacore_builtins library, open-astro#710).
 
 #include <alpacacore/catalog/device_catalog.h>
 
+namespace alpacacore::vendor::zwo {
+class ZWOSDK;
+}
+
 namespace alpacacore::catalog {
 
+void register_altair_schema(DeviceCatalog& catalog);
+void register_altair_factory(DeviceCatalog& catalog);
 void register_astroasis_schema(DeviceCatalog& catalog);
 void register_astroasis_factory(DeviceCatalog& catalog);
 void register_skywatcher_schema(DeviceCatalog& catalog);
@@ -45,8 +51,29 @@ void register_onstep_schema(DeviceCatalog& catalog);
 void register_onstep_factory(DeviceCatalog& catalog);
 void register_celestron_schema(DeviceCatalog& catalog);
 void register_celestron_factory(DeviceCatalog& catalog);
-// Camera listers for the thermal-switch camera picker of vendors whose switch
-// is still built by a router arm (defined in <vendor>_thermal_listing.cpp).
+void register_synscan_schema(DeviceCatalog& catalog);
+void register_synscan_factory(DeviceCatalog& catalog);
+void register_qhy_schema(DeviceCatalog& catalog);
+void register_qhy_factory(DeviceCatalog& catalog);
+void register_touptek_schema(DeviceCatalog& catalog);
+void register_touptek_factory(DeviceCatalog& catalog);
+void register_gemini_schema(DeviceCatalog& catalog);
+void register_gemini_factory(DeviceCatalog& catalog);
+void register_wandererastro_schema(DeviceCatalog& catalog);
+void register_wandererastro_factory(DeviceCatalog& catalog);
+void register_ioptron_schema(DeviceCatalog& catalog);
+void register_ioptron_factory(DeviceCatalog& catalog);
+// The iOptron iCAM camera is a rebadged Player One: its factory is defined in
+// playerone_catalog.cpp and registered under ALPACACORE_ENABLE_PLAYERONE.
+void register_ioptron_icam_factory(DeviceCatalog& catalog);
+void register_zwo_schema(DeviceCatalog& catalog);
+void register_zwo_factory(DeviceCatalog& catalog);
+// The ZWO camera factory over `sdk`: its bind hook enumerates cameras through it
+// at registration. register_zwo_factory() passes the process-wide SDK; a test
+// passes a fake (defined in zwo_catalog.cpp, so only with ALPACACORE_ENABLE_ZWO).
+void register_zwo_camera_factory(DeviceCatalog& catalog, vendor::zwo::ZWOSDK& sdk);
+// Camera listers for the thermal-switch camera picker (defined in
+// <vendor>_thermal_listing.cpp).
 void register_zwo_thermal_camera_lister(DeviceCatalog& catalog);
 void register_touptek_thermal_camera_lister(DeviceCatalog& catalog);
 

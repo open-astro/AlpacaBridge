@@ -14,7 +14,17 @@ The descriptor is two files in the vendor's directory. The schema half compiles 
 
 AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor headers; the layering gate enforces zero once the migration is done. It serves the schema at /management/v1/devicecatalog in the management envelope, as a compact custom shape pinned by a committed fixture.
 
-API configs are rejected on validation failure; persisted configs are normalized with a warning, as `Router::reject_invalid_config()` does today (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
+API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router's `reject_invalid_config()` did (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
+
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. Each (vendor, device) declares its config fields once, in a descriptor pair in the vendor directory, and the schema half includes no vendor header. Scope: `AlpacaCore/src/vendors/*/*_schema.cpp`, `AlpacaCore/src/vendors/*/*_catalog.cpp`. Checked by: `scripts/check_layering.py`.
+2. AlpacaHTTP includes no vendor header and builds no driver outside the catalog. Scope: `AlpacaHTTP/src/**`, `AlpacaHTTP/include/**`. Checked by: `scripts/check_layering.py` (`MAX_ALPACAHTTP_VENDOR_INCLUDES` is 0).
+3. AlpacaCore holds no JSON type; AlpacaHTTP bridges JSON to the typed config in one place. Scope: `AlpacaCore/src/**`, `AlpacaCore/include/**`. Checked by: review ([decision 0013](0013-designs-to-avoid.md), section 4).
+4. A config from the API is rejected on validation failure; a persisted config is normalized with a warning and stays registered. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
+5. Sanitize keeps every declared non-secret field and drops every `Secret` field. Scope: `AlpacaCore/src/catalog/*.cpp`, `AlpacaHTTP/src/http/router.cpp`. Checked by: `AlpacaHTTP/tests/test_routing.cpp`.
 
 ## Alternatives rejected
 
@@ -22,7 +32,7 @@ Catalog in AlpacaHTTP, with JSON there and a typed struct and factory per device
 
 ## Consequences
 
-The router's registration and sanitize arms, and its vendor includes, go away one vendor at a time; until the last vendor moves, the router consults the catalog first and falls back to its arm chain. Every vendor's config round-trip cases exist before its descriptor lands, so a move that changes normalization shows as a diff. #508 inconsistencies are pinned as documented behaviour during the move and fixed after it, failing test first. Router tests that today call `registry.register_device` directly gain a test descriptor with a stub driver, which is a new seam. Adding a device becomes one descriptor pair beside its driver.
+The router's registration and sanitize arms, and its vendor includes, went away one vendor at a time; every vendor has moved, `AlpacaHTTP/src/http/router.cpp` includes no vendor header, and the layering gate holds the count at zero (`MAX_ALPACAHTTP_VENDOR_INCLUDES` in `scripts/check_layering.py`). Every vendor's config round-trip cases exist before its descriptor lands, so a move that changes normalization shows as a diff. #508 inconsistencies are pinned as documented behaviour during the move and fixed after it, failing test first. Router tests that today call `registry.register_device` directly gain a test descriptor with a stub driver, which is a new seam. Adding a device becomes one descriptor pair beside its driver.
 
 ## Links
 

@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <alpacacore/vendor/astroasis/astroasis_hid_transport.h>
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -67,7 +69,10 @@ std::vector<AstroasisPortInfo> enumerate_astroasis_focusers();
  */
 class AstroasisProtocolWrapper {
 public:
+    /// Over the hidapi transport.
     AstroasisProtocolWrapper();
+    /// Over an injected transport (tests).
+    explicit AstroasisProtocolWrapper(std::unique_ptr<AstroasisHidTransport> transport);
     ~AstroasisProtocolWrapper();
 
     AstroasisProtocolWrapper(const AstroasisProtocolWrapper&) = delete;

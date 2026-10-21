@@ -12,11 +12,13 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
@@ -26,6 +28,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstdint>
 #include <ctime>
 #include <functional>
 #include <limits>
@@ -57,8 +61,12 @@ public:
     iOptronTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                            std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                            std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                           util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                           std::function<void()> before_slew_worker_lock = {},
+                           std::function<void()> before_slew_reap = {}, std::function<void()> before_handoff_lock = {},
+                           util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("iOptron"),
+          clock_(clock),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
@@ -79,31 +87,33 @@ public:
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
-          last_site_info_fetch_(std::chrono::steady_clock::now()),
+          last_site_info_fetch_(clock_.now()),
           cached_ra_hours_(0.0),
           cached_dec_degrees_(0.0),
           cached_side_of_pier_(-1),
           position_cache_valid_(false),
-          last_position_update_(std::chrono::steady_clock::now()),
+          last_position_update_(clock_.now()),
           cached_alt_degrees_(0.0),
           cached_az_degrees_(0.0),
           altaz_cache_valid_(false),
-          last_altaz_update_(std::chrono::steady_clock::now()),
+          last_altaz_update_(clock_.now()),
           cached_guide_rate_(),
           guide_rate_valid_(false),
           cached_status_(),
           status_cache_valid_(false),
-          last_status_update_(std::chrono::steady_clock::now()),
+          last_status_update_(clock_.now()),
           last_utc_set_{},
           last_utc_set_monotonic_(std::chrono::steady_clock::now()),
           last_utc_valid_(false),
           utc_query_supported_(true),
           fast_cache_until_(std::chrono::steady_clock::time_point{}),
-          clock_sync_cancel_(false),
           pending_site_latitude_(site_latitude_deg),
           pending_site_longitude_(site_longitude_deg),
           pending_site_elevation_(site_elevation_m),
-          sync_time_on_connect_(sync_time_on_connect.value_or(true)) {
+          sync_time_on_connect_(sync_time_on_connect.value_or(true)),
+          before_slew_worker_lock_(std::move(before_slew_worker_lock)),
+          before_slew_reap_(std::move(before_slew_reap)),
+          before_handoff_lock_(std::move(before_handoff_lock)) {
         // Initialize mount info (will be populated on connect)
     }
 
@@ -111,7 +121,7 @@ public:
         // Blocks new connection tasks, then joins the in-flight one — MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        // Join the async slew dispatch thread before any member it touches is
+        // Cancel and join the async slew dispatch (slew slot) before any member it touches is
         // destroyed. Must run WITHOUT mutex_ held (the thread takes mutex_).
         reap_slew_dispatch();
         if (connected_) {
@@ -129,16 +139,14 @@ public:
         }
         // Unconditional, and last: both starts happen AFTER set_connected()
         // releases mutex_, so a connect can lose the race to a concurrent
-        // disconnect and run its start_clock_sync_thread() after that
-        // disconnect's stop_clock_sync_thread() has already returned. The
-        // driver is then left with connected_ == false and a joinable thread
-        // that the `if (connected_)` branch above never reaps -- and
-        // destroying a joinable std::thread is std::terminate(), which is how
-        // this shows up: an abort in ~iOptronTelescopeDriver with no active
-        // exception, under a connect/disconnect storm. Both reapers are
-        // idempotent (each joins only a joinable thread and resets its cancel
-        // flag), so running them again here costs nothing on the normal path.
-        stop_clock_sync_thread();
+        // disconnect and run its start_clock_sync() after that
+        // disconnect's stop_clock_sync() has already returned. The
+        // driver is then left with connected_ == false and a running clock-sync body
+        // that the `if (connected_)` branch above never reaps, which would outlive
+        // the members it touches. Both reapers are idempotent (each cancels and
+        // joins its slot, a no-op when it is idle), so running them again here
+        // costs nothing on the normal path.
+        stop_clock_sync();
         reap_slew_dispatch();
     }
     
@@ -158,14 +166,14 @@ public:
     DeviceType get_device_type() const override {
         return DeviceType::Telescope;
     }
-    
-    std::string get_unique_id() const override {
+
+    std::string fallback_unique_id() const override {
         if (mount_info_.model_code.empty()) {
             return "iOptron_" + std::to_string(device_number_);
         }
         return "iOptron_" + mount_info_.model_code + "_" + std::to_string(device_number_);
     }
-    
+
     std::string get_description() const override {
         return "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver";
     }
@@ -196,7 +204,7 @@ public:
     // no-op task; a disconnect() racing that window is recorded and honored
     // by the task tail rather than spawning immediately.
     //
-    // LATENCY NOTE: this driver's teardown joins the clock-sync thread, which
+    // LATENCY NOTE: this driver's teardown joins the clock-sync body, which
     // can sit in multi-second serial protocol retries. When that teardown runs
     // as the base's DEFERRED disconnect (disconnect-races-connect path only),
     // connection_mutex_ is held throughout — concurrent connect()/disconnect()
@@ -296,6 +304,7 @@ public:
                 tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_override_until_ = std::chrono::steady_clock::time_point{};
                 slew_in_progress_ = false;
+                driver_motion_ = DriverMotion::None;
                 utc_query_supported_ = true;
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 pulse_guiding_end_ns_.store(0, std::memory_order_relaxed);
@@ -324,13 +333,13 @@ public:
                 sync_offset_ra_hours_ = 0.0;
                 sync_offset_dec_degrees_ = 0.0;
                 slew_in_progress_ = false;
-                last_slew_error_.clear();
+                invalidate_slew_error_locked();
                 prefetch_mount_state_locked();
                 try {
                     mount_info_ = protocol.get_mount_info();
                 } catch (...) {
                 }
-                fast_cache_until_ = std::chrono::steady_clock::now() + kFastCacheGrace;
+                fast_cache_until_ = clock_.now() + kFastCacheGrace;
                 schedule_clock_sync = true;
                 std::string mount_desc = mount_info_.model_name.empty()
                     ? "unknown model"
@@ -374,6 +383,7 @@ public:
             tracking_rate_override_until_ = std::chrono::steady_clock::time_point{};
             slew_override_until_ = std::chrono::steady_clock::time_point{};
             slew_in_progress_ = false;
+            driver_motion_ = DriverMotion::None;
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_ra_hours_ = 0.0;
             pulse_guiding_hold_until_ = std::chrono::steady_clock::time_point{};
@@ -397,21 +407,24 @@ public:
             target_ra_hours_ = 0.0;
             target_dec_degrees_ = 0.0;
             slew_in_progress_ = false;
-            last_slew_error_.clear();
+            invalidate_slew_error_locked();
             disconnect_protocol = true;
         }
 
         lock.unlock();
 
         if (schedule_clock_sync) {
-            start_clock_sync_thread();
+            start_clock_sync();
         }
         if (disconnect_protocol) {
-            stop_clock_sync_thread();
-            // Join the async slew dispatch thread before tearing down the
+            stop_clock_sync();
+            // Cancel and join the async slew dispatch (slew slot) before tearing down the
             // protocol connection (runs after lock.unlock() — the thread
             // takes mutex_, so joining under the lock would deadlock).
-            reap_slew_dispatch();
+            {
+                std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
+                reap_slew_dispatch();
+            }
             auto& protocol = iOptronProtocolWrapper::instance();
             protocol.disconnect();
             ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
@@ -516,7 +529,7 @@ public:
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             return false;
         }
@@ -548,7 +561,7 @@ public:
             throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
         }
         if (pulse_guiding_active_.load(std::memory_order_acquire)) {
-            auto now_ns = std::chrono::steady_clock::now().time_since_epoch().count();
+            auto now_ns = clock_.now().time_since_epoch().count();
             if (now_ns >= pulse_guiding_end_ns_.load(std::memory_order_relaxed)) {
                 pulse_guiding_active_.store(false, std::memory_order_release);
                 return false;
@@ -557,7 +570,14 @@ public:
         }
         return false;
     }
-    
+
+    // True from PulseGuide until its duration plus kPulseGuideCompletionDelay has passed. Does not
+    // clear the flag (get_is_pulse_guiding() does).
+    bool pulse_window_open() const {
+        return pulse_guiding_active_.load(std::memory_order_acquire) &&
+               clock_.now().time_since_epoch().count() < pulse_guiding_end_ns_.load(std::memory_order_relaxed);
+    }
+
     bool get_can_set_declination_rate() const override {
         return false;  // iOptron doesn't support setting Dec rate directly
     }
@@ -614,15 +634,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double dec_value = 0.0;
-        if (pulse_guiding_hold_dec_valid_ &&
-            std::chrono::steady_clock::now() < pulse_guiding_hold_dec_until_) {
+        if (pulse_guiding_hold_dec_valid_ && clock_.now() < pulse_guiding_hold_dec_until_) {
             dec_value = pulse_guiding_hold_dec_degrees_;
         } else {
             refresh_position_cache_locked();
             dec_value = cached_dec_degrees_;
         }
         if (pulse_guiding_dec_correction_valid_) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
             if (now < pulse_guiding_dec_correction_until_) {
                 dec_value = pulse_guiding_dec_baseline_degrees_ +
                             pulse_guiding_dec_expected_delta_degrees_;
@@ -651,12 +670,7 @@ public:
     bool get_tracking() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
-        if (tracking_override_until_ > now && status_cache_valid_) {
-            return cached_status_.is_tracking;
-        }
-        refresh_status_cache_locked();
-        return cached_status_.is_tracking;
+        return get_tracking_locked();
     }
     
     void set_tracking(bool tracking) override {
@@ -673,7 +687,7 @@ public:
         }
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             tracking_state_before_move_ = tracking;
@@ -732,15 +746,14 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double ra_value = 0.0;
-        if (pulse_guiding_hold_ra_valid_ &&
-            std::chrono::steady_clock::now() < pulse_guiding_hold_until_) {
+        if (pulse_guiding_hold_ra_valid_ && clock_.now() < pulse_guiding_hold_until_) {
             ra_value = pulse_guiding_hold_ra_hours_;
         } else {
             refresh_position_cache_locked();
             ra_value = cached_ra_hours_;
         }
         if (pulse_guiding_ra_correction_valid_) {
-            const auto now = std::chrono::steady_clock::now();
+            const auto now = clock_.now();
             if (now < pulse_guiding_ra_correction_until_) {
                 ra_value = normalize_ra_hours(pulse_guiding_ra_baseline_hours_ +
                                               pulse_guiding_ra_expected_delta_hours_);
@@ -788,7 +801,7 @@ public:
         // Slewing/DeviceState poll observes completion, so a client that
         // polls SideOfPier alone keeps live reads after the move as well:
         // never stale, just uncached until it asks whether the slew ended.
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         if (!position_cache_valid_ || slew_in_progress_ || cached_status_.is_slewing ||
             (now - last_position_update_) >= kSideOfPierPositionTtl) {
             refresh_position_cache_locked();
@@ -913,7 +926,7 @@ public:
         site_latitude_cached_ = latitude;
         hemisphere_north_ = (latitude >= 0.0);
         site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        last_site_info_fetch_ = clock_.now();
     }
 
     double get_site_longitude() const override {
@@ -937,7 +950,7 @@ public:
         protocol.set_longitude(longitude);
         site_longitude_cached_ = longitude;
         site_info_valid_ = true;
-        last_site_info_fetch_ = std::chrono::steady_clock::now();
+        last_site_info_fetch_ = clock_.now();
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -1012,7 +1025,7 @@ public:
                 }
                 cached_status_.is_tracking = desired_tracking;
                 status_cache_valid_ = true;
-                last_status_update_ = std::chrono::steady_clock::now();
+                last_status_update_ = clock_.now();
                 tracking_override_until_ = last_status_update_ + std::chrono::seconds(2);
                 tracking_state_before_move_.reset();
             }
@@ -1029,7 +1042,13 @@ public:
         // open-astro#575: a fresh initiator is a clean start -- a client
         // that jogs an axis after a failed GOTO must not be told the OLD
         // goto failed.
-        last_slew_error_.clear();
+        const DriverMotion motion = slew_in_progress_ ? DriverMotion::Goto : driver_motion_;
+        supersede_slew_dispatch_locked();
+        // open-astro#843: :qR#/:qD# stop arrow motion only ("other slewing and tracking are not affected",
+        // RS-232 command language v3.10), so a GOTO, Park or FindHome the driver started keeps moving after
+        // MoveAxis. Keep it as driver motion (a jog too: the protocol does not say it ends one) so a PulseGuide
+        // does not mask it; the next fresh no-motion status ends it, the override being cleared above.
+        driver_motion_ = motion;
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1069,13 +1088,17 @@ public:
         if (axis_move_active_primary_ || axis_move_active_secondary_) {
             return true;
         }
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (slew_override_until_ > now) {
             return true;
         }
         refresh_status_cache_locked();
         if (cached_status_.is_slewing) {
-            return true;
+            // open-astro#843: the firmware reports system status 2 (slewing) while it runs a pulse.
+            // ASCOM keeps Slewing false during PulseGuide (IsPulseGuiding carries it). The mask covers
+            // the pulse plus kPulseGuideCompletionDelay, and only with no driver-started GOTO still
+            // dispatching and no Park/FindHome still moving (driver_motion_).
+            return !(pulse_window_open() && !slew_in_progress_ && driver_motion_ == DriverMotion::None);
         }
         if (slew_override_until_ > now) {
             return true;
@@ -1126,8 +1149,7 @@ public:
                                                    std::to_string(kMaxSlewRefines) + " (" +
                                                    std::to_string(duration_ms) + " ms, final-approach firmware quirk)");
                     protocol.pulse_guide(direction, duration_ms);
-                    slew_override_until_ =
-                        std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms + 500);
+                    slew_override_until_ = clock_.now() + std::chrono::milliseconds(duration_ms + 500);
                     status_cache_valid_ = false;
                     position_cache_valid_ = false;
                     return true;
@@ -1181,7 +1203,7 @@ public:
     int get_tracking_rate() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (tracking_rate_override_until_ > now && status_cache_valid_) {
             return static_cast<int>(cached_status_.tracking_rate);
         }
@@ -1205,7 +1227,7 @@ public:
         }
         cached_status_.tracking_rate = rate;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         tracking_rate_override_until_ = last_status_update_ + std::chrono::seconds(2);
     }
 
@@ -1267,13 +1289,11 @@ public:
         auto& protocol = iOptronProtocolWrapper::instance();
         // Use a direct go-to-zero command to avoid aggressive sensor searches.
         protocol.go_to_home();
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        supersede_slew_dispatch_locked();
+        driver_motion_ = DriverMotion::Home;
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
-        // open-astro#575: a fresh initiator is a clean start -- a client
-        // that calls FindHome after a failed GOTO must not be told the OLD
-        // goto failed while it's homing.
-        last_slew_error_.clear();
     }
 
     void park() override {
@@ -1296,18 +1316,16 @@ public:
             throw AlpacaException(std::string("Failed to park mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        supersede_slew_dispatch_locked();
+        driver_motion_ = DriverMotion::Park;
         park_override_until_ = std::chrono::steady_clock::time_point{};
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(5);
         position_cache_valid_ = false;
-        // open-astro#575: a fresh initiator is a clean start -- a client
-        // that calls Park after a failed GOTO must not be told the OLD goto
-        // failed while it's parking.
-        last_slew_error_.clear();
         // HAE29C firmware quirk (hardware-verified 2026-07-14): :MP1# park
         // slews complete physically but the mount keeps reporting
         // system-status 2 ("slewing") forever instead of 6 ("parked");
@@ -1327,9 +1345,12 @@ public:
     }
 
     void abort_slew() override {
+        std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         // open-astro#768: fence the async slew dispatch first, so no :MS1#/:MS2#
         // can reach the mount after the stop below. Runs without mutex_ held
-        // (the dispatch thread takes it), like every other reap site.
+        // (the dispatch body takes it), like every other reap site. Taking
+        // the handoff lock can wait for a concurrent initiator's in-flight
+        // dispatch transaction before the stop can be sent.
         reap_slew_dispatch();
         std::lock_guard<std::mutex> lock(mutex_);
         // open-astro#728: a latched fault must not stop a client stopping the
@@ -1346,7 +1367,7 @@ public:
         // slew failure -- the client acted on the error, so the next Slewing
         // read must answer normally again. Clear unconditionally (a
         // soft-failed goto never set is_slewing).
-        last_slew_error_.clear();
+        invalidate_slew_error_locked();
         // open-astro#768: the stop is sent even when the cached status says the
         // mount is not slewing; that cache can lag a GOTO the mount accepted.
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1359,6 +1380,7 @@ public:
                                   AlpacaError::DriverException);
         }
         slew_in_progress_ = false;
+        driver_motion_ = DriverMotion::None;
         status_cache_valid_ = false;
         slew_override_until_ = std::chrono::steady_clock::time_point{};
     }
@@ -1396,10 +1418,8 @@ public:
                 pulse_guiding_hold_ra_hours_ = cached_ra_hours_;
             }
             pulse_guiding_hold_ra_valid_ = true;
-            pulse_guiding_hold_until_ = std::chrono::steady_clock::now() +
-                                       std::chrono::milliseconds(duration) +
-                                       kPulseGuideCompletionDelay +
-                                       kPulseGuideHoldGrace;
+            pulse_guiding_hold_until_ =
+                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
             pulse_guiding_hold_dec_valid_ = false;
             GuideRate guide_rate;
             if (guide_rate_valid_) {
@@ -1419,10 +1439,8 @@ public:
                 pulse_guiding_dec_baseline_degrees_ = cached_dec_degrees_;
             }
             pulse_guiding_dec_correction_valid_ = true;
-            pulse_guiding_dec_correction_until_ = std::chrono::steady_clock::now() +
-                                                  std::chrono::milliseconds(duration) +
-                                                  kPulseGuideCompletionDelay +
-                                                  kPulseGuideCorrectionGrace;
+            pulse_guiding_dec_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
+                                                  kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
         } else if (duration > 0 && is_ra) {
             if (last_dec_read_valid_) {
                 pulse_guiding_hold_dec_degrees_ = last_dec_read_degrees_;
@@ -1430,10 +1448,8 @@ public:
                 pulse_guiding_hold_dec_degrees_ = cached_dec_degrees_;
             }
             pulse_guiding_hold_dec_valid_ = true;
-            pulse_guiding_hold_dec_until_ = std::chrono::steady_clock::now() +
-                                            std::chrono::milliseconds(duration) +
-                                            kPulseGuideCompletionDelay +
-                                            kPulseGuideHoldGrace;
+            pulse_guiding_hold_dec_until_ =
+                clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay + kPulseGuideHoldGrace;
             pulse_guiding_hold_ra_valid_ = false;
             GuideRate guide_rate;
             if (guide_rate_valid_) {
@@ -1453,19 +1469,15 @@ public:
                 pulse_guiding_ra_baseline_hours_ = cached_ra_hours_;
             }
             pulse_guiding_ra_correction_valid_ = true;
-            pulse_guiding_ra_correction_until_ = std::chrono::steady_clock::now() +
-                                                 std::chrono::milliseconds(duration) +
-                                                 kPulseGuideCompletionDelay +
-                                                 kPulseGuideCorrectionGrace;
+            pulse_guiding_ra_correction_until_ = clock_.now() + std::chrono::milliseconds(duration) +
+                                                 kPulseGuideCompletionDelay + kPulseGuideCorrectionGrace;
         } else {
             pulse_guiding_hold_ra_valid_ = false;
             pulse_guiding_hold_dec_valid_ = false;
         }
         protocol.pulse_guide(calibrated_direction, duration);
         if (duration > 0) {
-            auto end = std::chrono::steady_clock::now() +
-                       std::chrono::milliseconds(duration) +
-                       kPulseGuideCompletionDelay;
+            auto end = clock_.now() + std::chrono::milliseconds(duration) + kPulseGuideCompletionDelay;
             pulse_guiding_end_ns_.store(end.time_since_epoch().count(),
                                         std::memory_order_relaxed);
             pulse_guiding_active_.store(true, std::memory_order_release);
@@ -1492,70 +1504,36 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             double phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
+            check_equatorial_slew_allowed_locked("SlewToCoordinates");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
-            dispatch_slew_command_locked(phys_ra, phys_dec, false, "SlewToCoordinates");
+            dispatch_slew_command_locked(phys_ra, phys_dec, nullptr, "SlewToCoordinates");
         }
         wait_for_slew_completion("SlewToCoordinates");
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        if (before_handoff_lock_) before_handoff_lock_();
+        std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
         double phys_dec = 0.0;
+        std::uint64_t generation = 0;
+        std::string previous_slew_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
+            previous_slew_error = last_slew_error_;
+            check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinatesAsync");
+            generation = slew_operation_generation_;
         }
-        try {
-            // Joinable member thread (never detached), joined in the
-            // destructor and on disconnect. Join any previous dispatch first
-            // (must run without mutex_ held — the thread takes mutex_).
-            reap_slew_dispatch();
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            if (slew_dispatch_thread_.joinable()) {
-                // A racing async-slew caller spawned between our reap and this
-                // lock — cancel and join it INSIDE the same critical section as
-                // the assignment, so a joinable thread can never be overwritten
-                // (std::terminate) or joined from two threads (UB). Matches the
-                // Celestron/SynScan spawn-site recheck.
-                slew_dispatch_cancel_.store(true);
-                slew_dispatch_thread_.join();
-                slew_dispatch_cancel_.store(false);
-            }
-            slew_dispatch_thread_ = std::thread([this, phys_ra, phys_dec]() {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || slew_dispatch_cancel_.load()) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    return;
-                }
-                try {
-                    dispatch_slew_command_locked(phys_ra, phys_dec, true, "SlewToCoordinatesAsync");
-                } catch (const std::exception& e) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = std::string("SlewToCoordinatesAsync failed: ") + e.what();
-                    }
-                    ALPACA_LOG_WARN("iOptron", std::string("Async slew failed: ") + e.what());
-                } catch (...) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = "SlewToCoordinatesAsync failed with an unknown error";
-                    }
-                    ALPACA_LOG_WARN("iOptron", "Async slew failed with unknown exception");
-                }
-            });
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            slew_in_progress_ = false;
-            clear_slew_override_locked();
-            throw AlpacaException(std::string("Failed to start async slew: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
+        start_slew_body(generation, previous_slew_error, "Failed to start async slew",
+                        [this, phys_ra, phys_dec, generation](util::OperationContext& ctx) {
+                            run_slew_body(ctx, generation, "SlewToCoordinatesAsync", [&] {
+                                dispatch_slew_command_locked(phys_ra, phys_dec, &ctx, "SlewToCoordinatesAsync");
+                            });
+                        });
     }
     
     void slew_to_target() override {
@@ -1623,6 +1601,10 @@ public:
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         validate_alt_az(altitude, azimuth, "SlewToAltAzAsync");
+        if (before_handoff_lock_) before_handoff_lock_();
+        std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
+        std::uint64_t generation = 0;
+        std::string previous_slew_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1636,64 +1618,30 @@ public:
                                           AlpacaError::ValueNotSet);
                 }
             }
-            slew_in_progress_ = true;
             ensure_not_parked_locked("SlewToAltAzAsync");
+            previous_slew_error = last_slew_error_;
+            supersede_slew_dispatch_locked();
+            generation = slew_operation_generation_;
+            slew_in_progress_ = true;
             // Same reason as prepare_slew_state_locked(): Slewing must read
             // true from the moment this initiator returns, not from when the
-            // dispatch thread gets the mutex.
-            slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            // dispatch body gets the mutex.
+            slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         }
 
-        try {
-            // Joinable member thread (never detached), joined in the
-            // destructor and on disconnect. Join any previous dispatch first
-            // (must run without mutex_ held — the thread takes mutex_).
-            reap_slew_dispatch();
-            std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-            if (slew_dispatch_thread_.joinable()) {
-                // Racing async-slew between reap_slew_dispatch() and this lock —
-                // see the RA/Dec spawn above; join under the same critical section.
-                slew_dispatch_cancel_.store(true);
-                slew_dispatch_thread_.join();
-                slew_dispatch_cancel_.store(false);
-            }
-            slew_dispatch_thread_ = std::thread([this, altitude, azimuth]() {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || slew_dispatch_cancel_.load()) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    return;
-                }
-                try {
-                    auto converted = alt_az_to_ra_dec(
-                        altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
-                    double ra_hours = converted.first;
-                    double dec_degrees = converted.second;
-                    prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees, "SlewToAltAzAsync");
-                    dispatch_slew_command_locked(ra_hours, dec_degrees, true, "SlewToAltAzAsync");
-                } catch (const std::exception& e) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = std::string("SlewToAltAzAsync failed: ") + e.what();
-                    }
-                    ALPACA_LOG_WARN("iOptron", std::string("Async AltAz slew failed: ") + e.what());
-                } catch (...) {
-                    slew_in_progress_ = false;
-                    clear_slew_override_locked();
-                    if (!slew_dispatch_cancel_.load()) {
-                        last_slew_error_ = "SlewToAltAzAsync failed with an unknown error";
-                    }
-                    ALPACA_LOG_WARN("iOptron", "Async AltAz slew failed with unknown exception");
-                }
-            });
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            slew_in_progress_ = false;
-            clear_slew_override_locked();
-            throw AlpacaException(std::string("Failed to start async Alt/Az slew: ") + e.what(),
-                                  AlpacaError::DriverException);
-        }
+        start_slew_body(generation, previous_slew_error, "Failed to start async Alt/Az slew",
+                        [this, altitude, azimuth, generation](util::OperationContext& ctx) {
+                            run_slew_body(ctx, generation, "SlewToAltAzAsync", [&] {
+                                auto converted = alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_,
+                                                                  site_longitude_cached_, current_utc_time_locked());
+                                double ra_hours = converted.first;
+                                double dec_degrees = converted.second;
+                                // The initiator already claimed and published this generation.
+                                prepare_slew_state_locked(ra_hours, dec_degrees, ra_hours, dec_degrees,
+                                                          "SlewToAltAzAsync", false);
+                                dispatch_slew_command_locked(ra_hours, dec_degrees, &ctx, "SlewToAltAzAsync");
+                            });
+                        });
     }
 
     void slew_to_alt_az(double altitude, double azimuth) override {
@@ -1712,7 +1660,7 @@ public:
                 altitude, azimuth, site_latitude_cached_, site_longitude_cached_, current_utc_time_locked());
             ra_hours = converted.first;
             dec_degrees = converted.second;
-            start_slew_to_coordinates_locked(ra_hours, dec_degrees, false);
+            start_slew_to_coordinates_locked(ra_hours, dec_degrees);
         }
         wait_for_slew_completion("SlewToAltAz");
     }
@@ -1739,11 +1687,12 @@ public:
             throw AlpacaException(std::string("Failed to unpark mount: ") + e.what(),
                                   AlpacaError::DriverException);
         }
+        supersede_slew_dispatch_locked();
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
         slew_override_until_ = last_status_update_ + std::chrono::seconds(2);
         park_override_until_ = last_status_update_ + kUnparkGrace;
         park_finalize_pending_ = false;
@@ -1788,7 +1737,7 @@ private:
     }
 
     void ensure_not_parked_locked(const char* action) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             park_override_until_ = now + kUnparkGrace;
             return;
@@ -1804,7 +1753,7 @@ private:
     }
 
     void ensure_not_parked_fast_locked(const char* action) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (park_override_until_ > now) {
             park_override_until_ = now + kUnparkGrace;
             return;
@@ -1864,7 +1813,7 @@ private:
 
     void prefetch_mount_state_locked() {
         auto& protocol = iOptronProtocolWrapper::instance();
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         try {
             Position pos = protocol.get_position();
             cached_dec_degrees_ = pos.dec_degrees;
@@ -1906,14 +1855,45 @@ private:
         }
     }
 
-    void prepare_slew_state_locked(double ascom_ra, double ascom_dec,
-                                    double phys_ra, double phys_dec,
-                                    const char* label) {
+    bool get_tracking_locked() const {
+        auto now = clock_.now();
+        if (tracking_override_until_ > now && status_cache_valid_) {
+            return cached_status_.is_tracking;
+        }
+        refresh_status_cache_locked();
+        return cached_status_.is_tracking;
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Runs after the parked check and before the new slew
+    // supersedes a dispatch in flight, so a refusal leaves that motion alone.
+    // Not part of prepare_slew_state_locked(): the Alt/Az slews share it.
+    void check_equatorial_slew_allowed_locked(const char* label) const {
         check_connected();
         ensure_not_parked_locked(label);
-        // open-astro#575: a fresh initiator is a clean start -- a client that
-        // retries a rejected goto must not be told the OLD goto failed.
-        last_slew_error_.clear();
+        if (tracking_off_for_slew_locked()) {
+            throw AlpacaException(std::string(label) + " requires Tracking to be true", AlpacaError::InvalidOperation);
+        }
+    }
+
+    // Not get_tracking_locked(): :GLS reports slewing (2), guiding (3) and a
+    // meridian flip (4) instead of tracking, so the getter reads them as off,
+    // and refusing there would refuse a retarget of a GOTO in flight. Off is a
+    // commanded Tracking=false still in its read-back window, or a stopped
+    // mount (0, or 7 at home); parked (6) is refused before this runs.
+    bool tracking_off_for_slew_locked() const {
+        if (tracking_override_until_ > clock_.now() && status_cache_valid_) {
+            return !cached_status_.is_tracking;
+        }
+        refresh_status_cache_locked();
+        return cached_status_.system_status == 0 || cached_status_.system_status == 7;
+    }
+
+    void prepare_slew_state_locked(double ascom_ra, double ascom_dec, double phys_ra, double phys_dec,
+                                   const char* label, bool supersede = true) {
+        check_connected();
+        ensure_not_parked_locked(label);
+        if (supersede) supersede_slew_dispatch_locked();
 
         target_ra_hours_ = ascom_ra;
         target_dec_degrees_ = ascom_dec;
@@ -1930,12 +1910,28 @@ private:
         // the settle refinement against the pre-slew position and report the
         // slew complete before it started (caught by the loopback fake-mount
         // test). Every dispatch-failure path clears it again.
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
+    }
+
+    void invalidate_slew_error_locked() {
+        ++slew_operation_generation_;
+        last_slew_error_.clear();
+    }
+
+    void supersede_slew_dispatch_locked() {
+        // Clear an unsent GOTO's state before a stale worker observes its
+        // generation mismatch, preventing a ghost slew/trim after newer motion.
+        invalidate_slew_error_locked();
+        slew_in_progress_ = false;
+        driver_motion_ = DriverMotion::None;
+        clear_slew_override_locked();
     }
 
     void clear_slew_override_locked() { slew_override_until_ = std::chrono::steady_clock::time_point{}; }
 
-    void dispatch_slew_command_locked(double ra, double dec, bool allow_soft_fail, const char* label) {
+    // `async_ctx` is the slew slot's context when the GOTO runs on its body: a rejection is then recorded in
+    // last_slew_error_ and logged instead of thrown. Null: the synchronous initiators, which throw.
+    void dispatch_slew_command_locked(double ra, double dec, util::OperationContext* async_ctx, const char* label) {
         auto& protocol = iOptronProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
@@ -1946,12 +1942,12 @@ private:
         if (!accepted) {
             slew_in_progress_ = false;
             clear_slew_override_locked();
-            if (allow_soft_fail) {
+            if (async_ctx != nullptr) {
                 // open-astro#575: a reap by a newer initiator is not a failure -- that
                 // initiator already owns clearing/replacing last_slew_error_.
-                // AbortSlew reaps the dispatch (open-astro#768), so none can
+                // AbortSlew cancels and joins the slot (open-astro#768), so none can
                 // record a failure after the abort cleared the error.
-                if (!slew_dispatch_cancel_.load()) {
+                if (async_ctx->stop_reason() == util::StopReason::None) {
                     last_slew_error_ = std::string(label) + " failed: mount rejected the target";
                 }
                 ALPACA_LOG_WARN("iOptron", "Slew rejected by mount - treating as no-op for async slew");
@@ -1959,23 +1955,23 @@ private:
             }
             throw AlpacaException("Slew rejected by mount - target may violate altitude limits");
         }
-        slew_override_until_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        slew_override_until_ = clock_.now() + std::chrono::seconds(5);
         status_cache_valid_ = false;
         position_cache_valid_ = false;
     }
 
-    void start_slew_to_coordinates_locked(double ra, double dec, bool allow_soft_fail) {
+    void start_slew_to_coordinates_locked(double ra, double dec) {
         prepare_slew_state_locked(ra, dec, ra, dec, "SlewToCoordinates");
-        dispatch_slew_command_locked(ra, dec, allow_soft_fail, "SlewToCoordinates");
+        dispatch_slew_command_locked(ra, dec, nullptr, "SlewToCoordinates");
     }
 
     void wait_for_slew_completion(const char* label) {
-        const auto deadline = std::chrono::steady_clock::now() + kSlewTimeout;
+        const auto deadline = clock_.now() + kSlewTimeout;
         while (get_slewing()) {
-            if (std::chrono::steady_clock::now() > deadline) {
+            if (clock_.now() > deadline) {
                 throw AlpacaException(std::string(label) + " timed out waiting for slew to complete");
             }
-            std::this_thread::sleep_for(kSlewPollInterval);
+            clock_.sleep_for(kSlewPollInterval);
         }
 
         // The mount may clear its slewing status well before the physical
@@ -1995,7 +1991,7 @@ private:
             double prev_dec_degrees = std::numeric_limits<double>::quiet_NaN();
             int stable_count = 0;
 
-            while (std::chrono::steady_clock::now() < deadline) {
+            while (clock_.now() < deadline) {
                 bool target_reached = false;
                 double cur_ra = 0, cur_dec = 0;
                 {
@@ -2027,18 +2023,18 @@ private:
                     break;
                 }
 
-                std::this_thread::sleep_for(kSlewPollInterval);
+                clock_.sleep_for(kSlewPollInterval);
             }
         }
 
         if (slew_settle_time_seconds_ > 0) {
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
         }
         slew_in_progress_ = false;
     }
     
     void refresh_position_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && position_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2063,7 +2059,7 @@ private:
     }
 
     void refresh_altaz_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && altaz_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2087,7 +2083,7 @@ private:
     }
     
     void refresh_status_cache_locked(bool force = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && status_cache_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2107,6 +2103,15 @@ private:
                                   AlpacaError::DriverException);
         }
         finalize_wedged_park_locked();
+        // A fresh status ends a driver-started Park or FindHome whichever getter fetched it (AtHome, AtPark,
+        // Tracking or Slewing): at home after a FindHome at once, any other no-motion status only past the
+        // initiator's override (the firmware can still report its old status just after the command). A Park
+        // needs no early end: a parked mount refuses PulseGuide and Unpark ends the window.
+        // Runs after the finalizer, which may have re-read the status.
+        const bool reached_home = driver_motion_ == DriverMotion::Home && cached_status_.is_at_home;
+        if (reached_home || (!cached_status_.is_slewing && slew_override_until_ <= now)) {
+            driver_motion_ = DriverMotion::None;
+        }
     }
 
     // See park(): once an :MP1# park has physically arrived, some firmware
@@ -2139,7 +2144,7 @@ private:
                             "to finalize (HAE firmware quirk)");
             protocol.stop_tracking();
             cached_status_ = protocol.get_status();
-            last_status_update_ = std::chrono::steady_clock::now();
+            last_status_update_ = clock_.now();
             if (cached_status_.is_parked) {
                 park_finalize_pending_ = false;
             }
@@ -2149,7 +2154,7 @@ private:
     }
 
     void ensure_site_info_cached_locked(bool force_refresh = false) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force_refresh && site_info_valid_ && now < fast_cache_until_) {
             return;
         }
@@ -2196,18 +2201,26 @@ private:
         bool dst_active = false;
     };
 
-    bool retry_mount_command(const char* label, const std::function<void()>& fn) {
+    // `ctx`: the clock-sync body's retries stop when it is stopped; the synchronous
+    // connect-path callers pass none and keep the plain delay.
+    bool retry_mount_command(const char* label, const std::function<void()>& fn,
+                             util::OperationContext* ctx = nullptr) {
         constexpr int kMaxAttempts = 3;
         const auto delay = std::chrono::milliseconds(750);
         std::string last_error;
         for (int attempt = 1; attempt <= kMaxAttempts; ++attempt) {
+            if (ctx && ctx->stop_reason() != util::StopReason::None) {
+                return false;  // stopped between commands: send nothing more
+            }
             try {
                 fn();
                 return true;
             } catch (const std::exception& e) {
                 last_error = e.what();
                 if (attempt < kMaxAttempts) {
-                    std::this_thread::sleep_for(delay);
+                    if (ctx ? !ctx->wait_for(delay) : (clock_.sleep_for(delay), false)) {
+                        break;  // the clock-sync body was stopped: stop retrying
+                    }
                 }
             }
         }
@@ -2233,10 +2246,10 @@ private:
             }
             const int sample_duration = std::clamp(duration_ms, 500, 2000);
             protocol.pulse_guide(0, sample_duration);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration + 700));
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration + 700));
             Position end = protocol.get_position();
             for (int i = 0; i < 2; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                clock_.sleep_for(std::chrono::milliseconds(200));
                 end = protocol.get_position();
             }
 
@@ -2288,26 +2301,26 @@ private:
             const double test_ra_rate = std::clamp(0.5, 0.01, 0.90);
             const double test_dec_rate = std::clamp(original_dec_rate, 0.10, 0.99);
             protocol.set_guide_rates(test_ra_rate, test_dec_rate);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            clock_.sleep_for(std::chrono::milliseconds(300));
 
-            auto read_position_stable = [&protocol]() {
+            auto read_position_stable = [&protocol, this]() {
                 Position pos = protocol.get_position();
                 for (int i = 0; i < 2; ++i) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    clock_.sleep_for(std::chrono::milliseconds(200));
                     pos = protocol.get_position();
                 }
                 return pos;
             };
 
             const Position baseline_start = protocol.get_position();
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position baseline_end = read_position_stable();
             const double baseline_delta_hours =
                 shortest_ra_delta_hours(baseline_end.ra_hours, baseline_start.ra_hours);
 
             const Position pulse_start = protocol.get_position();
             protocol.pulse_guide(2, sample_duration);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
+            clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position pulse_end = read_position_stable();
 
             const double pulse_delta_hours =
@@ -2405,7 +2418,7 @@ private:
                 site_latitude_cached_ = latitude;
                 hemisphere_north_ = (latitude >= 0.0);
                 site_info_valid_ = true;
-                last_site_info_fetch_ = std::chrono::steady_clock::now();
+                last_site_info_fetch_ = clock_.now();
             }
         }
 
@@ -2414,7 +2427,7 @@ private:
             if (retry_mount_command("site longitude", [&]() { iOptronProtocolWrapper::instance().set_longitude(longitude); })) {
                 site_longitude_cached_ = longitude;
                 site_info_valid_ = true;
-                last_site_info_fetch_ = std::chrono::steady_clock::now();
+                last_site_info_fetch_ = clock_.now();
             }
         }
 
@@ -2474,121 +2487,183 @@ private:
         info.dst_active = (local_tm.tm_isdst > 0);
         return info;
     }
-    
-    void start_clock_sync_thread() {
-        // clock_sync_mutex_ serializes start/stop from overlapping
-        // set_connected bodies (sync PUT vs async connect task) — both run
-        // after mutex_ is released, so without this guard two callers can
-        // join and assign clock_sync_thread_ concurrently (UB), or a second
-        // start can overwrite a still-joinable thread (std::terminate).
-        // The clock-sync body never takes clock_sync_mutex_, so joining
-        // under it cannot deadlock. Same shape as reap_slew_dispatch().
-        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
-        stop_clock_sync_thread_locked();
-        clock_sync_cancel_.store(false);
-        clock_sync_thread_ = std::thread([this]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            if (clock_sync_cancel_.load()) {
-                return;
-            }
 
-            std::optional<double> lat, lon;
-            std::optional<int> elev;
-            bool do_clock_sync = false;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || clock_sync_cancel_.load()) {
-                    return;
-                }
-                lat = pending_site_latitude_;
-                lon = pending_site_longitude_;
-                elev = pending_site_elevation_;
-                do_clock_sync = sync_time_on_connect_;
-            }
-
-            auto& protocol = iOptronProtocolWrapper::instance();
-
-            if (lat.has_value()) {
-                double latitude = lat.value();
-                retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); });
-                retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); });
-            }
-            if (lon.has_value()) {
-                double longitude = lon.value();
-                retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); });
-            }
-
-            if (do_clock_sync) {
-                auto tz_info = compute_local_timezone_info();
-                auto now_utc = std::chrono::system_clock::now();
-                retry_mount_command("timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); });
-                retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); });
-                retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); });
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                if (!connected_ || clock_sync_cancel_.load()) {
-                    return;
-                }
-                if (lat.has_value()) {
-                    site_latitude_cached_ = lat.value();
-                    hemisphere_north_ = (lat.value() >= 0.0);
-                    site_info_valid_ = true;
-                    last_site_info_fetch_ = std::chrono::steady_clock::now();
-                }
-                if (lon.has_value()) {
-                    site_longitude_cached_ = lon.value();
-                    site_info_valid_ = true;
-                    last_site_info_fetch_ = std::chrono::steady_clock::now();
-                }
-                if (elev.has_value()) {
-                    site_elevation_m_ = elev.value();
-                }
-                if (do_clock_sync) {
-                    auto tz_info = compute_local_timezone_info();
-                    timezone_offset_minutes_ = tz_info.offset_minutes;
-                    timezone_offset_valid_ = true;
-                    dst_observed_ = tz_info.dst_active;
-                    last_utc_set_ = std::chrono::system_clock::now();
-                    last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-                    last_utc_valid_ = true;
-                }
+    // Starts the clock-sync body on the clock-sync slot (decision 0006). start() cancels nothing
+    // itself: it supersedes the previous body, whose waits wake at once, and never waits for it.
+    // Call without mutex_ held (the body takes it). Clock sync is not an ASCOM async operation and
+    // ITelescopeV4 has no completion property for it, so a body that throws is kept by the slot
+    // (clock_sync_failure()) and logged, until the next start().
+    void start_clock_sync() {
+        clock_sync_.start([this](util::OperationContext& ctx) {
+            try {
+                run_clock_sync(ctx);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_WARN("iOptron", std::string("Clock sync failed: ") + e.what());
+                throw;
             }
         });
     }
 
-    void stop_clock_sync_thread() {
-        std::lock_guard<std::mutex> tlock(clock_sync_mutex_);
-        stop_clock_sync_thread_locked();
-    }
-
-    void stop_clock_sync_thread_locked() {
-        clock_sync_cancel_.store(true);
-        if (clock_sync_thread_.joinable()) {
-            clock_sync_thread_.join();
+    void run_clock_sync(util::OperationContext& ctx) {
+        if (!ctx.wait_for(std::chrono::milliseconds(250))) {
+            return;
         }
-        clock_sync_cancel_.store(false);
-    }
+        if (clock_sync_test_hook_) {
+            clock_sync_test_hook_();
+        }
 
-    // Join the async slew dispatch thread (if any) and reset its cancel flag.
-    // Must be called WITHOUT mutex_ held — the dispatch thread takes mutex_,
-    // so joining under the lock would deadlock. The thread only dispatches a
-    // single command (no long sleeps), so the join is quick.
-    // open-astro#768: join under slew_dispatch_mutex_ (the dispatch never
-    // takes it) and touch the cancel flag only there, so a second reaper waits
-    // for the first join instead of returning early and clearing the cancel
-    // the queued dispatch still has to see. Same shape as
-    // stop_clock_sync_thread_locked().
-    void reap_slew_dispatch() {
-        std::lock_guard<std::mutex> tlock(slew_dispatch_mutex_);
-        if (slew_dispatch_thread_.joinable()) {
-            slew_dispatch_cancel_.store(true);
-            slew_dispatch_thread_.join();
-            slew_dispatch_cancel_.store(false);
+        std::optional<double> lat, lon;
+        std::optional<int> elev;
+        bool do_clock_sync = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                return;
+            }
+            lat = pending_site_latitude_;
+            lon = pending_site_longitude_;
+            elev = pending_site_elevation_;
+            do_clock_sync = sync_time_on_connect_;
+        }
+
+        auto& protocol = iOptronProtocolWrapper::instance();
+
+        if (lat.has_value()) {
+            double latitude = lat.value();
+            retry_mount_command("site latitude", [&]() { protocol.set_latitude(latitude); }, &ctx);
+            retry_mount_command("hemisphere", [&]() { protocol.set_hemisphere(latitude >= 0.0); }, &ctx);
+        }
+        if (lon.has_value()) {
+            double longitude = lon.value();
+            retry_mount_command("site longitude", [&]() { protocol.set_longitude(longitude); }, &ctx);
+        }
+
+        if (do_clock_sync) {
+            auto tz_info = compute_local_timezone_info();
+            auto now_utc = std::chrono::system_clock::now();
+            retry_mount_command(
+                "timezone offset", [&]() { protocol.set_timezone_offset(tz_info.offset_minutes); }, &ctx);
+            retry_mount_command("DST flag", [&]() { protocol.set_dst_observed(tz_info.dst_active); }, &ctx);
+            retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); }, &ctx);
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+                return;
+            }
+            if (lat.has_value()) {
+                site_latitude_cached_ = lat.value();
+                hemisphere_north_ = (lat.value() >= 0.0);
+                site_info_valid_ = true;
+                last_site_info_fetch_ = clock_.now();
+            }
+            if (lon.has_value()) {
+                site_longitude_cached_ = lon.value();
+                site_info_valid_ = true;
+                last_site_info_fetch_ = clock_.now();
+            }
+            if (elev.has_value()) {
+                site_elevation_m_ = elev.value();
+            }
+            if (do_clock_sync) {
+                auto tz_info = compute_local_timezone_info();
+                timezone_offset_minutes_ = tz_info.offset_minutes;
+                timezone_offset_valid_ = true;
+                dst_observed_ = tz_info.dst_active;
+                last_utc_set_ = std::chrono::system_clock::now();
+                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
+                last_utc_valid_ = true;
+            }
         }
     }
 
+    // Cancel and join the clock-sync body. Without mutex_ held. clock_sync_reap_mutex_ serializes
+    // reapers across the whole join (docs/failures/0011): a second caller would otherwise see an empty
+    // slot while the first still owns the running body, and disconnect would tear the protocol down
+    // under it. The body never takes it.
+    void stop_clock_sync() {
+        std::lock_guard<std::mutex> reap(clock_sync_reap_mutex_);
+        clock_sync_.cancel_all_and_join();
+    }
+
+    // Cancel and join the async slew dispatch on the slew slot (decision 0006).
+    // Must be called WITHOUT mutex_ held -- the body takes mutex_, so joining
+    // under the lock would deadlock -- and every caller holds
+    // slew_handoff_mutex_ (or is the destructor), because the slot requires
+    // its reapers to be serialized across the whole join. The body sends one
+    // command (no long waits), so the join is quick.
+    // open-astro#768: abort and disconnect fence the dispatch through this.
+    void reap_slew_dispatch() { slew_.cancel_all_and_join(); }
+
+    // Starts `body` on the slew slot after the initiator published its state
+    // and bumped slew_operation_generation_. Call without mutex_ held, under
+    // slew_handoff_mutex_. A refused start (no thread) undoes the published
+    // state and restores the error the initiator cleared.
+    void start_slew_body(std::uint64_t generation, std::string& previous_slew_error, const char* failure_prefix,
+                         std::function<void(util::OperationContext&)> body) {
+        try {
+            if (before_slew_reap_) before_slew_reap_();
+            // The previous dispatch is cancelled and joined first, so a newer
+            // initiator never leaves an older body running (open-astro#768).
+            reap_slew_dispatch();
+            slew_.start(std::move(body));
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (generation == slew_operation_generation_) {
+                slew_in_progress_ = false;
+                clear_slew_override_locked();
+                last_slew_error_ = std::move(previous_slew_error);
+            }
+            throw AlpacaException(std::string(failure_prefix) + ": " + e.what(), AlpacaError::DriverException);
+        }
+    }
+
+    // The body of an async slew: takes mutex_, stands down when a newer
+    // initiator, MoveAxis, Park, disconnect or AbortSlew got there first, and
+    // records a real failure in last_slew_error_ (never one caused by its own
+    // cancellation). `dispatch` runs under mutex_.
+    template <typename Dispatch>
+    void run_slew_body(util::OperationContext& ctx, std::uint64_t generation, const char* label, Dispatch&& dispatch) {
+        if (before_slew_worker_lock_) before_slew_worker_lock_();
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A superseding initiator already cleared/replaced the GOTO state
+        // before bumping this generation; never publish or clear state owned
+        // by that newer operation.
+        if (generation != slew_operation_generation_) return;
+        if (!connected_ || ctx.stop_reason() != util::StopReason::None) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            return;
+        }
+        try {
+            dispatch();
+        } catch (const std::exception& e) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            if (ctx.stop_reason() == util::StopReason::None) {
+                last_slew_error_ = std::string(label) + " failed: " + e.what();
+            }
+            ALPACA_LOG_WARN("iOptron", std::string(label) + " dispatch failed: " + e.what());
+        } catch (...) {
+            slew_in_progress_ = false;
+            clear_slew_override_locked();
+            if (ctx.stop_reason() == util::StopReason::None) {
+                last_slew_error_ = std::string(label) + " failed with an unknown error";
+            }
+            ALPACA_LOG_WARN("iOptron", std::string(label) + " dispatch failed with unknown exception");
+        }
+    }
+
+public:
+    void set_slew_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slew_.set_spawn_for_testing(std::move(spawn));
+    }
+    void set_clock_sync_hook_for_testing(std::function<void()> hook) { clock_sync_test_hook_ = std::move(hook); }
+    void start_clock_sync_for_testing() { start_clock_sync(); }
+    std::optional<std::string> clock_sync_failure_for_testing() const { return clock_sync_.last_failure(); }
+
+private:
     std::chrono::system_clock::time_point current_utc_time_locked() const {
         if (!last_utc_valid_) {
             return std::chrono::system_clock::now();
@@ -2601,7 +2676,7 @@ private:
                                                     double longitude_degrees) {
         using namespace std::chrono;
         const double unix_epoch_jd = 2440587.5;
-        double days_since_epoch = duration_cast<seconds>(utc_time.time_since_epoch()).count() / 86400.0;
+        double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
         double jd = unix_epoch_jd + days_since_epoch;
         double T = (jd - 2451545.0) / 36525.0;
         double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) +
@@ -2709,7 +2784,12 @@ private:
         }
         return false;
     }
-    
+
+    // Task waits, settle/poll sleeps and deadlines run on this clock (open-astro#1223,
+    // decision 0005). Real by default; UTC pointing time stays on system_clock
+    // (decision 0001) and serial/TCP I/O timeouts stay real. Declared first:
+    // later members are initialised from it.
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     // Set by the auto-detect factories; empty for an explicit port or host.
@@ -2814,13 +2894,22 @@ private:
     mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
     mutable bool last_utc_valid_;
     mutable bool slew_in_progress_ = false;
+    // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
+    // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide
+    // arrives mid-motion. Set by park()/find_home() and move_axis(), cleared by
+    // refresh_status_cache_locked() once a fresh status reports at home after a FindHome, or no motion
+    // past the initiator's override, and by AbortSlew, any new initiator but MoveAxis
+    // (supersede_slew_dispatch_locked, which Unpark also calls) and disconnect.
+    enum class DriverMotion : std::uint8_t { None, Park, Home, Goto };
+    mutable DriverMotion driver_motion_ = DriverMotion::None;
     // open-astro#575: an async slew that fails AFTER the initiator returned
     // (mount rejects the GOTO, soft-failed and logged as a no-op) used to
     // leave Slewing read FALSE -- indistinguishable from a landed goto. Set
-    // (under mutex_) on a REAL failure (never on the dispatch thread's own
+    // (under mutex_) on a REAL failure (never on the dispatch body's own
     // cancellation), cleared by the next slew initiator and by AbortSlew.
     // Consulted by get_slewing() before the cached status.
     mutable std::string last_slew_error_;
+    std::uint64_t slew_operation_generation_ = 0;
     static constexpr int kMaxSlewRefines = 3;
     mutable int slew_refine_count_ = 0;
     mutable double slew_target_ra_hours_ = 0.0;
@@ -2835,55 +2924,70 @@ private:
     mutable std::chrono::steady_clock::time_point tracking_override_until_{};
     mutable std::chrono::steady_clock::time_point tracking_rate_override_until_{};
     mutable std::chrono::steady_clock::time_point slew_override_until_{};
-    std::thread clock_sync_thread_;
-    std::atomic<bool> clock_sync_cancel_;
-    // Guards clock_sync_thread_ join/assign across overlapping set_connected
-    // bodies — see start_clock_sync_thread(). Never taken by the body.
-    std::mutex clock_sync_mutex_;
-    // Async slew dispatch thread (never detached) — see reap_slew_dispatch().
-    // slew_dispatch_mutex_ guards the thread handle and every write of the
-    // cancel flag; the dispatch body never takes it.
-    std::mutex slew_dispatch_mutex_;
-    std::thread slew_dispatch_thread_;
-    std::atomic<bool> slew_dispatch_cancel_{false};
+    // Serializes clock-sync reapers across the join; see stop_clock_sync().
+    std::mutex clock_sync_reap_mutex_;
+    // Test seam, set before connect: runs on the clock-sync body after its start delay.
+    std::function<void()> clock_sync_test_hook_;
     std::optional<double> pending_site_latitude_;
     std::optional<double> pending_site_longitude_;
     std::optional<double> pending_site_elevation_;
     bool sync_time_on_connect_;
+    const std::function<void()> before_slew_worker_lock_;
+    const std::function<void()> before_slew_reap_;
+    const std::function<void()> before_handoff_lock_;
+    std::mutex slew_handoff_mutex_;
+    // The async slew dispatch (decision 0006), declared last so the slot is destroyed, and its body
+    // joined, before any member the body touches. Private generation: only start() bumps it, while the
+    // driver's own slew_operation_generation_ stays the supersede guard (MoveAxis, Park and FindHome bump
+    // it without the handoff lock).
+    util::OperationGeneration slew_slot_generation_;
+    util::AsyncOperation slew_{"iOptron slew", slew_slot_generation_, clock_};
+    // The connect-time clock-sync body (decision 0006); its own generation, so a slew start never
+    // supersedes it. Declared after everything the body touches.
+    util::OperationGeneration clock_sync_generation_;
+    util::AsyncOperation clock_sync_{"iOptron clock sync", clock_sync_generation_, clock_};
 };
 
 // Factory function implementation
-std::unique_ptr<TelescopeDriver> create_ioptron_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info)
-{
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                          util::TaskClock& clock) {
+    return std::make_unique<iOptronTelescopeDriver>(device_number, connection_info, std::nullopt, std::nullopt,
+                                                    std::nullopt, std::nullopt,
+                                                    util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
+}
+
+std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_slew_worker_hook(
+    int device_number, const ConnectionInfo& connection_info, std::function<void()> before_worker_lock,
+    std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
+    std::function<void()> before_slew_reap, std::function<void()> before_handoff_lock, util::TaskClock& clock) {
     return std::make_unique<iOptronTelescopeDriver>(
-        device_number, connection_info, std::nullopt, std::nullopt, std::nullopt, std::nullopt);
+        device_number, connection_info, site_latitude_deg, site_longitude_deg, std::nullopt, std::nullopt,
+        util::ConnectionResolver<ConnectionInfo>{}, std::move(before_worker_lock), std::move(before_slew_reap),
+        std::move(before_handoff_lock), clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect)
-{
-    return std::make_unique<iOptronTelescopeDriver>(
-        device_number, connection_info, site_latitude_deg, site_longitude_deg, site_elevation_m,
-        sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
+    return std::make_unique<iOptronTelescopeDriver>(device_number, connection_info, site_latitude_deg,
+                                                    site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                    util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
     int device_number, util::ConnectionResolver<ConnectionInfo> connection_resolver,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect) {
+    std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
     if (!connection_resolver) {
         throw AlpacaException("iOptron telescope: a connection resolver is required", AlpacaError::InvalidValue);
     }
     return std::make_unique<iOptronTelescopeDriver>(device_number, ConnectionInfo{}, site_latitude_deg,
                                                     site_longitude_deg, site_elevation_m, sync_time_on_connect,
-                                                    std::move(connection_resolver));
+                                                    std::move(connection_resolver), std::function<void()>{},
+                                                    std::function<void()>{}, std::function<void()>{}, clock);
 }
 
 ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
@@ -2941,23 +3045,50 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number
                                                                std::optional<double> site_latitude_deg,
                                                                std::optional<double> site_longitude_deg,
                                                                std::optional<double> site_elevation_m,
-                                                               std::optional<bool> sync_time_on_connect) {
+                                                               std::optional<bool> sync_time_on_connect,
+                                                               util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
     return create_ioptron_telescope_deferred(
         device_number, [mount_index] { return resolve_ioptron_serial_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int device_number, int mount_index,
                                                                        std::optional<double> site_latitude_deg,
                                                                        std::optional<double> site_longitude_deg,
                                                                        std::optional<double> site_elevation_m,
-                                                                       std::optional<bool> sync_time_on_connect) {
+                                                                       std::optional<bool> sync_time_on_connect,
+                                                                       util::TaskClock& clock) {
     // The subnet sweep runs at connect time (#659), not here: at server
     // start-up the mount is usually still joining the access point.
     return create_ioptron_telescope_deferred(
         device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect);
+        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
+}
+
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_slew_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_clock_sync_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->set_clock_sync_hook_for_testing(std::move(hook));
+    }
+}
+
+void start_clock_sync_for_testing(TelescopeDriver& driver) {
+    if (auto* ioptron = dynamic_cast<iOptronTelescopeDriver*>(&driver)) {
+        ioptron->start_clock_sync_for_testing();
+    }
+}
+
+std::optional<std::string> clock_sync_failure_for_testing(const TelescopeDriver& driver) {
+    if (const auto* ioptron = dynamic_cast<const iOptronTelescopeDriver*>(&driver)) {
+        return ioptron->clock_sync_failure_for_testing();
+    }
+    return std::nullopt;
 }
 
 } // namespace alpacacore::vendor::ioptron

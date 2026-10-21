@@ -66,6 +66,11 @@ struct FakeZwoState {
     // Answer ":GU" as a stopped mount and ":GR"/":GD" with a fixed position
     // (12h, +45 deg), so Slewing and RA/Dec reads reach the mount's answer.
     std::atomic<bool> serve_position{false};
+    // What ":GAT" answers: tracking on (the default) or off.
+    std::atomic<bool> tracking_on{true};
+    // A GOTO in flight that reports no tracking: ":GU" answers "n#" (not
+    // tracking, no 'N': slewing) and ":GAT" "0#".
+    std::atomic<bool> goto_not_tracking{false};
 };
 
 // A chunk can carry more than one command, so count occurrences.
@@ -112,7 +117,15 @@ alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr
             return "1";
         }
         if (chunk.find(":GAT") != std::string::npos) {
-            return "1#";
+            return st->tracking_on.load() && !st->goto_not_tracking.load() ? "1#" : "0#";
+        }
+        if (st->goto_not_tracking.load() && chunk.find(":GU") != std::string::npos) {
+            return "n#";
+        }
+        // ":GU" carries the tracking flag too: 'n' is "not tracking", 'N' "not slewing". The status poll
+        // refreshes the cached Tracking state from it, so the fake must agree with ":GAT".
+        if (!st->tracking_on.load() && chunk.find(":GU") != std::string::npos) {
+            return "nN#";
         }
         if (st->serve_position.load()) {
             if (chunk.find(":GU") != std::string::npos) return "N#";
@@ -179,6 +192,83 @@ int setup_sent_after_return(const FakeZwoState& st, int at_return) {
 }
 
 }  // namespace
+
+TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking is false",
+          "[zwo][telescope][async][tracking-guard]") {
+    auto st = std::make_shared<FakeZwoState>();
+    st->tracking_on.store(false);
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE_FALSE(driver->get_tracking());
+
+    const auto require_code = [](const std::function<void()>& call, int code) {
+        try {
+            call();
+            FAIL("Expected an AlpacaException");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == code);
+        }
+    };
+    // Argument validation comes first: a bad Dec is InvalidValue even with Tracking off.
+    require_code([&] { driver->slew_to_coordinates(5.5, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_code([&] { driver->slew_to_coordinates_async(5.5, 95.0); }, alpacacore::AlpacaError::InvalidValue);
+
+    driver->set_target_right_ascension(5.5);  // the target forms need one; the setters write it to the mount
+    driver->set_target_declination(20.0);
+    const int targets_before = st->sr_count.load() + st->sd_count.load();
+    require_code([&] { driver->slew_to_coordinates(5.5, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_code([&] { driver->slew_to_coordinates_async(5.5, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
+    require_code([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_code([&] { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
+
+    // Neither a target write nor a GOTO reached the mount, and the driver is not slewing.
+    CHECK_FALSE(wait_until(
+        [&] { return st->goto_count.load() != 0 || st->sr_count.load() + st->sd_count.load() != targets_before; },
+        500));
+    CHECK(read_slewing(*driver) == SlewingRead::False);
+
+    // With the mount tracking the same call goes through.
+    st->tracking_on.store(true);
+    REQUIRE(wait_until([&] { return driver->get_tracking(); }, 5000));  // the cached read ages out after 2 s
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    CHECK(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    driver->set_connected(false);
+}
+
+// ":GU" may drop the tracking flag while a GOTO runs: a retarget of the driver's own GOTO is not refused for
+// it, past the 5 s force window too. A commanded Tracking=false is still off.
+TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused for Tracking",
+          "[zwo][telescope][async][tracking-guard]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    REQUIRE(driver->get_tracking());
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    st->goto_not_tracking.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5500));  // past the 5 s Slewing force window
+    REQUIRE(wait_until([&] { return !driver->get_tracking(); }, 3000));
+    CHECK(read_slewing(*driver) == SlewingRead::True);
+
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
+    CHECK(wait_until([&] { return st->goto_count.load() >= 2; }, 5000));
+
+    // Tracking=false during the GOTO is a commanded off: the next slew is refused, nothing more sent.
+    driver->set_tracking(false);
+    try {
+        driver->slew_to_coordinates_async(6.5, 25.0);
+        FAIL("Expected an AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
+    CHECK_FALSE(wait_until([&] { return st->goto_count.load() > 2; }, 500));
+    driver->set_connected(false);
+}
 
 TEST_CASE("ZWO slew completion waits for the final coordinate pair", "[zwo][telescope][async][arrival]") {
     const bool reject_final = GENERATE(false, true);
@@ -603,6 +693,33 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
 
     CHECK(std::abs(driver->get_right_ascension() - mount_ra) < 1e-6);
     CHECK(std::abs(driver->get_declination() - mount_dec) < 1e-6);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure",
+          "[zwo][telescope][async][slewfailure]") {
+    auto st = std::make_shared<FakeZwoState>();
+    alpacacore::test::FakeMountServer server(zwo_responder(st));
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+
+    st->reject_sr.store(true);
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5000));
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+
+    // Platform 7 may resend Connected=true while already connected. That is
+    // only a refresh, not a successful motion recovery.
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK(read_slewing(*driver) == SlewingRead::Threw);
+
+    // A full successful reconnect is a valid recovery and clears the old error.
+    st->reject_sr.store(false);
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const SlewingRead after_reconnect = read_slewing(*driver);
+    CHECK((after_reconnect == SlewingRead::True || after_reconnect == SlewingRead::False));
     driver->set_connected(false);
 }
 

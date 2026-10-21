@@ -269,6 +269,22 @@ TEST_CASE("WandererAstro FilterWheel Driver - Silent link refuses Position and m
     CHECK_NOTHROW(driver->set_connected(false));
 }
 
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("WandererAstro FilterWheel Driver - Connect with empty serial port names portPath",
+          "[wandererastro][filterwheel][unit]") {
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_filterwheel(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+}
+
 // ---------------------------------------------------------------------------
 // Issue #1202: the filter wheel opens its port through util::SerialLink, so a port
 // another device holds is refused untouched, its own claim is released on

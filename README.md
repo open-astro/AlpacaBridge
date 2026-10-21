@@ -3,6 +3,7 @@
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
 [![CI](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/ci.yml)
+[![Nightly Build](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml/badge.svg)](https://github.com/open-astro/AlpacaBridge/actions/workflows/nightly-build.yml)
 [![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Debian%2013%20arm64-orange.svg)](#supported-hardware)
 [![ConformU](https://img.shields.io/badge/ConformU-validated%20on%20hardware-success.svg)](SUPPORTED-DRIVERS.md)
@@ -19,7 +20,7 @@ Flash it. Plug in your gear. Image from anywhere on your network with N.I.N.A., 
 ## Why AlpacaBridge
 
 - **Proven, not promised.** Every driver is [validated with ASCOM ConformU](SUPPORTED-DRIVERS.md), on the actual hardware it supports.
-- **83 validated devices. Fifteen brands. One server.** Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
+- **92 validated devices. Sixteen brands. One server.** Altair, Astroasis, Celestron, Gemini, iOptron, Canon and Nikon DSLRs, OnStep, Player One Astronomy, QHY, Sky-Watcher, SVBONY, ToupTek Astro, Unihedron SQM-LE (WeeWX plugin), WandererAstro, WeeWX, and ZWO.
 - **Plug in and go.** Vendor SDKs and udev rules come bundled. USB and Wi-Fi devices are auto-detected. No port hunting.
 - **Manage it from a browser.** Configure every device from the built-in web UI, from any machine on your network.
 - **Set it and forget it.** Installs from the OpenAstro APT repository, runs as a systemd service, starts on boot, updates with `apt upgrade`.

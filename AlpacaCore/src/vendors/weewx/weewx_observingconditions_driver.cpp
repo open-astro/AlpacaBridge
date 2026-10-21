@@ -267,6 +267,9 @@ std::string http_get(const std::string& url, std::chrono::milliseconds timeout) 
     std::string response;
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    // The URL is user-set: only http and https, also after a redirect, never file://, ldap:// etc.
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(timeout.count()));
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
@@ -296,14 +299,18 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config)
+    WeeWxObservingConditionsDriver(int device_number, WeeWxHttpConfig config, WeeWxFetcher fetcher)
         : AsyncConnectable(kDriverComponent),
           device_number_(device_number),
           config_(std::move(config)),
+          fetcher_(std::move(fetcher)),
           connected_(false),
           poll_running_(false) {
         if (config_.url.empty()) {
             throw AlpacaException("WeeWX URL is required", AlpacaError::InvalidValue);
+        }
+        if (!fetcher_) {
+            throw AlpacaException("WeeWX fetcher is required", AlpacaError::InvalidValue);
         }
     }
 
@@ -326,9 +333,7 @@ public:
         return DeviceType::ObservingConditions;
     }
 
-    std::string get_unique_id() const override {
-        return "WEEWX_OC_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "WEEWX_OC_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "WeeWX ObservingConditions from HTTP JSON";
@@ -463,10 +468,6 @@ public:
         return get_value_or_nan(&SensorSnapshot::sky_temperature_c, "skytemperature");
     }
 
-    double get_seeing() const override {
-        throw AlpacaException("Seeing not implemented", AlpacaError::PropertyNotImplemented);
-    }
-
     double get_star_fwhm() const override {
         throw AlpacaException("StarFWHM not implemented", AlpacaError::PropertyNotImplemented);
     }
@@ -491,6 +492,10 @@ public:
         const std::string key = normalize_property_name(property_name);
         if (!key.empty() && !is_ascom_sensor_name(key)) {
             throw AlpacaException("Unknown sensor property", AlpacaError::InvalidValue);
+        }
+        // Parameter validation precedes the connection check (ASCOM contract).
+        if (!get_connected()) {
+            throw AlpacaException("Device not connected", AlpacaError::NotConnected);
         }
         // supported_properties_ is mutated by the poll thread under data_mutex_;
         // every read must hold the same lock.
@@ -591,7 +596,7 @@ private:
     }
 
     SensorSnapshot fetch_snapshot() const {
-        std::string payload = http_get(config_.url, config_.timeout);
+        std::string payload = fetcher_(config_.url, config_.timeout);
         return parse_snapshot(payload);
     }
 
@@ -643,6 +648,7 @@ private:
 
     int device_number_;
     WeeWxHttpConfig config_;
+    WeeWxFetcher fetcher_;
 
     std::atomic<bool> connected_;
 
@@ -681,7 +687,13 @@ std::optional<WeeWxCurrentValues> parse_weewx_current(std::string_view payload) 
 std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(
     int device_number,
     const WeeWxHttpConfig& config) {
-    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config);
+    return create_weewx_observingconditions(device_number, config, http_get);
+}
+
+std::unique_ptr<ObservingConditionsDriver> create_weewx_observingconditions(int device_number,
+                                                                            const WeeWxHttpConfig& config,
+                                                                            WeeWxFetcher fetcher) {
+    return std::make_unique<WeeWxObservingConditionsDriver>(device_number, config, std::move(fetcher));
 }
 
 } // namespace alpacacore::vendor::weewx

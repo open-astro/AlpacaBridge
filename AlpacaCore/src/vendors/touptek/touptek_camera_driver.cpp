@@ -14,6 +14,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
 #include <alpacacore/vendor/touptek/touptek_sdk_wrapper.h>
 #include <alpacacore/version.h>
@@ -30,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::vendor::touptek {
@@ -71,9 +73,12 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk)
-        : AsyncConnectable("ToupTek"),
+    ToupTekCameraDriver(int device_number, int camera_index, ToupTekSDK& sdk, ToupCameraBranding branding,
+                        util::TaskClock& clock)
+        : AsyncConnectable(branding.label),
+          branding_(std::move(branding)),
           sdk_(sdk),
+          clock_(clock),
           device_number_(device_number),
           camera_index_(camera_index),
           handle_(nullptr),
@@ -109,7 +114,7 @@ public:
             try {
                 set_connected(false);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ToupTek", "Error during destruction: " + std::string(e.what()));
+                ALPACA_LOG_WARN(branding_.label, "Error during destruction: " + std::string(e.what()));
             }
         }
     }
@@ -122,21 +127,21 @@ public:
         if (camera_info_valid_ && !camera_info_.name.empty()) {
             return camera_info_.name;
         }
-        return "ToupTek Camera";
+        return branding_.label + " Camera";
     }
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!serial_number_.empty()) {
-            return "TOUPTEK_SN_" + serial_number_;
+            return branding_.unique_id_prefix + "_SN_" + serial_number_;
         }
-        return "TOUPTEK_" + std::to_string(device_number_);
+        return branding_.unique_id_prefix + "_" + std::to_string(device_number_);
     }
 
-    std::string get_description() const override { return "ToupTek Camera Driver"; }
-    std::string get_driver_info() const override { return "AlpacaCore ToupTek Camera Driver"; }
+    std::string get_description() const override { return branding_.label + " Camera Driver"; }
+    std::string get_driver_info() const override { return "AlpacaCore " + branding_.label + " Camera Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
     int get_interface_version() const override { return 4; }  // ICameraV4 (Platform 7)
 
@@ -198,7 +203,7 @@ public:
             // Enumerate and resolve the target camera.
             auto cameras = sdk.enumerate_cameras();
             if (cameras.empty()) {
-                throw AlpacaException("No ToupTek cameras detected", AlpacaError::NotConnected);
+                throw AlpacaException("No " + branding_.label + " cameras detected", AlpacaError::NotConnected);
             }
             if (camera_index_ < 0 || camera_index_ >= static_cast<int>(cameras.size())) {
                 throw AlpacaException("Camera index out of range", AlpacaError::InvalidValue);
@@ -206,9 +211,9 @@ public:
             camera_info_ = cameras[static_cast<std::size_t>(camera_index_)];
             camera_info_valid_ = true;
 
-            ALPACA_LOG_INFO("ToupTek", "SDK version: " + sdk.get_sdk_version());
-            ALPACA_LOG_INFO("ToupTek", "Opening camera index " +
-                std::to_string(camera_index_) + ": " + camera_info_.name);
+            ALPACA_LOG_INFO(branding_.label, "SDK version: " + sdk.get_sdk_version());
+            ALPACA_LOG_INFO(branding_.label,
+                            "Opening camera index " + std::to_string(camera_index_) + ": " + camera_info_.name);
 
             handle_ = sdk.open_camera_by_id(camera_info_.id);
 
@@ -218,21 +223,20 @@ public:
             try {
                 sdk.put_auto_exposure(handle_, false);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ToupTek", "put_AutoExpoEnable failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN(branding_.label, "put_AutoExpoEnable failed: " + std::string(e.what()));
             }
 
             try {
                 sdk.put_raw(handle_, 1);
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ToupTek", "put_Option(RAW) failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN(branding_.label, "put_Option(RAW) failed: " + std::string(e.what()));
             }
 
             if (camera_info_.bit_depth_max > 8) {
                 try {
                     sdk.put_bitdepth(handle_, 1);
                 } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ToupTek", "put_Option(BITDEPTH=1) failed: " +
-                                               std::string(e.what()));
+                    ALPACA_LOG_WARN(branding_.label, "put_Option(BITDEPTH=1) failed: " + std::string(e.what()));
                 }
             }
 
@@ -252,7 +256,7 @@ public:
                     sdk.get_size(handle_, width, height);
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded sensor size on failure.
-                    ALPACA_LOG_DEBUG("ToupTek", "get_Size failed: " + std::string(e.what()));
+                    ALPACA_LOG_DEBUG(branding_.label, "get_Size failed: " + std::string(e.what()));
                 }
                 if (width > 0 && height > 0) {
                     camera_info_.max_width = width;
@@ -275,7 +279,7 @@ public:
                     }
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded colour/format info on failure.
-                    ALPACA_LOG_DEBUG("ToupTek", "get_RawFormat failed: " + std::string(e.what()));
+                    ALPACA_LOG_DEBUG(branding_.label, "get_RawFormat failed: " + std::string(e.what()));
                 }
 
                 try {
@@ -286,7 +290,7 @@ public:
                     if (py > 0.0f) camera_info_.pixel_size_um_y = py;
                 } catch (const std::exception& e) {
                     // Best-effort: keep the preloaded pixel size on failure.
-                    ALPACA_LOG_DEBUG("ToupTek", "get_PixelSize failed: " + std::string(e.what()));
+                    ALPACA_LOG_DEBUG(branding_.label, "get_PixelSize failed: " + std::string(e.what()));
                 }
 
                 serial_number_ = sdk.get_serial_number(handle_);
@@ -310,7 +314,7 @@ public:
             } catch (const std::exception& e) {
                 sdk.close_camera(handle_);
                 handle_ = nullptr;
-                throw AlpacaException(std::string("Failed to configure ToupTek camera: ") + e.what(),
+                throw AlpacaException("Failed to configure " + branding_.label + " camera: " + e.what(),
                                       AlpacaError::DriverException);
             }
 
@@ -396,13 +400,11 @@ public:
     void set_bin_y(int bin_y) override { set_bin_locked(bin_y, bin_y); }
 
     CameraState get_camera_state() const override {
-        if (!connected_.load()) return CameraState::Idle;
+        ensure_connected();
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ &&
-                std::chrono::steady_clock::now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN("ToupTek",
-                    "Exposure deadline exceeded; forcing CameraState=Idle.");
+            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
+                ALPACA_LOG_WARN(branding_.label, "Exposure deadline exceeded; forcing CameraState=Idle.");
                 // Publish the false-transition under readout_mutex_ too, so the
                 // invariant "exposure_active_ only changes under readout_mutex_"
                 // (which set_readout_mode relies on) holds on this path as well.
@@ -586,7 +588,7 @@ public:
             throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
         }
         if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
-            throw AlpacaException("Image not ready", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early("Image not ready");
         }
         return last_image_;
     }
@@ -708,7 +710,7 @@ public:
     }
 
     double get_percent_completed() const override {
-        if (!connected_.load()) return 0.0;
+        ensure_connected();
         if (!exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
             return image_ready_ ? 100.0 : 0.0;
@@ -781,8 +783,8 @@ public:
         // spec fully determines both axes, so this should be unreachable unless
         // the camera powers up in an undocumented mode). Log it so a real
         // occurrence is observable instead of silently reporting mode 0.
-        ALPACA_LOG_WARN("ToupTek", "Readout mode registers (CG=" + std::to_string(cur_cg) + ", HFW=" +
-                                       (cur_hfw ? "1" : "0") + ") match no enumerated mode; reporting mode 0");
+        ALPACA_LOG_WARN(branding_.label, "Readout mode registers (CG=" + std::to_string(cur_cg) + ", HFW=" +
+                                             (cur_hfw ? "1" : "0") + ") match no enumerated mode; reporting mode 0");
         return 0;
     }
     void set_readout_mode(int mode) override {
@@ -860,7 +862,7 @@ public:
         if (camera_info_valid_ && !camera_info_.model_name.empty()) {
             return camera_info_.model_name;
         }
-        return "ToupTek Sensor";
+        return branding_.label + " Sensor";
     }
     SensorType get_sensor_type() const override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -940,8 +942,8 @@ public:
         pulse_guiding_.store(true);
         pulse_guide_thread_ = std::thread([this, duration]() {
             std::unique_lock<std::mutex> plock(pulse_guide_mutex_);
-            const bool cancelled = pulse_guide_cv_.wait_for(plock, std::chrono::milliseconds(duration),
-                                                            [this] { return pulse_guide_cancel_; });
+            const bool cancelled = clock_.wait_for(plock, pulse_guide_cv_, std::chrono::milliseconds(duration),
+                                                   [this] { return pulse_guide_cancel_; });
             if (!cancelled) {
                 pulse_guiding_.store(false);  // natural completion
             }
@@ -960,10 +962,10 @@ public:
     // DeviceState (temperature first, then CoolerPower) right after connect
     // would serve the zero-initialised TEC values -- and keep serving them for
     // a whole exposure, since the freshness check is bypassed while exposing.
-    bool cache_fresh_locked(bool valid, std::chrono::steady_clock::time_point stamped) const {
+    bool cache_fresh_locked(bool valid, util::TaskClock::clock::time_point stamped) const {
         if (!valid) return false;
         if (exposure_active_.load()) return true;
-        return std::chrono::steady_clock::now() - stamped < kThermalCacheMaxAge;
+        return clock_.now() - stamped < kThermalCacheMaxAge;
     }
 
     // Each live read stamps only its own reading, so a getter's fallback read
@@ -971,7 +973,7 @@ public:
     // kThermalCacheMaxAge instead of every call hitting the SDK.
     void read_temperature_locked(HToupcam h, ToupTekSDK& sdk) const {
         temperature_cache_c_ = static_cast<double>(sdk.get_temperature_deciC(h)) / 10.0;
-        temperature_cache_time_ = std::chrono::steady_clock::now();
+        temperature_cache_time_ = clock_.now();
         temperature_cache_valid_ = true;
     }
 
@@ -981,7 +983,7 @@ public:
             tec_voltage_max_deciV_ = sdk.get_tec_voltage_max_deciV(h);
             tec_voltage_max_valid_ = true;
         }
-        tec_cache_time_ = std::chrono::steady_clock::now();
+        tec_cache_time_ = clock_.now();
         tec_cache_valid_ = true;
     }
 
@@ -1013,7 +1015,7 @@ public:
                 // First tick runs immediately (primes the cache); later ticks
                 // wait out the interval unless stopped.
                 if (!first) {
-                    thermal_cv_.wait_for(tlock, kThermalPollInterval, [this] { return thermal_stop_; });
+                    clock_.wait_for(tlock, thermal_cv_, kThermalPollInterval, [this] { return thermal_stop_; });
                 }
                 first = false;
                 if (thermal_stop_) return;
@@ -1033,7 +1035,7 @@ public:
                 // Transient SDK failure (e.g. USB hiccup mid-exposure): keep the
                 // last good values; the getters fall back to a live read once
                 // the cache ages out.
-                ALPACA_LOG_DEBUG("ToupTek", "Thermal poll failed: " + std::string(e.what()));
+                ALPACA_LOG_DEBUG(branding_.label, "Thermal poll failed: " + std::string(e.what()));
             }
         }
     }
@@ -1235,9 +1237,7 @@ public:
             exposure_failure_.clear();
             image_ready_ = false;
             image_cached_ = false;
-            exposure_deadline_ = std::chrono::steady_clock::now() +
-                std::chrono::microseconds(exposure_us) +
-                std::chrono::seconds(15);
+            exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
         }
 
@@ -1331,7 +1331,7 @@ public:
                 if (!got || !exposure_active_.load()) {
                     const char* failure_message = got ? "A frame arrived after the exposure was no longer active"
                                                       : "The camera failed to deliver the exposure frame";
-                    ALPACA_LOG_WARN("ToupTek", failure_message);
+                    ALPACA_LOG_WARN(branding_.label, failure_message);
                     // Publish the false-transition under readout_mutex_ so the
                     // invariant "exposure_active_ only changes under readout_mutex_"
                     // holds on the exposure thread's own exit paths too (matching
@@ -1390,9 +1390,9 @@ public:
             } catch (const ExposureAborted&) {
                 // Aborted before the frame started: the abort already forced the
                 // next exposure to re-init the stream; nothing to re-mark.
-                ALPACA_LOG_DEBUG("ToupTek", "Exposure aborted before the frame started");
+                ALPACA_LOG_DEBUG(branding_.label, "Exposure aborted before the frame started");
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN("ToupTek", "Exposure failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN(branding_.label, "Exposure failed: " + std::string(e.what()));
                 // Re-mark only the stage that did NOT complete, so the next
                 // exposure re-applies the failed reconfigure without needlessly
                 // restarting the stream for one that already succeeded.
@@ -1472,7 +1472,11 @@ private:
     // Injected SDK seam (issue #104): production passes the singleton
     // wrapper; tests pass a scripted fake. Reference outlives the driver
     // (singleton, or test-scoped fake created before the driver).
+    // Identity strings (ToupTek, or an OEM brand on the same SDK); fixed at
+    // construction, so read without a lock.
+    const ToupCameraBranding branding_;
     ToupTekSDK& sdk_;
+    util::TaskClock& clock_;
     int device_number_;
     int camera_index_;
     HToupcam handle_;
@@ -1520,7 +1524,7 @@ private:
 
     mutable std::atomic<bool> exposure_active_;
     std::thread exposure_thread_;
-    mutable std::chrono::steady_clock::time_point exposure_deadline_{};
+    mutable util::TaskClock::clock::time_point exposure_deadline_{};
     mutable bool exposure_deadline_valid_{false};
 
     // Thermal cache fed by thermal_poll_loop (all guarded by mutex_).
@@ -1530,9 +1534,9 @@ private:
     mutable int tec_voltage_deciV_{0};
     mutable int tec_voltage_max_deciV_{0};
     mutable bool tec_voltage_max_valid_{false};
-    mutable std::chrono::steady_clock::time_point temperature_cache_time_{};
+    mutable util::TaskClock::clock::time_point temperature_cache_time_{};
     mutable bool temperature_cache_valid_{false};
-    mutable std::chrono::steady_clock::time_point tec_cache_time_{};
+    mutable util::TaskClock::clock::time_point tec_cache_time_{};
     mutable bool tec_cache_valid_{false};
     // Poller lifecycle: member thread + stop flag/cv so disconnect and the
     // destructor can wake and join it (never detached).
@@ -1739,8 +1743,7 @@ private:
                 camera_info_valid_ = true;
             }
         } catch (const std::exception& e) {
-            ALPACA_LOG_DEBUG("ToupTek",
-                             "Preload enumerate failed: " + std::string(e.what()));
+            ALPACA_LOG_DEBUG(branding_.label, "Preload enumerate failed: " + std::string(e.what()));
         }
     }
 
@@ -1903,8 +1906,15 @@ std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camer
     return create_touptek_camera(device_number, camera_index, ToupTekSDKWrapper::instance());
 }
 
-std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk) {
-    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk);
+std::unique_ptr<CameraDriver> create_touptek_camera(int device_number, int camera_index, ToupTekSDK& sdk,
+                                                    util::TaskClock& clock) {
+    return create_toupcam_family_camera(device_number, camera_index, sdk, ToupCameraBranding{"ToupTek", "TOUPTEK"},
+                                        clock);
+}
+
+std::unique_ptr<CameraDriver> create_toupcam_family_camera(int device_number, int camera_index, ToupTekSDK& sdk,
+                                                           ToupCameraBranding branding, util::TaskClock& clock) {
+    return std::make_unique<ToupTekCameraDriver>(device_number, camera_index, sdk, std::move(branding), clock);
 }
 
 } // namespace alpacacore::vendor::touptek

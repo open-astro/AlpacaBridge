@@ -48,6 +48,22 @@ def matches(path, pattern):
     return re.fullmatch(expression, path) is not None
 
 
+def heading_anchors(text):
+    """GitHub's anchors for every Markdown heading in `text`: lower case, every
+    character that is not a letter, digit, space, hyphen or underscore dropped,
+    spaces turned into hyphens, and -1, -2 ... appended to repeats."""
+    anchors, seen = set(), {}
+    for line in FENCED_BLOCK_RE.sub('', text).splitlines():
+        m = re.match(r'^#{1,6} +(.+?) *#*$', line)
+        if not m:
+            continue
+        slug = re.sub(r'[^\w\- ]', '', m.group(1).strip().lower()).replace(' ', '-')
+        count = seen.get(slug, 0)
+        seen[slug] = count + 1
+        anchors.add(slug if count == 0 else '%s-%d' % (slug, count))
+    return anchors
+
+
 def check(root=ROOT):
     failures = []
     def require(ok, message):
@@ -125,14 +141,28 @@ def check(root=ROOT):
         # for the spaces in model names.
         text = FENCED_BLOCK_RE.sub('', path.read_text(encoding="utf-8", errors="replace"))
         targets = MARKDOWN_LINK_TARGET_RE.findall(text) + HTML_SRC_TARGET_RE.findall(text)
+        rel_path = path.relative_to(root).as_posix()
         for target in targets:
-            if target.startswith(('#', 'http:', 'https:', 'mailto:')):
+            if target.startswith(('http:', 'https:', 'mailto:')):
+                continue
+            fragment = unquote(target.split('#', 1)[1]) if '#' in target else ''
+            if target.startswith('#'):
+                # A same-file link must name one of the document's own headings.
+                require(not fragment or fragment in heading_anchors(text),
+                        '%s: link %s names a heading that does not exist' % (rel_path, target))
                 continue
             file = unquote(target.split('#', 1)[0])
             if path.parent == root and path.name in distinct_targets:
                 distinct_targets[path.name].add(file)
             require((path.parent / file).exists(), '%s: broken relative link %s'
                     % (path.relative_to(root).as_posix(), target))
+            # A link to a Markdown file that names a heading must name one that
+            # exists: renamed headings broke cross-file anchors silently (#1388;
+            # #1412 first checked the decision records).
+            target_path = path.parent / file
+            if fragment and file.endswith('.md') and target_path.is_file():
+                require(fragment in heading_anchors(target_path.read_text(encoding="utf-8", errors="replace")),
+                        '%s: link %s names a heading that does not exist' % (rel_path, target))
     for name, floor in ROOT_DOCUMENT_LINK_FLOORS.items():
         require(len(distinct_targets[name]) >= floor,
                 'only %d distinct relative link/src target(s) found in %s (floor %d): the file is missing, '
@@ -148,7 +178,7 @@ def self_test():
     assert matches('AlpacaCore/conformu/Player One/model/Linux-arm64.txt', 'AlpacaCore/conformu/Player One/**')
     assert not matches('AlpacaCore/src/vendors/celestron/x.cpp', 'AlpacaCore/src/vendors/gemini/**')
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
+        root = Path(tmp).resolve()  # macOS: /var is a symlink to /private/var
         for directory in ('.github/instructions', '.claude/rules', 'docs', 'AlpacaCore/src/vendors',
                           'AlpacaCore/include/alpacacore/vendor', 'AlpacaCore/tests',
                           '.claude/skills'):
@@ -173,6 +203,43 @@ def self_test():
             path.write_text(original)
         # A broken link is reported with its repo-relative path: two files
         # named README.md (or two records with one name) must be told apart.
+        assert 'hardware-free-driver-tests-via-the-sdk-seam--extend' in heading_anchors(
+            '### Hardware-free driver tests via the SDK seam — extend\n'), 'heading_anchors slug rule regressed'
+        assert 'a-1' in heading_anchors('## A\n## A\n'), 'heading_anchors does not number repeats'
+        anchor_probe = root / 'docs/decisions/zz-anchor.md'
+        anchor_probe.write_text('[x](../../.github/instructions/gemini.instructions.md#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        anchor_probe.unlink()
+        assert any('zz-anchor.md' in f and 'no-such-heading' in f for f in new_findings), \
+            'A decision-record link to a missing heading escaped the anchor check'
+        # Any document's link fragment is checked (#1388), not only the decision
+        # records': rename a heading a cross-file link targets, and break a
+        # same-file (#anchor) link.
+        probe = root / 'docs/failures/zz-anchor-probe.md'
+        probe.write_text('[x](../../.github/instructions/gemini.instructions.md#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        assert any('zz-anchor-probe.md' in f and 'no-such-heading' in f for f in new_findings), \
+            'A cross-file link to a missing heading outside docs/decisions escaped the anchor check'
+        probe.write_text('# Real\n[ok](#real) [bad](#no-such-heading)\n')
+        new_findings = set(check(root)) - baseline
+        probe.write_text('# Real\n[ok](#real)\n')
+        assert not (set(check(root)) - baseline), 'A same-file link to an existing heading was reported'
+        probe.unlink()
+        assert any('zz-anchor-probe.md' in f and '#no-such-heading' in f for f in new_findings), \
+            'A same-file (#anchor) link to a missing heading escaped the anchor check'
+        index = root / 'docs/architecture.md'
+        original = index.read_text(encoding="utf-8", errors="replace")
+        link = re.search(r'\]\(([^)#\s]+\.md)#([^)\s]+)\)', original)
+        assert link, 'docs/architecture.md has no cross-file anchor link for the rename mutation'
+        target = (index.parent / link[1]).resolve()
+        assert target.is_file() and root in target.parents, 'rename mutation target is not in the fixture'
+        target_text = target.read_text(encoding="utf-8", errors="replace")
+        target.write_text(re.sub(r'^(#{1,6} )', r'\1Renamed ', target_text, flags=re.M))
+        renamed = set(check(root)) - baseline
+        target.write_text(target_text)
+        assert any('docs/architecture.md' in f and 'names a heading that does not exist' in f
+                   for f in renamed), \
+            'Renaming the headings a cross-file link targets escaped the anchor check'
         broken = root / 'docs/decisions/zz-broken-link.md'
         broken.write_text('[gone](missing-target.md)\n')
         new_findings = set(check(root)) - baseline

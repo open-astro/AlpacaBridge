@@ -262,12 +262,12 @@ The result of calling this method is stored in the **DoCommandOutput()** propert
 
 6 Unlocks the serial port so that other processes can access it.
 
-9 Start an open loop move (see http://www.bisque.com/x2standard/class_open_loop_move_interface.html) where the qsParam is pipe separated string indicating a direction number and device dependent, zero based rate index number. For direction, North = 0, South = 1, East = 2, West = 3.
+9 Start an open loop move (see https://www.bisque.com/wp-content/x2standard/class_open_loop_move_interface.html) where the qsParam is pipe separated string indicating a direction number and device dependent, zero based rate index number. For direction, North = 0, South = 1, East = 2, West = 3.
 Here are two examples, to move North at the 2nd open loop move rate, set qsParam="0|1", to move West at the first open loop move rate set qsParam="3|0".
 
 10 Ends the open loop move.
 
-11 Returns 1 if a mount is beyond the pole otherwise 0 (see http://www.bisque.com/x2standard/class_asymmetrical_equatorial_interface.html).
+11 Returns 1 if a mount is beyond the pole otherwise 0 (see https://www.bisque.com/wp-content/x2standard/class_asymmetrical_equatorial_interface.html).
 
 12 Get/set the All Sky option "Use AllSky Image Link for scripted Image Link"
 

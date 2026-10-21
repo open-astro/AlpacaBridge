@@ -58,10 +58,25 @@ public:
     /// open-astro#728: reset the driver's connection, so its next send (a blind ":Q#" included) fails.
     void reset_link() { server_.reset_connections(); }
 
+    /// Firmware system status the ":GLS" read reports: 1 = tracking (default), 2 = slewing. Lets a test make the
+    /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
+    void set_system_status(int status) { system_status_.store(status); }
+
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
     /// make Connecting observable.
-    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+    void hold_next_reply(std::chrono::milliseconds delay) {
+        holding_.store(false);
+        hold_ms_.store(static_cast<int>(delay.count()));
+    }
+    // True once a held reply has begun waiting, before its command is recorded: a test uses it to act while the
+    // transaction is in flight. Latched until hold_next_reply() is called again.
+    bool wait_until_holding(std::chrono::milliseconds timeout) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!holding_.load() && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        return holding_.load();
+    }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -92,8 +107,10 @@ private:
     }
 
     std::string respond(const std::string& chunk) {
-        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
+            holding_.store(true);
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        }
         std::string out;
         std::string cmd;
         for (char ch : chunk) {
@@ -124,7 +141,10 @@ private:
             // sign + 16 digits (site), then 6 status digits: GPS, system
             // status (1 = tracking, 2 = slewing), rate, speed, time source,
             // hemisphere.
-            return "+0000000000000000010001#";
+            return std::string("+00000000000000000") + std::to_string(system_status_.load()) + "0001#";
+        }
+        if (cmd == ":GUT#") {
+            return "+00000000000000000#";
         }
         // The driver no longer reads :GAL / :GMT (#763). Keep these answers:
         // without them the old override failed its read and never sent :SAL /
@@ -169,9 +189,11 @@ private:
         return "0#";  // any other query: harmless, per-command parse failures are tolerated
     }
 
+    std::atomic<int> system_status_{1};
     std::string model_code_;
     double landing_error_arcsec_;
     std::atomic<int> hold_ms_{0};
+    std::atomic<bool> holding_{false};
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;
     long long pending_ra_ = 0;

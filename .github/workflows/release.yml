@@ -8,10 +8,10 @@
 # alpacabridge-dbgsym_<tag without v>_arm64.deb, each with a .sha256 that holds
 # the sha256sum line for that file name. A tester can also install a named
 # beta, or any release, without apt. The .deb gets a signed build provenance
-# attestation (the dbgsym is a subject of it too; Actions > Attestations), so
-# `gh attestation verify` proves this workflow built it from the tag. A Release
-# also has a name, a source archive (GitHub attaches the zip/tarball itself)
-# and its release notes.
+# attestation (the dbgsym is a subject of it too) and an SPDX SBOM attestation
+# (Actions > Attestations), so `gh attestation verify` proves this workflow
+# built it from the tag. A Release also has a name, a source archive (GitHub
+# attaches the zip/tarball itself) and its release notes.
 #
 # Flow: `/bump-release` cuts the release on a PR (VERSION, README badge,
 # dated CHANGELOG heading, plain-language notes in docs/releases/X.Y.Z.md),
@@ -221,14 +221,14 @@ jobs:
     name: Attach the .deb to the release
     permissions:
       contents: write       # gh release upload
-      id-token: write       # OIDC token Sigstore signs the attestation with
-      attestations: write   # store the provenance attestation
+      id-token: write       # OIDC token Sigstore signs the attestations with
+      attestations: write   # store the provenance and SBOM attestations
     needs: release
     runs-on: ubuntu-24.04-arm
     # Built on the target distribution so dpkg-shlibdeps derives trixie
     # package names (libgpiod3 and friends), not the runner's Ubuntu ones.
     container: debian:trixie
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       NOTES_NAME: ${{ needs.release.outputs.notes_name }}
@@ -275,6 +275,12 @@ jobs:
           dpkg-deb --info "dist/alpacabridge_${NOTES_NAME}_arm64.deb" | sed -n '/Package:/,/Depends:/p'
           ls -l dist
 
+      - name: Generate the SBOM
+        # The repository's own inventory (scripts/dependency_snapshot.py), not a
+        # scanner: the vendored SDK .so files in the package carry no metadata a
+        # scanner could identify.
+        run: python3 scripts/dependency_snapshot.py --spdx "dist/alpacabridge_${NOTES_NAME}_arm64.deb" --output dist/sbom.spdx.json
+
       # Attestations are public records, so a dry run stops before them.
       - name: Attest build provenance
         if: github.event_name == 'push'
@@ -283,6 +289,13 @@ jobs:
           subject-path: |
             dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
             dist/alpacabridge-dbgsym_${{ env.NOTES_NAME }}_arm64.deb
+
+      - name: Attest the SBOM
+        if: github.event_name == 'push'
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0 pinned (immutable ref)
+        with:
+          subject-path: dist/alpacabridge_${{ env.NOTES_NAME }}_arm64.deb
+          sbom-path: dist/sbom.spdx.json
 
       - name: Attach to the release
         if: github.event_name == 'push'

@@ -1,0 +1,7 @@
+### Breaking changes
+
+- **OnStep refuses an equatorial slew with `Tracking` false** (issue #1274): `SlewToCoordinatesAsync` and `SlewToTargetAsync`, the slews the router serves, used to start the GOTO with `Tracking` off and now raise `InvalidOperation` (0x40B). A client that slews without turning `Tracking` on first stops slewing OnStep mounts. **After upgrading:** turn `Tracking` on before slewing, including after Park/Unpark, FindHome or `Tracking=false`.
+
+### Changed
+
+- **OnStep refuses equatorial slews while `Tracking` is false** (issue #1274), the last telescope driver to follow the rule: `SlewToCoordinates`, `SlewToCoordinatesAsync`, `SlewToTarget` and `SlewToTargetAsync` now raise `InvalidOperation` (0x40B) with "<member> requires Tracking to be true", as ITelescopeV4 requires. A parked mount still raises `InvalidWhileParked` and an out-of-range coordinate `InvalidValue` first, and no target or GOTO command is sent to the mount for a refused slew. Alt/Az slews and syncs are unchanged. OnStepX turns tracking on by itself at the end of a GOTO (TeSeek HM-17), so before this change an untracked landing did not happen on OnStep; the change brings it in line with the interface and the other drivers. The refusal is a breaking change, see Breaking changes. Tests: `test_onstep_telescope.cpp` "OnStep Telescope Driver - an equatorial slew needs Tracking" and "OnStep Telescope Driver - an Alt/Az slew does not need Tracking".

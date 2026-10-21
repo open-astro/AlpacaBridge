@@ -17,6 +17,7 @@
 namespace alpacacore::catalog {
 
 void register_builtin_schemas(DeviceCatalog& catalog) {
+    register_altair_schema(catalog);
     register_astroasis_schema(catalog);
     register_skywatcher_schema(catalog);
     register_weewx_schema(catalog);
@@ -26,9 +27,19 @@ void register_builtin_schemas(DeviceCatalog& catalog) {
     register_bisque_schema(catalog);
     register_onstep_schema(catalog);
     register_celestron_schema(catalog);
+    register_synscan_schema(catalog);
+    register_qhy_schema(catalog);
+    register_touptek_schema(catalog);
+    register_gemini_schema(catalog);
+    register_wandererastro_schema(catalog);
+    register_zwo_schema(catalog);
+    register_ioptron_schema(catalog);
 }
 
 void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
+#ifdef ALPACACORE_ENABLE_ALTAIR
+    register_altair_factory(catalog);
+#endif
 #ifdef ALPACACORE_ENABLE_ASTROASIS
     register_astroasis_factory(catalog);
 #endif
@@ -46,6 +57,7 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_PLAYERONE
     register_playerone_factory(catalog);
+    register_ioptron_icam_factory(catalog);
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
     register_bisque_factory(catalog);
@@ -55,6 +67,27 @@ void register_builtin_factories([[maybe_unused]] DeviceCatalog& catalog) {
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
     register_celestron_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+    register_synscan_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_QHY
+    register_qhy_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_TOUPTEK
+    register_touptek_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+    register_gemini_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_WANDERERASTRO
+    register_wandererastro_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+    register_zwo_factory(catalog);
+#endif
+#ifdef ALPACACORE_ENABLE_IOPTRON
+    register_ioptron_factory(catalog);
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
     register_zwo_thermal_camera_lister(catalog);

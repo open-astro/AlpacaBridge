@@ -301,7 +301,12 @@ TEST_CASE("ToupTek camera - thermal poller primes the cache at connect and is si
         }
         return pred();
     };
-    REQUIRE(wait_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }, std::chrono::milliseconds(2000)));
+    // Wait on the tick's LAST read: it reads the temperature first and the TEC
+    // voltages after, so waiting on the temperature alone let the checks below
+    // run mid-tick, which the slow -O0 coverage build did (0 >= 1).
+    REQUIRE(
+        wait_until([&] { return fake.call_count("get_tec_voltage_max_deciV") >= 1; }, std::chrono::milliseconds(2000)));
+    CHECK(fake.call_count("get_temperature_deciC") >= 1);
     CHECK(fake.call_count("get_tec_voltage_deciV") >= 1);  // default fake camera supports the cooler
     CHECK(fake.call_count("get_tec_voltage_max_deciV") == 1);
 
@@ -743,5 +748,33 @@ TEST_CASE("ToupTek camera - malformed exposure failure clears on reconnect", "[t
     driver->set_connected(false);
     driver->set_connected(true);
     CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
+// open-astro#294: a wheel's DeviceState is the single Position member, so it already costs one
+// device read and the static members cost none; this pins that so a cache is not needed.
+// Falsified by: touptek_filterwheel_driver.cpp get_names() calling
+// sdk_.get_filter_wheel_position() (position reads 4 after the loop, not 1).
+TEST_CASE("ToupTek AFW - DeviceState is one device read and static members cost none",
+          "[touptek][filterwheel][unit][fakesdk]") {
+    FakeToupTekSDK fake;
+    FakeToupTekSDK::ToupFilterWheelInfo wheel;
+    wheel.id = "fake-afw-0";
+    wheel.name = "FakeAFW";
+    wheel.model_name = "AFW-M";
+    fake.wheels.push_back(wheel);
+    fake.wheel_position_script = {0, 0, 0, 0, 0, 0, 0, 0};
+
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
+    driver->set_connected(true);
+    const int base = fake.call_count("get_filter_wheel_position");
+
+    CHECK(driver->get_device_state().size() == 2);  // Position, TimeStamp
+    CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
+    for (int i = 0; i < 3; ++i) {
+        (void)driver->get_names();
+        (void)driver->get_focus_offsets();
+    }
+    CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
     driver->set_connected(false);
 }

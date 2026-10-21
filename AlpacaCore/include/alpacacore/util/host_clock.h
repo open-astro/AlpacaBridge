@@ -22,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace alpacacore::util {
@@ -62,6 +63,14 @@ public:
     using SetTimeFn = std::function<bool(std::chrono::system_clock::time_point, std::string& error)>;
     using HasRtcFn = std::function<bool()>;
 
+    // Result of writing the system time into the hardware RTC the host booted
+    // from (open-astro#296). NoDevice means no RTC has hctosys = 1: nothing
+    // was attempted and nothing is logged.
+    enum class RtcWrite : std::uint8_t { NoDevice, Written, Failed };
+    // Writes the CURRENT system time (hwclock --systohc semantics). `device`
+    // is set to the node written; `error` to the errno text on Failed.
+    using WriteRtcFn = std::function<RtcWrite(std::string& device, std::string& error)>;
+
     // Same window the /management/v1/synctime endpoint enforces.
     static constexpr std::int64_t kMinEpoch = 946684800;   // 2000-01-01T00:00:00Z
     static constexpr std::int64_t kMaxEpoch = 4102444800;  // 2100-01-01T00:00:00Z
@@ -79,6 +88,22 @@ public:
     // seven users through three sites (router, Sky-Watcher, ClientUtcWarning)
     // rather than literals that can drift apart.
     static constexpr std::chrono::milliseconds kClientDisagreementWarn{2000};
+    // A client UTCDate offset no longer describes the host when realtime was
+    // stepped independently of monotonic time. Shared by mount pointing clocks.
+    static bool clock_was_stepped(std::chrono::system_clock::duration system_elapsed,
+                                  std::chrono::steady_clock::duration steady_elapsed,
+                                  std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000)) {
+        const auto system_ms = std::chrono::duration_cast<std::chrono::milliseconds>(system_elapsed);
+        const auto steady_ms = std::chrono::duration_cast<std::chrono::milliseconds>(steady_elapsed);
+        const auto drift = system_ms - steady_ms;
+        return drift > tolerance || drift < -tolerance;
+    }
+
+    // A client offset is a pointing fallback only when the host was not
+    // already disciplined at the UTCDate write.
+    static bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized) {
+        return offset_survives && !host_was_synchronized;
+    }
     // host_booted_from_rtc() re-probes a missing RTC at most this often; a
     // refresh_rtc() that lands sooner returns the cached answer. The server's
     // probe timer (Config::rtc_probe_interval_seconds) must run SLOWER than
@@ -97,12 +122,13 @@ public:
     // production Router, built by the Server before it listens. Code that
     // must build one elsewhere injects a HasRtcFn that does no I/O.
     HostClock()
-        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc) {
-    }
+        : HostClock(&HostClock::kernel_is_synchronized, &HostClock::kernel_set_time, &HostClock::host_booted_from_rtc,
+                    &HostClock::kernel_write_rtc) {}
     HostClock(
-        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; })
+        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; },
+        WriteRtcFn write_rtc = [](std::string&, std::string&) { return RtcWrite::NoDevice; })
         : hooks_(std::make_shared<const Hooks>(
-              Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc)})) {
+              Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc), std::move(write_rtc)})) {
         // open-astro#314: prime the probe here, at construction, so that no
         // request path ever pays for it. Construction is startup, where a
         // wedged I2C bus costs a second that nobody is waiting on (see the
@@ -126,9 +152,11 @@ public:
      * they describe what has happened to the host clock, which swapping the
      * probes does not undo. enabled() likewise carries over.
      */
-    void set_hooks(IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; }) {
-        auto next =
-            std::make_shared<const Hooks>(Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc)});
+    void set_hooks(
+        IsSynchronizedFn is_synchronized, SetTimeFn set_time, HasRtcFn has_rtc = [] { return false; },
+        WriteRtcFn write_rtc = [](std::string&, std::string&) { return RtcWrite::NoDevice; }) {
+        auto next = std::make_shared<const Hooks>(
+            Hooks{std::move(is_synchronized), std::move(set_time), std::move(has_rtc), std::move(write_rtc)});
         {
             std::lock_guard<std::mutex> lock(mutex_);
             hooks_ = std::move(next);
@@ -172,7 +200,8 @@ public:
     // loaded the clock from a hardware RTC at boot -- open-astro#292), or
     // "none". The RTC answer is a cached atomic read since open-astro#314,
     // never a bus transaction: the probe runs on the server's timer thread,
-    // so neither this nor step_from_client() can queue behind an I2C RTC.
+    // so this cannot queue behind an I2C RTC. (A stepping step_from_client()
+    // or mark_stepped() does pay one RTC write, #296.)
     std::string source() const {
         if (synchronized()) {
             return "ntp";
@@ -189,14 +218,15 @@ public:
     // True when the kernel loaded system time from a hardware RTC at boot and
     // that RTC is not obviously dead. This is a statement about where the
     // clock CAME FROM, not about how accurate it is: nothing on an NTP-less
-    // host verifies or rewrites the RTC, so it may still be wrong or drifting.
+    // host verifies the RTC (it is rewritten only after a client or Sync Time
+    // step), so it may still be wrong or drifting.
     // Reporting only -- the stepping decision never looks at it.
     //
     // open-astro#314: a memory read in every case. The underlying probe reads
     // sysfs, which on a bus-attached RTC (DS3231, PCF85063) is a real I2C
     // transaction that can block for the adapter timeout on a wedged bus --
     // about a second. This is called from warn_if_clock_undisciplined() on the
-    // ITelescopeV4 connect initiator, which AGENTS.md times against the 1 s
+    // ITelescopeV4 connect initiator, which ascom-contract.instructions.md times against the 1 s
     // STANDARD target and which holds the device connection op mutex, and from
     // the description endpoint the web UI polls. Neither may probe.
     bool has_rtc() const { return rtc_.load(std::memory_order_relaxed); }
@@ -204,8 +234,8 @@ public:
     /**
      * Re-run the RTC probe and cache the answer. Called once at construction
      * and thereafter only from off the request path: the server's dedicated
-     * RTC probe thread (open-astro#314), and, when it lands, after this process writes
-     * the RTC itself (open-astro#307).
+     * RTC probe thread (open-astro#314). A step's RTC write only invalidates the
+     * settled probe (open-astro#307); that thread re-reads on its next tick.
      *
      * Cheap and safe to call when the answer has already settled: the probe
      * itself short-circuits, and it is rate-limited to once per
@@ -219,6 +249,21 @@ public:
     // its since_epoch reading must be after kMinPlausibleEpoch. A battery-less
     // Raspberry Pi 5 RTC hands the kernel 2000-01-01 and must not count.
     static bool host_booted_from_rtc();
+
+    // Forget a settled host_booted_from_rtc() answer and the re-probe rate
+    // limit, so the next probe reads the RTC afresh. Called after this process
+    // wrote the RTC: a battery-less RTC that handed the kernel 2000-01-01 was
+    // settled "implausible" and would otherwise read ClockSource "none" for
+    // the life of the process (open-astro#307).
+    static void invalidate_rtc_probe();
+
+    // Test seam: read the RTC sysfs tree from `root` instead of
+    // /sys/class/rtc ("" restores it).
+    static void set_sysfs_root_for_test(const std::string& root);
+
+    // ioctl(RTC_SET_TIME) with the current UTC system time on the /dev/rtcN
+    // whose /sys/class/rtc/rtcN/hctosys reads 1. Never throws.
+    static RtcWrite kernel_write_rtc(std::string& device, std::string& error);
 
     // A sanity floor, not an accuracy check: comfortably after the dead-RTC
     // defaults (1970 and 2000-01-01) and before any real deployment.
@@ -299,6 +344,7 @@ public:
             stepped_ = true;
         }
         r.outcome = Outcome::Stepped;
+        write_rtc_after_step(*snapshot, r.delta);
         return r;
     }
 
@@ -309,8 +355,13 @@ public:
      * clock was never set and the connect-time warning would keep firing.
      */
     void mark_stepped() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        stepped_ = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stepped_ = true;
+        }
+        // The caller set the clock itself and only calls this on success. It
+        // does not know the delta, so the INFO line carries none.
+        write_rtc_after_step(*hooks(), std::nullopt);
     }
 
     static const char* outcome_name(Outcome o) {
@@ -379,7 +430,12 @@ private:
         IsSynchronizedFn is_synchronized;
         SetTimeFn set_time;
         HasRtcFn has_rtc;
+        WriteRtcFn write_rtc;
     };
+
+    // After a successful step: write the system time into the boot RTC, then
+    // invalidate the settled probe. Never throws; a failure is logged once.
+    void write_rtc_after_step(const Hooks& hooks, std::optional<std::chrono::milliseconds> delta);
 
     std::shared_ptr<const Hooks> hooks() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -395,6 +451,7 @@ private:
     bool enabled_ = true;
     mutable bool stepped_ = false;
     bool step_failed_ = false;
+    bool rtc_write_warned_ = false;  // under mutex_: the WARN is once until a write succeeds
 };
 
 }  // namespace alpacacore::util

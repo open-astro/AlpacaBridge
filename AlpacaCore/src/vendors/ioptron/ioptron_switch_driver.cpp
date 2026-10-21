@@ -48,11 +48,11 @@ public:
     // Issue #358: hand the connect-failure reason to the router.
     ALPACA_EXPOSE_CONNECT_ERROR()
 
-    IoptronSwitchDriver(int device_number, IoptronSwitchConfig config)
+    IoptronSwitchDriver(int device_number, IoptronSwitchConfig config, IoptronGpioBackend* backend = nullptr)
         : AsyncConnectable(kLogCategory),
           device_number_(device_number),
           config_(std::move(config)),
-          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz) {
+          wrapper_(config_.gpio_chip_path, config_.ports, config_.pwm_frequency_hz, backend) {
         switch_names_.reserve(config_.ports.size());
         for (const auto& p : config_.ports) {
             switch_names_.emplace_back(p.name);
@@ -76,7 +76,9 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "iOptron_iMate_PowerBox_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override {
+        return "iOptron_iMate_PowerBox_" + std::to_string(device_number_);
+    }
 
     std::string get_description() const override {
         return "iOptron " + config_.model_name + " DC power switch (" + config_.gpio_chip_path + ")";
@@ -291,6 +293,11 @@ private:
 
 std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config) {
     return std::make_unique<IoptronSwitchDriver>(device_number, std::move(config));
+}
+
+std::unique_ptr<SwitchDriver> create_ioptron_switch(int device_number, IoptronSwitchConfig config,
+                                                    IoptronGpioBackend& backend) {
+    return std::make_unique<IoptronSwitchDriver>(device_number, std::move(config), &backend);
 }
 
 }  // namespace alpacacore::vendor::ioptron

@@ -35,7 +35,10 @@ set(TEST_SOURCES
     test_motion_limits.cpp
     test_poll_settle.cpp
     test_rotator_sync_offset_store.cpp
+    test_unique_id.cpp
+    test_state_snapshot.cpp
     test_task_clock.cpp
+    test_utc_offset.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_connection_resolver.cpp
@@ -51,6 +54,10 @@ set(TEST_SOURCES
 if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_camera.cpp)
     list(APPEND TEST_SOURCES test_zwo_camera_identity.cpp)
+    list(APPEND TEST_SOURCES test_zwo_camera_catalog.cpp)
+    list(APPEND TEST_SOURCES test_zwo_fake_sdk.cpp)
+    list(APPEND TEST_SOURCES test_zwo_seam_fakes.cpp)
+    list(APPEND TEST_SOURCES test_zwo_camera_clock.cpp)
     list(APPEND TEST_SOURCES test_zwo_focuser.cpp)
     list(APPEND TEST_SOURCES test_zwo_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_zwo_concurrency_stress.cpp)
@@ -66,6 +73,7 @@ if(TARGET alpacacore_zwo)
 endif()
 
 if(TARGET alpacacore_qhy)
+    list(APPEND TEST_SOURCES test_qhy_enumeration.cpp)
     list(APPEND TEST_SOURCES test_qhy_camera.cpp)
     list(APPEND TEST_SOURCES qhy_camera_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_qhy_filterwheel.cpp)
@@ -76,6 +84,7 @@ if(TARGET alpacacore_qhy)
     # Q-Focuser: serial JSON protocol, no SDK; the pty fake gives it a real
     # connect path, so it carries its own [stress] registration.
     list(APPEND TEST_SOURCES test_qhy_focuser.cpp)
+    list(APPEND TEST_SOURCES test_qhy_focuser_snapshot.cpp)
     list(APPEND TEST_SOURCES test_qhy_focuser_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_qhy_focuser_deferred_connect.cpp)
@@ -97,21 +106,30 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_park.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
+    # Refused operation-slot starts leave the mount stopped and the state consistent.
+    list(APPEND TEST_SOURCES test_synscan_slot.cpp)
+    # A new initiator replaces a goto body blocked in an exchange without waiting for it (issue #1407).
+    list(APPEND TEST_SOURCES test_synscan_initiator_supersede.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
     # Precise e/z replies decode the upper 24 bits of each field (issue #785).
     list(APPEND TEST_SOURCES test_synscan_precise_position.cpp)
     list(APPEND TEST_SOURCES test_synscan_goto_landing.cpp)
+    # Getters and DeviceState served from the polled snapshot (issue #1247).
+    list(APPEND TEST_SOURCES test_synscan_telescope_snapshot.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_synscan_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_telescope.cpp
         test_skywatcher_async.cpp test_skywatcher_serial.cpp
-        test_skywatcher_pointing.cpp)
+        test_skywatcher_pointing.cpp
+        test_skywatcher_link_loss.cpp test_skywatcher_snapshot.cpp)
     # Altitude floor / meridian limit: goto target check over the fake mount
     # (open-astro#436).
     list(APPEND TEST_SOURCES test_skywatcher_motion_limits.cpp)
+    # Goto backlash compensation over the fake mount (open-astro#437).
+    list(APPEND TEST_SOURCES test_skywatcher_backlash.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
@@ -126,6 +144,8 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
+    # Clock-sync body runs on an operation slot (issue #1368).
+    list(APPEND TEST_SOURCES test_ioptron_clock_sync_slot.cpp)
     # AbortSlew fences the async dispatch thread (issue #768).
     list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.
@@ -133,6 +153,9 @@ if(TARGET alpacacore_ioptron)
         test_ioptron_ieaf_focuser_deferred_connect.cpp)
     # Serial-port ownership of the mount, iEAF and iEFW links (issue #1202).
     list(APPEND TEST_SOURCES test_ioptron_serial_ownership.cpp)
+    # iGuider guide camera (UVC over V4L2) and its [stress] registration, over
+    # FakeIGuiderV4L2.
+    list(APPEND TEST_SOURCES test_ioptron_iguider_camera.cpp test_ioptron_iguider_concurrency_stress.cpp)
     # The PowerBox Switch test only builds when its driver was compiled in
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_IOPTRON_POWERBOX)
@@ -148,11 +171,13 @@ if(TARGET alpacacore_onstep)
     list(APPEND TEST_SOURCES test_onstep_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_onstep_telescope_deferred_connect.cpp)
+    # Serial link loss and relink over a pty fake (decision 0009, issue #1241).
+    list(APPEND TEST_SOURCES test_onstep_link_loss.cpp)
     # Serial-port ownership over a pty (issue #1202).
     list(APPEND TEST_SOURCES test_onstep_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_weewx)
-    # ObservingConditions [stress] coverage over an unreachable URL, #271.
+    # ObservingConditions [stress] coverage over a scripted fetcher, #271, #1070.
     list(APPEND TEST_SOURCES test_weewx_observingconditions.cpp test_weewx_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_gemini)
@@ -162,6 +187,8 @@ if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_gemini_focuser_deferred_connect.cpp)
+    # Getters served from a util::StateSnapshot (open-astro#1229).
+    list(APPEND TEST_SOURCES test_gemini_focuser_snapshot.cpp)
     # Serial-port ownership through util::SerialLink (issue #1202).
     list(APPEND TEST_SOURCES test_gemini_serial_ownership.cpp)
 endif()
@@ -195,7 +222,10 @@ if(TARGET alpacacore_gphoto)
     list(APPEND TEST_SOURCES test_gphoto_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_celestron)
-    list(APPEND TEST_SOURCES test_celestron_telescope.cpp)
+    list(APPEND TEST_SOURCES test_celestron_telescope.cpp test_celestron_cgx_protocol.cpp
+         test_celestron_cgx_geometry.cpp test_celestron_cgx_telescope.cpp
+         test_celestron_cgx_telemetry.cpp
+         test_celestron_cgx_concurrency_stress.cpp)
     # Same telescope [stress] coverage as SynScan (audit 3.0.1 follow-up).
     list(APPEND TEST_SOURCES test_celestron_concurrency_stress.cpp)
     list(APPEND TEST_SOURCES test_celestron_async_park.cpp)
@@ -203,11 +233,14 @@ if(TARGET alpacacore_celestron)
     list(APPEND TEST_SOURCES test_celestron_telescope_deferred_connect.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_celestron_async_slew_failure.cpp)
+    # Focus motor on its own USB port (issue #896).
+    list(APPEND TEST_SOURCES test_celestron_focuser.cpp test_celestron_focuser_concurrency_stress.cpp)
     # Serial-port ownership over a pty handset (issue #1202).
     list(APPEND TEST_SOURCES test_celestron_serial_ownership.cpp)
 endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
+    list(APPEND TEST_SOURCES test_bisque_telescope_snapshot.cpp)
     # Covers the mutex-guarded get_connected() driver shape in the [stress]
     # pool (PR #115 round-2 ABBA regression coverage).
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
@@ -227,7 +260,14 @@ if(TARGET alpacacore_touptek)
     # (i.e. libgpiod >= 2.0 was available).
     if(ALPACACORE_TOUPTEK_STELLAVITA)
         list(APPEND TEST_SOURCES test_touptek_switch.cpp)
+        list(APPEND TEST_SOURCES test_touptek_powerbox_seam.cpp)
     endif()
+endif()
+if(TARGET alpacacore_altair)
+    # Runs over the ToupTek fake SDK (fake_touptek_sdk.h): the Altair camera is
+    # the ToupTek camera driver behind the same seam.
+    list(APPEND TEST_SOURCES test_altair_camera.cpp)
+    list(APPEND TEST_SOURCES altair_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_camera.cpp)
@@ -297,6 +337,10 @@ if(TARGET alpacacore_touptek)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_touptek)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_TOUPTEK)
 endif()
+if(TARGET alpacacore_altair)
+    target_link_libraries(alpacacore_tests PRIVATE alpacacore_altair)
+    target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_ALTAIR)
+endif()
 if(TARGET alpacacore_playerone)
     target_link_libraries(alpacacore_tests PRIVATE alpacacore_playerone)
     target_compile_definitions(alpacacore_tests PRIVATE ALPACACORE_ENABLE_PLAYERONE)
@@ -320,6 +364,12 @@ if(UNIX AND TARGET alpacacore_qhy AND TARGET alpacacore_zwo)
     target_link_options(alpacacore_tests PRIVATE "LINKER:--allow-multiple-definition")
 endif()
 include(CTest)
+if(TARGET alpacacore_svbony)
+    add_test(NAME svbony_sdk_symbol_isolation
+        COMMAND "${CMAKE_NM}" -D --defined-only "$<TARGET_FILE:alpacacore_tests>")
+    set_tests_properties(svbony_sdk_symbol_isolation PROPERTIES
+        FAIL_REGULAR_EXPRESSION "[ \t]libusb_")
+endif()
 # Include Catch2's test discovery module
 include(${Catch2_DIR}/Catch.cmake)
 catch_discover_tests(alpacacore_tests)

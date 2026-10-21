@@ -116,6 +116,12 @@ public:
     void set_garbage(bool on) { garbage_.store(on); }
     int kicks() const { return kicks_.load(); }
 
+    /// Stay silent: every command is recorded and none is answered, the shape
+    /// of a hung MCU behind a healthy port. The link stays alive, so the driver
+    /// sees timeouts, never a vanished node. Each unanswered exchange costs the
+    /// driver its full serial timeout (3 s).
+    void set_muted(bool on) { muted_.store(on); }
+
 private:
     void run() {
         std::string pending;
@@ -167,6 +173,7 @@ private:
             std::lock_guard<std::mutex> lock(mutex_);
             commands_.push_back(cmd);
         }
+        if (muted_.load()) return;
         const int id = field(cmd, "cmd_id");
         std::string reply;
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
@@ -252,6 +259,7 @@ private:
     std::atomic<bool> one_behind_{false};
     std::string held_reply_;
     std::atomic<bool> garbage_{false};
+    std::atomic<bool> muted_{false};
     std::atomic<int> kicks_{0};
 };
 

@@ -16,14 +16,17 @@
 #include <alpacacore/vendor/svbony/svbony_sdk_wrapper.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -46,6 +49,11 @@ namespace alpacacore::test {
 //   verify the native wrapper's SVB_ERROR_TIMEOUT translation.
 class FakeSVBSDK final : public vendor::svbony::SVBSDK {
 public:
+    // Test-only hook, null by default: runs on the calling thread at the top of get_video_data() and
+    // pulse_guide(), before the fake takes its mutex, so it may advance a FakeTaskClock. Set it before the
+    // driver exists and never change it while a call is in flight (FakeGPhotoSDK::before_call ownership).
+    std::function<void(const std::string&)> before_call;
+
     using CameraInfo = vendor::svbony::SVBCameraInfo;
     using ControlCaps = vendor::svbony::SVBControlCaps;
     using Control = vendor::svbony::SVBControlType;
@@ -91,6 +99,9 @@ public:
         return true;
     }
     void open_camera(int camera_id) override {
+        // Outside the mutex, so the delay holds only the caller (the driver's connect), not other fake calls.
+        const auto delay = std::chrono::milliseconds(open_delay_ms_.load());
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard lock(mutex_);
         record_locked("open_camera");
         maybe_fail_locked("open_camera");
@@ -222,6 +233,7 @@ public:
     }
     vendor::svbony::SVBVideoDataResult get_video_data(int camera_id, std::uint8_t* buffer, long capacity,
                                                       int wait_ms) override {
+        if (before_call) before_call("get_video_data");
         std::unique_lock lock(mutex_);
         last_video_wait_ms_ = wait_ms;
         record_locked("get_video_data");
@@ -300,6 +312,7 @@ public:
         return vendor::svbony::SVBVideoDataResult::Frame;
     }
     void pulse_guide(int camera_id, vendor::svbony::SVBGuideDirection, int) override {
+        if (before_call) before_call("pulse_guide");
         std::lock_guard lock(mutex_);
         record_locked("pulse_guide");
         maybe_fail_locked("pulse_guide");
@@ -368,6 +381,10 @@ public:
     void set_auto(Control control, bool is_auto) {
         std::lock_guard lock(mutex_);
         auto_values_[control] = is_auto;
+    }
+    // Holds each open_camera() for `delay` (bounded, never indefinite), so a test can observe Connecting.
+    void set_open_delay(std::chrono::milliseconds delay) {
+        open_delay_ms_.store(std::clamp<std::int64_t>(delay.count(), 0, 20000));
     }
     void set_max_read_wait(std::chrono::milliseconds timeout) {
         std::lock_guard lock(mutex_);
@@ -468,6 +485,7 @@ private:
     std::size_t last_buffer_capacity_{0};
     int last_video_wait_ms_{0};
     int max_read_wait_ms_{250};
+    std::atomic<std::int64_t> open_delay_ms_{0};
     int timeout_reads_remaining_{0};
     int completed_video_data_reads_{0};
     int open_count_{0};

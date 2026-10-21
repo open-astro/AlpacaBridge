@@ -82,7 +82,7 @@ install_udev_rules() {
   fi
 
   # QHY cameras require firmware files that the udev rules load via fxload.
-  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.06.04"
+  local qhy_sdk_dir="${CORE_DIR}/external/QHY/sdk_linux_arm64_26.07.28"
   if [[ -d "${qhy_sdk_dir}/lib/firmware/qhy" ]]; then
     echo "Installing QHY firmware files from ${qhy_sdk_dir}/lib/firmware/qhy"
     sudo mkdir -p /lib/firmware/qhy
@@ -128,8 +128,16 @@ install_udev_rules() {
     sudo ldconfig
   fi
 
+  # Install Altair Camera shared library (ToupTek OEM SDK under Altair's name)
+  local altair_lib_dir="${CORE_DIR}/external/Altair/altaircamsdk.20260531/linux/arm64/glibc"
+  if [[ -f "${altair_lib_dir}/libaltaircam.so" ]]; then
+    echo "Installing Altair Camera shared library to /usr/local/lib"
+    sudo cp -a "${altair_lib_dir}/libaltaircam.so"* /usr/local/lib/
+    sudo ldconfig
+  fi
+
   # Install Player One Camera shared library (SmartGuider dlopens this directly)
-  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.0/lib/arm64"
+  local playerone_lib_dir="${CORE_DIR}/external/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64"
   if [[ -f "${playerone_lib_dir}/libPlayerOneCamera.so" ]]; then
     echo "Installing Player One Camera shared library to /usr/local/lib"
     sudo cp -a "${playerone_lib_dir}/libPlayerOneCamera.so"* /usr/local/lib/
@@ -155,7 +163,29 @@ clean_build_dir() {
   fi
 }
 
+# libgphoto2 is bundled: the gphoto driver links the copy that
+# scripts/build_bundled_gphoto.sh builds from the vendored tarball into
+# /usr/lib/alpacabridge/libgphoto2 (the distro's libgphoto2 is not used). Build it
+# when it is missing or at another version; otherwise skip. Keep this function
+# identical in build_and_run.sh and install_alpaca_service.sh.
+ensure_bundled_gphoto() {
+  [[ "${CORE_VENDORS}" == "ON" && "${OSTYPE:-}" == "linux"* ]] || return 0
+  local pins LIBGPHOTO2_VER pc
+  pins="$("${ROOT_DIR}/scripts/build_bundled_gphoto.sh" --print-pins)"
+  LIBGPHOTO2_VER="$(sed -n 's/^LIBGPHOTO2_VER=//p' <<<"${pins}")"
+  pc="/usr/lib/alpacabridge/libgphoto2/lib/pkgconfig/libgphoto2.pc"
+  if [[ "$(sed -n 's/^Version: //p' "${pc}" 2>/dev/null)" == "${LIBGPHOTO2_VER}" ]]; then
+    return 0
+  fi
+  echo "Building bundled libgphoto2 ${LIBGPHOTO2_VER}"
+  sudo "${ROOT_DIR}/scripts/build_bundled_gphoto.sh"
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger
+}
+
 build_projects() {
+  ensure_bundled_gphoto
+
   local parallel
   parallel="$(detect_parallel)"
 

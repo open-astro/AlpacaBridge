@@ -12,6 +12,14 @@ Status: accepted
 
 `join_or_abandon()` never rethrows: `stop()` and `wait()` both return normally even when the underlying thread had to be detached rather than confirmed joined, with only a logged `ERROR` distinguishing the two. This was a deliberate call, not an oversight: propagating the failure only from `wait()` (leaving `stop()` quiet, since `stop()` must not throw — that is the #402 lesson, a port conflict becoming an abort at a different layer) would need a second parameter threaded through `join_server_thread()`/`join_or_abandon()` and a new exception type, for a fault path (`ESRCH`/`EINVAL` on a handle that isn't the caller's own thread) neither this decision nor the review that revised it could demonstrate is reachable through the current test harness. Adding untested branching to the most safety-critical function in this file for an unfalsifiable path is the wrong trade; the log line is the intended signal until a concrete need for a stronger one appears.
 
+## Rules
+
+The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
+
+1. Every path that reads, moves, assigns or joins `server_thread_` goes through `join_server_thread()`, so exactly one caller owns the join and other callers wait for it. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/include/alpacahttp/server.h`. Checked by: `AlpacaHTTP/tests/test_server_socket.cpp` (concurrent-stop, same-object retry and stop()/wait() race cases).
+2. Every lifecycle thread join in `stop()`, `wait()` and `join_orphaned_threads()` uses `join_or_abandon()`, which never retries a failed join and never rethrows. Scope: `AlpacaHTTP/src/http/server.cpp`, `AlpacaHTTP/src/http/thread_join.h`. Checked by: `AlpacaHTTP/tests/test_thread_join.cpp`.
+3. A thread is detached only as the `join_or_abandon()` fault fallback, never as the normal teardown path. Scope: `AlpacaHTTP/src/http/server.cpp`. Checked by: review.
+
 ## Alternatives rejected
 
 Return early when `running_` is false: leaves a failed-start thread joinable. Join directly from each caller: concurrent joins are undefined behavior. Detach the worker as the NORMAL teardown path (not the `join_or_abandon()` fault-path fallback below), or let a losing caller return while another joins: teardown can free state the worker still uses. Hold the ownership mutex through `join()`: can deadlock while the accept loop unwinds.

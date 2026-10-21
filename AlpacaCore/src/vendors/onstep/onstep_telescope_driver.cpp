@@ -12,23 +12,31 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/motion_policy.h>
+#include <alpacacore/util/task_clock.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <functional>
 #include <mutex>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <thread>
 
 namespace alpacacore::vendor::onstep {
@@ -44,9 +52,23 @@ constexpr auto kPositionCacheTtl = std::chrono::seconds(2);
 constexpr auto kStatusCacheTtl = std::chrono::seconds(2);
 constexpr auto kSiteInfoRetryDelay = std::chrono::seconds(2);
 constexpr auto kSlewForceGrace = std::chrono::seconds(2);
+// open-astro#1378: how far inside the horizon and overhead limits a MoveAxis
+// re-send must stay.
+constexpr double kAltitudeLimitMarginDeg = 1.0;
+// open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
+// time limit (10 s by default) does not end it. Tests advance a FakeTaskClock.
+constexpr auto kMoveAxisResendInterval = std::chrono::seconds(7);
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
+// OnStepX numbers its releases from 10 (the HM-17 answers :GVN# with
+// "10.23a"); legacy OnStep is 4.x and older. Only OnStepX knows :GXEE#.
+bool is_onstepx_version(const std::string& version) {
+    std::size_t digits = 0;
+    while (digits < version.size() && std::isdigit(static_cast<unsigned char>(version[digits]))) ++digits;
+    return digits > 0 && digits <= 4 && std::stoi(version.substr(0, digits)) >= 10;
+}
+
 constexpr double kInformationalGuideRateDegPerSec = (15.0411 / 3600.0) * 0.5;
 
 double wrap_hours(double hours) {
@@ -59,8 +81,7 @@ double wrap_hours(double hours) {
 
 double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time, double longitude_degrees) {
     using namespace std::chrono;
-    double days_since_epoch =
-        static_cast<double>(duration_cast<seconds>(utc_time.time_since_epoch()).count()) / 86400.0;
+    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
     double jd = 2440587.5 + days_since_epoch;
     double t = (jd - 2451545.0) / 36525.0;
     double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - (t * t * t) / 38710000.0;
@@ -124,8 +145,10 @@ public:
     OnStepTelescopeDriver(int device_number, const ConnectionInfo& connection_info,
                           std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
                           std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {})
+                          util::ConnectionResolver<ConnectionInfo> connection_resolver = {},
+                          util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("OnStep"),
+          clock_(clock),
           device_number_(device_number),
           connection_info_(connection_info),
           connection_resolver_(std::move(connection_resolver)),
@@ -138,11 +161,11 @@ public:
 
     ~OnStepTelescopeDriver() override {
         // MUST be first, before members the async connection task touches
-        // are destroyed (AsyncConnectable base contract). This driver spawns
-        // no other worker threads: OnStep's LX200 text commands (:MS#, guide
-        // pulses, park/unpark, move-axis) are all quick round trips issued
-        // synchronously, so there is nothing else to cancel/join here.
+        // are destroyed (AsyncConnectable base contract). The only other
+        // worker is the MoveAxis re-send (#1378), joined next without mutex_
+        // (it takes mutex_ to send).
         shutdown_connection();
+        move_axis_resend_.cancel_all_and_join();
         if (connected_) {
             try {
                 // OnStepTelescopeDriver is the most-derived class (no further
@@ -153,6 +176,9 @@ public:
                 // Best-effort teardown during destruction.
             }
         }
+        // Last: the process-wide wrapper must not keep a clock that may die
+        // with this driver (a test's FakeTaskClock).
+        OnStepProtocolWrapper::instance().release_task_clock(clock_);
     }
 
     int get_device_number() const override { return device_number_; }
@@ -161,7 +187,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
-    std::string get_unique_id() const override { return "OnStep_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "OnStep_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "OnStep LX200-Protocol Telescope Driver"; }
 
@@ -183,9 +209,32 @@ public:
 
     int get_interface_version() const override { return 4; }
 
+    // Lock-free on purpose (open-astro#910): set_connected(true) holds mutex_
+    // for the whole connect (port open, handshake, site and time sync, cache
+    // warm-up, and an auto-detect scan when the port is not explicit). The
+    // router checks Connecting before most Connected reads, but DeviceState
+    // calls this with no such check, and a read that lands just before the
+    // connect task shows as running gets past it; with mutex_ taken here those
+    // waited for the whole connect. link_alive() takes no lock a connect holds: the wrapper mutex_
+    // only by try_lock, otherwise only short leaf mutexes (a stat(), a few fields).
+    // It reads published_connected_, raised only at the end of a connect, so
+    // Connected stays false while Connecting is true. Same rule as SynScan
+    // (#130); the blocking-driver list lives in async_connectable.h.
     bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
+        // A removed or re-enumerated adapter reads as not connected (#1241).
+        return published_connected_.load() && OnStepProtocolWrapper::instance().link_alive();
+    }
+
+    // Why the serial link was lost, kept until the next Connect or Disconnect
+    // (decision 0009). Wrapper state only: never waits on mutex_.
+    std::string get_link_fault() const override {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        (void)protocol.link_alive();  // notice an unplug the listing would otherwise miss
+        const std::string reason = protocol.link_lost_reason();
+        if (reason.empty()) {
+            return {};
+        }
+        return "Link to the mount lost (" + reason + "); reconnect";
     }
 
     void connect() override { start_connection_task(true); }
@@ -196,6 +245,16 @@ public:
 
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
+        auto& protocol = OnStepProtocolWrapper::instance();
+        // A Connected=true against a lost link must reconnect, not return as
+        // already connected (decision 0009 point 4, #1241).
+        if (connected && connected_ && !protocol.link_alive()) {
+            ALPACA_LOG_WARN("OnStep", "Connect requested on a lost link; reconnecting");
+            published_connected_ = false;
+            protocol.disconnect();
+            connected_ = false;
+            reset_session_state_locked();
+        }
         // Base gates BEFORE the idempotency check: a sync disconnect during
         // an in-flight connect looks idempotent (both sides see
         // disconnected) and would be silently dropped without the record; a
@@ -210,8 +269,9 @@ public:
             return;
         }
 
-        auto& protocol = OnStepProtocolWrapper::instance();
         if (connected) {
+            // The wrapper's loss stamps read this driver's clock (decision 0005).
+            protocol.set_task_clock(clock_);
             // An auto-detected mount resolves its port here, not in the factory (#659).
             util::connect_resolved(
                 connection_info_, connection_resolved_, connection_resolver_,
@@ -232,30 +292,45 @@ public:
                 },
                 "OnStep");
             connected_ = true;
+            stop_motion_after_long_outage_locked(protocol);
             status_cache_valid_ = false;
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
             site_info_valid_ = false;
-            last_utc_valid_ = false;
+            utc_offset_.clear();
             client_disagreement_warned_ = false;
+            firmware_reports_guide_move_ = false;
             target_ra_set_ = false;
             target_dec_set_ = false;
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
+            clear_manual_motion_locked();
             slewing_cached_ = false;
             slew_force_until_ = std::chrono::steady_clock::time_point::min();
             pulse_guiding_active_ = false;
-            tracking_before_slew_ = true;
+            tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
+            std::string firmware_version;
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
                 try {
                     std::string product = protocol.get_product_name();
-                    std::string version = protocol.get_version_number();
-                    firmware_cache_ = product + (version.empty() ? "" : (" " + version));
+                    firmware_version = protocol.get_version_number();
+                    firmware_cache_ = product + (firmware_version.empty() ? "" : (" " + firmware_version));
                 } catch (...) {  // NOLINT(bugprone-empty-catch)
                     firmware_cache_.clear();
+                }
+            }
+
+            // OnStepX applies refraction to the RA/Dec it reports unless it was
+            // built for observed-place coordinates; :GXEE# says which (#1216).
+            refraction_from_firmware_.reset();
+            if (is_onstepx_version(firmware_version)) {
+                try {
+                    if (const auto mode = protocol.get_mount_coords_mode()) {
+                        refraction_from_firmware_ = (*mode != 0);
+                    }
+                } catch (...) {  // NOLINT(bugprone-empty-catch)
+                    // Unknown: DoesRefraction keeps the settable local flag.
                 }
             }
 
@@ -313,13 +388,12 @@ public:
             }
 
             // Warm caches so the first property reads stay within ConformU's
-            // fast-response targets. NOTE: this does not help the very first
-            // DeviceState call — ConformU's Connect()/Connected preamble
-            // issues a fast connect/disconnect/reconnect dance and calls
-            // DeviceState immediately after, faster than this warm-up can
-            // complete (measured: DeviceState's ~0.65s live-read cost is
-            // identical whether or not this block runs). Kept anyway because
-            // every OTHER first-property-read benefits from it.
+            // fast-response targets. This covers the first DeviceState too:
+            // after ConformU's Connected=false / Connect() preamble from a
+            // single client it answers in 3-5 ms with no serial reads. It
+            // only misses when another client keeps the device open, so the
+            // preamble does not reconnect and this block does not run
+            // (#1242).
             try {
                 refresh_status_cache_locked(true);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -329,7 +403,7 @@ public:
                 cached_ra_hours_ = pos.ra_hours;
                 cached_dec_degrees_ = pos.dec_degrees;
                 equatorial_cache_valid_ = true;
-                last_equatorial_update_ = std::chrono::steady_clock::now();
+                last_equatorial_update_ = clock_.now();
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
             try {
@@ -341,27 +415,19 @@ public:
                 cached_alt_degrees_ = altaz.altitude_degrees;
                 cached_az_degrees_ = altaz.azimuth_degrees;
                 altaz_cache_valid_ = true;
-                last_altaz_update_ = std::chrono::steady_clock::now();
+                last_altaz_update_ = clock_.now();
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
             try {
                 refresh_status_cache_locked(true);
             } catch (...) {  // NOLINT(bugprone-empty-catch)
             }
+            published_connected_ = true;  // the connect is complete (#910)
         } else {
+            published_connected_ = false;
             protocol.disconnect();
             connected_ = false;
-            {
-                std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                firmware_cache_.clear();
-            }
-            target_ra_set_ = false;
-            target_dec_set_ = false;
-            manual_axis_slewing_[0] = false;
-            manual_axis_slewing_[1] = false;
-            slewing_cached_ = false;
-            slew_force_until_ = std::chrono::steady_clock::time_point::min();
-            pulse_guiding_active_ = false;
+            reset_session_state_locked();
         }
     }
 
@@ -453,7 +519,7 @@ public:
     bool get_is_pulse_guiding() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (pulse_guiding_active_ && std::chrono::steady_clock::now() >= pulse_guide_end_time_) {
+        if (pulse_guiding_active_ && clock_.now() >= pulse_guide_end_time_) {
             pulse_guiding_active_ = false;
         }
         return pulse_guiding_active_;
@@ -512,7 +578,10 @@ public:
         }
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
+        // The client has said what it wants; a pending GOTO restore must not
+        // override it when the slew ends (#1230).
+        tracking_before_slew_ = false;
     }
 
     double get_focal_length() const override { return focal_length_m_; }
@@ -565,11 +634,12 @@ public:
         //
         // Deliberately does NOT call refresh_equatorial_cache_locked() (which
         // enforces kPositionCacheTtl's normal 2s freshness window): a live
-        // :GRa#/:GDe# round trip (~0.13s each, ~0.26s+ together on this
-        // serial link) landing inside this call is enough to blow ConformU's
-        // 0.1s FAST target — confirmed against real hardware, where this
-        // showed up as an occasional "SideOfPier Read ... OUTSIDE FAST
-        // RESPONSE TIME TARGET" once the TTL happened to have just lapsed.
+        // :GRa#/:GDe# round trip (~25 ms each on the HM-17 at 9600 baud;
+        // ~0.16s each while read_response() slept per character, #1242)
+        // landing inside this call (~50 ms together) uses about half of
+        // ConformU's 0.1s FAST target, and about three times it before #1242 — confirmed against real
+        // hardware, where this showed up as an occasional "SideOfPier Read
+        // ... OUTSIDE FAST RESPONSE TIME TARGET" once the TTL had just lapsed.
         // Hour-angle SIGN (the only thing this needs) is insensitive to a
         // couple of seconds of RA staleness — sidereal drift over that
         // window is a few arcseconds, utterly negligible next to the ±6h
@@ -602,9 +672,29 @@ public:
 
     EquatorialSystem get_equatorial_system() const override { return EquatorialSystem::Topocentric; }
 
-    bool get_does_refraction() const override { return does_refraction_; }
+    // OnStepX reports its refraction mode at connect (#1216). It is fixed when
+    // the firmware is built, so only the value the firmware already uses can
+    // be written. Older firmware keeps the local flag.
+    bool get_does_refraction() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        return refraction_from_firmware_.value_or(does_refraction_);
+    }
 
-    void set_does_refraction(bool does_refraction) override { does_refraction_ = does_refraction; }
+    void set_does_refraction(bool does_refraction) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        if (refraction_from_firmware_.has_value()) {
+            if (does_refraction != *refraction_from_firmware_) {
+                throw AlpacaException(std::string("This OnStepX firmware ") +
+                                          (*refraction_from_firmware_ ? "always applies" : "never applies") +
+                                          " refraction to its coordinates; it is set when the firmware is built",
+                                      AlpacaError::PropertyNotImplemented);
+            }
+            return;
+        }
+        does_refraction_ = does_refraction;
+    }
 
     int get_slew_settle_time() const override { return slew_settle_time_seconds_; }
 
@@ -730,7 +820,8 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        if (!last_utc_valid_) {
+        if (!utc_offset_.valid()) {
+            std::chrono::system_clock::time_point seeded;
             try {
                 TimeInfo info = OnStepProtocolWrapper::instance().get_time();
                 using namespace std::chrono;
@@ -741,12 +832,11 @@ public:
                 auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
                 auto offset = duration_cast<system_clock::duration>(
                     std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
-                last_utc_set_ = local_time - offset;
+                seeded = local_time - offset;
             } catch (...) {  // NOLINT(bugprone-empty-catch)
-                last_utc_set_ = std::chrono::system_clock::now();
+                seeded = std::chrono::system_clock::now();
             }
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+            utc_offset_.set(seeded, clock_.now());
         }
         return current_utc_time_locked();
     }
@@ -774,10 +864,12 @@ public:
             return;
         }
         OnStepProtocolWrapper::instance().find_home();
+        // OnStepX ends a home with tracking off; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_at_home = false;
         cached_status_.is_slewing = true;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
     }
 
     void park() override {
@@ -788,13 +880,14 @@ public:
             return;  // ASCOM: Park() on an already-parked mount is a no-op.
         }
         OnStepProtocolWrapper::instance().park();
+        // A parked mount must not track; never restart it afterwards (#1218).
+        tracking_before_slew_ = false;
         cached_status_.is_parked = false;
         cached_status_.is_slewing = true;
         cached_status_.is_at_home = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
+        last_status_update_ = clock_.now();
+        clear_manual_motion_locked();
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -819,7 +912,7 @@ public:
         const int clamped_duration = std::clamp(duration, 0, 9999);
         OnStepProtocolWrapper::instance().pulse_guide(direction, duration);
         pulse_guiding_active_ = true;
-        pulse_guide_end_time_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(clamped_duration);
+        pulse_guide_end_time_ = clock_.now() + std::chrono::milliseconds(clamped_duration);
         equatorial_cache_valid_ = false;
     }
 
@@ -831,16 +924,14 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SlewToCoordinates");
+        check_equatorial_slew_locked(ra, dec, "SlewToCoordinates");
         start_slew_locked(ra, dec, "SlewToCoordinates");
         wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked_locked("SlewToCoordinatesAsync");
+        check_equatorial_slew_locked(ra, dec, "SlewToCoordinatesAsync");
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
@@ -889,7 +980,7 @@ public:
         cached_ra_hours_ = ra;
         cached_dec_degrees_ = dec;
         equatorial_cache_valid_ = true;
-        last_equatorial_update_ = std::chrono::steady_clock::now();
+        last_equatorial_update_ = clock_.now();
     }
 
     void sync_to_target() override {
@@ -911,7 +1002,7 @@ public:
         OnStepProtocolWrapper::instance().unpark();
         cached_status_.is_parked = false;
         status_cache_valid_ = true;
-        last_status_update_ = std::chrono::steady_clock::now();
+        last_status_update_ = clock_.now();
     }
 
     bool get_can_move_axis(int axis) const override {
@@ -922,7 +1013,7 @@ public:
     }
 
     void move_axis(int axis, double rate) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("MoveAxis");
         if (axis != 0 && axis != 1) {
@@ -943,6 +1034,12 @@ public:
         const int positive_dir = (axis == 0) ? 2 : 0;
         const int negative_dir = (axis == 0) ? 3 : 1;
 
+        // Drop this axis's earlier move from the re-send first: a stop asks
+        // for none whatever its outcome, and a new move sets it again only
+        // once its own command went out. This only withdraws the old move,
+        // under mutex_ where no body runs; decision 0006 rule 3's bump still
+        // comes before the new move's flags below.
+        manual_axis_resend_[axis] = false;
         if (!moving) {
             // Defensive dual-stop, matching the project's convention for
             // fixed-direction (rather than signed-rate) motion protocols.
@@ -970,10 +1067,33 @@ public:
                 throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
         } else {
-            protocol.move_axis_start(rate > 0.0 ? positive_dir : negative_dir, std::abs(rate));
+            const int dir = rate > 0.0 ? positive_dir : negative_dir;
+            protocol.move_axis_start(dir, std::abs(rate));
+            // Decision 0006 rule 3: supersede the running re-send under mutex_
+            // before this move's flags change; start() below replaces it. Only
+            // once the move went out: a failed send must leave the other
+            // axis's re-send running.
+            move_axis_generation_.bump();
+            manual_axis_dir_[axis] = dir;
+            manual_axis_rate_[axis] = std::abs(rate);
+            manual_axis_resend_[axis] = true;
+            manual_axis_resend_due_[axis] = clock_.now() + kMoveAxisResendInterval;
+            status_read_since_move_ = false;  // a :GU# from before the move must not end it (#1378)
         }
 
         manual_axis_slewing_[axis] = moving;
+        if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
+            clear_manual_motion_locked();
+            return;
+        }
+        if (!moving) {
+            return;
+        }
+        // Always a fresh body, never "already running": a body that has just
+        // found nothing to re-send may still read as running while it exits.
+        // The new one supersedes it.
+        lock.unlock();  // start() without mutex_: decision 0006 rule 4, async_operation.h rule 10
+        start_move_axis_resend();
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1026,36 +1146,50 @@ public:
             try_stop([&protocol, dir]() { protocol.move_axis_stop(dir); });
         }
         if (!stop_error.empty()) {
-            // The mount may still be moving: leave Slewing as it was.
+            // The mount may still be moving: leave Slewing as it was, but
+            // stop re-sending a MoveAxis the client asked to end.
+            manual_axis_resend_[0] = false;
+            manual_axis_resend_[1] = false;
             throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
         }
         slewing_cached_ = false;
         slew_force_until_ = std::chrono::steady_clock::time_point::min();
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
+        clear_manual_motion_locked();
         status_cache_valid_ = false;
+        // ASCOM: after AbortSlew, tracking returns to its state before the
+        // slew. Decide now instead of at a later slew end the driver may never
+        // see (#1230). Only an aborted GOTO costs the extra :GU#.
+        if (tracking_before_slew_) {
+            try {
+                refresh_status_cache_locked(true);
+                finish_slew_tracking_locked();
+            } catch (...) {
+                tracking_before_slew_ = false;  // status unknown: never restart blind
+            }
+        }
     }
 
+    // An Alt/Az slew is not equatorial, so it skips the Tracking check
+    // (open-astro#1274) and goes straight to the GOTO.
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        }
-        slew_to_coordinates(ra, dec);
+        std::unique_lock<std::mutex> lock(mutex_);
+        check_connected();
+        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
+        check_not_parked_locked("SlewToCoordinates");
+        start_slew_locked(ra, dec, "SlewToCoordinates");
+        wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_alt_az_async(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_connected();
-            compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        }
-        slew_to_coordinates_async(ra, dec);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
+        check_not_parked_locked("SlewToCoordinatesAsync");
+        start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1068,6 +1202,283 @@ private:
     void check_connected() const {
         if (!connected_) {
             throw AlpacaException("Not connected to OnStep mount", AlpacaError::NotConnected);
+        }
+        // A removed or re-enumerated adapter is NotConnected, not a generic
+        // send failure while Connected still reads true (#1241).
+        if (!OnStepProtocolWrapper::instance().link_alive()) {
+            const std::string reason = OnStepProtocolWrapper::instance().link_lost_reason();
+            throw AlpacaException("OnStep link lost" + (reason.empty() ? std::string{} : " (" + reason + ")") +
+                                      "; set Connected true to reconnect",
+                                  AlpacaError::NotConnected);
+        }
+    }
+
+    // Ends the driver's record of a MoveAxis and its re-send (#1378).
+    // cancel() may be called with mutex_ held (async_operation.h rule 10).
+    // Slews, Park and AbortSlew end the re-send here with cancel() rather
+    // than a supersede (decision 0006 rule 3): safe, because the body checks
+    // ctx.stop_reason() under mutex_ before it sends anything, and these
+    // callers hold mutex_.
+    void clear_manual_motion_locked() const {
+        manual_axis_slewing_[0] = false;
+        manual_axis_slewing_[1] = false;
+        manual_axis_resend_[0] = false;
+        manual_axis_resend_[1] = false;
+        move_axis_resend_.cancel();
+    }
+
+    // :GU# says the firmware ended the running MoveAxis (#1378): no 'g',
+    // from firmware that has shown 'g' since this connect. 'N' covers a GOTO
+    // only. Firmware that never sends 'g' never ends it here, and a pulse
+    // guide ('G') hides 'g' while it runs, so it is no evidence either. Only
+    // a :GU# read after the move was sent counts (the firmware runs commands
+    // in order): the setters that patch cached_status_ (Tracking, park,
+    // unpark, FindHome) keep its older 'g'.
+    bool manual_move_ended_locked() const {
+        if (!status_read_since_move_ || cached_status_.is_pulse_guide_active) {
+            return false;
+        }
+        if (cached_status_.is_guide_active) {
+            firmware_reports_guide_move_ = true;
+            return false;
+        }
+        return firmware_reports_guide_move_;
+    }
+
+    // open-astro#1378: OnStepX stops an equatorial mount at the horizon and
+    // overhead limits only on the crossing (Limits::poll calls stop() when the
+    // error turns on), and Guide::validate skips limits.isError() for a custom
+    // rate, so a re-send after that crossing, or during the braking that
+    // follows it, would carry the mount past the limit. Re-send only with the
+    // altitude at least kAltitudeLimitMarginDeg inside both limits. The margin
+    // covers the whole-degree :Gh#/:Go# replies and the pointing model. A
+    // failed or out-of-range read sends nothing. The meridian, axis and switch
+    // limits need no check here: OnStepX enforces them on every poll and
+    // refuses a move further out (Guide::validAxis1/validAxis2).
+    bool resend_within_altitude_limits_locked(OnStepProtocolWrapper& protocol) const {
+        double altitude = 0.0;
+        AltitudeLimits limits;
+        try {
+            altitude = protocol.get_alt_az().altitude_degrees;
+            limits = protocol.get_altitude_limits();
+        } catch (const std::exception& ex) {
+            ALPACA_LOG_WARN("OnStep", std::string("MoveAxis re-send skipped, altitude read failed: ") + ex.what());
+            return false;
+        }
+        if (limits.horizon_degrees < -30.0 || limits.horizon_degrees > 30.0 || limits.overhead_degrees < 60.0 ||
+            limits.overhead_degrees > 90.0) {
+            ALPACA_LOG_WARN("OnStep", "MoveAxis re-send skipped, altitude limits out of range");
+            return false;
+        }
+        const bool overhead_on = limits.overhead_degrees < 90.0;
+        if (altitude < limits.horizon_degrees + kAltitudeLimitMarginDeg ||
+            (overhead_on && altitude > limits.overhead_degrees - kAltitudeLimitMarginDeg)) {
+            char text[160];
+            std::snprintf(
+                text, sizeof(text),
+                "MoveAxis not re-sent: altitude %.2f deg is within %.0f deg of, or past, a limit (horizon %.0f, "
+                "overhead %.0f); the firmware ends the move",
+                altitude, kAltitudeLimitMarginDeg, limits.horizon_degrees, limits.overhead_degrees);
+            ALPACA_LOG_INFO("OnStep", text);  // a client can cause it: decision 0007 rule 9
+            return false;
+        }
+        return true;
+    }
+
+    // open-astro#1378: OnStepX ends a :Mn#/:Ms#/:Me#/:Mw# move after
+    // GUIDE_TIME_LIMIT (default 10 s, 1-120 s or 0 for none at firmware
+    // build; Guide.command.cpp), but ASCOM runs a MoveAxis until the client
+    // sends rate 0. Each repeat of the move restarts that timer
+    // (Guide::startAxis1), so re-send every running move while one is set,
+    // every 7 s by default: inside the 10 s default, and seldom, because a
+    // move command that lands while an axis brakes after a stop restarts it
+    // (Axis::autoSlew; 'g' stays set for about 0.4 s of braking at 0.5 deg/s
+    // on the HM-17). Each tick reads :GU# first and re-sends only while the
+    // mount shows the move ('g') in that read, so a stop from a hand
+    // controller or another app is undone only when the tick lands in that
+    // braking. Near the horizon and overhead limits nothing is re-sent (see
+    // resend_within_altitude_limits_locked()). A failed read skips the tick.
+    // A lost link ends the re-send; the #1241 path handles the link and the
+    // firmware limit stops the mount, as before.
+    void start_move_axis_resend() {
+        move_axis_resend_.start([this](util::OperationContext& ctx) {
+            const auto wants_resend = [this](int axis) {
+                return manual_axis_slewing_[axis] && manual_axis_resend_[axis];
+            };
+            for (;;) {
+                // Each axis is due on its own clock, as OnStepX times each
+                // axis on its own: a MoveAxis on the other axis replaces this
+                // body but must not push this axis's re-send back.
+                std::chrono::steady_clock::duration wait{};
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (ctx.stop_reason() != util::StopReason::None || !connected_) {
+                        return;
+                    }
+                    if (!wants_resend(0) && !wants_resend(1)) {
+                        return;  // stopped, even if the stop failed: nothing left to keep going
+                    }
+                    auto earliest = std::chrono::steady_clock::time_point::max();
+                    for (int axis = 0; axis < 2; ++axis) {
+                        if (wants_resend(axis)) {
+                            earliest = std::min(earliest, manual_axis_resend_due_[axis]);
+                        }
+                    }
+                    wait = std::max(earliest - clock_.now(), std::chrono::steady_clock::duration::zero());
+                }
+                if (!ctx.wait_for(wait)) {
+                    return;
+                }
+                // The tick holds mutex_ across its serial exchanges (:GU#, the
+                // altitude reads, the re-send), as every OnStep path does, so a
+                // getter can wait for it. Decision 0016 rule 1 calls that a
+                // defect; moving OnStep's I/O off mutex_ is #1449.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (ctx.stop_reason() != util::StopReason::None || !connected_) {
+                    return;
+                }
+                const auto now = clock_.now();
+                bool due[2] = {false, false};
+                for (int axis = 0; axis < 2; ++axis) {
+                    due[axis] = wants_resend(axis) && manual_axis_resend_due_[axis] <= now;
+                }
+                if (!due[0] && !due[1]) {
+                    continue;  // a newer MoveAxis moved the due time
+                }
+                const bool keep_going = resend_tick_locked(due);
+                // Due again a full interval after this tick ends, whatever it
+                // did: a skipped tick never spins, and mutex_ is free between
+                // ticks.
+                const auto next = clock_.now() + kMoveAxisResendInterval;
+                for (int axis = 0; axis < 2; ++axis) {
+                    if (due[axis]) {
+                        manual_axis_resend_due_[axis] = next;
+                    }
+                }
+                if (!keep_going) {
+                    return;
+                }
+            }
+        });
+    }
+
+    // One re-send tick for the axes in `due` (#1378). False ends the body.
+    bool resend_tick_locked(const bool (&due)[2]) {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        if (!protocol.link_alive()) {
+            return false;
+        }
+        try {
+            cached_status_ = protocol.get_status();
+            status_cache_valid_ = true;
+            status_read_since_move_ = true;
+            last_status_update_ = clock_.now();
+        } catch (const std::exception& ex) {
+            ALPACA_LOG_WARN("OnStep", std::string("MoveAxis re-send skipped, status read failed: ") + ex.what());
+            return true;
+        }
+        if (manual_move_ended_locked()) {
+            clear_manual_motion_locked();  // cancel() from its own body is allowed
+            return false;
+        }
+        // Re-send only a move the mount shows now. A move the firmware let
+        // lapse stays ended: its time limit, or the 5 s GUIDE_TIME_NO_LIMITS
+        // cap while its soft limits are off (Guide::finalizeTimeLimit), which
+        // asks for a fresh command on purpose. Firmware without 'g' gets no
+        // re-send, and a pulse guide ('G') skips the tick.
+        if (!cached_status_.is_guide_active) {
+            return true;
+        }
+        if (!resend_within_altitude_limits_locked(protocol)) {
+            return true;  // the firmware ends the move; 'g' then ends it here
+        }
+        for (int axis = 0; axis < 2; ++axis) {
+            if (!due[axis]) {
+                continue;
+            }
+            try {
+                protocol.move_axis_start(manual_axis_dir_[axis], manual_axis_rate_[axis]);
+            } catch (const std::exception& ex) {
+                ALPACA_LOG_WARN("OnStep", std::string("MoveAxis re-send failed: ") + ex.what());
+            }
+        }
+        return true;
+    }
+
+    // The per-session state a disconnect or a lost link leaves behind.
+    void reset_session_state_locked() {
+        refraction_from_firmware_.reset();
+        {
+            std::lock_guard<std::mutex> fwlock(firmware_mutex_);
+            firmware_cache_.clear();
+        }
+        target_ra_set_ = false;
+        target_dec_set_ = false;
+        clear_manual_motion_locked();
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        pulse_guiding_active_ = false;
+        utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
+    }
+
+    // open-astro#521: OnStepX keeps running a GOTO while the serial link is
+    // out (on the HM-17 a GOTO pulled mid-slew stopped only when this sent
+    // the stops, #1241), and a MoveAxis for up to about 10 s before the
+    // firmware ends it by itself (#1098). On the connect that follows a
+    // loss, an outage at least as long as the preserve window means nobody
+    // was in control of that motion, so stop it with the same commands
+    // AbortSlew sends. A shorter outage is a glitch the client rides out,
+    // and no recorded loss (e.g. a fresh start) preserves motion: no stamp
+    // is not evidence that anything ran unattended. The outage runs from the
+    // last time the link was seen alive to the end of this reconnect (an
+    // auto-detect re-scan counts): rounds toward stopping. Tracking is kept.
+    void stop_motion_after_long_outage_locked(OnStepProtocolWrapper& protocol) {
+        const auto lost_at = protocol.consume_link_lost_at();
+        const auto alive_at = protocol.consume_last_alive_before_loss();
+        if (!lost_at) {
+            return;
+        }
+        // Timed from the last moment the link was known to be there, not from
+        // when the loss was noticed: with no poll thread (only a MoveAxis
+        // re-send checks the link, #1378), the first to notice
+        // may be the reconnect itself (the router reads Connected before every
+        // Connect), which would make a long unattended outage look like 0 s.
+        // The wrapper stamped both times on clock_ (set at connect).
+        const auto outage = clock_.now() - (alive_at ? *alive_at : *lost_at);
+        if (outage < detail::relink_motion_preserve_window()) {
+            return;
+        }
+        char seconds[32];
+        std::snprintf(seconds, sizeof(seconds), "%.1f", std::chrono::duration<double>(outage).count());
+        ALPACA_LOG_WARN("OnStep", std::string("Serial link was last seen alive ") + seconds +
+                                      " s ago; stopping any slew or MoveAxis that ran unattended (open-astro#521)");
+        // Each stop on its own, as AbortSlew does (#781): a failed :Q# must
+        // not skip the per-axis stops that end a MoveAxis.
+        const auto try_stop = [](const char* what, const std::function<void()>& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                ALPACA_LOG_ERROR("OnStep", std::string("Stop after a long outage failed (") + what + "): " + ex.what());
+            }
+        };
+        try_stop(":Q#", [&protocol]() { protocol.abort_slew(); });
+        for (int dir = 0; dir < 4; ++dir) {
+            try_stop("axis stop", [&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
+    }
+
+    // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
+    // (open-astro#1274). Runs after the parked check and argument validation and
+    // before any target or GOTO command is sent, and reads Tracking as the getter
+    // does (a :GU# query when the cache is stale), so a Tracking=false just
+    // written counts as off.
+    void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
+        check_connected();
+        check_not_parked_locked(who);
+        validate_ra_dec(ra, dec, who);
+        refresh_status_cache_locked(false);
+        if (!cached_status_.is_tracking) {
+            throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
     }
 
@@ -1106,17 +1517,25 @@ private:
         altaz_cache_valid_ = false;
         status_cache_valid_ = false;
         slewing_cached_ = true;
-        slew_force_until_ = std::chrono::steady_clock::now() + kSlewForceGrace;
-        manual_axis_slewing_[0] = false;
-        manual_axis_slewing_[1] = false;
+        slew_force_until_ = clock_.now() + kSlewForceGrace;
+        clear_manual_motion_locked();
         tracking_before_slew_ = cached_status_.is_tracking;
     }
 
     bool get_slewing_locked() const {
         if (manual_axis_slewing_[0] || manual_axis_slewing_[1]) {
-            return true;
+            // Slewing follows the mount once it has shown the move (#1378).
+            try {
+                refresh_status_cache_locked(false);
+            } catch (...) {
+                return true;  // keep reporting the move; the read error is not a stop
+            }
+            if (!manual_move_ended_locked()) {
+                return true;
+            }
+            clear_manual_motion_locked();
         }
-        if (std::chrono::steady_clock::now() < slew_force_until_) {
+        if (clock_.now() < slew_force_until_) {
             return true;
         }
         const bool was_slewing = cached_status_.is_slewing;
@@ -1126,23 +1545,37 @@ private:
         // simple dataflow model doesn't see that the call mutates
         // cached_status_, so it (wrongly) assumes both sides always match.
         if (was_slewing && !cached_status_.is_slewing) {
-            // Slew just completed: caches are stale and, per the SynScan
+            // Slew just completed: caches are stale. Per the SynScan
             // tracking-restoration lesson in
             // .github/instructions/synscan.instructions.md, some LX200-family
-            // mounts stop tracking during a GOTO — best-effort restore it.
-            // TODO: confirm against
-            // real OnStep firmware whether this restoration is needed.
+            // mounts stop tracking during a GOTO, so restore it once, and only
+            // after a coordinate slew that started with tracking on and ended
+            // without it. OnStepX keeps tracking through a GOTO (seen on the
+            // TeSeek HM-17), so there this normally sends nothing. Park and
+            // FindHome clear the flag: they end with tracking off on purpose,
+            // and restarting it moved the mount off home (#1218).
             equatorial_cache_valid_ = false;
             altaz_cache_valid_ = false;
-            if (tracking_before_slew_) {
-                try {
-                    OnStepProtocolWrapper::instance().start_tracking();
-                    cached_status_.is_tracking = true;
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                }
-            }
+            finish_slew_tracking_locked();
         }
         return cached_status_.is_slewing;
+    }
+
+    // Uses and clears the restore flag that start_slew_locked() set: restore
+    // tracking once if that slew started with tracking on and the mount now
+    // reports it off. Every path that ends a coordinate slew calls this (the
+    // async edge above, wait_for_slew_complete_locked(), abort_slew()), so the
+    // flag cannot outlive its slew and fire at an unrelated one (#1230).
+    void finish_slew_tracking_locked() const {
+        const bool restore_tracking = tracking_before_slew_ && !cached_status_.is_tracking;
+        tracking_before_slew_ = false;
+        if (restore_tracking) {
+            try {
+                OnStepProtocolWrapper::instance().start_tracking();
+                cached_status_.is_tracking = true;
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+            }
+        }
     }
 
     // Poll for a status condition, RELEASING the driver mutex around every
@@ -1153,13 +1586,13 @@ private:
     template <typename Predicate>
     void wait_for_condition_locked(std::unique_lock<std::mutex>& lock, Predicate done) const {
         const auto timeout = std::chrono::seconds(120);
-        const auto start = std::chrono::steady_clock::now();
+        const auto start = clock_.now();
         while (!done()) {
-            if (std::chrono::steady_clock::now() - start > timeout) {
+            if (clock_.now() - start > timeout) {
                 throw AlpacaException("Operation timed out waiting for mount status");
             }
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            clock_.sleep_for(std::chrono::milliseconds(250));
             lock.lock();
             check_connected();
             refresh_status_cache_locked(true);
@@ -1168,22 +1601,26 @@ private:
 
     void wait_for_slew_complete_locked(std::unique_lock<std::mutex>& lock) const {
         wait_for_condition_locked(lock, [this] { return !get_slewing_locked(); });
+        // The loop's forced refresh hides the slewing -> idle edge from
+        // get_slewing_locked(), so decide here; the status was just read (#1230).
+        finish_slew_tracking_locked();
         if (slew_settle_time_seconds_ > 0) {
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+            clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
             lock.lock();
             check_connected();
         }
     }
 
     void refresh_status_cache_locked(bool force) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (!force && status_cache_valid_ && (now - last_status_update_) < kStatusCacheTtl) {
             return;
         }
         try {
             cached_status_ = OnStepProtocolWrapper::instance().get_status();
             status_cache_valid_ = true;
+            status_read_since_move_ = true;
             last_status_update_ = now;
         } catch (...) {
             if (!status_cache_valid_) {
@@ -1193,7 +1630,7 @@ private:
     }
 
     void refresh_equatorial_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1211,7 +1648,7 @@ private:
     }
 
     void refresh_altaz_cache_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
@@ -1242,7 +1679,7 @@ private:
         if (site_info_valid_) {
             return;
         }
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         if (last_site_info_attempt_ != std::chrono::steady_clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
             return;
@@ -1292,24 +1729,27 @@ private:
 
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         OnStepProtocolWrapper::instance().set_time(info);
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
+        utc_offset_.set(utc, clock_.now());
         // The mount now runs on the client's clock and so does the LST above;
         // on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("OnStep", client_minus_host, client_disagreement_warned_);
     }
 
+    // The lazy re-seed below can now also follow a disconnect, which clears
+    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+        const auto now = clock_.now();
+        if (const auto utc = utc_offset_.current(now)) {
+            return *utc;
         }
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        const auto seeded = std::chrono::system_clock::now();
+        utc_offset_.set(seeded, now);
+        return seeded;
     }
 
+    // Decision 0005: every wait, sleep and deadline of this driver (#1378),
+    // and the wrapper's link-loss stamps (set_task_clock() at connect).
+    util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     // Set by the auto-detect factory; empty for an explicit port or host.
@@ -1319,6 +1759,10 @@ private:
     bool connection_resolved_ = false;
     mutable std::mutex mutex_;
     bool connected_;
+    // What get_connected() reports, read lock-free (#910). Raised only once a
+    // connect has finished, so Connected never reads true while Connecting
+    // does; dropped before any disconnect. Written under mutex_.
+    std::atomic<bool> published_connected_{false};
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect
 
     double target_ra_hours_ = 0.0;
@@ -1358,16 +1802,28 @@ private:
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     double site_elevation_m_;
 
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_ = false;
+    // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
+    // time since. Cleared on connect and disconnect. Under mutex_.
+    mutable util::UtcOffset utc_offset_;
 
     mutable bool slewing_cached_ = false;
     mutable std::chrono::steady_clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
-    mutable bool tracking_before_slew_ = true;
+    // The running MoveAxis per axis, for the re-send (#1378). Under mutex_.
+    int manual_axis_dir_[2] = {0, 0};
+    double manual_axis_rate_[2] = {0.0, 0.0};
+    mutable bool manual_axis_resend_[2] = {false, false};
+    std::chrono::steady_clock::time_point manual_axis_resend_due_[2]{};
+    // :GU# has shown 'g' since this connect, so its absence ends a MoveAxis (#1378).
+    mutable bool firmware_reports_guide_move_ = false;
+    // A real :GU# read has landed since the last MoveAxis start (#1378).
+    mutable bool status_read_since_move_ = false;
+    // Set only by a coordinate slew; consumed when that slew completes (#1218).
+    mutable bool tracking_before_slew_ = false;
 
     bool does_refraction_ = false;
+    // From :GXEE# at connect on OnStepX; empty when unknown or disconnected.
+    std::optional<bool> refraction_from_firmware_;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;
@@ -1382,21 +1838,26 @@ private:
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
     std::string firmware_cache_;
+
+    // Last, so it is destroyed (and its body joined) before every member the
+    // body touches. The destructor joins it explicitly as well.
+    util::OperationGeneration move_axis_generation_;
+    mutable util::AsyncOperation move_axis_resend_{"OnStep MoveAxis re-send", move_axis_generation_, clock_};
 };
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                         util::TaskClock& clock) {
     return create_onstep_telescope_with_site(device_number, connection_info, std::nullopt, std::nullopt, std::nullopt,
-                                             std::nullopt);
+                                             std::nullopt, clock);
 }
 
-std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(int device_number,
-                                                                   const ConnectionInfo& connection_info,
-                                                                   std::optional<double> site_latitude_deg,
-                                                                   std::optional<double> site_longitude_deg,
-                                                                   std::optional<double> site_elevation_m,
-                                                                   std::optional<bool> sync_time_on_connect) {
+std::unique_ptr<TelescopeDriver> create_onstep_telescope_with_site(
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock) {
     return std::make_unique<OnStepTelescopeDriver>(device_number, connection_info, site_latitude_deg,
-                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect);
+                                                   site_longitude_deg, site_elevation_m, sync_time_on_connect,
+                                                   util::ConnectionResolver<ConnectionInfo>{}, clock);
 }
 
 std::unique_ptr<TelescopeDriver> create_onstep_telescope_deferred(
@@ -1440,5 +1901,23 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
         device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
         site_longitude_deg, site_elevation_m, sync_time_on_connect);
 }
+
+namespace detail {
+
+namespace {
+std::atomic<std::chrono::milliseconds::rep>& relink_window_ms() {
+    static std::atomic<std::chrono::milliseconds::rep> window{
+        std::chrono::duration_cast<std::chrono::milliseconds>(util::kRelinkMotionPreserveWindow).count()};
+    return window;
+}
+}  // namespace
+
+void set_relink_motion_preserve_window(std::chrono::milliseconds window) { relink_window_ms() = window.count(); }
+
+std::chrono::milliseconds relink_motion_preserve_window() {
+    return std::chrono::milliseconds(relink_window_ms().load());
+}
+
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

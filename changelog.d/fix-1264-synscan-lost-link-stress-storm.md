@@ -1,0 +1,3 @@
+### Added (tests)
+
+- **SynScan lost-link stress storm**, SynScan driver, issue #1264. A `[stress]` case mutes and severs the fake handset while the lifecycle and operate threads run and the task clock passes `util::kLinkStalenessBound`, then asserts that a severed silent handset reaches `Connected` false with `NotConnected` reads, and that `Connected=true` relinks and resumes polling; a second case races `set_connected(true)` against `set_connected(false)` (the status poll starts after `mutex_` is released) and asserts the poll runs exactly when the driver ends connected. Both are in `AlpacaCore/tests/test_synscan_concurrency_stress.cpp`.

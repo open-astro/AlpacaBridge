@@ -11,11 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -24,15 +26,18 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
@@ -231,7 +236,13 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
-    if (raw.find('E') != std::string::npos) {
+    status.is_guide_active = raw.find('g') != std::string::npos;
+    status.is_pulse_guide_active = raw.find('G') != std::string::npos;
+    // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
+    // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
+    // therefore always present on a GEM and says nothing about the pier
+    // side (#1217; HM-17 traces nNpEW180 = west, nNpET1:0 = east).
+    if (raw.find('T') != std::string::npos) {
         status.side_of_pier = 0;  // pier east
     } else if (raw.find('W') != std::string::npos) {
         status.side_of_pier = 1;  // pier west
@@ -367,6 +378,29 @@ std::vector<std::string> list_dev_nodes_with_prefix(const std::string& prefix) {
 }
 #endif
 
+// Never destroyed: the wrapper singleton can disconnect from its destructor at
+// exit, after function-local statics built later than it are gone.
+std::mutex& link_loss_hook_mutex() {
+    static auto* m = new std::mutex;  // NOLINT(cppcoreguidelines-owning-memory)
+    return *m;
+}
+
+std::function<void(detail::LinkLossHookPoint)>& link_loss_hook() {
+    static auto* hook = new std::function<void(detail::LinkLossHookPoint)>;  // NOLINT(cppcoreguidelines-owning-memory)
+    return *hook;
+}
+
+void run_link_loss_hook(detail::LinkLossHookPoint point) {
+    std::function<void(detail::LinkLossHookPoint)> hook;
+    {
+        std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+        hook = link_loss_hook();
+    }
+    if (hook) {
+        hook(point);
+    }
+}
+
 }  // namespace
 
 std::vector<OnStepPortInfo> enumerate_onstep_ports() {
@@ -483,6 +517,13 @@ public:
 
         std::lock_guard<std::mutex> lock(mutex_);
 
+        // A lost link whose fd could not be closed when the loss was found
+        // (an exchange held the mutex) is closed here, so a reconnect is not
+        // refused as a second mount.
+        if (connected_ && link_lost_) {
+            disconnect_locked();
+        }
+
         if (connected_) {
             // The protocol wrapper is a per-vendor singleton: a second device
             // connecting through it would silently steal/tear down the first
@@ -504,26 +545,126 @@ public:
         }
 
         connected_ = success;
+        if (success) {
+            // Only a successful connect (or disconnect()) clears the loss
+            // text; the driver's relink calls disconnect() first (decision
+            // 0009 point 5). The stamps stay for the reconnecting driver.
+            clear_loss();
+            mark_alive();
+        }
         return success;
     }
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
         disconnect_locked();
+        clear_loss();
     }
 
     void disconnect_locked() {
         if (!connected_) {
             return;
         }
-        // State first, then the close (#1202): nothing can see a connected
-        // wrapper whose port is already released.
-        connected_ = false;
+        {
+            // Down, node cleared and generation bumped in one step, before the
+            // port closes: a link_alive() that took its snapshot before this
+            // cannot record a loss after it (open-astro#1289). connected_ is
+            // published first, so link_alive() never reports a closing fd as live.
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            connected_ = false;
+            link_path_.clear();
+            ++link_generation_;
+        }
+        run_link_loss_hook(detail::LinkLossHookPoint::DisconnectBeforeClose);
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
         } else {
             disconnect_network();
         }
+    }
+
+    // ── Link loss (decision 0009, #1241) ──
+
+    // Decision 0005 (#1378): the loss and last-alive stamps read the clock of
+    // the driver that uses this process-wide wrapper, so the driver's #521
+    // outage is measured on one clock. Default: the process clock.
+    void set_task_clock(util::TaskClock& c) { clock_.store(&c); }
+    void release_task_clock(util::TaskClock& c) {
+        util::TaskClock* expected = &c;
+        clock_.compare_exchange_strong(expected, &util::default_task_clock());
+    }
+
+    bool link_alive() {
+        if (!connected_) {
+            return false;
+        }
+        if (link_lost_) {
+            // A loss found while an exchange held the fd: close it now if
+            // nothing does, so the replugged adapter can take the old name.
+            std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+            // Re-checked under the lock: a connect may have cleared the loss
+            // and opened a fresh link in between.
+            if (lock.owns_lock() && connected_ && link_lost_) {
+                disconnect_locked();
+            }
+            return false;
+        }
+        bool present = true;
+        std::uint64_t generation = 0;
+        std::string path;
+        {
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            generation = link_generation_;
+            if (!link_path_.empty()) {
+                struct stat st {};
+                if (::stat(link_path_.c_str(), &st) != 0) {
+                    // Only a path that is gone counts; a transient lookup
+                    // error (EACCES, EINTR) is not evidence of loss.
+                    present = !(errno == ENOENT || errno == ENOTDIR);
+                } else {
+                    present = st.st_dev == link_dev_ && st.st_ino == link_ino_;
+                }
+            }
+            if (!present) {
+                path = link_path_;  // for the loss text; copied only when it is needed
+            }
+        }
+        if (present) {
+            mark_alive();
+            return connected_;
+        }
+        run_link_loss_hook(detail::LinkLossHookPoint::AliveBeforeRecord);
+        // Nothing holds mutex_ here, so a Disconnect or a reconnect can have
+        // run since the stat(). Record the loss only for the link that was
+        // checked: otherwise a deliberate Disconnect would leave a loss (and
+        // the next Connect would send the #521 stops), or a relink would see
+        // its fresh link marked lost and closed (open-astro#1289).
+        if (!note_loss_if_current(generation, "the adapter at " + path + " was removed or re-enumerated")) {
+            return connected_ && !link_lost_;
+        }
+        run_link_loss_hook(detail::LinkLossHookPoint::AliveBeforeClose);
+        // Best effort: an exchange in progress will find the loss itself.
+        // Re-checked under the lock: a relink may have opened a fresh link
+        // since the record, and a successful connect clears the loss.
+        std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+        if (lock.owns_lock() && connected_ && link_lost_) {
+            disconnect_locked();
+        }
+        return connected_ && !link_lost_;
+    }
+
+    std::string link_lost_reason() const {
+        std::lock_guard<std::mutex> lock(loss_mutex_);
+        return link_lost_ ? lost_reason_ : std::string{};
+    }
+
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() { return link_lost_at_.consume(); }
+
+    std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss() {
+        std::lock_guard<std::mutex> lock(loss_mutex_);
+        auto at = alive_before_loss_;
+        alive_before_loss_.reset();
+        return at;
     }
 
     std::string last_connect_error() const {
@@ -538,9 +679,7 @@ public:
 
     std::string send_command(const std::string& command, bool require_hash_terminator, int timeout_ms_override) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
-            throw AlpacaException("Not connected to mount");
-        }
+        require_live_link_locked();
 
         std::string full_command = normalize_command(command);
 
@@ -554,7 +693,7 @@ public:
         }
 
         if (!write_data(full_command)) {
-            throw AlpacaException("Failed to send command to mount");
+            fail_write_locked();
         }
 
         int timeout_ms = timeout_ms_override;
@@ -571,15 +710,13 @@ public:
 
     void send_command_blind(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) {
-            throw AlpacaException("Not connected to mount");
-        }
+        require_live_link_locked();
 
         std::string full_command = normalize_command(command);
         ALPACA_LOG_TRACE("OnStep", "CMD " + full_command + " (blind)");
 
         if (!write_data(full_command)) {
-            throw AlpacaException("Failed to send command to mount");
+            fail_write_locked();
         }
 
         // Many OnStep "blind" commands still ack with a stray byte on some
@@ -632,13 +769,22 @@ public:
 
     std::string get_version_number() { return send_command(":GVN#", true, 0); }
 
+    std::optional<int> get_mount_coords_mode() {
+        // Bare digit, no '#' (OnStepX sets suppressFrame for :GXEE#).
+        const std::string reply = send_command(":GXEE#", false, kSetAckTimeoutMs);
+        if (reply.size() == 1 && reply[0] >= '0' && reply[0] <= '2') {
+            return reply[0] - '0';
+        }
+        return std::nullopt;
+    }
+
     Position get_position() {
         Position pos;
         // :GRa#/:GDe# request OnStep's high-precision reply variants
         // (HH:MM:SS.SSSS# / sDD*MM:SS.SSSS#, 0.0001s / 0.001" resolution)
         // instead of the whole-second/whole-arcsecond :GR#/:GD# forms.
         // :GR#'s 1-second RA resolution (~15" at the equator) is too coarse
-        // for ConformU's PulseGuide tolerance (0.07") on short (2-5s) guide
+        // for ConformU's PulseGuide tolerance (0.07 s) on short (2-5s) guide
         // pulses — confirmed against real hardware (firmware "On-Step"
         // v10.23a responds to :GRa# with fractional seconds).
         std::string ra_resp = send_command(":GRa#", true, 0);
@@ -663,6 +809,18 @@ public:
         altaz.altitude_degrees = alt.value();
         altaz.azimuth_degrees = az.value();
         return altaz;
+    }
+
+    AltitudeLimits get_altitude_limits() {
+        auto horizon = parse_sexagesimal(send_command(":Gh#", true, 0));
+        auto overhead = parse_sexagesimal(send_command(":Go#", true, 0));
+        if (!horizon.has_value() || !overhead.has_value()) {
+            throw AlpacaException("Invalid OnStep altitude limit response");
+        }
+        AltitudeLimits limits;
+        limits.horizon_degrees = horizon.value();
+        limits.overhead_degrees = overhead.value();
+        return limits;
     }
 
     MountStatus get_status() {
@@ -958,6 +1116,17 @@ private:
             return false;
         }
         serial_fd_ = link_.fd();
+
+        // Remember which node the configured path reached, so link_alive()
+        // can tell when the adapter is gone or the path now points elsewhere.
+        struct stat st {};
+        if (::fstat(serial_fd_, &st) == 0) {
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            link_path_ = port_path;
+            link_dev_ = st.st_dev;
+            link_ino_ = st.st_ino;
+            ++link_generation_;
+        }
         return true;
     }
 
@@ -1052,7 +1221,24 @@ private:
         // Bounded read (poll() on a non-blocking fd), held under mutex_ by
         // design — the mutex provides transaction atomicity for
         // command/response pairs.
-        return util::tty_read(serial_fd_, &ch, 1, kSerialReadSliceMs) == 1;
+        const ssize_t bytes_read = util::tty_read(serial_fd_, &ch, 1, kSerialReadSliceMs);
+        if (bytes_read == 1) {
+            return true;
+        }
+        if (bytes_read < 0) {
+            // tty_read() reports a hung-up tty (read() returning 0) as EIO.
+            const int err = errno;
+            if (is_loss_errno(err)) {
+                lose_link_locked("read failed: " + util::errno_string(err));
+            }
+            return false;
+        }
+        // 0 is a read-slice timeout; the node may be gone without the fd
+        // reporting it yet.
+        if (node_removed_locked()) {
+            lose_link_locked("the adapter was removed");
+        }
+        return false;
     }
 
     bool read_network_char(char& ch) {
@@ -1100,13 +1286,152 @@ private:
                     break;
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            // For a '#'-terminated reply, back off only when nothing arrived:
+            // a pause after every character cost ~10 ms each (a 14-char :GRa#
+            // reply took ~0.16 s at 9600 baud, where the bytes take ~15 ms).
+            // An unterminated ack keeps it: its idle break needs this pause
+            // plus one VTIME wait to pass 100 ms, or it waits a second cycle.
+            if (!got_char || !require_hash_terminator) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
         return response;
     }
 
+    // ── Link-loss helpers (decision 0009, #1241) ──
+
+    static bool is_loss_errno(int err) { return err == EIO || err == ENXIO || err == ENODEV || err == EBADF; }
+
+    // Caller holds mutex_. True when the open fd's node is gone.
+    bool node_removed_locked() const {
+        if (connection_type_ != ConnectionType::Serial || serial_fd_ < 0) {
+            return false;
+        }
+        struct stat st {};
+        return ::fstat(serial_fd_, &st) != 0 || st.st_nlink == 0;
+    }
+
+    // Marks the link lost once: the first detection keeps its reason and stamp.
+    void note_loss(const std::string& reason) {
+        if (record_loss(reason)) {
+            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+        }
+    }
+
+    // note_loss() for a loss found with no mutex_ held: records it only while
+    // the link it was found on is still the current one. The generation check
+    // and the record share link_id_mutex_, which connect and disconnect take
+    // to change the node, so neither can slip in between (open-astro#1289).
+    // False when the link changed and nothing was recorded.
+    bool note_loss_if_current(std::uint64_t generation, const std::string& reason) {
+        bool recorded = false;
+        {
+            std::lock_guard<std::mutex> id_lock(link_id_mutex_);
+            if (generation != link_generation_) {
+                return false;
+            }
+            recorded = record_loss(reason);
+        }
+        if (recorded) {
+            ALPACA_LOG_WARN("OnStep", "Serial link to the mount lost: " + reason);
+        }
+        return true;
+    }
+
+    // The state half of note_loss(): true when this call marked the link lost.
+    bool record_loss(const std::string& reason) {
+        {
+            std::lock_guard<std::mutex> lock(loss_mutex_);
+            if (link_lost_) {
+                return false;
+            }
+            lost_reason_ = reason;
+            link_lost_ = true;
+            const auto alive_ns = last_alive_ns_.load();
+            if (alive_ns != 0) {  // stored + 1 ns, so 0 means never (see mark_alive())
+                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns - 1));
+            }
+        }
+        (void)link_lost_at_.consume();  // an older, unclaimed loss is superseded by this one
+        link_lost_at_.note(clock().now());
+        return true;
+    }
+
+    // The last time the link was confirmed present (connect, a live
+    // link_alive(), the check before an exchange). A loss happened after it,
+    // so it bounds the outage from above even when nobody looked for a while.
+    void mark_alive() {
+        // Stored + 1 ns: 0 means "never", and a FakeTaskClock starts at the
+        // epoch, where a real stamp would otherwise read as never.
+        last_alive_ns_ =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(clock().now().time_since_epoch()).count() + 1;
+    }
+
+    util::TaskClock& clock() const { return *clock_.load(); }
+
+    void clear_loss() {
+        std::lock_guard<std::mutex> lock(loss_mutex_);
+        link_lost_ = false;
+        lost_reason_.clear();
+    }
+
+    // Caller holds mutex_. Closes the dead link and reports it as NotConnected.
+    [[noreturn]] void lose_link_locked(const std::string& reason) {
+        note_loss(reason);
+        disconnect_locked();
+        throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
+                              AlpacaError::NotConnected);
+    }
+
+    // Caller holds mutex_. Every exchange starts here.
+    void require_live_link_locked() {
+        if (connected_ && link_lost_) {
+            disconnect_locked();  // a loss found by link_alive() while an exchange held the fd
+        }
+        if (!connected_) {
+            const std::string reason = link_lost_reason();
+            if (!reason.empty()) {
+                throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
+                                      AlpacaError::NotConnected);
+            }
+            throw AlpacaException("Not connected to mount", AlpacaError::NotConnected);
+        }
+        if (node_removed_locked()) {
+            lose_link_locked("the adapter was removed");
+        }
+        mark_alive();
+    }
+
+    // Caller holds mutex_; errno is from the failed write.
+    [[noreturn]] void fail_write_locked() {
+        const int err = errno;
+        if (connection_type_ == ConnectionType::Serial) {
+            if (is_loss_errno(err)) {
+                lose_link_locked("write failed: " + util::errno_string(err));
+            }
+            if (node_removed_locked()) {
+                lose_link_locked("the adapter was removed");
+            }
+        }
+        throw AlpacaException("Failed to send command to mount");
+    }
+
+    std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     mutable std::mutex mutex_;
-    bool connected_;
+    std::atomic<bool> connected_;
+    std::atomic<bool> link_lost_{false};
+    mutable std::mutex loss_mutex_;  // leaf: lost_reason_ and the link_lost_ transitions
+    std::string lost_reason_;
+    util::LinkLostStamp link_lost_at_;
+    std::atomic<std::int64_t> last_alive_ns_{0};
+    std::optional<std::chrono::steady_clock::time_point> alive_before_loss_;  // under loss_mutex_
+    // The node recorded at connect. Taken before loss_mutex_ and the
+    // link_lost_at_ stamp's mutex (note_loss_if_current), never after them.
+    mutable std::mutex link_id_mutex_;
+    std::string link_path_;
+    dev_t link_dev_{};
+    ino_t link_ino_{};
+    std::uint64_t link_generation_ = 0;  // under link_id_mutex_: bumped when the node is recorded or cleared
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
     util::SerialLink link_;  // the connected serial port (#1202); closed while disconnected
@@ -1129,15 +1454,35 @@ void OnStepProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool OnStepProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
 
+void OnStepProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_->set_task_clock(clock); }
+
+void OnStepProtocolWrapper::release_task_clock(util::TaskClock& clock) { pimpl_->release_task_clock(clock); }
+
+bool OnStepProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
+
+std::string OnStepProtocolWrapper::link_lost_reason() const { return pimpl_->link_lost_reason(); }
+
+std::optional<std::chrono::steady_clock::time_point> OnStepProtocolWrapper::consume_link_lost_at() {
+    return pimpl_->consume_link_lost_at();
+}
+
+std::optional<std::chrono::steady_clock::time_point> OnStepProtocolWrapper::consume_last_alive_before_loss() {
+    return pimpl_->consume_last_alive_before_loss();
+}
+
 std::string OnStepProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
 std::string OnStepProtocolWrapper::get_product_name() { return pimpl_->get_product_name(); }
 
 std::string OnStepProtocolWrapper::get_version_number() { return pimpl_->get_version_number(); }
 
+std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl_->get_mount_coords_mode(); }
+
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 
 AltAz OnStepProtocolWrapper::get_alt_az() { return pimpl_->get_alt_az(); }
+
+AltitudeLimits OnStepProtocolWrapper::get_altitude_limits() { return pimpl_->get_altitude_limits(); }
 
 MountStatus OnStepProtocolWrapper::get_status() { return pimpl_->get_status(); }
 
@@ -1193,5 +1538,12 @@ std::string OnStepProtocolWrapper::send_command(const std::string& command, bool
 void OnStepProtocolWrapper::send_command_blind(const std::string& command) { pimpl_->send_command_blind(command); }
 
 void OnStepProtocolWrapper::flush_input() { pimpl_->flush_input(); }
+
+namespace detail {
+void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook) {
+    std::lock_guard<std::mutex> lock(link_loss_hook_mutex());
+    link_loss_hook() = std::move(hook);
+}
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

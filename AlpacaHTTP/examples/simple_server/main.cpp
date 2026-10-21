@@ -12,6 +12,7 @@
 
 #include <alpacacore/device_registry.h>
 #include <alpacacore/managementdriver.h>
+#include <alpacacore/version.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/discovery.h>
 #include <alpacahttp/server.h>
@@ -21,11 +22,84 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 
 std::atomic<bool> g_running{true};
+
+namespace {
+
+void print_usage(std::ostream& out) {
+    out << "Usage: alpacabridge [--help | -h | --version] [config-file]\n"
+           "\n"
+           "Runs the AlpacaBridge server. With no argument it loads the default\n"
+           "configuration; with a config-file argument it loads that file, which must be readable.\n"
+           "\n"
+           "Options:\n"
+           "  -h, --help     Print this usage text and exit.\n"
+           "  --version      Print the version and exit.\n"
+           "\n"
+           "Environment overrides (applied over the configuration):\n"
+           "  ALPACAHTTP_PORT\n"
+           "  ALPACAHTTP_DISCOVERY\n"
+           "  ALPACAHTTP_LOG_LEVEL\n"
+           "  ALPACAHTTP_SERVER_NAME\n"
+           "  ALPACAHTTP_MANUFACTURER\n"
+           "  ALPACAHTTP_LOCATION\n"
+           "  ALPACAHTTP_PROFILE_NAME\n"
+           "  ALPACAHTTP_THREAD_POOL_SIZE\n"
+           "  ALPACAHTTP_MAX_CONNECTIONS\n"
+           "  ALPACAHTTP_KEEP_ALIVE_LIFETIME_SECONDS\n"
+           "  ALPACAHTTP_MOTION_WATCHDOG_SECONDS\n"
+           "  ALPACAHTTP_UPDATE_PACKAGES_URL\n"
+           "  ALPACAHTTP_UPDATE_RELEASE_NOTES_URL\n"
+           "  ALPACAHTTP_UPDATE_RELEASE_URL\n"
+           "  ALPACAHTTP_LOG_DIRECTORY\n"
+           "  ALPACAHTTP_FILE_LOGGING\n"
+           "  ALPACAHTTP_LOG_RETENTION_DAYS\n";
+}
+
+// Handles the arguments that must not start a server. Returns the exit status to
+// leave with, or -1 to carry on. Runs before the config load, logging, Wi-Fi and
+// any socket, so a mistyped command line touches nothing.
+int check_arguments(int argc, char* argv[]) {
+    if (argc < 2) {
+        return -1;
+    }
+    const std::string first = argv[1];
+    if (first == "--help" || first == "-h") {
+        print_usage(std::cout);
+        return 0;
+    }
+    if (first == "--version") {
+        std::cout << alpacacore::kVersion << std::endl;
+        return 0;
+    }
+    if (!first.empty() && first[0] == '-') {
+        std::cerr << "alpacabridge: unknown option '" << first << "'\n";
+        print_usage(std::cerr);
+        return 2;
+    }
+    if (argc > 2) {
+        std::cerr << "alpacabridge: expected at most one config-file argument, got " << (argc - 1) << "\n";
+        print_usage(std::cerr);
+        return 2;
+    }
+    // Config::load() skips a file it cannot open and still succeeds, so a mistyped
+    // path would start a server on defaults. Refuse it here instead.
+    std::error_code ec;
+    if (std::filesystem::is_directory(first, ec) || !std::ifstream(first).is_open()) {
+        std::cerr << "alpacabridge: cannot read config file '" << first << "'\n";
+        return 1;
+    }
+    return -1;
+}
+
+}  // namespace
 
 void signal_handler(int signal) {
     (void)signal;
@@ -33,6 +107,10 @@ void signal_handler(int signal) {
 }
 
 int main(int argc, char* argv[]) {
+    if (const int status = check_arguments(argc, argv); status >= 0) {
+        return status;
+    }
+
     // Setup signal handlers
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);

@@ -14,11 +14,15 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 
+#include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::synscan {
 
@@ -46,7 +50,31 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_with_site(
     int device_number, const ConnectionInfo& connection_info, SynScanVersion version,
     std::optional<double> site_latitude_deg, std::optional<double> site_longitude_deg,
     std::optional<double> site_elevation_m, std::optional<bool> sync_time_on_connect,
-    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto,
+    util::TaskClock& clock = util::default_task_clock());
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can make a body's start fail. Call only while no start is in flight.
+/// `driver` must come from the factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+void set_pulse_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seams of the status poll (decision 0010): stop or resume its ticks, and run a hook between a tick's sample
+/// and its publish (no lock held) so a case can land a client write in that window. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+/// Runs one full tick on the calling thread, paused or not. False when the connection is gone.
+bool poll_status_now_for_testing(TelescopeDriver& driver);
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+void set_status_poll_before_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Takes or drops the hold the readback-tick hunt keeps while it owns the line; a held poll tick makes no exchange.
+void hold_status_poll_for_testing(TelescopeDriver& driver, bool hold);
+
+/// Test seam: replaces the wall time the driver uses for local sidereal time (park and SetPark target,
+/// DestinationSideOfPier, SiderealTime); an empty function restores std::chrono::system_clock. `driver` must come from
+/// the factories above.
+void set_sidereal_wall_clock_for_testing(TelescopeDriver& driver,
+                                         std::function<std::chrono::system_clock::time_point()> now);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -55,7 +83,8 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_deferred(
     SynScanVersion version = SynScanVersion::Auto, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
     std::optional<bool> sync_time_on_connect = std::nullopt,
-    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto,
+    util::TaskClock& clock = util::default_task_clock());
 
 /// The serial scan behind create_synscan_telescope_auto(); throws when nothing answers.
 ConnectionInfo resolve_synscan_serial_auto(int mount_index);
@@ -66,6 +95,7 @@ std::unique_ptr<TelescopeDriver> create_synscan_telescope_auto(
     int device_number, int mount_index = 0, SynScanVersion version = SynScanVersion::Auto,
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::optional<bool> sync_time_on_connect = std::nullopt,
-    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto);
+    SynScanAlignmentSetting alignment = SynScanAlignmentSetting::Auto,
+    util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::synscan

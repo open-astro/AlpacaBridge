@@ -1,0 +1,3 @@
+### Fixed
+
+- **SynScan GOTO landing no longer waits out the readback-tick hunt on every round**, SynScan driver, issue #1107. A handset without the once-a-second RA readback sawtooth made each landing round spend the 1.3 s first-jump budget, so a slew reported `Slewing=true` up to about 4 s longer than needed. The first hunt that ends with no jump now marks the connection, and later landings take one plain position read; connect, disconnect, a tracking write and a time write clear the mark, and a handset with the sawtooth is hunted every round as before. Covered by `AlpacaCore/tests/test_synscan_goto_landing.cpp` ("a handset without the sawtooth is hunted once per connection").

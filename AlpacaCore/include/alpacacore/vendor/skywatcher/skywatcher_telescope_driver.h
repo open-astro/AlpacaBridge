@@ -23,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <thread>
 
 namespace alpacacore::vendor::skywatcher {
 
@@ -53,6 +54,12 @@ bool host_synchronized_probe();
 // driver is destroyed. Process-wide; tests clear it afterwards.
 void set_pulse_restore_hook(std::function<void()> hook);
 void run_pulse_restore_hook();
+// Test-only: called by the RA pulse task when the dispatch threw after the
+// live ":I" went out, before the drive-rate recovery takes the lock and with no
+// driver lock held, so a test can change SiteLatitude in that window. Default
+// empty; process-wide; tests clear it afterwards.
+void set_pulse_dispatch_failure_hook(std::function<void()> hook);
+void run_pulse_dispatch_failure_hook();
 // open-astro#405: how often the pointing path re-samples discipline while a
 // client offset is armed on a host that was undisciplined at the write
 // (default 30 s; a test shortens it). Zero disables the re-sample.
@@ -108,6 +115,22 @@ bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronize
 /// identify itself. It sets eps, never the hemisphere term k = s * eps.
 enum class DecAxisSenseSetting : std::uint8_t { Auto, Normal, Reversed };
 
+/// open-astro#437: per-axis goto backlash compensation. `steps` is the
+/// overshoot in microsteps (the board's own counts) a goto against the axis'
+/// approach side makes before its slow final leg back onto the target; an axis
+/// with `enabled` false or `steps` 0 is never compensated. Applies to gotos only (decision in the
+/// Sky-Watcher docs): PulseGuide, MoveAxis and the rate properties are not.
+struct BacklashSettings {
+    struct Axis {
+        std::uint32_t steps = 0;
+        bool enabled = false;
+        bool active() const { return enabled && steps > 0; }
+    };
+    Axis ra;
+    Axis dec;
+    bool any_active() const { return ra.active() || dec.active(); }
+};
+
 // `motion_limits` (open-astro#436): per-device altitude floor and meridian
 // limit, both off by default; see <alpacacore/util/motion_limits.h>.
 /// `clock` is the TaskClock the driver's task waits and deadlines run on
@@ -117,8 +140,26 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope(
     int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
     std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {}, util::MotionLimits motion_limits = {},
-    util::TaskClock& clock = util::default_task_clock(),
-    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    util::TaskClock& clock = util::default_task_clock(), DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto,
+    BacklashSettings backlash = {});
+
+/// Test seam: replaces the thread factory of the driver's slew slot, so a case
+/// can hold a new body's thread back until a replaced body has finished its
+/// tail. Call only while no start is in flight. `driver` must come from the
+/// factories above; anything else is ignored.
+void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
+/// Test seam: while paused the driver's status poll (decision 0010) wakes and
+/// samples nothing, so a case can age the snapshot's frame on the task clock
+/// without the board going quiet. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
+
+/// Test seam: `hook` runs on the poll thread between a poll's sample and its
+/// publish, with no driver lock held, so a case can land a client write in that
+/// window. Pass an empty function to clear it, and release anything the hook
+/// blocks on before the driver is destroyed.
+void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
@@ -127,7 +168,7 @@ std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(
     std::optional<double> site_latitude_deg = std::nullopt, std::optional<double> site_longitude_deg = std::nullopt,
     std::optional<double> site_elevation_m = std::nullopt, std::unique_ptr<SkyWatcherProtocolWrapper> protocol = {},
     util::MotionLimits motion_limits = {}, util::TaskClock& clock = util::default_task_clock(),
-    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto, BacklashSettings backlash = {});
 
 /// The scan behind create_skywatcher_telescope_auto(): serial ports first, then
 /// Wi-Fi discovery (UDP 11880); throws when nothing answers.
@@ -138,6 +179,7 @@ ConnectionInfo resolve_skywatcher_auto(int mount_index);
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_auto(
     int device_number, int mount_index = 0, std::optional<double> site_latitude_deg = std::nullopt,
     std::optional<double> site_longitude_deg = std::nullopt, std::optional<double> site_elevation_m = std::nullopt,
-    util::MotionLimits motion_limits = {}, DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto);
+    util::MotionLimits motion_limits = {}, DecAxisSenseSetting dec_axis_sense = DecAxisSenseSetting::Auto,
+    BacklashSettings backlash = {});
 
 }  // namespace alpacacore::vendor::skywatcher

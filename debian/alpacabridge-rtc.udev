@@ -1,0 +1,4 @@
+# Let the service write the corrected system time back to the hardware RTC
+# after a client or the web UI sets the clock (open-astro#296). The kernel
+# default is root-only; the service runs as alpacabridge with CAP_SYS_TIME.
+SUBSYSTEM=="rtc", KERNEL=="rtc[0-9]*", GROUP="alpacabridge", MODE="0660"

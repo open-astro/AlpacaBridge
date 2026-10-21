@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/playerone/playerone_sdk_wrapper.h>
 
 #include <chrono>
@@ -33,6 +34,7 @@ std::unique_ptr<CameraDriver> create_playerone_camera(int device_number, int cam
 // outlive the returned driver.
 std::unique_ptr<CameraDriver> create_playerone_camera(
     int device_number, int camera_index, PlayerOneSDK& sdk,
-    std::chrono::steady_clock::duration completion_grace = std::chrono::seconds(15));
+    std::chrono::steady_clock::duration completion_grace = std::chrono::seconds(15),
+    util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::playerone

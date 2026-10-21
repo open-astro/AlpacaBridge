@@ -1,0 +1,5 @@
+### Added (tooling)
+- **Dependency graph: everything the installed daemon needs at runtime** (`scripts/dependency_snapshot.py`, `nightly-build.yml`): the snapshot now reports `debian/control`'s Recommends (network-manager, polkitd) and the system packages the daemon uses without declaring them (systemd, dbus, udev, apt, dpkg, bash, dash, coreutils; `RUNTIME_SYSTEM`, each tied to the file line that proves the need, so `--check` fails when that line goes), and the nightly build submits the built `.deb`'s resolved `Depends`, which `${shlibs:Depends}` hid until now, as a second snapshot (`--deb-snapshot`).
+
+### Fixed (tooling)
+- **Dependency graph: the action pins of `ci.yml`, `osv-scan.yml`, `nightly-build.yml` and `release.yml` were missing** (`scripts/dependency_snapshot.py`): GitHub stopped listing the `uses:` pins of the workflow files our snapshot also names (checkout, upload-artifact, upload-sarif, attest-build-provenance, attest-sbom), so the snapshot now lists each named workflow's pins itself.

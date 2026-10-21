@@ -13,7 +13,10 @@
 #pragma once
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
+
 #include <memory>
+#include <optional>
 
 namespace alpacacore::vendor::zwo {
 
@@ -22,17 +25,37 @@ namespace alpacacore::vendor::zwo {
  *
  * @param device_number Alpaca device number
  * @param focuser_id ZWO EAF SDK focuser ID
+ * @param max_step Optional max step to write to the unit at connect (see the driver); unset leaves the stored value
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id);
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id,
+                                                      std::optional<int> max_step = std::nullopt);
 
 /**
  * @brief Create a ZWO EAF focuser driver by focuser index (enumeration order).
  *
  * @param device_number Alpaca device number
  * @param focuser_index ZWO EAF SDK focuser index (0-based)
+ * @param max_step As for create_zwo_eaf_focuser()
  * @return Unique pointer to focuser driver
  */
-std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index);
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index,
+                                                               std::optional<int> max_step = std::nullopt);
+
+/**
+ * @brief Test seam: as create_zwo_eaf_focuser(), over an injected EAF SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser(int device_number, int focuser_id, ZWOEAFSDK& sdk,
+                                                      std::optional<int> max_step = std::nullopt);
+
+/**
+ * @brief Test seam: as create_zwo_eaf_focuser_by_index(), over an injected EAF SDK.
+ *
+ * @p sdk must outlive the driver.
+ */
+std::unique_ptr<FocuserDriver> create_zwo_eaf_focuser_by_index(int device_number, int focuser_index, ZWOEAFSDK& sdk,
+                                                               std::optional<int> max_step = std::nullopt);
 
 } // namespace alpacacore::vendor::zwo

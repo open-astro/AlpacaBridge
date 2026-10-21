@@ -11,6 +11,10 @@ the release page, so the operator decides with the changes in front of them.
 while it runs, and reloads the page on the new version once the service has
 restarted.
 
+The card also has an **Update channel** selector, Stable or Beta. It decides
+which apt component the host follows and which index the check reads, and the
+two always agree (see [Update channel](#update-channel)).
+
 Nothing updates on its own. The check runs only when the button is pressed,
 and the install only after the confirmation dialog.
 
@@ -38,7 +42,11 @@ cannot run `apt` and cannot use `sudo`. The feature is split along that line:
   `alpacabridge-update.service` and the verb is `start`. Every other unit and
   verb falls through to the default (admin authentication), which a service
   user cannot satisfy. This is the same shape as the WiFi card's
-  NetworkManager rule and requires the `polkitd` package.
+  NetworkManager rule and requires the `polkitd` package. The same rule also
+  answers `YES` for the `start` verb on exactly two more units,
+  `alpacabridge-channel@stable.service` and `alpacabridge-channel@beta.service`
+  (string equality, no prefix or pattern match), described under
+  [Update channel](#update-channel).
 
 The helper unit is outside `alpacabridge.service`'s control group, so it
 survives the restart that the new package's `postinst` performs part-way
@@ -72,13 +80,66 @@ user cannot write to. The path is fixed on both sides (`kUpdateLogPath` in
 `software_update.h`, `LOG=` in the script) and `test_software_update` fails if
 they disagree or if the daemon's unit claims the same directory.
 
+## Update channel
+
+The effective channel of a host is whether the apt source
+`/etc/apt/sources.list.d/alpacabridge-beta.sources` exists: present is Beta,
+absent is Stable. The daemon keeps no copy of it. Choosing a channel in the card
+starts one of two instances of the root-owned template unit
+`alpacabridge-channel@.service` (`Type=oneshot`, no `[Install]`, kept out of
+the `dh_installsystemd` snippets like the update unit). Its `ExecStart` is
+`/usr/libexec/alpacabridge/set-update-channel %i`. The polkit rule names the
+two instances by exact string, the daemon picks the unit from a two-entry table
+and never builds a unit name from request text, and the helper itself refuses
+any argument but `stable` or `beta` before it touches apt.
+
+- **Beta** writes the deb822 source (`Types: deb`, `URIs:
+  https://apt.openastro.net`, `Suites: trixie`, `Components: beta`,
+  `Architectures: arm64`, `Signed-By` the OpenAstro keyring) through a
+  `mktemp` file in `/etc/apt/sources.list.d`, `chmod 0644`, `mv -f`.
+- **Stable** removes that file.
+- Both then run `apt-get update`. If it exits non-zero the helper puts the
+  source back as it was before the run (removes it if this run created it,
+  restores it if Stable removed it), ends the transcript with `=== RESULT:
+  failure ... apt-get update exit N` and exits with N, so the card reports the
+  failure (a host that installed the `.deb` from a release lacks the keyring
+  and cannot verify the beta source). `/etc/apt/sources.list.d/openastro.list` is
+  never edited, and `apt purge alpacabridge` removes the beta source.
+- The helper does not look for `beta` in other apt sources. A host that added
+  `beta` to the `openastro.list` line by hand (an older opt-in step in
+  [beta-channel.md](beta-channel.md)) gets beta packages on either channel, and
+  after a switch to Beta `apt update` warns that each beta target is configured
+  multiple times. The fix is to put that line back to `trixie main`.
+
+The card shows a finished switch only on the page that started or joined it, and a failed one carries the helper's result line (with the apt exit code) as its detail. The transcript is `/var/log/alpacabridge-update/channel.log` (same root-owned
+`LogsDirectory=` as the update transcript, `kChannelLogPath`), ending in the
+same `=== RESULT: success|failure` markers. A finished switch is judged by that
+transcript, never by a template instance's own `failed` state, which stays
+until something resets it. While a switch runs the card cannot start an
+install, and while an install runs it cannot switch.
+
+The check follows the channel: `https://apt.openastro.net/dists/trixie/main/binary-arm64/Packages`
+for Stable, `.../beta/binary-arm64/Packages` for Beta, from one mapping in
+`software_update.cpp` that also names the apt component, so the two cannot
+disagree (`test_software_update` pins this). If `update_packages_url` is unset
+or equal to the stock stable index, the check follows the channel. Any other
+non-empty value is an explicit override: the check uses it as is, the status
+reports `ChannelOverridden: true`, the selector is disabled with "set by
+update_packages_url", and the channel route refuses. A result fetched for the
+other channel is not reported after a switch; check again.
+
+Choosing Stable on a beta build does not downgrade: apt never does, so the
+card shows this under the selector while Stable is selected on a beta build
+and repeats it in the confirmation: "You stay on X.Y.0~betaN until the stable
+release overtakes it".
+
 ## API
 
-All three live under `/management/v1/update/` (the unversioned
+These live under `/management/v1/update/` (the unversioned
 `/management/update/` alias works too) and use the standard Alpaca envelope.
 `check` and `install` accept `PUT` as well as `POST`, like the other
 state-changing management endpoints; the examples use `POST`.
-The state-changing pair carries the cross-origin guard documented in
+The state-changing endpoints (`check`, `install`, `channel`) carry the cross-origin guard documented in
 [wifi-api.md](wifi-api.md): a browser request whose `Origin` does not match
 `Host` gets HTTP 403 with `ErrorMessage` "Cross-origin software update requests
 are not allowed". `GET status` is exempt, like every other GET.
@@ -96,6 +157,9 @@ are not allowed". `GET status` is exempt, like every other GET.
     "CheckedAt": 1790535600,
     "CheckError": null,
     "PackagesUrl": "https://apt.openastro.net/dists/trixie/main/binary-arm64/Packages",
+    "Channel": "stable",
+    "ChannelOverridden": false,
+    "ChannelSwitch": { "State": "idle", "Detail": "", "Log": "" },
     "ReleaseNotes": "# AlpacaBridge 4.2.0\n\nOne paragraph...\n\n## Read this first\n\n- ...",
     "ReleaseNotesUrl": "https://raw.githubusercontent.com/open-astro/AlpacaBridge/v4.2.0/docs/releases/4.2.0.md",
     "ReleaseUrl": "https://github.com/open-astro/AlpacaBridge/releases/tag/v4.2.0",
@@ -140,6 +204,16 @@ are not allowed". `GET status` is exempt, like every other GET.
   helper unit is not installed, and with 0x500 when systemd refuses the start
   (the message names polkit and the rule file).
 
+- `POST /management/v1/update/channel` (or `PUT`) takes `{"Channel":"stable"}`
+  or `{"Channel":"beta"}`, starts the matching helper instance and answers the
+  status payload with `ChannelSwitch.State` = `running`. Any other body answers
+  HTTP 400 with `ErrorNumber` 0x401 (`InvalidValue`) and does not echo the
+  text. It refuses with 0x40B (`InvalidOperation`) while the update installer
+  or a switch is running or `update_packages_url` is an override, with 0x400
+  (`NotImplemented`) when the helper unit is not installed, and with 0x500 when
+  systemd refuses the start. `install` refuses with 0x40B while a switch runs.
+  It carries the same cross-origin guard as `check` and `install`.
+
 When the manager is not wired at all (a test router), every sub-endpoint
 answers 0x400 "Software update not configured".
 
@@ -147,9 +221,12 @@ answers 0x400 "Software update not configured".
 
 `update_packages_url` under `server:` in `default.yaml` (environment override
 `ALPACAHTTP_UPDATE_PACKAGES_URL`) is the index the check reads. The default is
-the arm64 Trixie index at apt.openastro.net. Only the check uses it; the
-install always goes through the host's own apt sources. An empty value
-disables the check.
+the arm64 Trixie `main` index at apt.openastro.net, which means "follow the
+update channel": leave the key out (it is a commented example in the shipped
+file) unless you mirror the repository. Any other non-empty value is an
+override that pins the check and disables the channel selector. Only the check
+uses it; the install always goes through the host's own apt sources. An empty
+value disables the check.
 
 `update_release_notes_url` and `update_release_url` (environment
 `ALPACAHTTP_UPDATE_RELEASE_NOTES_URL`, `ALPACAHTTP_UPDATE_RELEASE_URL`) are
@@ -175,7 +252,9 @@ informational and never gate the install.
   service restarts. Do not start it mid-exposure or mid-slew. The
   confirmation dialog says so.
 - A failed run keeps its transcript in `/var/log/alpacabridge-update/update.log`, and
-  `journalctl -u alpacabridge-update` has the same text.
+  `journalctl -u alpacabridge-update` has the same text. A channel switch keeps
+  its transcript in `/var/log/alpacabridge-update/channel.log`, and
+  `journalctl -u alpacabridge-channel@beta` (or `@stable`) has the same text.
 - On a host without `polkitd`, or where the rule file is missing, the install
   answers with a message naming both; the check still works, and
   `sudo apt install --only-upgrade alpacabridge` is the fallback.

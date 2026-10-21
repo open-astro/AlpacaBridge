@@ -17,9 +17,11 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <thread>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 #include "fake_touptek_sdk.h"
 
 namespace {
@@ -76,7 +78,7 @@ TEST_CASE("ToupTek Camera Driver - Not connected throws", "[touptek][camera][uni
 TEST_CASE("ToupTek Camera Driver - Disconnected state", "[touptek][camera][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
-    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
@@ -133,7 +135,7 @@ TEST_CASE("ToupTek Camera Driver - ASCOM Error Codes", "[touptek][camera][unit]"
 TEST_CASE("ToupTek Camera Driver - State Machine Contracts", "[touptek][camera][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0);
 
-    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
     REQUIRE(driver->get_is_pulse_guiding() == false);
     REQUIRE(driver->get_can_abort_exposure() == true);
@@ -275,4 +277,188 @@ TEST_CASE("ToupTek Camera Driver - AbortExposure clears a failure from a complet
     CHECK_NOTHROW(driver->get_camera_state());
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     driver->set_connected(false);
+}
+
+namespace {
+
+using namespace std::chrono_literals;
+
+// Spins (real time, bounded) until `cond` holds; the driver's own threads
+// make progress in the meantime. Virtual time never moves here.
+template <typename Cond>
+bool spin_until(Cond cond) {
+    for (int i = 0; i < 5000 && !cond(); ++i) std::this_thread::sleep_for(1ms);
+    return cond();
+}
+
+alpacacore::test::FakeToupTekSDK make_fake_camera(bool pulse_guide = false) {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto info = alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One");
+    info.supports_pulse_guide = pulse_guide;
+    fake.cameras.push_back(info);
+    return fake;
+}
+
+}  // namespace
+
+TEST_CASE("ToupTek Camera Driver - thermal poll waits on the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    // The first tick primes the cache at once, then the poller waits out the
+    // interval on the clock.
+    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    const int primed = fake.call_count("get_temperature_deciC");
+
+    clock.advance(999ms);
+    CHECK(fake.call_count("get_temperature_deciC") == primed);
+    clock.advance(1ms);
+    CHECK(spin_until([&] { return fake.call_count("get_temperature_deciC") > primed; }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - thermal cache ages on the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    fake.deliver_frame = false;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(spin_until([&] { return fake.call_count("get_temperature_deciC") >= 1; }));
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    // The poller skips its reads while a frame integrates, so the cache ages.
+    fake.hold_wait_image(true);
+    driver->start_exposure(100.0, true);
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    for (int i = 0; i < 4; ++i) {
+        clock.advance(1000ms);
+        REQUIRE(clock.wait_for_woken_settled(5s));
+    }
+    const int before = fake.call_count("get_temperature_deciC");
+    // Served as is during the exposure, however old.
+    (void)driver->get_ccd_temperature();
+    CHECK(fake.call_count("get_temperature_deciC") == before);
+
+    driver->abort_exposure();
+    fake.release_wait_image();
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    // 4 s of clock time old: past the 3 s bound, so one live read ...
+    (void)driver->get_ccd_temperature();
+    CHECK(fake.call_count("get_temperature_deciC") == before + 1);
+    // ... which stamps the cache fresh again.
+    (void)driver->get_ccd_temperature();
+    CHECK(fake.call_count("get_temperature_deciC") == before + 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - TEC cache ages on the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    fake.deliver_frame = false;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_get_cooler_power());
+    REQUIRE(spin_until([&] { return fake.call_count("get_tec_voltage_deciV") >= 1; }));
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    // The poller skips its reads while a frame integrates, so the cache ages.
+    fake.hold_wait_image(true);
+    driver->start_exposure(100.0, true);
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    for (int i = 0; i < 4; ++i) {
+        clock.advance(1000ms);
+        REQUIRE(clock.wait_for_woken_settled(5s));
+    }
+    const int before = fake.call_count("get_tec_voltage_deciV");
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before);
+
+    driver->abort_exposure();
+    fake.release_wait_image();
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    // 4 s of clock time old: past the 3 s bound, so one live read ...
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before + 1);
+    // ... which stamps the TEC cache fresh again.
+    (void)driver->get_cooler_power();
+    CHECK(fake.call_count("get_tec_voltage_deciV") == before + 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - exposure deadline reads the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera();
+    fake.hold_wait_image(true);
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    driver->start_exposure(1.0, true);  // deadline: 1 s exposure + 15 s grace
+    REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(15999ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    clock.advance(1ms);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    fake.release_wait_image();
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - pulse guide timer waits on the task clock", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera(true);
+    fake.guiding = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_pulse_guide());
+    REQUIRE(clock.wait_for_wait_count(1, 5s));  // the thermal poller's wait
+
+    driver->pulse_guide(0, 500);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));  // the pulse timer's wait
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(499ms);
+    CHECK(driver->get_is_pulse_guiding());
+    clock.advance(1ms);
+    CHECK(spin_until([&] { return !driver->get_is_pulse_guiding(); }));
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - a superseding pulse cancels the clock wait", "[touptek][camera][unit][taskclock]") {
+    alpacacore::test::FakeTaskClock clock;
+    auto fake = make_fake_camera(true);
+    fake.guiding = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+
+    driver->pulse_guide(0, 10000);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));
+    // No advance: replacing the pulse, disconnecting and destroying the driver
+    // must all wake the wait. A regression in the cancel or its notify would
+    // park the fake-clock wait for ever, in pulse_guide's join as much as in
+    // disconnect or the destructor: run all three in one bounded async so the
+    // case fails instead of hanging.
+    struct Outcome {
+        bool guiding;
+        bool connected;
+    };
+    auto work = std::async(std::launch::async, [&]() -> Outcome {
+        driver->pulse_guide(1, 10000);
+        const bool guiding = driver->get_is_pulse_guiding();
+        driver->set_connected(false);
+        const bool connected = driver->get_connected();
+        driver.reset();
+        return {guiding, connected};
+    });
+    const bool ready = work.wait_for(5s) == std::future_status::ready;
+    // Release every parked timer (the replaced pulse's and the new one's) so the
+    // joins return and the future can be destroyed.
+    for (int i = 0; !ready && i < 200 && work.wait_for(10ms) != std::future_status::ready; ++i) clock.advance(20s);
+    REQUIRE(ready);
+    const Outcome outcome = work.get();
+    CHECK(outcome.guiding);
+    CHECK_FALSE(outcome.connected);
 }

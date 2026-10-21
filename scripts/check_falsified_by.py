@@ -389,7 +389,7 @@ def main(argv):
     if errors:
         for e in errors:
             print("FALSIFIED-BY: " + e)
-        print("falsified-by: FAIL (%d problem(s)); see the `Falsified by:` rule in AGENTS.md Testing Requirements" % len(errors))
+        print("falsified-by: FAIL (%d problem(s)); see the `Falsified by:` rule in .github/instructions/testing.instructions.md" % len(errors))
         return 1
     print("falsified-by: OK (%d new case(s), each with a mutation line)" % len(new))
     return 0

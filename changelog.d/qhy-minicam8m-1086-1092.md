@@ -1,0 +1,2 @@
+### Changed
+- **QHY miniCam8M hardware validation** (AlpacaCore, issues #1086 and #1092): replace the Linux arm64 report with a ConformU 4.5.1.54507 pass on AlpacaBridge `5.0.0~beta2`; ICameraV4 checks pass and full-frame/odd-size subframe dimensions were confirmed at 1x1 through 4x4 binning. A malformed or short frame was not inducible on the camera; corresponding fake tests remain coverage for that path.

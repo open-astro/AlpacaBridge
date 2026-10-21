@@ -1,0 +1,2 @@
+### Changed
+- **ZWO EAF SDK updated to 1.8.1** (ZWO EAF focuser driver), issue #1134: `external/ZWO/EAF/` now carries the 1.8.1 `libEAFFocuser.a`, `libEAFFocuser.so`, `libEAFFocuser.so.1.8.1` (replacing `.so.1.7.7`) and `EAF_focuser.h` from ZWO's EAF SDK V1.8.1. The header adds `EAFStopAndWait()` and makes `EAFGetSDKVersion()` return `const char*`, which the wrapper already expects; the driver keeps using `EAFStop()`. `SUPPORTED-DRIVERS.md` and the `scripts/dependency_sdk_versions.json` version and pin follow, and the EAFN ConformU report is re-run on 1.8.1.

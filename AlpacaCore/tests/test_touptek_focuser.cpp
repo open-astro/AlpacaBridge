@@ -14,7 +14,10 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <string>
+#include <thread>
 #include <variant>
 
 #include "catch2_compat.h"
@@ -29,6 +32,19 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
     } catch (const alpacacore::AlpacaException& ex) {
         REQUIRE(ex.error_code() == expected_code);
     }
+}
+
+void wait_past_status_ttl() { std::this_thread::sleep_for(std::chrono::milliseconds(150)); }
+
+std::unique_ptr<alpacacore::FocuserDriver> make_connected(alpacacore::test::FakeToupTekSDK& fake) {
+    alpacacore::test::FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    focuser.model_name = "AAF";
+    fake.focusers.push_back(focuser);
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
+    driver->set_connected(true);
+    return driver;
 }
 
 } // namespace
@@ -221,4 +237,82 @@ TEST_CASE("ToupTek AAF Focuser Driver - connected, StepSize and TempComp are not
     CHECK(driver->get_temp_comp() == false);
 
     driver->set_connected(false);
+}
+
+// open-astro#294: DeviceState and each getter used to call aaf_get once per property.
+// Falsified by: touptek_focuser_driver.cpp read_status() calling the SDK on every
+// read instead of through status_cache_.get() (aaf_get delta 6, not 3).
+TEST_CASE("ToupTek AAF Focuser Driver - DeviceState is one status read, served from the TTL cache",
+          "[touptek][focuser][unit][fake]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    const int base = fake.call_count("aaf_get");
+
+    CHECK(driver->get_device_state().size() == 4);  // IsMoving, Position, Temperature, TimeStamp
+    CHECK(fake.call_count("aaf_get") - base == 3);  // one refill: IsMoving, GetPosition, GetTemp
+
+    (void)driver->get_device_state();
+    (void)driver->get_position();
+    (void)driver->get_is_moving();
+    (void)driver->get_temperature();
+    CHECK(fake.call_count("aaf_get") - base == 3);  // inside the TTL: no device I/O
+
+    wait_past_status_ttl();
+    (void)driver->get_device_state();
+    CHECK(fake.call_count("aaf_get") - base == 6);
+}
+
+// Falsified by: touptek_focuser_driver.cpp get_max_step() calling sdk_.aaf_get()
+// instead of returning max_step_current_ (aaf_get delta 3 after the reads, not 0).
+TEST_CASE("ToupTek AAF Focuser Driver - Static members cost no device read", "[touptek][focuser][unit][fake]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    const int base = fake.call_count("aaf_get");
+    for (int i = 0; i < 3; ++i) {
+        (void)driver->get_max_step();
+        (void)driver->get_max_increment();
+        (void)driver->get_name();
+    }
+    CHECK(fake.call_count("aaf_get") == base);
+}
+
+// Falsified by: touptek_focuser_driver.cpp move() dropping its
+// status_cache_.invalidate() (Position keeps the pre-move value for a TTL).
+TEST_CASE("ToupTek AAF Focuser Driver - A move and a halt drop the cached frame", "[touptek][focuser][unit][fake]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    CHECK(driver->get_position() == 0);
+    driver->move(900);
+    CHECK(driver->get_position() == 900);
+    const int before = fake.call_count("aaf_get");
+    driver->halt();
+    (void)driver->get_position();
+    CHECK(fake.call_count("aaf_get") - before == 3);  // halt() forced a refill inside the TTL
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw
+// (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ToupTek AAF Focuser Driver - A dead link refuses reads instead of serving the cache",
+          "[touptek][focuser][unit][fake]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    (void)driver->get_position();
+
+    fake.throw_from.insert("aaf_get");
+    wait_past_status_ttl();
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(driver->get_position());
+    }
+    try {
+        (void)driver->get_position();
+        FAIL("expected a throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+
+    fake.throw_from.clear();
+    CHECK(driver->get_position() == 0);
 }

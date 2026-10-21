@@ -346,8 +346,8 @@ private:
             // may take the driver state mutex, and the sync set_connected path
             // takes driver mutex -> pending_mutex_ (obligations 4/5) — calling
             // it under pending_mutex_ is an ABBA deadlock. The drivers that
-            // create that hazard are the Bisque, Celestron, iOptron, OnStep
-            // and Sky-Watcher telescopes. The wrapper-backed switch drivers
+            // create that hazard are the Bisque, Celestron, iOptron and
+            // Sky-Watcher telescopes. The wrapper-backed switch drivers
             // () used to lock in get_connected() via the wrapper's is_open();
             // since open-astro#382 every wrapper publishes an atomic instead,
             // so that list is empty on purpose and the gate below keeps it

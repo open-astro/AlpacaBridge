@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/camera_driver.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <cstdint>
 #include <memory>
@@ -76,8 +77,11 @@ public:
  */
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index);
 
-// Test seam: identical driver wired to an injected SDK and RAW decoder.
+// Test seam: identical driver wired to an injected SDK and RAW decoder. Every
+// driver wait and deadline reads `clock` (decision 0005); tests pass a
+// FakeTaskClock. `clock` must outlive the driver.
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
-                                                   RawDecoder& decoder);
+                                                   RawDecoder& decoder,
+                                                   util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::gphoto

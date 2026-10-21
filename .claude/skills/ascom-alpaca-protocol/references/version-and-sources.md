@@ -16,6 +16,8 @@ The LF-normalized Device API schema snapshot used to produce the endpoint catalo
 
 The hash identifies the snapshot, not a permanently current standard. Recheck it after the verification date.
 
+The `dependency-updates` workflow watches the upstream Device API and Management API schemas and the API Reference page (`documents` in `scripts/dependency_sdk_versions.json`) and opens an "Upstream document changed" issue when one changes. It hashes the raw bytes ascom-standards.org serves (CRLF line ends), so its Device API `baseline` differs from the LF-normalized hash above while the content is the same.
+
 ## Official sources
 
 - Architecture and motivation: <https://ascom-standards.org/About/Index.htm>

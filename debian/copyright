@@ -2,6 +2,25 @@ Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: AlpacaBridge
 Upstream-Contact: OpenAstro <support@openastro.net>
 Source: https://github.com/open-astro/AlpacaBridge
+Comment: Dynamically linked system library, not part of this source tree
+ .
+ The gphoto camera driver links libraw from Debian's own package
+ (Build-Depends libraw-dev). It is not vendored or redistributed in this
+ package, so no Files paragraph can match it; it is recorded here instead.
+ libgphoto2 is NOT in this record: it is bundled, and has its own Files
+ paragraph for AlpacaCore/external/libgphoto2/* below.
+ .
+ libraw (LibRaw): Copyright 2008-2025 LibRaw LLC. License: LGPL-2.1 or
+ CDDL-1.0, at the licensee's choice (upstream COPYRIGHT, LICENSE.LGPL and
+ LICENSE.CDDL). The LGPL-2.1 text is at
+ "/usr/share/common-licenses/LGPL-2.1"; the CDDL-1.0 paragraph is
+ below. LibRaw also carries code under other permissive licenses (dcraw,
+ DCB/FBDD, X3F, Adobe DNG SDK) listed in its own COPYRIGHT file.
+ .
+ libgphoto2 2.5.34 is built from the unmodified upstream source tarball
+ kept in this repository (AlpacaCore/external/libgphoto2/), which is the
+ corresponding source for the LGPL library shipped under
+ /usr/lib/alpacabridge/libgphoto2.
 
 Files: *
 Copyright: 2025-2026 OpenAstro Contributors
@@ -53,6 +72,14 @@ License: ToupTek-SDK
  written redistribution grant accompanies the SDK; it will be removed on
  request by the vendor.
 
+Files: AlpacaCore/external/Altair/*
+Copyright: 2026 Altair Astro Limited
+License: Expat
+Comment: Altair camera SDK (altaircamsdk 60.31589.20260531, ToupTek OEM) —
+ license.txt in the SDK tree. Altair Support confirmed the SDK is MIT
+ licensed and may be redistributed with the copyright notice and license
+ text included.
+
 Files: AlpacaCore/external/SVBONY/*
 Copyright: SVBONY (Hong Kong SVBONY Technology Co., Ltd.)
 License: SVBONY-SDK
@@ -73,6 +100,20 @@ License: LGPL-2.1-or-later
  On Debian systems, the complete text of the GNU Lesser General Public
  License version 2.1 can be found in
  "/usr/share/common-licenses/LGPL-2.1".
+
+Files: AlpacaCore/external/libgphoto2/*
+Copyright: 1999-2026 Scott Fritzinger, Lutz Mueller, Marcus Meissner and
+           libgphoto2 contributors
+License: LGPL-2.1-or-later and GPL-2.0-or-later
+Comment: libgphoto2 is LGPL-2.1-or-later (COPYING in the tarball); some of its
+ camlibs carry their own GPL-2.0-or-later COPYING. Redistributed as an
+ unmodified upstream source tarball and built at package build time into
+ /usr/lib/alpacabridge/libgphoto2 for the gphoto camera driver.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in
+ "/usr/share/common-licenses/LGPL-2.1" and of the GNU General Public
+ License version 2 or later in "/usr/share/common-licenses/GPL-2".
 
 Files: AlpacaCore/external/Bisque/*
 Copyright: Software Bisque, Inc.
@@ -823,6 +864,14 @@ License: AGPL-3.0-or-later with vendor-SDK linking exception
  if any, to sign a "copyright disclaimer" for the program, if necessary.
  For more information on this, and how to apply and follow the GNU AGPL, see
  <https://www.gnu.org/licenses/>.
+
+License: CDDL-1.0
+ The Common Development and Distribution License (CDDL) Version 1.0,
+ one of the two licenses LibRaw (linked dynamically from the Debian
+ libraw package) is offered under. The Debian common-licenses directory
+ has no CDDL; the complete text is at
+ <https://opensource.org/license/cddl-1-0> and ships as LICENSE.CDDL in
+ the LibRaw source distribution.
 
 License: Expat
  Permission is hereby granted, free of charge, to any person obtaining a copy

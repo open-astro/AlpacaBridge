@@ -162,7 +162,7 @@ protected:
 };
 
 /**
- * Thin wrapper around the Player One Camera SDK v3.10.0.
+ * Thin wrapper around the Player One Camera SDK v3.10.1.
  *
  * - Singleton: enumeration state (POAGetCameraCount) is process-wide.
  * - A std::mutex serializes calls into the SDK. Blocking calls (get_image_data)

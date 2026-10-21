@@ -22,12 +22,14 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
+#include <system_error>
 
 namespace alpacacore::vendor::bisque {
 
@@ -227,11 +229,12 @@ public:
         std::string response = read_until_hash_locked(connection_info_.response_timeout_ms);
         std::string value = strip_error_prefix(response);
 
-        int complete = 0;
-        if (std::sscanf(value.c_str(), "%d", &complete) != 1) {
+        int completion = 0;
+        const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), completion);
+        if (error != std::errc{} || end != value.data() + value.size()) {
             throw AlpacaException("Failed to parse IsSlewComplete from TheSkyX: " + value);
         }
-        return complete == 1;
+        return completion != 0;
     }
 
     void sync_to_coordinates(double ra_hours, double dec_degrees) {

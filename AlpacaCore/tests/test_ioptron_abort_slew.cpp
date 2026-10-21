@@ -10,7 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// open-astro#768, iOptron: AbortSlew must fence the async slew dispatch thread.
+// open-astro#768, iOptron: AbortSlew must fence the async slew slot.
 // Once it returns, no :MS1#/:MS2# may reach the mount and the stop has been
 // sent, even when the cached status says the mount is not slewing.
 

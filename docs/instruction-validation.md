@@ -7,7 +7,8 @@ path metadata, vendor source/header/test coverage, the instruction index, and
 relative links in scoped guidance, memory, `CONTEXT.md`, `docs/architecture.md`, `README.md`,
 `SUPPORTED-DRIVERS.md` and `CHANGELOG.md` (percent-decoded, with a floor on distinct targets per root
 document), and the Claude skills under `.claude/skills/`; `<img src>` targets are read in every scanned
-document. Its existing prose checks also scan
+document. A link's `#fragment` must also name a heading of the Markdown file it targets (or of
+the document itself for a `(#anchor)` link). Its existing prose checks also scan
 the relocated instruction files. Negative fixtures check that removing the Claude
 entry point, changing an adapter's vendor, removing metadata, or breaking the index
 is detected.
@@ -34,4 +35,4 @@ instruction files it loaded before answering:
 
 Inspect the client's loaded rules and file-read trace rather than accepting its
 claim that it read a file. All substantive rules have one canonical owner; adapters
-and indexes contain routing instructions only. Cross-vendor rules stay in `AGENTS.md`.
+and indexes contain routing instructions only. Cross-vendor rules stay in `AGENTS.md` (core) or its shared topic files.

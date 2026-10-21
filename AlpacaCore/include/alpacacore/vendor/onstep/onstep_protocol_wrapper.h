@@ -12,9 +12,13 @@
 
 #pragma once
 
+#include <alpacacore/util/task_clock.h>
+
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,10 +71,18 @@ struct AltAz {
     double azimuth_degrees = 0.0;
 };
 
+// The firmware's horizon and overhead limits (:Gh#, :Go#), whole degrees.
+// OnStepX accepts -30..30 and 60..90; 90 overhead means no overhead limit.
+struct AltitudeLimits {
+    double horizon_degrees = 0.0;
+    double overhead_degrees = 90.0;
+};
+
 /**
  * @brief Mount status decoded from the :GU# extended status string.
  *
- * side_of_pier: -1 = unknown/not reported, 0 = pier east, 1 = pier west.
+ * side_of_pier: -1 = unknown/not reported, 0 = pier east ('T'), 1 = pier west
+ * ('W'). 'E' in :GU# is the mount type (GEM), not the pier side (#1217).
  * Some OnStep/OnStepX firmware revisions omit the pier-side character from
  * :GU# entirely (see .github/instructions/onstep.instructions.md) — callers must fall back to an
  * hour-angle computation when side_of_pier is -1.
@@ -80,6 +92,13 @@ struct MountStatus {
     bool is_slewing = false;
     bool is_parked = false;
     bool is_at_home = false;
+    // 'g' in :GU#: a guide move is running (OnStepX guide.active(): a
+    // :Mn#/:Ms#/:Me#/:Mw# move, so a MoveAxis, and also a home or spiral
+    // guide; not a pulse guide). Firmware without the letter never sets it.
+    bool is_guide_active = false;
+    // 'G': a pulse guide is running. While it runs OnStepX drops 'g' even
+    // when a MoveAxis is still running on the other axis.
+    bool is_pulse_guide_active = false;
     int side_of_pier = -1;
     std::string raw_status;
 };
@@ -125,6 +144,40 @@ public:
     std::string last_connect_error() const;
 
     /**
+     * @brief Whether the serial link is still there (decision 0009, #1241).
+     *
+     * False once the link is lost: the configured port path no longer
+     * reaches the node opened at connect (adapter unplugged or re-enumerated),
+     * or a read or write failed with EIO, ENXIO, ENODEV or EBADF. A loss
+     * found here closes the port when no exchange holds it. No serial I/O;
+     * the network test seam is never lost this way.
+     */
+    bool link_alive();
+
+    /**
+     * @brief The clock the link-loss and last-alive stamps read (decision 0005,
+     *        #1378): the driver's injected TaskClock, set at connect, so the
+     *        driver times the #521 outage on the clock it runs on. Default:
+     *        util::default_task_clock(). release_task_clock() puts the default
+     *        back if `clock` is still the one set (a driver going away).
+     */
+    void set_task_clock(util::TaskClock& clock);
+    void release_task_clock(util::TaskClock& clock);
+
+    /// Why the link was lost, or "" while it is not lost. Cleared by
+    /// disconnect() or a successful connect().
+    std::string link_lost_reason() const;
+
+    /// When the link was lost (first detection), read and cleared. Kept
+    /// across disconnect() so a reconnect can tell how long the outage was.
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
+
+    /// The last time the link was confirmed present before the current loss,
+    /// read and cleared. The adapter went away after this, so `now` minus it
+    /// is an upper bound on the outage even when nothing looked meanwhile.
+    std::optional<std::chrono::steady_clock::time_point> consume_last_alive_before_loss();
+
+    /**
      * @brief Get the mount's reported product name.
      *
      * Sends :GVP#. Used both for auto-detect identification (must be
@@ -138,6 +191,18 @@ public:
      * Sends :GVN#.
      */
     std::string get_version_number();
+
+    /**
+     * @brief Get OnStepX's coordinate mode (the firmware's MOUNT_COORDS - 1).
+     *
+     * Sends :GXEE#, which replies with one bare digit and no '#':
+     * 0 = observed place (no refraction applied to reported RA/Dec),
+     * 1 = topocentric, 2 = topocentric strict (both apply refraction).
+     * Returns std::nullopt for any other reply. Only meaningful on OnStepX:
+     * legacy OnStep answers an unknown command with "0" too, so callers must
+     * check the firmware version first (#1216).
+     */
+    std::optional<int> get_mount_coords_mode();
 
     /**
      * @brief Get current RA/Dec position.
@@ -154,6 +219,13 @@ public:
      * Sends :GA# and :GZ#.
      */
     AltAz get_alt_az();
+
+    /**
+     * @brief Get the horizon and overhead limits.
+     *
+     * Sends :Gh# and :Go#.
+     */
+    AltitudeLimits get_altitude_limits();
 
     /**
      * @brief Get mount status (tracking/slewing/parked/home/pier side).
@@ -377,5 +449,17 @@ private:
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };
+
+namespace detail {
+/// Where the link-loss test hook runs (open-astro#1289).
+enum class LinkLossHookPoint : std::uint8_t {
+    AliveBeforeRecord,      ///< link_alive(): node found gone, loss not yet recorded; no lock held
+    AliveBeforeClose,       ///< link_alive(): loss recorded, port not yet closed; no lock held
+    DisconnectBeforeClose,  ///< disconnect_locked(): link marked down, port not yet closed; mutex_ held
+};
+/// Test hook: lets a test land a Disconnect or a reconnect at the points above.
+/// Empty in production.
+void set_link_loss_hook(std::function<void(LinkLossHookPoint)> hook);
+}  // namespace detail
 
 }  // namespace alpacacore::vendor::onstep

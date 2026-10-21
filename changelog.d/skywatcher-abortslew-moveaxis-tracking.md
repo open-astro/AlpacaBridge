@@ -1,0 +1,3 @@
+### Fixed
+
+- **AbortSlew during a MoveAxis jog no longer turns tracking off**, Sky-Watcher driver. AbortSlew cleared tracking whatever it aborted, so stopping a jog with AbortSlew left the mount untracked, and a later goto landed untracked as well. ASCOM's ITelescopeV4 requires AbortSlew to return Tracking to its state before a MoveAxis; the driver now restarts tracking after the stop when it was on before the jog, and starts the motion-limit guard again for it. The client-silence motion watchdog stops a jog through AbortSlew, so after it fires on a jog the mount goes back to tracking if tracking was on. Aborting a goto, Park or FindHome is unchanged.

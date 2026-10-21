@@ -633,8 +633,8 @@ public:
 
     bool is_goto_in_progress() {
         std::string response = send_command("L", true, 0);
-        if (response.empty()) {
-            return false;
+        if (response.size() != 1 || (response[0] != '0' && response[0] != '1')) {
+            throw AlpacaException("Invalid response to SynScan slew-status query", AlpacaError::DriverException);
         }
         return response[0] == '1';
     }

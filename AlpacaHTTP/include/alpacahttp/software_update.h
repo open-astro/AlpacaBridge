@@ -73,6 +73,27 @@ private:
     std::int32_t alpaca_error_;
 };
 
+// The update channel (docs/software-update.md, docs/beta-channel.md). The
+// effective channel of a host is the presence of kChannelDropInPath, the apt
+// source the root helper writes for Beta and removes for Stable; the daemon
+// keeps no copy of it. One mapping decides everything that must agree: the
+// Packages index the check reads and the apt component the drop-in enables
+// (both name the same `main` or `beta`), and the helper unit instance.
+enum class UpdateChannel : std::uint8_t { Stable, Beta };
+
+// "stable" / "beta": the request body value, the status value and the
+// instance name of alpacabridge-channel@.service.
+const char* channel_name(UpdateChannel channel);
+// Exactly "stable" or "beta"; nullopt for anything else (case-sensitive).
+std::optional<UpdateChannel> parse_channel(std::string_view name);
+// The apt component of the channel: "main" or "beta".
+const char* channel_apt_component(UpdateChannel channel);
+// https://apt.openastro.net/dists/trixie/<component>/binary-arm64/Packages
+std::string channel_packages_url(UpdateChannel channel);
+// The helper unit instance for the channel, from a two-entry table (never
+// built from request input): alpacabridge-channel@stable.service / @beta.service.
+const char* channel_unit_name(UpdateChannel channel);
+
 // dpkg's version ordering (deb-version(7)): [epoch:]upstream[-revision],
 // each of upstream and revision compared as alternating non-digit and digit
 // runs, with '~' sorting before everything including the end of the string.
@@ -113,6 +134,11 @@ struct InstallerState {
 InstallerState classify_installer_state(const std::string& active_state, const std::string& sub_state,
                                         const std::string& result, bool job_pending, const std::string& log);
 
+// The channel switch with no unit running: judged by the transcript alone,
+// and `detail` is the transcript's last result line (it carries the apt exit
+// code of a failed switch).
+InstallerState classify_channel_switch_log(const std::string& log);
+
 class SoftwareUpdateBackend {
 public:
     virtual ~SoftwareUpdateBackend() = default;
@@ -127,6 +153,19 @@ public:
     // Never throws: a backend that cannot tell reports state "unavailable"
     // with the reason in `detail`.
     virtual InstallerState installer_state() = 0;
+
+    // The host's effective channel (presence of kChannelDropInPath). Never
+    // throws.
+    virtual UpdateChannel read_channel() = 0;
+
+    // Ask systemd to start the channel helper unit instance for `channel`
+    // (channel_unit_name). Throws SoftwareUpdateError like start_installer().
+    virtual void start_channel_switch(UpdateChannel channel) = 0;
+
+    // The channel helper's state: "running" when either instance is active or
+    // has a job queued, otherwise the last transcript's result (an old failed
+    // instance never marks a later run failed). Never throws.
+    virtual InstallerState channel_switch_state() = 0;
 };
 
 // libcurl for the index fetch, sd-bus (org.freedesktop.systemd1) for the
@@ -135,22 +174,33 @@ class SystemSoftwareUpdateBackend final : public SoftwareUpdateBackend {
 public:
     // unit: the helper unit name (kDefaultInstallerUnit in production).
     // log_path: where the helper writes its transcript.
-    SystemSoftwareUpdateBackend(std::string unit, std::string log_path);
+    // channel_marker_path / channel_log_path: kChannelDropInPath and
+    // kChannelLogPath in production; tests point them at a scratch directory.
+    SystemSoftwareUpdateBackend(std::string unit, std::string log_path, std::string channel_marker_path,
+                                std::string channel_log_path);
 
     std::string fetch_url(const std::string& url, std::chrono::milliseconds timeout) override;
     void start_installer() override;
     InstallerState installer_state() override;
+    UpdateChannel read_channel() override;
+    void start_channel_switch(UpdateChannel channel) override;
+    InstallerState channel_switch_state() override;
 
 private:
     std::string unit_;
     std::string log_path_;
+    std::string channel_marker_path_;
+    std::string channel_log_path_;
 };
 
 // Everything the manager needs to know about this host and the repository.
 struct SoftwareUpdateSettings {
     // The running build (alpacahttp::kVersion).
     std::string installed_version;
-    // The Packages index to check (Config::update_packages_url()).
+    // Config::update_packages_url(). Empty disables the check. Absent or
+    // equal to kDefaultPackagesUrl (the stock stable index) follows the host's
+    // channel; any other value is an explicit override the check uses as is
+    // and that pins the channel (status ChannelOverridden, set_channel refused).
     std::string packages_url;
     // The package name looked up in that index.
     std::string package;
@@ -196,7 +246,11 @@ public:
     //  "ReleaseNotes" (the newer version's plain-language notes, Markdown;
     //  null when no update is available or the notes could not be fetched),
     //  "ReleaseNotesUrl", "ReleaseUrl" (both null without an update),
-    //  "Installer": {"State", "Detail", "Log"}}
+    //  "Installer": {"State", "Detail", "Log"},
+    //  "Channel" ("stable" | "beta"), "ChannelOverridden" (packages_url is an
+    //  explicit override), "ChannelSwitch": {"State", "Detail", "Log"}}
+    // PackagesUrl is the URL the check uses. A cached check made for the other
+    // channel is not reported: LatestVersion is null, UpdateAvailable false.
     nlohmann::json status();
 
     // Fetch the index, compare, cache, and return status(). Throws
@@ -218,11 +272,23 @@ public:
     // afterwards. The sd-bus calls run outside mutex_ like the fetches.
     nlohmann::json install();
 
+    // Switch the channel by starting the helper unit instance for it. Throws
+    // INVALID_OPERATION when packages_url is an override, or when the update
+    // installer or a channel switch is running or being started (install()
+    // refuses while a switch is active in turn); NOT_IMPLEMENTED when the
+    // helper unit is not installed; otherwise whatever the backend throws.
+    // Returns status() afterwards.
+    nlohmann::json set_channel(UpdateChannel channel);
+
 private:
-    // `installer` is the backend's answer, read by the caller BEFORE taking
-    // mutex_ (an sd-bus round trip must not run under the lock).
-    nlohmann::json status_locked(const InstallerState& installer);
-    bool update_available_locked() const;
+    // `installer` / `channel_switch` are the backend's answers and `channel`
+    // its channel, read by the caller BEFORE taking mutex_ (an sd-bus round
+    // trip must not run under the lock).
+    nlohmann::json status_locked(const InstallerState& installer, const InstallerState& channel_switch,
+                                 UpdateChannel channel);
+    bool update_available_locked(UpdateChannel channel) const;
+    bool overridden() const;
+    std::string effective_url(UpdateChannel channel) const;
 
     std::mutex mutex_;
     // Single-flight state for check() and install(), under mutex_; cv_ wakes
@@ -230,10 +296,13 @@ private:
     std::condition_variable cv_;
     bool check_in_flight_ = false;
     bool install_in_flight_ = false;
+    bool switch_in_flight_ = false;
     SoftwareUpdateSettings settings_;
     std::unique_ptr<SoftwareUpdateBackend> backend_;
 
     std::optional<std::string> latest_version_;
+    // The channel the cached result above was fetched for.
+    std::optional<UpdateChannel> checked_channel_;
     std::optional<std::chrono::system_clock::time_point> checked_at_;
     std::optional<std::string> check_error_;
     std::optional<std::string> release_notes_;
@@ -246,6 +315,13 @@ inline constexpr const char* kDefaultPackagesUrl = "https://apt.openastro.net/di
 // LogsDirectory=alpacabridge-update (root:root 0755). Fixed, not derived from
 // the daemon's log directory: see the file comment above.
 inline constexpr const char* kUpdateLogPath = "/var/log/alpacabridge-update/update.log";
+// The channel helper (debian/alpacabridge-set-update-channel) writes its
+// transcript beside it, under the same LogsDirectory=.
+inline constexpr const char* kChannelLogPath = "/var/log/alpacabridge-update/channel.log";
+// The beta apt source: present = Beta, absent = Stable. Written and removed
+// by the root helper; test_software_update checks the helper names the same
+// path.
+inline constexpr const char* kChannelDropInPath = "/etc/apt/sources.list.d/alpacabridge-beta.sources";
 // The plain-language notes /bump-release writes for every release, read at
 // the release tag; the GitHub Release body is built from the same file.
 inline constexpr const char* kDefaultReleaseNotesUrl =

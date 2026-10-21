@@ -395,7 +395,7 @@ TEST_CASE("Gemini PDH Switch Driver - Disconnect is never observed beside a stal
     // Issue #387 ordering: connected_ is stored false before the wrapper's
     // close, and that close clears the firmware cache only after joining a
     // reader that can sit in a 500 ms read. The getter relies on the cache
-    // being empty while disconnected (AGENTS.md), so the driver must clear it
+    // being empty while disconnected (driver-lifecycle.instructions.md), so the driver must clear it
     // before the store. A sampler reads (connected, firmware) pairs for the
     // whole disconnect; one pair of (false, present) is the defect. Red
     // without the clear_firmware() call (hundreds of stale samples), green
@@ -656,4 +656,19 @@ TEST_CASE("Gemini PDH Switch Driver - Concurrent DEW value and mode writes never
     // Final state is self-consistent: value within the max of the final mode.
     CHECK(driver->get_switch_value(11) <= driver->get_max_switch_value(11));
     CHECK(driver->get_switch_value(11) >= 0.0);
+}
+
+// #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
+// connect refuses in words the operator can act on instead of opening "" or auto-detecting.
+TEST_CASE("Gemini PDH Switch Driver - Connect with empty serial port names portPath", "[gemini][switch][unit]") {
+    auto driver = alpacacore::vendor::gemini::create_gemini_pdh_switch(0, "");
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+    }
+    CHECK(message.find("portPath") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
 }

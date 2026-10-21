@@ -76,7 +76,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         return "WANDERERASTRO_COVERCALIBRATOR_" + std::to_string(device_number_);
     }
 
@@ -159,6 +159,13 @@ public:
                 const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
                 ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
                 effective.serial_port = port.port_path;
+            }
+            // A saved serial entry with no port (#508 item 1) is registered so it stays listed;
+            // refuse here, in words an operator can act on, instead of opening "".
+            if (effective.serial_port.empty()) {
+                throw AlpacaException(
+                    "WandererCover: portPath is required when connectionType is 'serial' (or use 'auto').",
+                    AlpacaError::NotConnected);
             }
             protocol_.connect(effective);
             // Seed the calibrator state from the first streamed frame so the
@@ -344,7 +351,7 @@ public:
         return cover_state_locked(s) == CoverState::Moving;
     }
 
-    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // Deliberately NO per-vendor get_device_state() override: per ascom-contract.instructions.md the
     // CoverCalibratorDriver base builds the DeviceState bag from these same
     // getters, DeviceState is intentionally non-atomic, and a single-lock vendor
     // override is explicitly disallowed (ASCOM doesn't require cross-property

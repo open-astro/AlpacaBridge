@@ -1,0 +1,3 @@
+### Changed
+
+- **Stress cases prove a connect works after the storm and start each destruction iteration cold**, concurrency tests, issue #1071. The Gemini, WandererAstro, Sky-Watcher, QHY CFW3 and QHY Q-Focuser connected storm cases now require a successful connect after the storm, and the ToupTek cases check the fake SDK saw a physical open, so a change that made every connect fail can no longer pass as fail-fast coverage. The destruction cases build a fresh fake for every iteration (`run_destruction_during_connect_stress_fresh_fake` in `AlpacaCore/tests/concurrency_stress.h`), so replies queued for a destroyed driver cannot reach the next one.

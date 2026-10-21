@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <variant>
@@ -41,6 +42,15 @@ using alpacacore::catalog::Role;
         alpacacore::AlpacaError::InvalidValue);
 }
 
+// An Int field given a fractional number or a boolean: the value is the wrong
+// shape of number, not the wrong kind of JSON, so say what the field needs and
+// what it got (`9600.5`, `true`).
+[[noreturn]] void throw_not_whole_number(const std::string& name, const nlohmann::json& value) {
+    throw AlpacaException(
+        std::string("Device config field '") + name + "' must be a whole number (got " + value.dump() + ")",
+        alpacacore::AlpacaError::InvalidValue);
+}
+
 // A JSON float with no fractional part that fits an int64 (e.g. 1.0), as the
 // integer it holds; config_get<int>() accepted that shape. Anything else,
 // including 1.5 and a JSON true/false (which config_get<int>() took as 1/0),
@@ -52,6 +62,12 @@ std::optional<std::int64_t> whole_number(const nlohmann::json& v) {
     constexpr double kTwo63 = 9223372036854775808.0;
     if (!(d >= -kTwo63 && d < kTwo63) || d != std::trunc(d)) return std::nullopt;
     return static_cast<std::int64_t>(d);
+}
+
+// An unsigned JSON integer above INT64_MAX: get<std::int64_t>() would wrap it to a negative number.
+bool exceeds_int64(const nlohmann::json& v) {
+    return v.is_number_unsigned() &&
+           v.get<std::uint64_t>() > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
 }
 
 DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<const FieldRef> fields,
@@ -68,17 +84,20 @@ DeviceConfig config_from_json_fields(const nlohmann::json& object, std::span<con
                 out.set(f.key, v.get<bool>());
                 break;
             case FieldRef::Kind::Int:
-                if (v.is_number_integer()) {
+                if (v.is_number_integer() && !exceeds_int64(v)) {
                     out.set(f.key, v.get<std::int64_t>());
                 } else if (const auto whole = whole_number(v)) {
                     out.set(f.key, *whole);
+                } else if (v.is_boolean() || (v.is_number_float() && std::isfinite(v.get<double>()) &&
+                                              v.get<double>() != std::trunc(v.get<double>()))) {
+                    throw_not_whole_number(name, v);
                 } else {
                     throw_wrong_type(name, v);
                 }
                 break;
             case FieldRef::Kind::Double:
                 if (!v.is_number()) throw_wrong_type(name, v);
-                if (v.is_number_integer())
+                if (v.is_number_integer() && !exceeds_int64(v))
                     out.set(f.key, v.get<std::int64_t>());
                 else
                     out.set(f.key, v.get<double>());

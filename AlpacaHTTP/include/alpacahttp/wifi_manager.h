@@ -27,14 +27,60 @@
 // Every method returns nlohmann::json and throws WifiError on failure so the
 // router can map failures onto Alpaca error responses uniformly.
 
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace alpacahttp::util {
+
+namespace detail {
+
+// Typed NetworkManager connection settings used by the profile test seam.
+struct WifiSettingValue {
+    char type = 0;  // 's', 'b', 'i', 'u', or 'y' (byte array)
+    std::string string_value;
+    std::int64_t integer_value = 0;
+    bool boolean_value = false;
+    std::vector<std::uint8_t> bytes;
+
+    static WifiSettingValue str(std::string value);
+    static WifiSettingValue boolean(bool value);
+    static WifiSettingValue i32(std::int32_t value);
+    static WifiSettingValue u32(std::uint32_t value);
+    static WifiSettingValue bytearr(const std::string& value);
+};
+
+using WifiSettingSection = std::vector<std::pair<std::string, WifiSettingValue>>;
+using WifiSettings = std::vector<std::pair<std::string, WifiSettingSection>>;
+
+struct WifiDeviceRoles {
+    std::string client_path;
+    std::string client_if;
+    std::string ap_path;
+    std::string ap_if;
+    std::size_t count = 0;
+};
+
+class WifiProfileBackend {
+public:
+    using Connection = std::pair<std::string, nlohmann::json>;
+
+    virtual std::vector<Connection> wifi_connections() = 0;
+    virtual WifiDeviceRoles device_roles() = 0;
+    virtual void add_connection(const WifiSettings& settings, bool pin_shared_ip4) = 0;
+    virtual void update_connection(const std::string& path, const WifiSettings& settings, bool pin_shared_ip4) = 0;
+
+protected:
+    ~WifiProfileBackend() = default;
+};
+}  // namespace detail
 
 class WifiError : public std::runtime_error {
 public:
@@ -53,6 +99,9 @@ public:
     // state_dir: writable directory for persistence (wifi country), normally
     // /var/lib/alpacabridge. Created lazily on first write.
     explicit WifiManager(std::string state_dir);
+    // Test seam for profile operations. The backend is borrowed and must
+    // outlive the manager; other bus-backed operations are unavailable.
+    WifiManager(std::string state_dir, detail::WifiProfileBackend& backend);
     ~WifiManager();
 
     WifiManager(const WifiManager&) = delete;
@@ -107,8 +156,8 @@ public:
     // when updating an already-secured one - converting a secured profile to
     // open is deliberately not expressible (delete and re-add instead), so a
     // blank password field in the UI can never strip encryption
-    // (PR #198 review round 3: intended contract). Returns the profile as in
-    // profiles().
+    // (PR #198 review round 3: intended contract). Returns Id, Ssid, SsidHex,
+    // Autoconnect, and Priority.
     nlohmann::json save_profile(const std::string& ssid, const std::string& passphrase, bool autoconnect, int priority);
 
     // Delete a saved profile by UUID. Refuses to delete the AP profile.
@@ -155,8 +204,10 @@ private:
     // from mutex_ so the netlink round-trip never blocks bus users.
     std::mutex country_mutex_;
     BusHandle* bus_ = nullptr;
+    detail::WifiProfileBackend* profile_backend_ = nullptr;
 
     void ensure_bus_locked();
+    detail::WifiProfileBackend& profile_backend_locked();
     std::string country_file() const;
 };
 

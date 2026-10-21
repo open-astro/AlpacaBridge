@@ -79,7 +79,9 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
-    std::string get_unique_id() const override { return "WANDERERASTRO_FILTERWHEEL_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override {
+        return "WANDERERASTRO_FILTERWHEEL_" + std::to_string(device_number_);
+    }
 
     std::string get_description() const override { return "WandererAstro SFW Filter Wheel Driver"; }
 
@@ -152,6 +154,13 @@ public:
                 const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
                 ALPACA_LOG_INFO("WandererAstro", "Auto-detected " + port.model + " at " + port.port_path);
                 effective.serial_port = port.port_path;
+            }
+            // A saved serial entry with no port (#508 item 1) is registered so it stays listed;
+            // refuse here, in words an operator can act on, instead of opening "".
+            if (effective.serial_port.empty()) {
+                throw AlpacaException(
+                    "WandererAstro filter wheel: portPath is required when connectionType is 'serial' (or use 'auto').",
+                    AlpacaError::NotConnected);
             }
             const std::string model = protocol_.connect(effective);
             try {
