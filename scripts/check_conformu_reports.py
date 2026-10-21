@@ -165,7 +165,8 @@ def main(argv=None):
             "\n%d finding(s). The driver is not validated. Fix the driver, "
             "re-run ConformU until clean, and replace the report on this "
             "branch. A failing ConformU report must never merge -- see "
-            "AGENTS.md and /driver-build Step 10." % len(failures)
+            "/submit-pr Step 1 (ConformU report validation) and "
+            "/driver-build Step 10 (pass criteria)." % len(failures)
         )
         return 1
 
