@@ -445,8 +445,8 @@ private:
     // Settled slot; empty while a goto is in flight or after a failed move.
     std::optional<int> position_cache_;
     // Text of the last goto's failure, raised by Position until the next
-    // Position PUT or a reconnect (set by the worker, cleared by set_position(),
-    // connect and teardown).
+    // Position PUT or a reconnect (set by the worker, cleared by set_position()
+    // and teardown_locked(), which every reconnect runs).
     std::optional<std::string> move_failure_;
     // Commanded slot while a goto is in flight; cleared by the worker.
     std::optional<int> pending_target_;
