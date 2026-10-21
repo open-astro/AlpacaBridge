@@ -34,8 +34,8 @@
 // The kFakeConnectableRoster at the bottom lists the drivers that can connect to
 // an in-process fake; scripts/check_docs_drift.py pins it to the fake_*.h files on
 // disk in both directions.
-// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; the snapshot
-// cases and their roster guard in test_contract_sweep.cpp hold it to that table.
+// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; rule 6 of
+// scripts/check_contract_sweep.py holds it to that table and to the snapshot hooks in test_contract_sweep.cpp.
 
 #pragma once
 
@@ -953,9 +953,9 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
 // ---------------------------------------------------------------------------
 // Snapshot-adopter roster (decision 0010, rule 6): the drivers whose Adoption row in
 // docs/decisions/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
-// guard, so every build can compare it with the ADR table; test_contract_sweep.cpp reads that table at run
-// time and fails when an `adopted` row has no entry here (or an entry has no adopted row), and, for each
-// vendor the build compiles, when an entry has no fake-clock hook in snapshot_adopters(). `source` is the
+// guard. scripts/check_contract_sweep.py (rule 6) fails when an `adopted` row has no entry here, when an entry
+// is not `adopted`, or when an entry has no CONTRACT_SWEEP_SNAPSHOT_ADOPTERS hook in test_contract_sweep.cpp (and
+// the reverse). `source` is the
 // ADR row's Source column, verbatim; `vendor` is the router vendor string.
 // ---------------------------------------------------------------------------
 

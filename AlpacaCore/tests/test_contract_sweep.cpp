@@ -33,8 +33,6 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <filesystem>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <map>
@@ -2227,16 +2225,16 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 //    the frame.
 //  - Past the bound (decision 0009), where the adopter has a lost-link stage: every one of the same getters
 //    throws NotConnected, Connected reads false and DeviceState is empty. The Gemini focuser and the Celestron
-//    focus motor have none (SnapshotRig::no_lost_link_stage): their getters keep throwing the latched fault's
-//    DriverException and Connected stays true.
+//    focus motor have none (SnapshotRig::no_lost_link_stage): decision 0009 says a driver not yet adopted keeps
+//    Connected true while faulted, so their getters keep throwing the latched fault's DriverException.
 // How the frame is held differs by backend and each rig says where it comes from: a telescope with a poll
 // pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
 // so the one poll the clock step wakes fails, which stays under every latch threshold.
 // The loss case fails kSnapshotLatchPolls polls (a latch needs three where an adopter has one), then passes the
 // bound: SynScan, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
 // and Astroasis also from the age of the frame.
-// The roster is kSnapshotAdopterRoster (contract_sweep.h); the guard case at the end reads the ADR table and
-// holds it, and the hooks, to that roster.
+// The roster is kSnapshotAdopterRoster (contract_sweep.h); rule 6 of scripts/check_contract_sweep.py holds it,
+// and the hooks below, to the ADR table.
 #ifndef _WIN32
 namespace {
 
@@ -2550,8 +2548,8 @@ std::unique_ptr<SnapshotRig> snapshot_rig_celestron_focuser() {
     rig.await_poll();
     rig.hold_frame = [fake] { fake->set_muted(true); };
     rig.no_lost_link_stage =
-        "no decision or instruction file defines the Celestron focus motor past the bound; its polled latch keeps "
-        "Connected true today (celestron_focuser_driver.cpp throw_if_faulted)";
+        "decision 0009: a driver not yet adopted keeps Connected true while faulted (the Celestron focus motor has "
+        "no lost-link stage; celestron_focuser_driver.cpp throw_if_faulted)";
     return rig_owner;
 }
 #endif
@@ -2738,108 +2736,4 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     }
 CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_CASE)
 #undef CS3_CASE
-// Roster guard (requirement of decision 0010 rule 6): a new `adopted` row in the ADR's Adoption table without
-// an entry in kSnapshotAdopterRoster fails here, and so does a roster entry the ADR does not list as adopted,
-// or an entry of a vendor this build compiles that has no hook above. The ADR is read from the source tree
-// (located from this file), so the guard also runs in a vendors-off build. Check 23 of
-// scripts/check_docs_drift.py holds the table itself to the drivers that use StateSnapshot.
-namespace {
-
-bool snapshot_vendor_built([[maybe_unused]] const std::string& vendor) {
-#ifdef ALPACACORE_ENABLE_SKYWATCHER
-    if (vendor == "skywatcher") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_CELESTRON
-    if (vendor == "celestron") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_BISQUE
-    if (vendor == "bisque") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_SYNSCAN
-    if (vendor == "synscan") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_GEMINI
-    if (vendor == "gemini") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_QHY
-    if (vendor == "qhy") return true;
-#endif
-#ifdef ALPACACORE_ENABLE_ASTROASIS
-    if (vendor == "astroasis") return true;
-#endif
-    return false;
-}
-
-std::string snapshot_trim(std::string text) {
-    const auto not_space = [](unsigned char c) { return std::isspace(c) == 0; };
-    text.erase(text.begin(), std::find_if(text.begin(), text.end(), not_space));
-    text.erase(std::find_if(text.rbegin(), text.rend(), not_space).base(), text.end());
-    return text;
-}
-
-// The Source column of every Adoption row whose State is `adopted`, with the number of table rows read.
-std::set<std::string> snapshot_adopted_sources(std::size_t& rows_read) {
-    const auto adr = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / "docs" / "decisions" /
-                     "0010-snapshot-served-state.md";
-    std::ifstream in(adr);
-    INFO("ADR 0010 must be readable at " << adr.string());
-    REQUIRE(in.good());
-    std::set<std::string> adopted;
-    rows_read = 0;
-    bool in_adoption = false;
-    for (std::string line; std::getline(in, line);) {
-        if (line.rfind("## ", 0) == 0) in_adoption = line == "## Adoption";
-        if (!in_adoption || line.rfind("| ", 0) != 0) continue;
-        std::vector<std::string> cells;
-        std::size_t from = 1;
-        for (std::size_t bar; (bar = line.find('|', from)) != std::string::npos; from = bar + 1) {
-            cells.push_back(snapshot_trim(line.substr(from, bar - from)));
-        }
-        if (cells.size() < 3 || cells[1].empty() || cells[1][0] != '`') continue;  // header and separator rows
-        ++rows_read;
-        if (cells[2] == "adopted") adopted.insert(cells[1].substr(1, cells[1].size() - 2));
-    }
-    return adopted;
-}
-
-}  // namespace
-
-TEST_CASE("Contract sweep snapshot - the adopter roster matches the ADR 0010 Adoption table and the hooks",
-          "[contract][contract-sweep-guard][snapshot]") {
-    using alpacacore::test::contract::kSnapshotAdopterRoster;
-    std::size_t rows_read = 0;
-    const auto adopted = snapshot_adopted_sources(rows_read);
-    // Not vacuous: the table has rows and some are adopted (a layout change that parses nothing must fail).
-    REQUIRE(rows_read > 0);
-    REQUIRE_FALSE(adopted.empty());
-
-    std::set<std::string> roster_sources;
-    std::set<std::string> roster_ids;
-    for (const auto& row : kSnapshotAdopterRoster) {
-        roster_sources.insert(row.source);
-        CHECK(roster_ids.insert(row.id).second);
-    }
-    for (const auto& source : adopted) {
-        INFO("ADR 0010 lists " << source << " as adopted but kSnapshotAdopterRoster (contract_sweep.h) has no entry");
-        CHECK(roster_sources.count(source) == 1);
-    }
-    for (const auto& source : roster_sources) {
-        INFO("kSnapshotAdopterRoster lists " << source << " but the ADR 0010 Adoption table does not say adopted");
-        CHECK(adopted.count(source) == 1);
-    }
-
-    std::set<std::string> hook_ids;
-#define CS3_ID(id, getters) hook_ids.insert(#id);
-    CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_ID)
-#undef CS3_ID
-    for (const auto& row : kSnapshotAdopterRoster) {
-        if (!snapshot_vendor_built(row.vendor)) continue;
-        INFO("roster entry " << row.id << " has no snapshot hook in CONTRACT_SWEEP_SNAPSHOT_ADOPTERS");
-        CHECK(hook_ids.count(row.id) == 1);
-    }
-    for (const auto& id : hook_ids) {
-        INFO("hook " << id << " has no kSnapshotAdopterRoster entry");
-        CHECK(roster_ids.count(id) == 1);
-    }
-}
 #endif  // !_WIN32
