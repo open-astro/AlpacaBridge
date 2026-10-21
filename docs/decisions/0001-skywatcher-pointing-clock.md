@@ -37,7 +37,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Consequences
 
-- A client that writes `UTCDate` on a disciplined host gets `PropertyNotImplemented` instead of a stored value. How each client reacts to that is not checked here; the rig run for issue #1472 records what NINA does.
+- A client that writes `UTCDate` on a disciplined host gets `PropertyNotImplemented` instead of a stored value. OpenAstro Ara never writes it: its telescope interface reads `UTCDate` only (`ITelescope.UTCDate` has no setter in `openastro-ara` 36de10754), and its time sync sets the host clock instead. How other clients react, NINA included, is not checked here.
 - Whether a write is accepted can change while the driver runs, when the host gains or loses NTP. A client that wrote once can be refused later.
 - The clock policy must be tested under both host-discipline states through the probe seam, not whichever state the CI runner happens to have.
 - ConformU accepts `PropertyNotImplemented` from the optional `UTCDate` write; the rig run for issue #1472 records it.
