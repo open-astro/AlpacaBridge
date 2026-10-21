@@ -53,7 +53,8 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
                                   : !latitude               ? "site latitude"
                                                             : "site longitude";
             ALPACA_LOG_WARN("SkyWatcherCatalog", "Persisted Sky-Watcher telescope " + std::to_string(device_number) +
-                                                     " has no " + missing + "; it connects but refuses to point until the site is set. " +
+                                                     " has no " + missing +
+                                                     "; it connects but refuses to point until the site is set. " +
                                                      std::string(kSkyWatcherMissingSite));
         }
 

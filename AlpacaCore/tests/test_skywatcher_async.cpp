@@ -3892,8 +3892,8 @@ TEST_CASE("SkyWatcher async - UTCDate, SiderealTime and pointing read one time s
     } else {
         driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
     }
-    const auto expected_utc = std::chrono::system_clock::now() + (host_disciplined ? std::chrono::hours(0)
-                                                                                   : std::chrono::hours(1));
+    const auto expected_utc =
+        std::chrono::system_clock::now() + (host_disciplined ? std::chrono::hours(0) : std::chrono::hours(1));
     CHECK(ms_from(driver->get_utc_date(), expected_utc) < 500);
 
     // The axes have not moved (tracking off, counts fixed) so reported RA
@@ -4046,8 +4046,7 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - one configured coordinate is not enough to point (#274, #1474)",
-          "[skywatcher][async]") {
+TEST_CASE("SkyWatcher async - one configured coordinate is not enough to point (#274, #1474)", "[skywatcher][async]") {
     // Latitude alone: the hemisphere is known but LST is not; longitude alone,
     // the reverse. Either connects and still refuses to point, and the getter
     // of the coordinate that was set answers.
@@ -4204,8 +4203,9 @@ TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - discipline gained after the write moves UTCDate and pointing to the host clock (#405, #1472)",
-          "[skywatcher][async]") {
+TEST_CASE(
+    "SkyWatcher async - discipline gained after the write moves UTCDate and pointing to the host clock (#405, #1472)",
+    "[skywatcher][async]") {
     // Host undisciplined at the write: the client's +1 h reaches LST. The
     // host then becomes disciplined without a step (NTP slewing a clock that
     // was already close), which the step detector cannot see. The pointing
