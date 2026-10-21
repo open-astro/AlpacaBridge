@@ -646,7 +646,14 @@ private:
             frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
                                               static_cast<std::int64_t>(read_be(position, 0, 3)));
             frame.moving = done[0] != 0xff || state.running;
-        } catch (const std::exception&) {
+        } catch (const std::exception& ex) {
+            // A poll that finds the port closed after a disconnect cleared
+            // connected_ is not a link fault; the disconnect already reset the
+            // latch. A closed port while connected_ still reads true counts.
+            const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+            if (alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected && !connected_.load()) {
+                return;
+            }
             std::lock_guard<std::mutex> lock(health_mutex_);
             if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
                 ALPACA_LOG_ERROR("Celestron", "Focuser communications compromised: " + health_.fault());
