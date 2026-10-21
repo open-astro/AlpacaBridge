@@ -43,6 +43,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_pty_write.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -530,9 +531,12 @@ TEST_CASE("OnStep link loss - a reconnect after the loss is recorded keeps the n
 TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outage", "[onstep][serial][connected]") {
     WrapperReset reset;
     WindowReset window_reset;
+    // The outage is timed on the driver's clock, which the wrapper's loss
+    // stamps read too (decision 0005); declared before the driver.
+    alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount first;
     PortLink link(first.slave_path());
-    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link));
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     // A first connect has no recorded loss, so it stops nothing.
@@ -574,7 +578,7 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
         // the loss, so timing from it would call the outage 0 s; the outage
         // is timed from the last moment the link was seen alive instead.
         alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(1500));
-        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        clock.advance(std::chrono::milliseconds(2000));
         REQUIRE_FALSE(driver->get_connected());
         driver->set_connected(true);
         REQUIRE(driver->get_connected());

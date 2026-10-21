@@ -224,6 +224,8 @@ MountStatus parse_status(const std::string& raw) {
     status.is_slewing = raw.find('N') == std::string::npos;
     status.is_at_home = raw.find('H') != std::string::npos;
     status.is_parked = raw.find('P') != std::string::npos;
+    status.is_guide_active = raw.find('g') != std::string::npos;
+    status.is_pulse_guide_active = raw.find('G') != std::string::npos;
     // OnStepX writes the mount type first ('E' GEM, 'K' fork, 'A' alt-az,
     // 'L' alt-alt), then the pier side: 'T' east, 'W' west, 'o' none. 'E' is
     // therefore always present on a GEM and says nothing about the pier
@@ -643,6 +645,15 @@ public:
 
     // ── Link loss (decision 0009, #1241) ──
 
+    // Decision 0005 (#1378): the loss and last-alive stamps read the clock of
+    // the driver that uses this process-wide wrapper, so the driver's #521
+    // outage is measured on one clock. Default: the process clock.
+    void set_task_clock(util::TaskClock& c) { clock_.store(&c); }
+    void release_task_clock(util::TaskClock& c) {
+        util::TaskClock* expected = &c;
+        clock_.compare_exchange_strong(expected, &util::default_task_clock());
+    }
+
     bool link_alive() {
         if (!connected_) {
             return false;
@@ -853,6 +864,18 @@ public:
         altaz.altitude_degrees = alt.value();
         altaz.azimuth_degrees = az.value();
         return altaz;
+    }
+
+    AltitudeLimits get_altitude_limits() {
+        auto horizon = parse_sexagesimal(send_command(":Gh#", true, 0));
+        auto overhead = parse_sexagesimal(send_command(":Go#", true, 0));
+        if (!horizon.has_value() || !overhead.has_value()) {
+            throw AlpacaException("Invalid OnStep altitude limit response");
+        }
+        AltitudeLimits limits;
+        limits.horizon_degrees = horizon.value();
+        limits.overhead_degrees = overhead.value();
+        return limits;
     }
 
     MountStatus get_status() {
@@ -1406,12 +1429,12 @@ private:
             lost_reason_ = reason;
             link_lost_ = true;
             const auto alive_ns = last_alive_ns_.load();
-            if (alive_ns != 0) {
-                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns));
+            if (alive_ns != 0) {  // stored + 1 ns, so 0 means never (see mark_alive())
+                alive_before_loss_ = std::chrono::steady_clock::time_point(std::chrono::nanoseconds(alive_ns - 1));
             }
         }
         (void)link_lost_at_.consume();  // an older, unclaimed loss is superseded by this one
-        link_lost_at_.note(util::default_task_clock().now());
+        link_lost_at_.note(clock().now());
         return true;
     }
 
@@ -1419,10 +1442,13 @@ private:
     // link_alive(), the check before an exchange). A loss happened after it,
     // so it bounds the outage from above even when nobody looked for a while.
     void mark_alive() {
+        // Stored + 1 ns: 0 means "never", and a FakeTaskClock starts at the
+        // epoch, where a real stamp would otherwise read as never.
         last_alive_ns_ =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(util::default_task_clock().now().time_since_epoch())
-                .count();
+            std::chrono::duration_cast<std::chrono::nanoseconds>(clock().now().time_since_epoch()).count() + 1;
     }
+
+    util::TaskClock& clock() const { return *clock_.load(); }
 
     void clear_loss() {
         std::lock_guard<std::mutex> lock(loss_mutex_);
@@ -1471,6 +1497,7 @@ private:
         throw AlpacaException("Failed to send command to mount");
     }
 
+    std::atomic<util::TaskClock*> clock_{&util::default_task_clock()};
     mutable std::mutex mutex_;
     std::atomic<bool> connected_;
     std::atomic<bool> link_lost_{false};
@@ -1506,6 +1533,10 @@ void OnStepProtocolWrapper::disconnect() { pimpl_->disconnect(); }
 
 bool OnStepProtocolWrapper::is_connected() const { return pimpl_->is_connected(); }
 
+void OnStepProtocolWrapper::set_task_clock(util::TaskClock& clock) { pimpl_->set_task_clock(clock); }
+
+void OnStepProtocolWrapper::release_task_clock(util::TaskClock& clock) { pimpl_->release_task_clock(clock); }
+
 bool OnStepProtocolWrapper::link_alive() { return pimpl_->link_alive(); }
 
 std::string OnStepProtocolWrapper::link_lost_reason() const { return pimpl_->link_lost_reason(); }
@@ -1527,6 +1558,8 @@ std::optional<int> OnStepProtocolWrapper::get_mount_coords_mode() { return pimpl
 Position OnStepProtocolWrapper::get_position() { return pimpl_->get_position(); }
 
 AltAz OnStepProtocolWrapper::get_alt_az() { return pimpl_->get_alt_az(); }
+
+AltitudeLimits OnStepProtocolWrapper::get_altitude_limits() { return pimpl_->get_altitude_limits(); }
 
 MountStatus OnStepProtocolWrapper::get_status() { return pimpl_->get_status(); }
 

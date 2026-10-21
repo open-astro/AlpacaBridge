@@ -52,9 +52,9 @@ vendor-agnostic; do them in the driver from the start.
   "not connected" twice and returned as a no-op while the connect stored true. Guard
   `set_connected()` against `set_connected()` only; never take it in a getter.
 - **Operation task threads: use the slot where a driver has adopted it.** The Celestron
-  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide and the Gemini
-  focuser and flat panel run their operation bodies (async slew, park, home, pulse-guide
-  timer, slew-completion tail) in a `util::AsyncOperation` slot
+  (NexStar and CGX), SynScan, Sky-Watcher and iOptron telescope drivers, the Bisque telescope's pulse guide, the OnStep
+  telescope's MoveAxis re-send (#1378) and the Gemini focuser and flat panel run their operation bodies (async slew,
+  park, home, pulse-guide timer, slew-completion tail, move re-send) in a `util::AsyncOperation` slot
   (`AlpacaCore/include/alpacacore/util/async_operation.h`, [decision 0006](../../docs/decisions/0006-async-operation-ownership.md)).
   The slot owns thread start, reaping of replaced bodies, cancelled-vs-superseded stop
   reasons, cancellable `ctx.wait_for()` polling, the kept failure and the join at
