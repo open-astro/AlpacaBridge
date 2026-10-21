@@ -25,6 +25,7 @@
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/synscan/synscan_telescope_driver.h>
 
 #include <algorithm>
@@ -34,6 +35,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <thread>
 #include <vector>
@@ -59,6 +61,7 @@ struct FakeSynScanState {
     std::atomic<bool> report_slewing{false};  // true: slewing queries answer "slewing" whatever the fake clock says
     std::atomic<int> gate_l_ms{0};  // >0: the next slewing query is held this long, then answered "not slewing"
     std::atomic<Clock::rep> gate_l_entered{0};
+    std::atomic<bool> fail_l{false};  // true: every slewing query, a held one too, is answered with garbage
     std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
     std::mutex command_mutex;
     std::vector<std::string> commands;
@@ -115,8 +118,9 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
                 if (hold > 0) {
                     st->gate_l_entered.store(Clock::now().time_since_epoch().count());
                     std::this_thread::sleep_for(std::chrono::milliseconds(hold));
-                    return "0#";
                 }
+                if (st->fail_l.load()) return "?#";  // neither 0 nor 1: the handset read throws
+                if (hold > 0) return "0#";
                 return st->report_slewing.load() || st->goto_in_progress() ? "1#" : "0#";
             }
             case 'M':  // cancel goto
@@ -381,6 +385,42 @@ TEST_CASE("SynScan initiator supersede - a queued goto never reaches the mount a
     std::fflush(stdout);
     CHECK(reordered == 0);
     CHECK(moving_after_abort == 0);
+}
+
+// A Park body superseded inside a slewing query that then fails touches no driver state (decision 0006, rule 6): the
+// count of failed polls belongs to the next Park, and the warning that reports each counted failure names it. Unpark
+// claims while the query is held and sends its stop after it.
+TEST_CASE("SynScan initiator supersede - a superseded Park body does not count its failed status poll",
+          "[synscan][initiator-supersede]") {
+    std::atomic<int> counted{0};
+    struct SinkGuard {
+        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
+    } sink_guard;
+    alpacacore::logging::set_log_sink([&](alpacacore::logging::LogLevel, std::string_view, std::string_view message) {
+        if (message.find("Park slew status poll failed") != std::string_view::npos) ++counted;
+    });
+    Rig rig;
+    rig.driver->park();
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    rig.st->report_slewing.store(true);
+    rig.clock.advance(std::chrono::seconds(9));  // past the 8 s Slewing window: the Park polls ask the handset now
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    rig.st->fail_l.store(true);
+    rig.st->gate_l_ms.store(kHoldMs);
+    for (int i = 0; i < 3 && rig.st->gate_l_entered.load() == 0; ++i) {
+        rig.clock.advance(std::chrono::milliseconds(260));
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    REQUIRE(wait_until([&] { return rig.st->gate_l_entered.load() != 0; }, 5000));
+    const auto entered = Clock::time_point(Clock::duration(rig.st->gate_l_entered.load()));
+    std::thread unpark([&] { rig.driver->unpark(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(ms_since(entered) < kHoldMs);  // Unpark claimed while the query was still held
+    // The Park body's thread exits once its query has failed.
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::milliseconds(kHoldMs + 5000)));
+    unpark.join();
+    CHECK(counted.load() == 0);
 }
 
 #endif  // _WIN32
