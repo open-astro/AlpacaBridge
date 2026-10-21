@@ -698,6 +698,13 @@ public:
             apply_or_load_site_info();
             apply_pending_elevation();
 
+            // A client write that lands while the read below is on the wire is newer than the reading, so the
+            // publish skips when set_guide_rate() bumped the counter in between.
+            std::uint64_t guide_rate_writes_seen = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                guide_rate_writes_seen = guide_rate_writes_;
+            }
             bool guide_rate_set = false;
             GuideRate guide_rate{};
             for (int attempt = 0; attempt < 3 && !guide_rate_set; ++attempt) {
@@ -720,7 +727,9 @@ public:
             }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                guide_rate_ = guide_rate;
+                if (guide_rate_writes_ == guide_rate_writes_seen) {
+                    guide_rate_ = guide_rate;
+                }
             }
 
             try {
@@ -1182,11 +1191,13 @@ public:
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
             std::lock_guard<std::mutex> lock(mutex_);
             guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
+            ++guide_rate_writes_;
             return;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = {effective, effective};
+        ++guide_rate_writes_;
     }
 
     double get_right_ascension() const override {
@@ -3164,6 +3175,8 @@ private:
     int slew_settle_time_s_;
 
     mutable GuideRate guide_rate_;
+    // Bumped under mutex_ by every set_guide_rate(); the connect publishes its reading only when unchanged.
+    std::uint64_t guide_rate_writes_{0};
     mutable int tracking_rate_cached_;
     mutable bool tracking_rate_valid_;
     mutable bool tracking_state_cached_;

@@ -39,6 +39,7 @@ constexpr util::ThermalSwitchLabels kDewHeaterLabels{"ZWO", "dew heater"};
 constexpr std::chrono::milliseconds kStatusTtl{100};
 
 struct DewStatus {
+    bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
     long value{};
 };
 
@@ -362,19 +363,25 @@ public:
         const int camera_id = camera_id_value();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        return static_cast<double>(
-            status_cache_
-                .get([this, camera_id] {
-                    std::lock_guard<std::mutex> io(io_mutex_);
-                    ensure_connected();  // a disconnect that won the I/O lock has closed the camera
-                    bool is_auto = false;
-                    DewStatus fresh;
-                    if (!sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto)) {
-                        throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
-                    }
-                    return fresh;
-                })
-                .value);
+        const DewStatus status = status_cache_.get([this, camera_id] {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            DewStatus fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the camera. Returning (not throwing) keeps
+                // it out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
+            bool is_auto = false;
+            if (!sdk_.get_control_value(camera_id, ZWOControlType::AntiDewHeater, fresh.value, is_auto)) {
+                throw AlpacaException("Failed to read dew heater value", AlpacaError::DriverException);
+            }
+            return fresh;
+        });
+        if (status.closed) {
+            throw AlpacaException("Dew heater not connected", AlpacaError::NotConnected);
+        }
+        return static_cast<double>(status.value);
     }
 
     void set_switch_value(int id, double value) override {

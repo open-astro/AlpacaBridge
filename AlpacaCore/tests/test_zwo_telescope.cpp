@@ -580,6 +580,8 @@ struct SlowMount {
     std::atomic<bool> hold_info{false};
     std::atomic<bool> hold_site{false};
     std::atomic<bool> hold_site_read{false};
+    std::atomic<bool> fail_guide_read{false};  // ":Ggr" replies with a non-number, so the connect falls back to 1.00x
+    std::atomic<bool> guide_read_entered{false};
     std::atomic<bool> info_entered{false};
     std::atomic<bool> site_entered{false};
     std::atomic<bool> site_read_entered{false};
@@ -592,6 +594,13 @@ struct SlowMount {
                     std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
                 }
                 return "AM5#";
+            }
+            if (chunk.find(":Ggr") != std::string::npos) {
+                if (fail_guide_read.load()) {
+                    guide_read_entered = true;
+                    return "x#";
+                }
+                return "0.30#";
             }
             if (chunk.find(":GMGE") != std::string::npos) {
                 if (hold_site_read.load()) {
@@ -748,6 +757,36 @@ TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site rea
     CHECK(driver->get_site_latitude() == 51.477833);
     // The mount keeps the write too: the last site payload on the wire is the Greenwich latitude, not a stale re-send.
     CHECK(mount.site_write().find("+51*28:40") != std::string::npos);
+    driver->set_connected(false);
+}
+
+// A GuideRate write that lands while the connect retries its unreadable guide-rate read (150 ms pause, no lock held)
+// is newer than the 1.00x the connect then assumes.
+// Falsified by: zwo_telescope_driver.cpp set_connected(true) publishing guide_rate_ without the guide_rate_writes_
+// check (the connect stores the assumed 1.00x over the 0.30x the client wrote during the retry pause).
+TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect read-back is kept",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.fail_guide_read = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.guide_read_entered));
+    std::thread writer([&] {
+        try {
+            const double deg_per_sec = 0.30 * 360.0 / 86164.0905;
+            driver->set_guide_rate({deg_per_sec, deg_per_sec});
+        } catch (const std::exception&) {
+        }
+    });
+    writer.join();
+    REQUIRE(wait_until_connected(*driver));
+    mount.fail_guide_read = false;
+
+    const double sidereal_deg_per_sec = 360.0 / 86164.0905;
+    CHECK(driver->get_guide_rate().ra / sidereal_deg_per_sec == Catch::Approx(0.30).margin(0.02));
     driver->set_connected(false);
 }
 

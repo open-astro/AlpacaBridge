@@ -461,7 +461,8 @@ TEST_CASE("ZWO CAA Rotator Driver - Identity answers while a status read is in f
 
 // A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
 // Falsified by: zwo_rotator_driver.cpp set_connected(false) calling close_rotator() without io_mutex_, or
-// move_absolute()/halt() reading the id and then calling the SDK without it (closed_while_busy is set).
+// move_absolute()/move()/move_mechanical()/set_reverse()/halt() reading the id and then calling the SDK without
+// it (closed_while_busy is set; one section per write).
 TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in flight instead of closing under it",
           "[zwo][rotator][unit][fake-sdk][getter-stall]") {
     using namespace alpacacore::test;
@@ -486,6 +487,36 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in fligh
         worker = std::thread([&] {
             try {
                 driver->move_absolute(90.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a mechanical move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move_mechanical(90.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a relative move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move(45.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a reverse write") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->set_reverse(true);
             } catch (const std::exception&) {
             }
         });

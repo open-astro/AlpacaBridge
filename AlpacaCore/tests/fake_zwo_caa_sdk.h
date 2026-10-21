@@ -32,7 +32,7 @@ namespace alpacacore::test {
 // the public knobs and counters are plain fields for single-threaded tests, set before
 // the driver starts and read after it stops. No call blocks except the explicit
 // delays: open_delay holds a connect open (contract sweep tier 2), read_delay holds a
-// get_motion_status() read and move_delay a move or stop in flight (getters-never-wait tests).
+// get_motion_status() read and move_delay a move, stop or set_reverse in flight (getters-never-wait tests).
 // The *_entered flags and `busy` are atomics a test polls from another thread; close_rotator()
 // sets closed_while_busy when it runs while a delayed call is still in flight.
 
@@ -63,7 +63,8 @@ public:
     bool fail_open{false};
     // open_rotator() sleeps this long before returning (a connect held open).
     std::chrono::milliseconds open_delay{0};
-    // get_motion_status() sleeps this long (a status refill held open); moves and stop() sleep move_delay.
+    // get_motion_status() sleeps this long (a status refill held open); moves, stop() and set_reverse() sleep
+    // move_delay.
     std::chrono::milliseconds read_delay{0};
     std::chrono::milliseconds move_delay{0};
     std::atomic<bool> open_entered{false};
@@ -149,6 +150,7 @@ public:
         return reverse;
     }
     void set_reverse(int, bool value) override {
+        const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         reverse = value;
     }

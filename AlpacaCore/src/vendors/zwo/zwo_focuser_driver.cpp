@@ -274,6 +274,7 @@ public:
     void halt() override {
         ensure_connected();
         {
+            // Waits for a status refill in flight (the I/O lock is not preemptible); the stop follows at once.
             std::lock_guard<std::mutex> io(io_mutex_);
             ensure_connected();  // a disconnect that won the I/O lock has closed the handle
             sdk_.stop(focuser_id_value());
@@ -309,7 +310,9 @@ private:
         int step_range = 0;  // unavailable: MaxIncrement falls back to MaxStep
         try {
             step_range = sdk_.get_step_range(focuser_id);
-        } catch (const std::exception&) {
+        } catch (const std::exception& e) {
+            // Optional: MaxIncrement falls back to MaxStep when the unit does not report a range.
+            ALPACA_LOG_DEBUG("ZWO", "EAF step range unavailable: " + std::string(e.what()));
         }
         max_step = apply_configured_max_step(focuser_id, max_step, step_range);
         if (max_step <= 0) {
@@ -355,6 +358,7 @@ private:
 
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
+        bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
         bool moving{};
         int position{};
         std::optional<double> temperature;                         // absent when the SDK would not report it
@@ -369,10 +373,15 @@ private:
         const int id = focuser_id_value();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        return status_cache_.get([this, id] {
+        Status status = status_cache_.get([this, id] {
             std::lock_guard<std::mutex> io(io_mutex_);
-            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
             Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
             fresh.moving = sdk_.is_moving(id);
             fresh.position = sdk_.get_position(id);
             try {
@@ -387,6 +396,10 @@ private:
             }
             return fresh;
         });
+        if (status.closed) {
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        return status;
     }
 
     void ensure_connected() const {

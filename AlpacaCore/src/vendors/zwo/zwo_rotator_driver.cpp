@@ -344,6 +344,7 @@ public:
 private:
     // One frame of the live readings; a single refill fills all of it (open-astro#294).
     struct Status {
+        bool closed{};  // a disconnect won the I/O lock: not a frame, not a link failure
         bool is_moving{};
         double degree{};  // logical (reverse-applied) angle, as CAAGetDegree() reports it
     };
@@ -355,14 +356,23 @@ private:
         const int id = rotator_id_value();
         // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
         // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
-        return status_cache_.get([this, id] {
+        Status status = status_cache_.get([this, id] {
             std::lock_guard<std::mutex> io(io_mutex_);
-            ensure_connected();  // a disconnect that won the I/O lock has closed the handle
             Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
             fresh.is_moving = sdk_.get_motion_status(id).is_moving;
             fresh.degree = sdk_.get_degree(id);
             return fresh;
         });
+        if (status.closed) {
+            throw AlpacaException("Rotator not connected", AlpacaError::NotConnected);
+        }
+        return status;
     }
 
     // Caller holds mutex_.
