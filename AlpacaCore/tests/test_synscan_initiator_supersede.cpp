@@ -61,7 +61,8 @@ struct FakeSynScanState {
     std::atomic<bool> report_slewing{false};  // true: slewing queries answer "slewing" whatever the fake clock says
     std::atomic<int> gate_l_ms{0};  // >0: the next slewing query is held this long, then answered "not slewing"
     std::atomic<Clock::rep> gate_l_entered{0};
-    std::atomic<bool> fail_l{false};  // true: every slewing query, a held one too, is answered with garbage
+    // true: every slewing query, a held one too, is answered with garbage
+    std::atomic<bool> fail_l{false};
     std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
     std::mutex command_mutex;
     std::vector<std::string> commands;
