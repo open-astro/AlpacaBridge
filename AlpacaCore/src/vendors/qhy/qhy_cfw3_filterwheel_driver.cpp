@@ -171,7 +171,6 @@ public:
                 slot_count_valid_ = true;
                 normalize_slot_data_locked();
                 position_cache_ = info.position;
-                move_failure_.reset();
                 pending_target_.reset();
             }
             {

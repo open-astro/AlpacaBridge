@@ -98,6 +98,15 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### A failed async operation body keeps its error (all drivers)
+
+The ASCOM async FAQ makes a failed async command (a goto, a slew, a cover move, an exposure) a failed
+operation. The body keeps its error, and the device's completion property (`IsMoving`, `Position`,
+`CoverState`/`CalibratorState`, `ImageReady`, `Slewing`, ...) raises it until the next command of that kind
+or a reconnect clears it. Never log the failure and report done, and never answer the property with a live
+read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
+site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
+
 ### UniqueID is the router's persisted GUID (all drivers)
 
 A driver does not build its `UniqueID`. The router assigns each configured device the version 4
