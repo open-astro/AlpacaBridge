@@ -187,7 +187,8 @@ entry.
 
 ## Step 5 — Commit, PR, review loop, merge
 
-1. Run `./scripts/ci_preflight.sh`. It must pass; fix anything it flags on this branch.
+1. Run `./scripts/ci_preflight.sh` (the quick set; a release PR changes no code, so CI's build
+   and test jobs are the rest of the check). It must pass; fix anything it flags on this branch.
 2. Show the user the diff summary and this commit message, and wait for approval:
 
    ```

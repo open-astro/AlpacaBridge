@@ -15,8 +15,9 @@ Common build and runtime issues for AlpacaBridge.
 **Warning**: `Catch2 not found. Install Catch2 (v2 or v3) to build AlpacaCore tests.`
 
 **Solution**: `sudo apt install catch2`. A manual CMake configure can opt out instead with
-`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and `scripts/ci_preflight.sh`
-always build the tests, so Catch2 is required for those.
+`cmake -S AlpacaHTTP -B AlpacaHTTP/build -DALPACACORE_BUILD_TESTS=OFF`, but `run_all_tests.sh` and a full pre-flight
+(`PREFLIGHT_FULL=1 scripts/ci_preflight.sh`) always build the tests, so Catch2 is required for
+those. The default quick pre-flight builds nothing.
 
 ### Vendor SDK not found
 

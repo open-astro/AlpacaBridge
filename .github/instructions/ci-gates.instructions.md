@@ -25,6 +25,15 @@ labeled PR fails the review job in seconds ("Actor does not have write permissio
 To onboard a new fork contributor, add their username to that list — do **not** grant
 them collaborator/write access; the `safe-to-review` label stays the per-PR trust gate.
 
+The bot reviews only a head whose CI build and test jobs passed: the job's first step
+("Wait for the CI build and test jobs", which owns the list) waits up to 45 minutes for them
+and fails before the agent runs when one is red, so a red push costs no review. The step
+matches those jobs' `name:` in `ci.yml`, so renaming one means updating the list in the same
+PR (the step fails at once with "never reported" otherwise).
+`/pr-checker` and `/submit-pr` read that failure as poll exit `4` (CI red: fix and push) or
+`5` (CI did not finish in time: approve or wait, then re-run the review), never as a broken
+review workflow.
+
 ## Continuous Integration and Pre-flight
 
 Related decision: [Documentation drift gates](../../docs/decisions/0003-docs-drift-gates.md).
@@ -79,11 +88,15 @@ author must do. Read the docstring before changing a gate.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
-  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (45 min)
-  outlasts `/pr-checker`'s 30-minute poll on purpose: a poll timeout is a re-poll.
-- **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) reproduces these gates
-  locally and installs missing tools. The ASan+UBSan pass is on by default (issue #588;
-  `RUN_SANITIZERS=0` skips it for docs/CI-only work); `RUN_TSAN=1` adds the stress suite. **When a
+  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (75 min:
+  up to 45 waiting for CI, then the review) is outlasted by the 80-minute verdict poll in
+  `/pr-checker` and `/submit-pr`; a poll timeout is a re-poll.
+- **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) runs every gate that
+  needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2.
+  The build and test gates (both `run_all_tests.sh` passes, clang-tidy, ASan+UBSan) run
+  only with `PREFLIGHT_FULL=1` and are reported `[SKIP]` otherwise: CI runs them on every PR, and
+  the review waits for them. In a full run the ASan+UBSan pass is on by default (issue #588;
+  `RUN_SANITIZERS=0` skips it); `RUN_TSAN=1` adds the stress suite in either mode. **When a
   sanitizer cannot observe a case, rather than having found a defect in it, gate the case out of
   sanitized builds; never loosen the assertion** (example: the `ALPACACORE_TESTS_SANITIZED` guard
   in `AlpacaCore/tests/test_fake_pty_write.cpp`). A genuine finding is a bug: fix it.
