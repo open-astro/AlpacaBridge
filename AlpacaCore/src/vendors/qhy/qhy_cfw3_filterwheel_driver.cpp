@@ -43,8 +43,11 @@ constexpr const char* kLogTag = "QHY";
  * in flight Position reads -1 (the ASCOM moving sentinel) from memory. That
  * keeps the FAST-classified reads (Position, DeviceState) off the serial line
  * in normal operation -- the one place the integrated CFW driver had to fight
- * ConformU's 0.1 s target. The one exception is the read after a FAILED move,
- * where the cache is empty and get_position() asks the wheel once.
+ * ConformU's 0.1 s target. A FAILED move (timeout, wire error) is kept as
+ * move_failure_ and Position raises it until the next Position PUT or a
+ * reconnect clears it: the ASCOM async FAQ makes a failed Position PUT a
+ * failed async operation, so the driver neither logs and reports done nor
+ * invents a slot with a live read.
  *
  * The goto's arrival wait (about 1 s per slot travelled) runs on a joinable
  * member thread so the Position PUT returns within the STANDARD budget;
@@ -206,13 +209,11 @@ public:
         // -1 while a goto is in flight: the wheel is silent until it arrives,
         // and the worker publishes the arrival slot into the cache.
         if (pending_target_.has_value()) return -1;
+        if (move_failure_.has_value()) throw AlpacaException(*move_failure_, AlpacaError::DriverException);
         if (position_cache_.has_value()) return position_cache_.value();
-        // Cache empty only after a failed move (the worker could not confirm
-        // where the wheel stopped): ask once and cache the answer. Lock order
-        // mutex_ -> wrapper mutex, same as the worker's publish path.
-        const int pos = const_cast<QhyCfw3FilterWheelDriver*>(this)->protocol_.get_position();
-        position_cache_ = pos;
-        return pos;
+        // Unreachable while connected: connect fills the cache, an arrival
+        // refills it and a failure is kept above.
+        throw AlpacaException("Filter wheel position unknown", AlpacaError::DriverException);
     }
 
     void set_position(int position) override {
@@ -261,6 +262,7 @@ public:
         // thread to exit and cannot deadlock on mutex_.
         if (move_thread_.joinable()) move_thread_.join();
         position_cache_.reset();
+        move_failure_.reset();
         pending_target_ = position;
         move_cancel_.store(false);
         move_thread_ = std::thread([this, position] { run_move(position); });
@@ -306,13 +308,13 @@ private:
             position_cache_ = arrived;
             pending_target_.reset();
         } catch (const std::exception& e) {
-            if (!move_cancel_.load()) {
-                ALPACA_LOG_ERROR(kLogTag,
-                                 "QHYCFW3 move to slot " + std::to_string(target + 1) + " failed: " + e.what());
-            }
+            const std::string failure = "QHYCFW3 move to slot " + std::to_string(target + 1) + " failed: " + e.what();
+            if (!move_cancel_.load()) ALPACA_LOG_ERROR(kLogTag, failure);
             std::lock_guard<std::mutex> lock(mutex_);
-            // Where the wheel stopped is unknown; leave the cache empty so the
-            // next Position read asks the wheel (NOW) instead of guessing.
+            // Where the wheel stopped is unknown: keep the failure for Position
+            // to raise. A cancelled wait (disconnect) keeps nothing; teardown
+            // clears the state anyway.
+            if (!move_cancel_.load()) move_failure_ = failure;
             pending_target_.reset();
         }
     }
@@ -347,6 +349,7 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         slot_count_valid_ = false;
         position_cache_.reset();
+        move_failure_.reset();
         pending_target_.reset();
     }
 
@@ -439,9 +442,12 @@ private:
     bool slot_count_valid_ = false;
     std::vector<std::string> filter_names_;
     std::vector<int> focus_offsets_;
-    // Settled slot; empty while unknown (after a failed move). Declared
-    // mutable so the const get_position() can refill it from a live read.
-    mutable std::optional<int> position_cache_;
+    // Settled slot; empty while a goto is in flight or after a failed move.
+    std::optional<int> position_cache_;
+    // Text of the last goto's failure, raised by Position until the next
+    // Position PUT or a reconnect (set by the worker, cleared by set_position()
+    // and teardown_locked(), which every reconnect runs).
+    std::optional<std::string> move_failure_;
     // Commanded slot while a goto is in flight; cleared by the worker.
     std::optional<int> pending_target_;
 

@@ -332,11 +332,12 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - Disconnect during a move cancels the w
     CHECK(driver->get_position() == 6);
 }
 
-TEST_CASE("QHY CFW3 Filter Wheel Driver - A failed move leaves Position to a live read",
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A failed move makes Position raise until the next Position PUT",
           "[qhy][filterwheel][cfw3][unit]") {
-    // The wheel goes silent mid-move (hung MCU): the worker times out, the
-    // cache is dropped, and the next Position asks the wheel instead of
-    // reporting the commanded slot as if it had arrived.
+    // The wheel goes silent mid-move (hung MCU): the worker times out. The
+    // ASCOM async FAQ makes a failed Position PUT a failed async operation, so
+    // Position raises the kept failure (no -1, no live read that invents a
+    // slot) until the next Position PUT or a reconnect clears it.
     FakeQhyCfw3 fake(7);
     alpacacore::vendor::qhy::Cfw3Settings settings = fast_settings();
     settings.move_timeout_ms = 300;
@@ -345,25 +346,61 @@ TEST_CASE("QHY CFW3 Filter Wheel Driver - A failed move leaves Position to a liv
 
     fake.set_muted(true);
     driver->set_position(3);
-    // Wait for the worker to give up: Position stops reading -1 and, with the
-    // wheel still muted, the live NOW fails instead of inventing a slot.
+    // Wait for the worker to give up: Position stops reading -1.
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    bool worker_done = false;
-    while (!worker_done && std::chrono::steady_clock::now() < deadline) {
+    bool failed = false;
+    std::string message;
+    int code = 0;
+    while (!failed && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
         try {
-            worker_done = driver->get_position() != -1;
-        } catch (const alpacacore::AlpacaException&) {
-            worker_done = true;
+            failed = driver->get_position() != -1;
+            if (failed) FAIL("Position returned a slot after a failed move");
+        } catch (const alpacacore::AlpacaException& ex) {
+            failed = true;
+            message = ex.what();
+            code = ex.error_code();
         }
     }
-    REQUIRE(worker_done);
-    // Still muted: the live NOW gets nothing and the read fails loudly.
+    REQUIRE(failed);
+    CHECK(code == alpacacore::AlpacaError::DriverException);
+    CHECK(message.find("move to slot 4 failed") != std::string::npos);
+    // Kept: a second read raises the same failure and puts nothing on the wire.
+    const int now_before = fake.count("NOW");
     require_alpaca_error([&]() { driver->get_position(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(fake.count("NOW") == now_before);
+
+    // The next Position PUT clears it.
     fake.set_muted(false);
-    fake.set_position(3);
-    CHECK(driver->get_position() == 3);
-    CHECK(fake.count("NOW") >= 2);
+    driver->set_position(3);
+    CHECK(settle_position(*driver) == 3);
+}
+
+TEST_CASE("QHY CFW3 Filter Wheel Driver - A reconnect clears a failed move", "[qhy][filterwheel][cfw3][unit]") {
+    FakeQhyCfw3 fake(7);
+    alpacacore::vendor::qhy::Cfw3Settings settings = fast_settings();
+    settings.move_timeout_ms = 300;
+    auto driver = alpacacore::vendor::qhy::create_qhy_cfw3_filterwheel(0, fake.slave_path(), settings);
+    driver->set_connected(true);
+
+    fake.set_muted(true);
+    driver->set_position(3);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    bool failed = false;
+    while (!failed && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        try {
+            (void)driver->get_position();
+        } catch (const alpacacore::AlpacaException&) {
+            failed = true;
+        }
+    }
+    REQUIRE(failed);
+
+    fake.set_muted(false);
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_NOTHROW(driver->get_position());
 }
 
 TEST_CASE("QHY CFW3 Filter Wheel Driver - A severed link reads disconnected and reconnects",

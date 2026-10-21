@@ -52,6 +52,10 @@ Each line is a summary; the linked topic file holds the rule and its history.
 - Inherit `AsyncConnectable` for connect/disconnect and run operation bodies in a
   `util::AsyncOperation` slot; never hand-roll either
   ([driver-lifecycle](.github/instructions/driver-lifecycle.instructions.md)).
+- An async operation body that fails keeps its error, and the device's completion property
+  (IsMoving, Position, CoverState/CalibratorState, ImageReady, Slewing, ...) raises it until the
+  next command or a reconnect clears it; never log-and-report-done (the ASCOM async FAQ)
+  ([ascom-contract](.github/instructions/ascom-contract.instructions.md#a-failed-async-operation-body-keeps-its-error-all-drivers)).
 - Never `.detach()` a thread that touches `this`; join every thread before members die.
 - Getters never wait on device I/O: `mutex_` is a short state lock, never held across
   an SDK call, serial exchange or connect handshake, except a camera's short
