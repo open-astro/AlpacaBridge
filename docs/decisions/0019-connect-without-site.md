@@ -1,6 +1,6 @@
 # Connect without a site, refuse what needs one
 
-Status: proposed
+Status: accepted
 
 ## Context
 
@@ -25,8 +25,8 @@ Decided 2026-10-21 on issue #1470 (item 5): allow Connect without a site, and re
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. A Sky-Watcher Connect succeeds without a site and sends no hemisphere-dependent command. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: review, until issue #1474 adds the test cases.
-2. Every member whose result or motion depends on `hemisphere_south_locked()` or on the longitude throws `InvalidOperation` until both site coordinates are set; the site getters throw `InvalidOperation` until set. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: review, until issue #1474 adds the test cases.
+1. A Sky-Watcher Connect succeeds without a site and sends no hemisphere-dependent command. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one").
+2. Every member whose result or motion depends on `hemisphere_south_locked()` or on the longitude throws `InvalidOperation` until both site coordinates are set; the site getters throw `InvalidOperation` until set. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one", "one configured coordinate is not enough to point"), review of every `hemisphere_south_locked()` call site.
 3. A new mount driver whose controller stores no site follows rules 1 and 2 instead of refusing Connect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
 
 ## Alternatives rejected
@@ -40,7 +40,6 @@ The rules a change is checked against. Each names where it applies and what chec
 - A device whose saved config has no site (one saved before #274) now connects, and a client can supply the site after connecting.
 - ConformU still needs a site before a telescope run. Without one it connects and then fails every pointing test with `InvalidOperation`. Set the site in the device config first.
 - The hemisphere-dependent member list in rule 2 must grow with the driver. A new member that reads `hemisphere_south_locked()` and skips the gate points wrongly, so review checks every call site of that function.
-- The driver on `main` still refuses Connect until issue #1474 lands. That change needs a ConformU run on the rig.
 
 ## Links
 

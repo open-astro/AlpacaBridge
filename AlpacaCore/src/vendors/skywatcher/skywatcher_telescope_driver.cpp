@@ -334,6 +334,7 @@ public:
           // only the optionals know, and only here.
           site_latitude_set_(site_latitude_deg.has_value()),
           site_longitude_set_(site_longitude_deg.has_value()),
+          site_elevation_set_(site_elevation_m.has_value()),
           dec_axis_sense_setting_(dec_axis_sense_setting),
           backlash_(backlash) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
@@ -510,24 +511,9 @@ public:
         }
 
         if (connected) {
-            // open-astro#274: the mount stores no site of its own, so an
-            // unconfigured device would run on 0.0/0.0. hemisphere_south_locked()
-            // is site_latitude_ < 0.0, which silently puts a southern rig on
-            // northern pointing math: the #432 sky frame (both the a1 term and
-            // dec), the RA tracking direction (#250, restored by #432) and the
-            // Dec rate / pulse-guide sign (#253). NOT #261: the pier-side
-            // label is picked from the sky hour angle and is
-            // hemisphere-independent (#432); the mechanical branch is
-            // `k * side` and mirrors with the hemisphere only on a board with
-            // a measured sense (#458). Refuse rather than point wrongly.
-            if (!site_coordinates_known_locked()) {
-                throw AlpacaException(
-                    "Site latitude and longitude must be set before connecting: this mount stores no site of its "
-                    "own, and pointing math (tracking direction, guide sign, pier side) is hemisphere-dependent. "
-                    "Set them in the web UI's device configuration, or write SiteLatitude and SiteLongitude "
-                    "before Connected.",
-                    AlpacaError::InvalidOperation);
-            }
+            // Decision 0019 (#1474): no site is needed to connect. The members
+            // that point by the site refuse until it is set (require_site_locked()),
+            // and the connect sends nothing whose meaning depends on it.
             // An auto-detected mount resolves its port or host here, not in the factory (#659).
             util::connect_resolved(
                 connection_info_, connection_resolved_, connection_resolver_,
@@ -743,6 +729,7 @@ public:
     double get_altitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        require_site_locked();
         serve_position_locked();
         auto [alt, az] = compute_alt_az_locked();
         (void)az;
@@ -783,6 +770,7 @@ public:
     double get_azimuth() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        require_site_locked();
         serve_position_locked();
         auto [alt, az] = compute_alt_az_locked();
         (void)alt;
@@ -828,6 +816,7 @@ public:
     double get_declination() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        require_site_locked();
         serve_position_locked();
         auto [ra, dec] = compute_ra_dec_locked();
         (void)ra;
@@ -853,6 +842,7 @@ public:
             // tear down a running duty worker it would never restart.
             std::unique_lock<std::mutex> lock(mutex_);
             check_writable_locked();
+            require_site_locked();  // the Dec sign reads the hemisphere
             if (tracking_rate_ != 0) {
                 throw AlpacaException("DeclinationRate can only be set at the Sidereal drive rate",
                                       AlpacaError::InvalidOperation);
@@ -916,6 +906,7 @@ public:
             check_writable_locked();
             if (tracking) {
                 check_not_parked_locked("Tracking");
+                require_site_locked();  // the RA drive direction reads the hemisphere
             }
             if (tracking == tracking_) {
                 // Keep-alive reassertion (many clients poll-set Tracking):
@@ -1004,6 +995,7 @@ public:
     double get_right_ascension() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        require_site_locked();
         serve_position_locked();
         auto [ra, dec] = compute_ra_dec_locked();
         (void)dec;
@@ -1024,6 +1016,7 @@ public:
     void set_right_ascension_rate(double rate) override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_writable_locked();
+        require_site_locked();  // the RA drive direction reads the hemisphere
         if (tracking_rate_ != 0) {
             throw AlpacaException("RightAscensionRate can only be set at the Sidereal drive rate",
                                   AlpacaError::InvalidOperation);
@@ -1072,6 +1065,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         throw_if_link_faulted_locked();  // open-astro#882: commanded state, not a wire read
+        require_site_locked();           // the home-term sign k = s * eps reads the hemisphere
         serve_position_locked();
         // ASCOM convention derived from the dec-axis branch: the side the goto
         // picks for HA >= 0 targets is pierEast (0), the mirror side
@@ -1094,6 +1088,7 @@ public:
         (void)dec;
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        require_site_locked();
         double lst = compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
         double ha = wrap_hour_angle(lst - ra);
         return ha >= 0.0 ? 0 : 1;
@@ -1119,20 +1114,34 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        require_site_locked();
         return compute_local_sidereal_time_hours(utc_now_locked(), site_longitude_);
     }
 
-    double get_site_elevation() const override { return site_elevation_m_; }
+    // Decision 0019: a site value never set reads as InvalidOperation (the
+    // ASCOM time and place FAQ), not as 0.0, which is a real place.
+    double get_site_elevation() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_set_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return site_elevation_m_;
+    }
 
     void set_site_elevation(double elevation) override {
         if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
+        site_elevation_set_ = true;
     }
 
     double get_site_latitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_latitude_set_) {
+            throw AlpacaException("SiteLatitude has not been set", AlpacaError::InvalidOperation);
+        }
         return site_latitude_;
     }
 
@@ -1234,6 +1243,9 @@ public:
 
     double get_site_longitude() const override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_longitude_set_) {
+            throw AlpacaException("SiteLongitude has not been set", AlpacaError::InvalidOperation);
+        }
         return site_longitude_;
     }
 
@@ -1332,47 +1344,39 @@ public:
     std::chrono::system_clock::time_point get_utc_date() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        // The motor controller has no clock; the host clock plus the
-        // client-set offset is what the client asked to read back, whatever
-        // the pointing math uses (see client_utc_now_locked()).
-        return client_utc_now_locked();
+        // The motor controller has no clock. Decision 0001: UTCDate,
+        // SiderealTime and pointing read one time source, so a client can
+        // explain SiderealTime from its own UTCDate and SiteLongitude reads.
+        return utc_now_locked();
     }
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        // Decision 0001 (#1472): a host the kernel reports as NTP-disciplined
+        // has a better clock than the client, and the router has already
+        // refused to step it. The ASCOM interface lets a mount with its own
+        // time source refuse the write, so it throws and changes nothing.
+        if (detail::host_synchronized_probe()) {
+            throw AlpacaException(
+                "UTCDate cannot be set: the host clock is NTP-synchronized, and the mount takes its time from it",
+                AlpacaError::PropertyNotImplemented);
+        }
         utc_offset_ = utc - std::chrono::system_clock::now();
         utc_anchor_system_ = std::chrono::system_clock::now();
         utc_anchor_steady_ = std::chrono::steady_clock::now();
         has_utc_offset_ = true;
-        // open-astro#301: sampled here at the write; while the host was
-        // undisciplined, resample_host_discipline_locked() re-checks it at
-        // most once per interval on the pointing path (open-astro#405). A
-        // host the kernel reports as disciplined has a better clock than the
-        // client does, and the router has already refused to step it.
-        utc_offset_host_was_synchronized_ = detail::host_synchronized_probe();
+        // open-astro#405: undisciplined at the write; resample_host_discipline_locked()
+        // re-checks at most once per interval and drops the offset for all
+        // three readers once the host is good.
+        utc_offset_host_was_synchronized_ = false;
         next_discipline_resample_ = std::chrono::steady_clock::now() + detail::host_discipline_resample_interval();
-        // open-astro#400: once per connection. The disagreement is a
-        // configuration fact, not an event, and a client that re-writes
-        // UTCDate on a poll interval would otherwise repeat the same line for
-        // the whole session; reset_runtime_state_locked() re-arms it.
-        if (utc_offset_host_was_synchronized_ && !client_disagreement_warned_ &&
-            (utc_offset_ > alpacacore::util::HostClock::kClientDisagreementWarn ||
-             utc_offset_ < -alpacacore::util::HostClock::kClientDisagreementWarn)) {
-            client_disagreement_warned_ = true;
-            ALPACA_LOG_WARN(
-                "SkyWatcher",
-                "Client UTCDate disagrees with an NTP-disciplined host clock by " +
-                    std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(utc_offset_).count()) +
-                    " ms; honouring it for the UTCDate readback but pointing by the host clock (logged once per "
-                    "connection)");
-        }
         // Unconditional on purpose. The cache holds only the axis angles;
         // compute_ra_dec_locked() recomputes LST from utc_now_locked() on
         // every read, so reported RA follows a UTCDate write with or without
         // this call. It stays because it is cheap (one refetch of the counts)
         // and keeps the first read after a time change on fresh hardware
-        // state, on either #301 branch.
+        // state.
         invalidate_position_cache_locked();
     }
 
@@ -1619,6 +1623,7 @@ public:
             if (direction < 0 || direction > 3) {
                 throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
             }
+            require_site_locked();  // the guide signs read the hemisphere
 
             const auto now = clock_.now();
 
@@ -2295,6 +2300,7 @@ public:
             check_writable_locked();
             check_not_parked_locked("SyncToCoordinates");
             validate_ra_dec(ra, dec, "SyncToCoordinates");
+            require_site_locked();
             refuse_sync_during_move_axis_locked();
         }
         stop_pulse_ops();
@@ -2440,6 +2446,7 @@ public:
             check_writable_locked();
             check_not_parked_locked("MoveAxis");
             validate_move_axis(axis, rate);
+            require_site_locked();  // MoveAxis is sky-referenced (#297)
             if (std::abs(rate) <= kStopEpsilon && !manual_axis_slewing_[axis]) {
                 invalidate_position_cache_locked(false);
                 clear_last_slew_error_locked();
@@ -2975,7 +2982,6 @@ private:
         ++motion_generation_;
         target_ra_set_ = false;
         target_dec_set_ = false;
-        client_disagreement_warned_ = false;  // open-astro#400: one WARN per connection
         // open-astro#414: the client UTCDate offset and the discipline flag
         // sampled with it are session state; a reconnect starts from the
         // host clock until the client writes UTCDate again.
@@ -3038,6 +3044,23 @@ private:
     // (open-astro#274). A client that writes only one leaves the other at its
     // configured value, so the two are tracked separately.
     bool site_coordinates_known_locked() const { return site_latitude_set_ && site_longitude_set_; }
+
+    // Decision 0019 (#1474): every member whose answer or motion depends on
+    // the hemisphere (hemisphere_south_locked()) or the longitude calls this
+    // first, after its argument checks. Until both coordinates are known it
+    // throws InvalidOperation naming what to set, for an operator at the mount.
+    void require_site_locked() const {
+        if (site_coordinates_known_locked()) {
+            return;
+        }
+        const char* missing = !site_latitude_set_ && !site_longitude_set_ ? "SiteLatitude and SiteLongitude are"
+                              : !site_latitude_set_                       ? "SiteLatitude is"
+                                                                          : "SiteLongitude is";
+        throw AlpacaException(std::string(missing) +
+                                  " not set: this mount stores no site of its own, and its pointing depends on the "
+                                  "site. Set it in the web UI's device configuration, or write it from the client.",
+                              AlpacaError::InvalidOperation);
+    }
 
     bool hemisphere_south_locked() const { return site_latitude_ < 0.0; }
 
@@ -3123,10 +3146,10 @@ private:
         return true;
     }
 
-    // The clock the mount is AIMED by: LST, SiderealTime,
+    // The one time source (decision 0001): UTCDate, LST, SiderealTime,
     // DestinationSideOfPier and every goto. Honours the client's offset only
-    // when the host clock was undisciplined at the time of the write
-    // (open-astro#301); see detail::pointing_uses_client_offset().
+    // while the host clock is undisciplined (open-astro#301, #405); see
+    // detail::pointing_uses_client_offset().
     // See docs/decisions/0001-skywatcher-pointing-clock.md for the rationale.
     std::chrono::system_clock::time_point utc_now_locked() const {
         const auto system_now = std::chrono::system_clock::now();
@@ -3161,20 +3184,9 @@ private:
         if (detail::host_synchronized_probe()) {
             utc_offset_host_was_synchronized_ = true;
             ALPACA_LOG_INFO("SkyWatcher",
-                            "Host clock became NTP-disciplined after the client's UTCDate write; pointing by the "
-                            "host clock from now on (the UTCDate readback still honours the client)");
+                            "Host clock became NTP-disciplined after the client's UTCDate write; UTCDate, "
+                            "SiderealTime and pointing use the host clock from now on");
         }
-    }
-
-    // The ASCOM UTCDate readback, which always honours a client's write:
-    // UTCDate is the client's property to set, and ConformU reads back what
-    // it wrote. Only a host clock step drops the offset here.
-    std::chrono::system_clock::time_point client_utc_now_locked() const {
-        const auto system_now = std::chrono::system_clock::now();
-        if (!client_offset_survives_locked(system_now)) {
-            return system_now;
-        }
-        return system_now + utc_offset_;
     }
 
     // ── Pointing model ──────────────────────────────────────────────────────
@@ -6005,6 +6017,7 @@ private:
             check_writable_locked();
             check_not_parked_locked(who);
             validate_ra_dec(ra, dec, who);
+            require_site_locked();
             check_target_altitude_locked(ra, dec, who);
             // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
             // (open-astro#1274). Read it as the Tracking getter does.
@@ -6155,6 +6168,7 @@ private:
     // Declared after site_elevation_m_ to match the initialiser order.
     bool site_latitude_set_;
     bool site_longitude_set_;
+    bool site_elevation_set_;  // decision 0019: SiteElevation reads as unset until written
     // Client UTCDate offset and the anchors client_offset_survives_locked()
     // uses to notice a host clock step underneath it -- both clocks answer
     // that question, and both time paths ask it. Mutable: the drop happens on
@@ -6166,7 +6180,6 @@ private:
     // which is why it is mutable.
     mutable bool utc_offset_host_was_synchronized_ = false;
     mutable std::chrono::steady_clock::time_point next_discipline_resample_{};  // open-astro#405
-    bool client_disagreement_warned_ = false;                                   // open-astro#400
     mutable std::chrono::system_clock::duration utc_offset_{};
     mutable std::chrono::system_clock::time_point utc_anchor_system_{};
     mutable std::chrono::steady_clock::time_point utc_anchor_steady_{};

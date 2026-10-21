@@ -83,24 +83,22 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
                         std::chrono::steady_clock::duration steady_elapsed,
                         std::chrono::milliseconds tolerance = std::chrono::milliseconds(1000));
 
-// Whether the POINTING math (LST, SiderealTime, DestinationSideOfPier, every
-// goto) applies the client's UTCDate offset (open-astro#301).
+// Whether the driver's one time source (UTCDate, LST, SiderealTime,
+// DestinationSideOfPier, every goto; decision 0001) applies the client's
+// UTCDate offset (open-astro#301, #1472).
 //
-// The ASCOM UTCDate readback always honours a client's write; this rule is
-// only about the clock the mount is aimed by. A client's offset is applied
-// when the host clock has nothing better to offer, and ignored when the host
-// is NTP/PTP-disciplined, whether at the moment of the write or found so by a
-// later re-sample (#405) -- there, a tablet with
-// a 30-minute error would otherwise skew every goto by 7.5 degrees of RA on a
-// rig whose own time is good. The router already refuses to step a
-// disciplined clock and already warns when a client disagrees by more than
-// 2 s; this makes the driver agree with that decision.
+// A client's offset is applied when the host clock has nothing better to
+// offer, and ignored once the host is found NTP/PTP-disciplined by a later
+// re-sample (#405) -- there, a tablet with a 30-minute error would otherwise
+// skew every goto by 7.5 degrees of RA on a rig whose own time is good. On a
+// host disciplined at the write the write itself is refused
+// (PropertyNotImplemented), so no offset is stored. The router already
+// refuses to step a disciplined clock; this makes the driver agree with it.
 //
-// `host_was_synchronized` is sampled when the client writes UTCDate and,
-// while an offset is armed on a host that was undisciplined then, re-sampled
-// at most once per interval on the pointing path (open-astro#405; one
-// adjtimex read, no device I/O). Pure, so the rule is unit-testable without
-// an NTP daemon.
+// `host_was_synchronized` is false at the write (a disciplined host refuses
+// it) and, while an offset is armed, re-sampled at most once per interval on
+// the time path (open-astro#405; one adjtimex read, no device I/O). Pure, so
+// the rule is unit-testable without an NTP daemon.
 //
 // `offset_survives` folds in both "an offset was written" and "the host clock
 // has not been stepped since", because the caller's
