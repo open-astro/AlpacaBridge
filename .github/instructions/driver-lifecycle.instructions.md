@@ -154,12 +154,13 @@ vendor-agnostic; do them in the driver from the start.
   on some control IDs) have no cancellation and no SDK-side timeout. If a
   background worker (temp-control thread, cooler-off task) is stuck inside one
   when disconnect wants to join it, an unbounded `join()` hangs disconnect —
-  and every ASCOM client (ConformU included) applies its own ~5s budget to the
-  bare `Disconnect()` method, so "just wait longer" is not an option. Fix
+  and ConformU gives the bare `Disconnect()` method a ~5s budget (a ConformU
+  timeout, not an ASCOM requirement; other clients set their own), so "just
+  wait longer" is not an option. Fix
   shape: (1) give the worker's own "is it still running" flag as a
   `shared_ptr<std::atomic<bool>>` (same pattern as a detached timer's flag,
   Threads & shutdown above); (2) bound the join with a short deadline (2s —
-  comfortably under the ~5s client budget) and `.detach()` instead of
+  comfortably under ConformU's ~5s budget) and `.detach()` instead of
   `.join()` on timeout; (3) make that detach *safe* by reference-counting the
   SDK handle itself (`shared_ptr<qhyccd_handle>` with a
   `CloseQHYCCD`-on-last-reference deleter in the wrapper, not a raw pointer)
