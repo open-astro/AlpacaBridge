@@ -21,7 +21,9 @@
 #include <alpacacore/util/hardware_config_refusal.h>
 #include <alpacacore/util/image_validation.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacahttp/config.h>
 #include <alpacahttp/json_utils.h>
 #include <alpacahttp/router.h>
@@ -47,6 +49,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iomanip>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -396,6 +399,25 @@ struct PersistedKey {
     int device_number = -1;
 };
 
+// Decision 0018: the persisted UniqueID of a configured device. A stored or
+// client-sent value is kept when it is a version 4 UUID that no other entry
+// holds (the web UI edits a device by removing and re-adding it, sending the
+// GUID back); anything else gets a fresh one.
+std::string stored_unique_id(const nlohmann::json& entry) {
+    const auto it = entry.find("uniqueId");
+    if (it == entry.end() || !it->is_string()) return {};
+    const std::string value = it->get<std::string>();
+    return alpacacore::util::is_unique_id(value) ? value : std::string();
+}
+
+std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
+    std::string value = stored_unique_id(entry);
+    while (value.empty() || taken.count(value) != 0) {
+        value = alpacacore::util::generate_unique_id();
+    }
+    return value;
+}
+
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
         return std::nullopt;
@@ -507,6 +529,37 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
     } catch (const std::exception&) {
         throw_invalid_value("Invalid value for parameter: " + param_name);
     }
+}
+
+// A JSON-body integer parameter (#1476): accepted only as a whole number
+// inside int, given as a JSON integer, a JSON number with no fraction (0.0),
+// or a string parse_int_value() accepts. The query and form paths already
+// refuse "0.5" and values outside int; before this, the JSON path truncated
+// 0.5 to 0 and wrapped 2^32 to 0 in all six device dispatchers.
+int json_int_value(const nlohmann::json& value, const std::string& param_name) {
+    constexpr auto kMin = static_cast<long long>(std::numeric_limits<int>::min());
+    constexpr auto kMax = static_cast<long long>(std::numeric_limits<int>::max());
+    if (value.is_number_unsigned()) {
+        const auto v = value.get<std::uint64_t>();
+        if (v > static_cast<std::uint64_t>(kMax)) throw_invalid_value("Invalid value for parameter: " + param_name);
+        return static_cast<int>(v);
+    }
+    if (value.is_number_integer()) {
+        const auto v = value.get<std::int64_t>();
+        if (v < kMin || v > kMax) throw_invalid_value("Invalid value for parameter: " + param_name);
+        return static_cast<int>(v);
+    }
+    if (value.is_number_float()) {
+        const double d = value.get<double>();
+        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(kMin) || d > static_cast<double>(kMax)) {
+            throw_invalid_value("Invalid value for parameter: " + param_name);
+        }
+        return static_cast<int>(d);
+    }
+    if (value.is_string()) {
+        return parse_int_value(value.get<std::string>(), param_name);
+    }
+    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
 }
 
 bool parse_bool_value(const std::string& raw, const std::string& param_name) {
@@ -2162,6 +2215,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Missing request body"
                 );
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476: a write it cannot interpret (ADR 0007)
                 return response;
             }
 
@@ -2173,6 +2227,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Invalid JSON payload"
                 );
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476
                 return response;
             }
 
@@ -2182,21 +2237,21 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 client_tx_id = body_client_tx;
             }
 
-            std::optional<std::string> new_location;
-            if (body.contains("Location")) {
-                new_location = body["Location"].get<std::string>();
-            } else if (body.contains("location")) {
-                new_location = body["location"].get<std::string>();
-            }
-
-            std::optional<std::string> new_profile_name;
-            if (body.contains("ProfileName")) {
-                new_profile_name = body["ProfileName"].get<std::string>();
-            } else if (body.contains("profileName")) {
-                new_profile_name = body["profileName"].get<std::string>();
-            } else if (body.contains("profile_name")) {
-                new_profile_name = body["profile_name"].get<std::string>();
-            }
+            // #1476: a wrong-type field is an invalid value (400), never a
+            // type_error from get<std::string>(). The first spelling present wins.
+            const auto read_string_field = [&body](std::initializer_list<const char*> keys) {
+                std::optional<std::string> value;
+                for (const char* key : keys) {
+                    if (!body.contains(key)) continue;
+                    if (!body[key].is_string()) throw_invalid_value(std::string("Invalid value for ") + key);
+                    value = body[key].get<std::string>();
+                    break;
+                }
+                return value;
+            };
+            const std::optional<std::string> new_location = read_string_field({"Location", "location"});
+            const std::optional<std::string> new_profile_name =
+                read_string_field({"ProfileName", "profileName", "profile_name"});
 
             std::optional<bool> new_sync_clock;
             for (const char* key :
@@ -2257,6 +2312,7 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
                     "'HostCheckEnabled' or 'AllowedHosts' property");
                 response.set_body(err);
+                response.set_status(400, "Bad Request");  // #1476
                 return response;
             }
 
@@ -2387,13 +2443,26 @@ Response Router::handle_description(const Request& request, std::uint32_t server
         alpaca_response.value = desc;
         response.set_body(alpaca_response);
     } catch (const std::exception& e) {
-        util::log_error("Error getting description: " + std::string(e.what()));
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::exception_to_error_code(e),
-            util::exception_to_error_message(e)
-        );
+        const bool is_write = request.method() == HttpMethod::POST || request.method() == HttpMethod::PUT;
+        // A JSON type_error in a write is a field the server cannot interpret,
+        // whatever field a later change adds without its own type check.
+        const bool type_mismatch = dynamic_cast<const nlohmann::json::type_error*>(&e) != nullptr;
+        const auto error_code =
+            is_write && type_mismatch ? util::ErrorCode::INVALID_VALUE : util::exception_to_error_code(e);
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, error_code, util::exception_to_error_message(e));
         response.set_body(alpaca_response);
+        // #1476: an invalid field value in a write is a request the server
+        // cannot interpret, answered 400 like the AllowedHosts refusal. A valid
+        // write that fails (persist error, management driver) stays HTTP 200.
+        // A client can trigger the 400, so it logs at DEBUG (ADR 0007 rule 9).
+        if (is_write && error_code == util::ErrorCode::INVALID_VALUE) {
+            util::log_debug("Refused description write: " + util::escape_for_log(e.what()));
+            response.set_status(400, "Bad Request");
+        } else {
+            util::log_error(std::string(is_write ? "Error writing description: " : "Error getting description: ") +
+                            e.what());
+        }
     }
 
     return response;
@@ -2405,6 +2474,16 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // #1486: the Management API defines this path for GET only.
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for configureddevices endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
     }
 
     try {
@@ -2581,7 +2660,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
                 device["DeviceName"] = entry.value("vendor", "unknown") + " (failed to load)";
                 device["DeviceType"] = ptype;
                 device["DeviceNumber"] = pnum;
-                device["UniqueID"] = "";
+                device["UniqueID"] = stored_unique_id(entry);  // decision 0018
                 device["Vendor"] = entry.value("vendor", "");
                 device["Config"] = entry;
                 device["LoadError"] = true;
@@ -3576,16 +3655,7 @@ Response Router::dispatch_telescope_method(
                 auto json_opt = parse_json(request.body());
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, param_name)) {
-                        if (val->is_number_integer()) {
-                            return val->get<int>();
-                        }
-                        if (val->is_number()) {
-                            return static_cast<int>(val->get<double>());
-                        }
-                        if (val->is_string()) {
-                            return parse_int_value(val->get<std::string>(), param_name);
-                        }
-                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                        return json_int_value(*val, param_name);
                     }
                 }
             }
@@ -4501,28 +4571,10 @@ Response Router::dispatch_camera_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5087,28 +5139,10 @@ Response Router::dispatch_switch_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5353,28 +5387,10 @@ Response Router::dispatch_filterwheel_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5500,28 +5516,10 @@ Response Router::dispatch_focuser_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -6127,28 +6125,10 @@ Response Router::dispatch_covercalibrator_method(
         auto json_opt = parse_json(request.body());
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
-                if (val->is_number_integer()) {
-                    return val->get<int>();
-                }
-                if (val->is_number()) {
-                    return static_cast<int>(val->get<double>());
-                }
-                if (val->is_string()) {
-                    return parse_int_value(val->get<std::string>(), param_name);
-                }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                return json_int_value(*val, param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -6563,6 +6543,16 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
     std::uint32_t client_tx_id = 0;
     if (request.has_query_param("ClientTransactionID")) {
         client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
+    }
+
+    // #1486: the Management API defines this path for GET only.
+    if (request.method() != HttpMethod::GET) {
+        AlpacaResponse alpaca_response =
+            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
+                                "Unsupported HTTP method for apiversions endpoint");
+        response.set_body(alpaca_response);
+        response.set_status(405, "Method Not Allowed");
+        return response;
     }
 
     try {
@@ -7081,6 +7071,36 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             response.set_body(alpaca_response);
             return response;
         }
+
+        // Decision 0018: keep a GUID the client sends back (the web UI's edit
+        // removes the entry first, so its own GUID is free again) unless another
+        // entry holds it, or another configuredevice call chose it and has not
+        // stored its entry yet; otherwise mint one. The entry this call replaces
+        // (same vendor, type and number, as add_or_replace_persisted_device()
+        // matches) is not another entry. The choice is reserved until this call
+        // stores its entry or fails.
+        {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            std::set<std::string> taken = reserved_unique_ids_;
+            const auto replaced = persisted_key(config);
+            for (const auto& entry : persisted_devices_) {
+                const auto key = persisted_key(entry);
+                if (replaced && key && key->vendor == replaced->vendor && key->device_type == replaced->device_type &&
+                    key->device_number == replaced->device_number) {
+                    continue;
+                }
+                if (const std::string held = stored_unique_id(entry); !held.empty()) taken.insert(held);
+            }
+            config["uniqueId"] = choose_unique_id(config, taken);
+            reserved_unique_ids_.insert(config["uniqueId"].get<std::string>());
+        }
+        struct UniqueIdReservation {
+            std::function<void()> release;
+            ~UniqueIdReservation() { release(); }
+        } reservation{[this, unique_id = config["uniqueId"].get<std::string>()] {
+            std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
+            reserved_unique_ids_.erase(unique_id);
+        }};
 
         std::string error_message;
         nlohmann::json learned_config = nlohmann::json::object();
@@ -8415,6 +8435,13 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
+            // Decision 0018: the configured device's persisted GUID is its UniqueID.
+            std::string unique_id = stored_unique_id(config);
+            if (unique_id.empty()) {
+                unique_id = alpacacore::util::generate_unique_id();
+                if (learned_config != nullptr) (*learned_config)["uniqueId"] = unique_id;
+            }
+            bound.driver->assign_unique_id(unique_id);
             if (registry.register_device(std::shared_ptr<alpacacore::AlpacaDriver>(std::move(bound.driver)))) {
                 util::log_info("Registered " + vendor_label(*view) + " " + device_type_str);
                 return true;
@@ -8499,6 +8526,10 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("siteElevation");
     copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
+    // Decision 0018: the server-owned GUID, for every device type.
+    if (const std::string unique_id = stored_unique_id(config); !unique_id.empty()) {
+        sanitized["uniqueId"] = unique_id;
+    }
 
     return sanitized;
 }
@@ -8687,6 +8718,11 @@ void Router::load_persisted_devices() {
     // the loaded devices afterwards so the lock is never held across
     // driver-registry calls (which may block on hardware).
     nlohmann::json payload = nlohmann::json::array();
+    bool assigned_unique_ids = false;
+    std::set<std::string> live_unique_ids;
+    // Entries this start gives their first GUID (the upgrade, or a hand-edited
+    // file): only their drivers adopt state saved under a driver-built ID.
+    std::set<std::string> first_unique_ids;
     {
         std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
         if (persisted_devices_loaded_) {
@@ -8713,13 +8749,41 @@ void Router::load_persisted_devices() {
             }
 
             persisted_devices_.clear();
-            for (const auto& entry : payload) {
-                persisted_devices_.push_back(sanitize_device_config(entry));
+            // Decision 0018: every stored entry gets a GUID once (the upgrade, or a
+            // hand-edited file), and a duplicated one is replaced in the later entry.
+            std::set<std::string> taken;
+            for (auto& entry : payload) {
+                nlohmann::json sanitized = sanitize_device_config(entry);
+                const std::string unique_id = choose_unique_id(sanitized, taken);
+                if (stored_unique_id(sanitized).empty()) first_unique_ids.insert(unique_id);
+                if (stored_unique_id(sanitized) != unique_id) {
+                    assigned_unique_ids = true;
+                    if (entry.is_object()) entry["uniqueId"] = unique_id;
+                    sanitized["uniqueId"] = unique_id;
+                }
+                taken.insert(unique_id);
+                persisted_devices_.push_back(std::move(sanitized));
             }
+            live_unique_ids = std::move(taken);
         } catch (const std::exception& e) {
             util::log_error("Failed to load registered devices: " + std::string(e.what()));
             return;
         }
+    }
+    if (assigned_unique_ids) {
+        util::log_info("Assigned a persisted UniqueID to the stored devices that had none (decision 0018)");
+        if (!save_persisted_devices() && !first_unique_ids.empty()) {
+            // The next start would mint other GUIDs and prune whatever moved onto
+            // these, so nothing moves until the file can keep them.
+            util::log_warning("Could not store the new UniqueIDs; saved rotator offsets stay under their old IDs");
+            first_unique_ids.clear();
+        }
+    }
+    // A removed rotator's offset goes here, not at removal: the web UI's edit
+    // removes and re-adds the entry with the same GUID (decisions 0008, 0018).
+    if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
+        pruned > 0) {
+        util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");
     }
 
     for (const auto& entry : payload) {
@@ -8734,7 +8798,7 @@ void Router::load_persisted_devices() {
                                   util::escape_for_log(error_message, error_message.size()));
             } else if (!learned_config.empty()) {
                 // #914: what the registration learned about the device (a ZWO
-                // camera's serial, model name, UniqueID) goes back into the
+                // camera's serial and model name) goes back into the
                 // stored entry, so the next start binds by it.
                 const auto learned_key = persisted_key(entry);
                 bool stored = false;
@@ -8767,6 +8831,23 @@ void Router::load_persisted_devices() {
             }
         } catch (const std::exception& e) {
             util::log_error("Failed to load persisted device: " + std::string(e.what()));
+        }
+    }
+
+    // Decision 0018: state a driver saved under its own ID moves to the GUID
+    // here, once, for the devices that held their number before this start. A
+    // device configured later keeps a GUID from the start and never adopts, so
+    // it cannot inherit what a removed device saved under the same number.
+    if (!first_unique_ids.empty()) {
+        for (const auto& device : alpacacore::management::DeviceRegistry::instance().get_all_devices()) {
+            if (first_unique_ids.count(device->get_unique_id()) == 0) {
+                continue;
+            }
+            try {
+                device->adopt_legacy_state();
+            } catch (const std::exception& e) {
+                util::log_warning("Could not move the saved state of " + device->get_unique_id() + ": " + e.what());
+            }
         }
     }
 }

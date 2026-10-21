@@ -79,7 +79,9 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
-    std::string get_unique_id() const override { return "WANDERERASTRO_FILTERWHEEL_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override {
+        return "WANDERERASTRO_FILTERWHEEL_" + std::to_string(device_number_);
+    }
 
     std::string get_description() const override { return "WandererAstro SFW Filter Wheel Driver"; }
 

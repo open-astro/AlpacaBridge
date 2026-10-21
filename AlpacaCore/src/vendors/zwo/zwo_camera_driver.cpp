@@ -127,7 +127,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         // Never derived from the device number or the enumeration index: both
         // move between starts, and the ASCOM UniqueID must not.

@@ -39,6 +39,7 @@
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -459,6 +460,10 @@ private:
     mutable std::mutex persisted_file_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
+    // Decision 0018: GUIDs a configuredevice call has chosen and not stored yet,
+    // so two concurrent calls sending one GUID cannot both keep it. Guarded by
+    // persisted_devices_mutex_.
+    std::set<std::string> reserved_unique_ids_;
 
     mutable std::mutex server_info_mutex_;
     std::string server_name_ = "AlpacaHTTP";

@@ -149,7 +149,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "WANDERERASTRO_BOX_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "WANDERERASTRO_BOX_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "WandererAstro WandererBox Pro V3 Power Box Switch Driver"; }
 
