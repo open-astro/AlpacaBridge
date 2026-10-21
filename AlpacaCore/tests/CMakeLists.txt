@@ -108,6 +108,8 @@ if(TARGET alpacacore_synscan)
     list(APPEND TEST_SOURCES test_synscan_async_slew_failure.cpp)
     # Refused operation-slot starts leave the mount stopped and the state consistent.
     list(APPEND TEST_SOURCES test_synscan_slot.cpp)
+    # A new initiator replaces a goto body blocked in an exchange without waiting for it (issue #1407).
+    list(APPEND TEST_SOURCES test_synscan_initiator_supersede.cpp)
     # Auto-detect resolves at connect time (issue #659).
     list(APPEND TEST_SOURCES test_synscan_telescope_deferred_connect.cpp)
     # Precise e/z replies decode the upper 24 bits of each field (issue #785).

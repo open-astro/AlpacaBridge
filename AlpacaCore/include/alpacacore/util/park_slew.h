@@ -31,14 +31,24 @@ namespace alpacacore::util {
  * Slewing in one locked step. The driver keeps what differs between mounts
  * (the target, the wire commands, the state it clears) in the hooks.
  *
- * Every hook runs with the driver mutex held. The flow itself releases the
- * mutex around each wait, so the HTTP getters stay responsive.
+ * Every hook is entered and left with the driver mutex held. The flow itself
+ * releases the mutex around each wait, so the HTTP getters stay responsive. A
+ * hook may release the mutex around a blocking call into the hardware if it
+ * takes it again before it returns or throws; the driver then supplies
+ * `superseded` (below), because a newer operation can take the state meanwhile.
  */
 struct ParkSlewHooks {
     /// True while the park is still wanted: connected and not aborted or
     /// unparked meanwhile. When false the canceller owns the state.
     std::function<bool()> still_parking;
-    /// Drops the parking state; run when the body is cancelled.
+    /// Optional; empty means never superseded. True once a newer operation owns
+    /// the slot's state (the body is Superseded). The flow then ends with
+    /// `abandon()` and runs neither `fail` nor `complete`, which would write
+    /// over that operation; it is checked after each hook that may have
+    /// released the mutex.
+    std::function<bool()> superseded;
+    /// Drops the parking state; run when the body is cancelled or superseded
+    /// (a driver whose hook sets `superseded` leaves the state alone then).
     std::function<void()> abandon;
     /// Sends the park GOTO. May throw.
     std::function<void()> dispatch;
@@ -70,6 +80,10 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
         return;
     } catch (...) {
         hooks.fail("Park slew dispatch failed with unknown exception");
+        return;
+    }
+    if (hooks.superseded && hooks.superseded()) {
+        hooks.abandon();
         return;
     }
     // Poll for completion with the mutex released between polls so the HTTP
@@ -131,6 +145,10 @@ inline void run_park_slew(OperationContext& ctx, std::unique_lock<std::mutex>& l
         return;
     } catch (...) {
         hooks.fail("Park: stopping tracking failed with unknown exception");
+        return;
+    }
+    if (hooks.superseded && hooks.superseded()) {
+        hooks.abandon();
         return;
     }
     hooks.complete();
