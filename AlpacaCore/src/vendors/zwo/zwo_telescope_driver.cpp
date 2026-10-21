@@ -365,8 +365,9 @@ public:
         // Gate on caches_ready_ so clients (ConformU) only see Connected=true
         // once the telemetry caches have been warmed after connect — the first
         // property reads after connect then hit warm caches and stay under the
-        // ASCOM FAST 0.1 s target. connected_ itself is set early (inside the
-        // lock) to keep concurrent Connected=true requests on the no-op path.
+        // ASCOM FAST 0.1 s target. connected_ itself is set early (right after
+        // the link opens) to keep concurrent Connected=true requests on the no-op
+        // path; check_connected() applies the same gate to the operations.
         return connected_.load() && caches_ready_.load();
     }
 
@@ -467,9 +468,12 @@ public:
             disconnect_thread_.join();
         }
 
-        std::unique_lock<std::mutex> lock(mutex_);
+        // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
+        // its I/O lock: the handshake below runs under them and never under mutex_, which each step
+        // takes for the short state publish only (decision 0016).
         auto& protocol = ZWOMountProtocolWrapper::instance();
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
+            std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[0] = false;
             manual_axis_slewing_[1] = false;
             slew_force_until_ = std::chrono::steady_clock::time_point{};
@@ -532,23 +536,36 @@ public:
             pulse_generation_.store(0);
         };
         auto apply_or_load_site_info = [&]() {
+            std::optional<double> pending_latitude;
+            std::optional<double> pending_longitude;
+            bool coords_valid = false;
+            double known_latitude = 0.0;
+            double known_longitude = 0.0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                pending_latitude = pending_site_latitude_;
+                pending_longitude = pending_site_longitude_;
+                coords_valid = site_coords_valid_;
+                known_latitude = site_latitude_deg_;
+                known_longitude = site_longitude_deg_;
+            }
             std::optional<SiteInfo> preferred_site;
-            if (pending_site_latitude_.has_value() || pending_site_longitude_.has_value() || site_coords_valid_) {
+            if (pending_latitude.has_value() || pending_longitude.has_value() || coords_valid) {
                 SiteInfo site;
                 bool has_latitude = false;
                 bool has_longitude = false;
-                if (pending_site_latitude_.has_value()) {
-                    site.latitude_degrees = pending_site_latitude_.value();
+                if (pending_latitude.has_value()) {
+                    site.latitude_degrees = pending_latitude.value();
                     has_latitude = true;
-                } else if (site_coords_valid_) {
-                    site.latitude_degrees = site_latitude_deg_;
+                } else if (coords_valid) {
+                    site.latitude_degrees = known_latitude;
                     has_latitude = true;
                 }
-                if (pending_site_longitude_.has_value()) {
-                    site.longitude_degrees = pending_site_longitude_.value();
+                if (pending_longitude.has_value()) {
+                    site.longitude_degrees = pending_longitude.value();
                     has_longitude = true;
-                } else if (site_coords_valid_) {
-                    site.longitude_degrees = site_longitude_deg_;
+                } else if (coords_valid) {
+                    site.longitude_degrees = known_longitude;
                     has_longitude = true;
                 }
                 if (has_latitude && has_longitude) {
@@ -559,6 +576,7 @@ public:
             if (preferred_site.has_value()) {
                 try {
                     protocol.set_site_info(preferred_site.value());
+                    std::lock_guard<std::mutex> lock(mutex_);
                     site_latitude_deg_ = preferred_site->latitude_degrees;
                     site_longitude_deg_ = preferred_site->longitude_degrees;
                     site_coords_valid_ = true;
@@ -572,10 +590,17 @@ public:
 
             try {
                 const SiteInfo site = protocol.get_site_info();
+                std::lock_guard<std::mutex> lock(mutex_);
                 site_latitude_deg_ = site.latitude_degrees;
                 site_longitude_deg_ = site.longitude_degrees;
                 site_coords_valid_ = true;
             } catch (const std::exception&) {
+            }
+        };
+        auto apply_pending_elevation = [&]() {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (pending_site_elevation_.has_value()) {
+                site_elevation_m_ = pending_site_elevation_.value();
             }
         };
         auto sync_mount_time_if_configured = [&]() {
@@ -584,17 +609,24 @@ public:
             }
 
             const auto now = std::chrono::system_clock::now();
-            if (site_coords_valid_) {
-                SiteInfo site;
-                site.latitude_degrees = site_latitude_deg_;
-                site.longitude_degrees = site_longitude_deg_;
-                protocol.set_site_info(site);
+            std::optional<SiteInfo> site;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (site_coords_valid_) {
+                    site = SiteInfo{};
+                    site->latitude_degrees = site_latitude_deg_;
+                    site->longitude_degrees = site_longitude_deg_;
+                }
+            }
+            if (site.has_value()) {
+                protocol.set_site_info(site.value());
             }
 
             // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
             const int offset_minutes = 0;
             TimeInfo info = from_utc_time_point(now, offset_minutes);
             protocol.set_time_info(info);
+            std::lock_guard<std::mutex> lock(mutex_);
             last_utc_set_ = now;
             last_utc_set_monotonic_ = std::chrono::steady_clock::now();
             last_utc_valid_ = true;
@@ -615,16 +647,13 @@ public:
             // link), which blows the ASCOM FAST 0.1 s target during ConformU.
             reset_session_state_for_connect(/*keep_telemetry_caches=*/true);
             apply_or_load_site_info();
-            if (pending_site_elevation_.has_value()) {
-                site_elevation_m_ = pending_site_elevation_.value();
-            }
+            apply_pending_elevation();
             try {
                 sync_mount_time_if_configured();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN(
                     "ZWO", "Unable to synchronize mount time/site on Connected=true refresh: " + std::string(e.what()));
             }
-            lock.unlock();
             refresh_cached_values();
             start_poll_thread();
             start_pulse_thread();
@@ -635,36 +664,40 @@ public:
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to ZWO mount", AlpacaError::NotConnected);
             }
-            // Publish connected_ immediately (inside the lock) so a concurrent
-            // Connected=true request takes the no-op path below instead of
-            // re-entering protocol.connect() and tearing down this fresh link.
-            // get_connected() additionally gates on caches_ready_, so clients
-            // only observe Connected=true once the telemetry caches below are
-            // warm — preserving the FAST-target ordering (first property reads
+            // Publish connected_ immediately so a concurrent Connected=true
+            // request takes the no-op path above instead of re-entering
+            // protocol.connect() and tearing down this fresh link.
+            // get_connected() and check_connected() additionally gate on
+            // caches_ready_, so clients only observe Connected=true, and the
+            // getters only run, once the telemetry caches below are warm —
+            // preserving the FAST-target ordering (first property reads
             // after connect hit warm caches, not live ~95 ms serial reads).
             connected_.store(true);
             caches_ready_.store(false);
             reset_session_state_for_connect();
 
+            std::string mount_info;
             try {
-                mount_info_ = protocol.get_mount_info();
+                mount_info = protocol.get_mount_info();
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                mount_info_.clear();
+                mount_info.clear();
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                mount_info_ = mount_info;
             }
 
             apply_or_load_site_info();
-
-            if (pending_site_elevation_.has_value()) {
-                site_elevation_m_ = pending_site_elevation_.value();
-            }
+            apply_pending_elevation();
 
             bool guide_rate_set = false;
+            GuideRate guide_rate{};
             for (int attempt = 0; attempt < 3 && !guide_rate_set; ++attempt) {
                 try {
                     const double guide_rate_multiple = protocol.get_guide_rate();
                     const double guide_rate_deg_per_sec = guide_rate_multiple * kSiderealRateDegPerSec;
-                    guide_rate_ = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
+                    guide_rate = {guide_rate_deg_per_sec, guide_rate_deg_per_sec};
                     guide_rate_set = true;
                 } catch (const std::exception&) {
                     if (attempt == 0) {
@@ -676,11 +709,17 @@ public:
                 const double fallback_multiple = 1.00;
                 const double fallback_deg_per_sec = fallback_multiple * kSiderealRateDegPerSec;
                 ALPACA_LOG_WARN("ZWO", "Unable to read guide rate; assuming 1.00x sidereal until updated");
-                guide_rate_ = {fallback_deg_per_sec, fallback_deg_per_sec};
+                guide_rate = {fallback_deg_per_sec, fallback_deg_per_sec};
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                guide_rate_ = guide_rate;
             }
 
             try {
-                tracking_rate_cached_ = protocol.get_tracking_rate();
+                const int tracking_rate = protocol.get_tracking_rate();
+                std::lock_guard<std::mutex> lock(mutex_);
+                tracking_rate_cached_ = tracking_rate;
                 tracking_rate_valid_ = true;
             } catch (const std::exception&) {
             }
@@ -694,7 +733,6 @@ public:
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Unable to synchronize mount time/site on connect: " + std::string(e.what()));
             }
-            lock.unlock();
             // Warm every telemetry cache before advertising Connected=true (via
             // caches_ready_) so a client that reads properties immediately after
             // seeing Connected hits warm caches instead of live serial reads.
@@ -1345,25 +1383,33 @@ public:
     void set_site_latitude(double latitude) override {
         validate_latitude(latitude);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Capture whether a longitude is already known BEFORE publishing this
-        // latitude: setting site_coords_valid_ first made has_longitude
-        // unconditionally true, so a latitude-only set wrote longitude 0.0 to
-        // the mount (M10). Partial site data must never be sent.
-        const bool has_longitude = pending_site_longitude_.has_value() || site_coords_valid_;
-        const double longitude = pending_site_longitude_.has_value() ? pending_site_longitude_.value() : site_longitude_deg_;
-        site_latitude_deg_ = latitude;
-        pending_site_latitude_ = latitude;
-        if (has_longitude) {
-            site_coords_valid_ = true;
+        std::optional<SiteInfo> to_send;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Capture whether a longitude is already known BEFORE publishing this
+            // latitude: setting site_coords_valid_ first made has_longitude
+            // unconditionally true, so a latitude-only set wrote longitude 0.0 to
+            // the mount (M10). Partial site data must never be sent.
+            const bool has_longitude = pending_site_longitude_.has_value() || site_coords_valid_;
+            const double longitude =
+                pending_site_longitude_.has_value() ? pending_site_longitude_.value() : site_longitude_deg_;
+            site_latitude_deg_ = latitude;
+            pending_site_latitude_ = latitude;
+            if (has_longitude) {
+                site_coords_valid_ = true;
+            }
+            if (connected_.load() && has_longitude) {
+                to_send = SiteInfo{};
+                to_send->latitude_degrees = site_latitude_deg_;
+                to_send->longitude_degrees = longitude;
+            }
         }
-        if (connected_.load() && has_longitude) {
-            SiteInfo site;
-            site.latitude_degrees = site_latitude_deg_;
-            site.longitude_degrees = longitude;
-            ZWOMountProtocolWrapper::instance().set_site_info(site);
-            pending_site_longitude_ = site.longitude_degrees;
-            site_longitude_deg_ = site.longitude_degrees;
+        // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
+        if (to_send.has_value()) {
+            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_site_longitude_ = to_send->longitude_degrees;
+            site_longitude_deg_ = to_send->longitude_degrees;
         }
     }
 
@@ -1378,24 +1424,32 @@ public:
     void set_site_longitude(double longitude) override {
         validate_longitude(longitude);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Mirror of set_site_latitude (M10): capture whether a latitude is
-        // already known BEFORE publishing this longitude, so a longitude-only
-        // set never writes latitude 0.0 to the mount.
-        const bool has_latitude = pending_site_latitude_.has_value() || site_coords_valid_;
-        const double latitude = pending_site_latitude_.has_value() ? pending_site_latitude_.value() : site_latitude_deg_;
-        site_longitude_deg_ = longitude;
-        pending_site_longitude_ = longitude;
-        if (has_latitude) {
-            site_coords_valid_ = true;
+        std::optional<SiteInfo> to_send;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Mirror of set_site_latitude (M10): capture whether a latitude is
+            // already known BEFORE publishing this longitude, so a longitude-only
+            // set never writes latitude 0.0 to the mount.
+            const bool has_latitude = pending_site_latitude_.has_value() || site_coords_valid_;
+            const double latitude =
+                pending_site_latitude_.has_value() ? pending_site_latitude_.value() : site_latitude_deg_;
+            site_longitude_deg_ = longitude;
+            pending_site_longitude_ = longitude;
+            if (has_latitude) {
+                site_coords_valid_ = true;
+            }
+            if (connected_.load() && has_latitude) {
+                to_send = SiteInfo{};
+                to_send->latitude_degrees = latitude;
+                to_send->longitude_degrees = site_longitude_deg_;
+            }
         }
-        if (connected_.load() && has_latitude) {
-            SiteInfo site;
-            site.latitude_degrees = latitude;
-            site.longitude_degrees = site_longitude_deg_;
-            ZWOMountProtocolWrapper::instance().set_site_info(site);
-            pending_site_latitude_ = site.latitude_degrees;
-            site_latitude_deg_ = site.latitude_degrees;
+        // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
+        if (to_send.has_value()) {
+            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending_site_latitude_ = to_send->latitude_degrees;
+            site_latitude_deg_ = to_send->latitude_degrees;
         }
     }
 
@@ -2711,8 +2765,10 @@ private:
         return true;
     }
 
+    // Same condition as get_connected(): a getter that runs mid-handshake would issue its own serial
+    // exchange before the caches are warm, now that connect no longer holds mutex_ across it.
     void check_connected() const {
-        if (!connected_.load()) {
+        if (!connected_.load() || !caches_ready_.load()) {
             throw AlpacaException("Telescope is not connected", AlpacaError::NotConnected);
         }
     }
