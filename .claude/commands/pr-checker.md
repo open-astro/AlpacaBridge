@@ -79,8 +79,8 @@ Checks to make before waiting on anything:
    gh api -X PUT repos/open-astro/AlpacaBridge/pulls/<N>/update-branch
    ```
    **Check the result before polling for a verdict**: `update-branch` returns HTTP 422 on a
-   merge conflict, and a chain that ignores that then waits 30 minutes for a verdict that never
-   comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
+   merge conflict, and a chain that ignores that then waits out the full poll budget for a verdict
+   that never comes (PRs #270 and #272 both stalled this way on 2026-09-10). GitHub recomputes
    mergeability asynchronously, so the first read after the call is usually `UNKNOWN`; poll
    until it settles and treat a timeout as a conflict, never as "fine":
    ```bash
@@ -111,15 +111,16 @@ Checks to make before waiting on anything:
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
-Never foreground-sleep. Run this with `run_in_background` and a 30-minute deadline:
+Never foreground-sleep. Run this with `run_in_background` and a 80-minute deadline (the review job first
+waits up to 45 minutes for CI's build and test jobs, then reviews):
 
 ```bash
-PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-1800} ))
+PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4800} ))
 # A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-if [ "${BUDGET:-1800}" -gt 0 ]; then sleep "$TICK"; fi
+if [ "${BUDGET:-4800}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -130,8 +131,8 @@ while :; do
   # Newest finished run that was not cancelled or skipped. A failed run still counts:
   # the assert step can fail after the post step published the verdict, and nothing
   # re-runs a failed run on its own, so it must be reported, not waited out.
-  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.html_url)"' <<<"$RUNS")
-  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }
+  DONE=$(jq -r '[.[] | select(.status == "completed" and (.conclusion | IN("cancelled","skipped") | not))] | max_by(.started_at) | select(. != null) | "\(.started_at) \(.conclusion) \(.id) \(.html_url)"' <<<"$RUNS")
+  RUN_STARTED=${DONE%% *}; RUN_STATE=${DONE#* }; RUN_ID=$(cut -d' ' -f2 <<<"$RUN_STATE")
   PENDING=$(jq -r '[.[] | select(.status == "queued" or .status == "in_progress")] | length' <<<"$RUNS")
   SKIPPED=$(jq -r '[.[] | select(.conclusion == "skipped")] | length' <<<"$RUNS")
   CANCELLED=$(jq -r '[.[] | select(.conclusion == "cancelled")] | length' <<<"$RUNS")
@@ -144,7 +145,22 @@ while :; do
     printf '%s\n' "${LAST#* }"; exit 0
   fi
   if [ -n "$RUN_STARTED" ] && [ "$PENDING" = 0 ]; then
-    # Finished, nothing pending, no verdict for this head. Never wait 30 minutes for it.
+    # Finished, nothing pending, no verdict for this head. Never wait out the budget for it.
+    # The review job waits for CI's build and test jobs first and fails before the
+    # agent runs when one is red; its error annotation starts with "CI ". That is a CI
+    # failure to fix and push, not a broken review workflow.
+    # One retry: a transient API error would otherwise turn a CI-red run into exit 3.
+    CI_RED=$( { gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message' \
+                || { sleep 5; gh api "repos/open-astro/AlpacaBridge/check-runs/$RUN_ID/annotations" --jq '.[].message'; }; } \
+              2>/dev/null | grep -m1 -E '^CI (is red|finished|did not finish)')
+    case "$CI_RED" in
+      "CI did not finish"*)
+        # Nothing to fix: CI is waiting for approval (fork PR) or a runner. Approve or wait,
+        # then re-run the review with the relabel trick (Step 1.2).
+        echo "CI NOT FINISHED for head $SHA, review timed out waiting: $CI_RED" >&2; exit 5 ;;
+      ?*)
+        echo "CI RED for head $SHA, review skipped: $CI_RED" >&2; exit 4 ;;
+    esac
     case "$RUN_STATE" in
       success*)
         # The PR edits the review workflow and the action skipped it (the assert step
@@ -180,13 +196,21 @@ while :; do
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
-echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-1800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just
 "not yet"). `2` = the action skipped a workflow-editing PR (hard stop). `3` = no run will
 produce a verdict for this head (the newest run failed, succeeded without publishing one, or
-the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one. Every
+the job was skipped or every run was cancelled); the message says which and carries the run URL where there is one.
+`4` = CI red, review skipped: the review job waits for CI's build and test jobs and fails before
+the agent runs when one is red, or when one of them never reported because it was renamed in
+`ci.yml` (its error annotation starts with `CI is red` or `CI finished`). A job someone cancelled
+by hand reads as red too: re-run that current-head CI run (`gh run rerun <run-id> --failed`)
+instead of changing code, then re-run the review with the relabel trick from Step 1.2, because
+the failed review run stays the newest one. `5` = CI did not finish within the wait step's 45
+minutes (a fork PR whose CI waits for a maintainer's approval, or a long arm64 queue): nothing
+is red and nothing is fixed. Approve or wait for CI, then re-run the review with the relabel trick. Every
 non-zero exit prints nothing on stdout, so a chained `poll && merge` never reaches the merge.
 `date -d` is GNU; the skills run on the Linux dev VM.
 
@@ -201,14 +225,18 @@ remove-and-re-add `safe-to-review` label trick from Step 1.2, which also covers 
 skip. Do not restart the poll blindly.
 
 While waiting, watch CI too (`gh pr checks <N>`). A red CI check gets fixed and pushed in the same
-batch as the bot findings, not on its own.
+batch as the bot findings, not on its own. With a red build or test job there are no bot
+findings: the review waits for those jobs and skips (exit `4`), so fix CI and push.
 
 ## Step 3 — Act on the verdict
 
 Read the newest bot comment in full. A poll that exited without a verdict has no comment to act
 on and never merges: exit `2` (workflow-editing PR skipped by the action) is a **Hard stop**;
 exit `3` (review run failed) means read the run log, apply the relabel trick from Step 1.2 if it
-is the permission skip, and otherwise treat it as a broken workflow (**Hard stop** after two).
+is the permission skip, and otherwise treat it as a broken workflow (**Hard stop** after two);
+exit `4` (CI red, review skipped) is a fix round with CI's failure as the only Defect: fix it,
+push, poll; exit `5` (CI did not finish) is a wait: approve or wait for CI, relabel, poll.
+Neither counts toward the broken-workflow hard stop.
 
 ### `⚠️ Issues found`
 
@@ -299,17 +327,18 @@ For **every** Defect, in this order:
      configure and then caches it, so reconfiguring a directory the sanitized pass built would
      keep `-fsanitize=address,undefined` from that cache and handed you a sanitized binary no
      matter what you passed on the command line.
-     After a default pre-flight, `AlpacaHTTP/build` (the one tree `run_all_tests.sh` builds
+     After a full pre-flight (`PREFLIGHT_FULL=1`), `AlpacaHTTP/build` (the one tree `run_all_tests.sh` builds
      since #1251; the core binary is `AlpacaHTTP/build/AlpacaCore/tests/alpacacore_tests`, and
      `AlpacaCore/build` is deleted, not built) holds the ASan+UBSan vendors-OFF binary
      rather than gate 4's vendors-ON one -- since #588 the sanitized pass is the last of the
-     three `run_all_tests.sh` invocations (`ci_preflight.sh:477`, after zizmor) and
+     three `run_all_tests.sh` invocations (the `sanitizers` section of `ci_preflight.sh`, after zizmor) and
      `run_all_tests.sh` `rm -rf`s its build tree on entry. `ci_preflight.sh` sets no
      `-e`, so it reaches that pass whether or not an earlier gate failed. (Under
      `RUN_SANITIZERS=0` the pass is skipped and `AlpacaHTTP/build` does still hold gate 4's
      vendors-ON build -- which is exactly why this is not worth reasoning about case by case.)
      Never infer what is in `AlpacaHTTP/build`: build your own.
-   The full `ci_preflight.sh` is for branches that change runtime C++ across vendors.
+   `PREFLIGHT_FULL=1 ./scripts/ci_preflight.sh` is for branches that change runtime C++ across
+   vendors; the default quick run builds nothing.
 5b. **After a rename, grep the old name across the whole tree before pushing.** PR #695
    round 2 renamed `MIN_README_RELATIVE_LINKS` to a dict and pushed with a comment in the
    *other* script still naming the deleted constant; the bot's next round was that one
@@ -332,11 +361,12 @@ git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 # run_gates is the step 5 gate set for the files this round touched, written
 # out as a function so a multi-command set chains like a single one. The
 # branch type picks the body, so the block runs as pasted: the five Python
-# gates on a docs/skill-only branch, the full pre-flight when runtime C++
-# changed across vendors. Narrow the C++ body to step 5's per-file gates
-# when only one vendor or one script changed.
+# gates on a docs/skill-only branch, the quick pre-flight (every no-build gate,
+# shellcheck, javascript and zizmor included) when code, scripts or workflows
+# changed. Add step 5's vendor build to the C++ body when a driver changed;
+# CI runs the full build and test set either way, and the review waits for it.
 if git diff origin/main...HEAD --name-only | grep -qE '\.(c|cc|cpp|cxx|h|hh|hpp|hxx|js|sh|yml|yaml)$'; then
-  run_gates() { ./scripts/ci_preflight.sh; }
+  run_gates() { PREFLIGHT_BASE=origin/main ./scripts/ci_preflight.sh; }
 else
   run_gates() { python3 scripts/check_docs_drift.py --self-test && python3 scripts/check_docs_drift.py \
     && python3 .github/scripts/check-unicode.py --self-test && python3 .github/scripts/check-unicode.py \
@@ -462,8 +492,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   no `-D` the case is absent and the filter matches nothing (rc 2, as below). If the gate-3 step
   above already built `AlpacaCore/build-vendors` with the vendor you need, run the probe against
   that binary instead of configuring a second tree. Nothing wipes either directory, so the
-  configure cost is paid once and later probes are incremental. Since #588 a default
-  pre-flight leaves `AlpacaHTTP/build` holding the ASan+UBSan, vendors-OFF binary from its last
+  configure cost is paid once and later probes are incremental. Since #588 a full
+  pre-flight (`PREFLIGHT_FULL=1`) leaves `AlpacaHTTP/build` holding the ASan+UBSan, vendors-OFF binary from its last
   pass (see the gate-3 note above), which breaks this probe two ways: a vendor test name matches nothing
   and Catch2 exits rc 2, and -- the quiet one -- a sanitized binary has different timing, so a
   concurrency flake can stop reproducing under it and get waved through as "passes in
@@ -475,8 +505,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
   consecutive flakes on the same test still push if the isolated runs pass. Only a failure in
   code this branch changes, or a test that fails in isolation every time, blocks the push.
 - **A docs/skill-only branch** (no `.cpp`/`.h`/`.js`/`.sh`/workflow changes; check with
-  `git diff main...HEAD --name-only`) does NOT run `ci_preflight.sh` at all: there is nothing
-  for the build and test gates to check, and CI runs them on the PR anyway. Its step 5 gates
+  `git diff main...HEAD --name-only`) does not need even the quick `ci_preflight.sh`: it has
+  nothing for the build and test gates to check, and CI runs them on the PR anyway. Its step 5 gates
   are the five Python checks (docs drift, unicode, stress registration, connect-error
   hook, ConformU reports).
   Run those, commit, push, poll.
@@ -513,8 +543,8 @@ The loop ends only when every PR is merged or a **Hard stop** below applies. In 
 - Merge conflicts that cannot be resolved without choosing between two contributors' intents.
 - The review action skipped a workflow-editing PR (poll exit `2`): hand it back for eyeball
   review. A PR that edits `claude-review.yml` is never merged on an empty verdict.
-- The review workflow itself is broken (two consecutive 30-minute timeouts, or two failed runs,
-  after the relabel tricks) — report the run URL.
+- The review workflow itself is broken (two consecutive full-budget timeouts, or two failed runs
+  that are not exit `4` or `5`, after the relabel tricks) — report the run URL.
 
 State the blocker in one or two sentences, finish every other PR in the list, and say exactly
 which PR was left and why.

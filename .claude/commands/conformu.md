@@ -363,7 +363,8 @@ cd AlpacaCore && cmake -B build-vendors -DALPACACORE_ENABLE_<VENDOR>=ON && cmake
 
 Build into `build-vendors`, not `build`. From #588 until #1251 a default pre-flight left
 `AlpacaCore/build` holding the ASan+UBSan, **vendors-OFF** binary from its last pass (since #1251
-it builds in `AlpacaHTTP/build` and deletes `AlpacaCore/build`, but a `build` from an older run or
+a full pre-flight, `PREFLIGHT_FULL=1`, builds in `AlpacaHTTP/build` and deletes `AlpacaCore/build`,
+and the default quick run builds nothing; but a `build` from an older run or
 a manual configure can still be there), so reusing it here rebuilds a
 tree with no driver compiled in: the `"[<vendor>]"` filter matches nothing and Catch2 exits rc 2,
 a failure that says nothing about the fix. A **fresh** `build-vendors` would have the driver

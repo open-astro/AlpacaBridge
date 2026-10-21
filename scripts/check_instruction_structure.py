@@ -178,7 +178,7 @@ def self_test():
     assert matches('AlpacaCore/conformu/Player One/model/Linux-arm64.txt', 'AlpacaCore/conformu/Player One/**')
     assert not matches('AlpacaCore/src/vendors/celestron/x.cpp', 'AlpacaCore/src/vendors/gemini/**')
     with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
+        root = Path(tmp).resolve()  # macOS: /var is a symlink to /private/var
         for directory in ('.github/instructions', '.claude/rules', 'docs', 'AlpacaCore/src/vendors',
                           'AlpacaCore/include/alpacacore/vendor', 'AlpacaCore/tests',
                           '.claude/skills'):
