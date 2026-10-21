@@ -62,6 +62,7 @@ Scan: `AlpacaCore/tests/locked_*.h`
 | ZWO EAF | `ZWOEAFSDK` | `AlpacaCore/tests/locked_zwo_eaf_sdk.h` | adopted | #1356 | |
 | ZWO CAA | `ZWOCAASDK` | `AlpacaCore/tests/locked_zwo_caa_sdk.h` | adopted | #1356 | |
 | Astroasis focuser (HID) | `AstroasisHidTransport` | `AlpacaCore/tests/locked_astroasis_hid_transport.h` | adopted | #1398 | owned per-device transport |
+| iOptron iGuider camera (V4L2) | `IGuiderV4L2` | `AlpacaCore/tests/locked_iguider_v4l2.h` | adopted | | kernel V4L2 API, not a vendor SDK; handle-based like the SDK seams |
 
 Serial and socket drivers have no SDK and are tested through pty fakes and fake servers instead ([decision 0013](0013-designs-to-avoid.md), section 7).
 

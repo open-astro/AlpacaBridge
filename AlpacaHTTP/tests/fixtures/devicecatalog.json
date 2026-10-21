@@ -123,6 +123,16 @@
     ]
   },
   {
+    "vendor": "iguider",
+    "deviceType": "camera",
+    "displayName": "iOptron iGuider Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_IOPTRON",
+    "fields": [
+      {"key": "devicePath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath"}
+    ]
+  },
+  {
     "vendor": "ioptron",
     "deviceType": "camera",
     "displayName": "iOptron iCAM Camera",

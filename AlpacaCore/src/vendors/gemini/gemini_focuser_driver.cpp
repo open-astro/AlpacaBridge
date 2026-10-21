@@ -149,7 +149,7 @@ public:
         // open-astro#333: the idempotency check below and the protocol_ call
         // that follows it must be one atomic transition. Without this, two
         // HTTP workers could both observe connected_ == false and both reach
-        // protocol_.connect(), which assigns serial_fd_ unconditionally, so
+        // protocol_.connect(), which (before #1202) assigned the fd unconditionally, so
         // the first descriptor leaks for the life of the process. (It does
         // NOT reset the MCU: the tty is still open, connect_serial() clears
         // HUPCL so DTR stays asserted, and Linux runs port activation only on
@@ -185,9 +185,9 @@ public:
                     try {
                         protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node is stale; a handshake miss on a present
-                        // port must not trigger the probe, which resets every CH340 MCU.
-                        if (util::device_node_missing(cfg.serial_port))
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale; a
+                        // handshake miss on a present port must not trigger the probe, which resets every CH340 MCU.
+                        if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
                     }
@@ -536,8 +536,13 @@ ConnectionConfig resolve_gemini_focuser_by_index(int focuser_index) {
     }
 
     const auto& port = ports[static_cast<std::size_t>(focuser_index)];
-    ALPACA_LOG_INFO("Gemini", "Auto-detected focuser at " + port.port_path +
-                    " (firmware " + std::to_string(port.firmware_version) + ")");
+    // firmware_version is 0 for a port a connected Gemini focuser already
+    // holds: the scan counts it without probing (#1202), and the connect that
+    // follows is refused with a message naming the holder.
+    ALPACA_LOG_INFO("Gemini",
+                    "Auto-detected focuser at " + port.port_path +
+                        (port.firmware_version > 0 ? " (firmware " + std::to_string(port.firmware_version) + ")"
+                                                   : std::string(" (held by a connected focuser, not probed)")));
 
     ConnectionConfig config;
     config.type = ConnectionType::Serial;

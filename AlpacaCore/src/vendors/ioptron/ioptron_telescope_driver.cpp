@@ -257,13 +257,19 @@ public:
                     ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
                     if (!protocol.connect(info)) {
                         ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
-                        // A refused TCP connect or a vanished serial node means the
+                        // The wrapper's reason (a port another connected device
+                        // holds, a busy or missing port) reaches the client (#1202).
+                        const std::string reason = protocol.last_connect_error();
+                        const std::string message =
+                            "Failed to connect to iOptron mount" + (reason.empty() ? std::string() : ": " + reason);
+                        // A refused TCP connect, a vanished serial node, or a port another
+                        // connected device now holds (#1202) means the
                         // resolved endpoint is gone: re-scan. A node that is present
                         // but would not open is not stale (busy, permissions).
-                        if (info.type == ConnectionType::Network || util::device_node_missing(info.port_path)) {
-                            throw util::StaleEndpoint("Failed to connect to iOptron mount");
+                        if (info.type == ConnectionType::Network || util::serial_endpoint_stale(info.port_path)) {
+                            throw util::StaleEndpoint(message);
                         }
-                        throw AlpacaException("Failed to connect to iOptron mount");
+                        throw AlpacaException(message);
                     }
                 },
                 "iOptron");

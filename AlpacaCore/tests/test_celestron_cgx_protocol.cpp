@@ -13,6 +13,7 @@
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <fcntl.h>
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <future>
@@ -290,6 +292,61 @@ TEST_CASE("Celestron CGX AUX link - does not claim a port held by another instan
 
     first.disconnect();
     CHECK_NOTHROW(second.connect_serial(mount.slave_path()));
+}
+
+// Issue #1448 (the #1202 port to main): the CGX link opens through
+// util::SerialLink like every other serial wrapper.
+TEST_CASE("Celestron CGX AUX link - a refused connect names the device that holds the port",
+          "[celestron][cgx][protocol][integration][issue1202]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto other = util::SerialPortClaim::acquire(mount.slave_path(), util::SerialClaimKind::Link, "Other device");
+    REQUIRE(other);
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    try {
+        protocol.connect_serial(mount.slave_path());
+        FAIL("Expected a port another device holds to be refused");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(error.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(std::string(error.what()).find("Other device") != std::string::npos);
+    }
+    CHECK_FALSE(protocol.is_connected());
+}
+
+TEST_CASE("Celestron CGX AUX link - waits out another device's probe on its port",
+          "[celestron][cgx][protocol][integration][issue1202]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto probe = util::SerialPortClaim::acquire(mount.slave_path(), util::SerialClaimKind::Probe, "Other probe");
+    REQUIRE(probe);
+    auto release = std::async(std::launch::async, [&probe] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        probe.release();
+    });
+
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    CHECK_NOTHROW(protocol.connect_serial(mount.slave_path()));
+    CHECK(protocol.is_connected());
+    release.get();
+    protocol.disconnect();
+}
+
+TEST_CASE("Celestron CGX AUX link - a port it cannot lock exclusively is refused",
+          "[celestron][cgx][protocol][integration][issue1202]") {
+    // /dev/null opens but refuses TIOCEXCL (ENOTTY). The CGX link requires the
+    // lock (decision 0011), so the connect fails and holds nothing.
+    alpacacore::vendor::celestron::CelestronCgxProtocol protocol;
+    try {
+        protocol.connect_serial("/dev/null");
+        FAIL("Expected a port without an exclusive lock to be refused");
+    } catch (const alpacacore::AlpacaException& error) {
+        CHECK(std::string(error.what()).find("exclusive") != std::string::npos);
+    }
+    CHECK_FALSE(protocol.is_connected());
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use("/dev/null"));
 }
 
 TEST_CASE("Celestron CGX AUX wrapper - exposes typed position, home and slew operations",

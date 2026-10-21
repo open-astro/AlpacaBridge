@@ -120,12 +120,12 @@ TEST_CASE("Celestron serial backends - refuse a NexStar open of a CGX AUX port",
     alpacacore::vendor::celestron::ConnectionInfo info;
     info.type = alpacacore::vendor::celestron::ConnectionType::Serial;
     info.port_path = mount.slave_path();
-    try {
-        static_cast<void>(nexstar.connect(info));
-        FAIL("The NexStar backend must not share the direct CGX serial port");
-    } catch (const alpacacore::AlpacaException& error) {
-        CHECK(error.error_code() == alpacacore::AlpacaError::InvalidOperation);
-    }
+    // SerialLink (#1202, #1448) refuses the held port before opening it: the
+    // connect fails, names the CGX link that holds it, and leaves it working.
+    CHECK_FALSE(nexstar.connect(info));
+    CHECK_FALSE(nexstar.is_connected());
+    CHECK(nexstar.last_connect_error().find("Celestron CGX mount") != std::string::npos);
+    CHECK(direct.is_connected());
 }
 #endif
 

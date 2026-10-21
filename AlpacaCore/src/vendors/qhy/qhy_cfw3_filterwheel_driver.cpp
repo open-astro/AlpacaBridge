@@ -153,10 +153,10 @@ public:
                     try {
                         info = protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node is stale. The out-of-step refusal of a wheel
-                        // that is still homing, or any other failure on a present port, must
-                        // NOT trigger the probe: it DTR-resets every CP210x device on the box.
-                        if (util::device_node_missing(cfg.serial_port))
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale. The
+                        // out-of-step refusal of a wheel that is still homing, or any other failure on a present port,
+                        // must NOT trigger the probe: it DTR-resets every CP210x device on the box.
+                        if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
                     }

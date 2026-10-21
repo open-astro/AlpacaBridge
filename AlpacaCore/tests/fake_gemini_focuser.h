@@ -70,6 +70,9 @@ public:
     FakeGeminiFocuser& operator=(const FakeGeminiFocuser&) = delete;
 
     std::string slave_path() const { return pty_.slave_path(); }
+    /// The keep-alive slave fd: shares the driver's termios, so a test can read
+    /// back (or retune, as another program would) the line settings (#1202).
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
 
     /// Every command received so far, in wire order (e.g. ":03#", ":05100#").
     std::vector<std::string> commands() const {

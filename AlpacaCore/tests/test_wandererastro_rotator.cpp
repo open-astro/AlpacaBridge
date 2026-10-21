@@ -51,6 +51,11 @@ public:
         th_.join();
     }
     std::string slave_path() const { return pty_.slave_path(); }
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
+    /// Write raw bytes to the driver (a test that must unpark a reader).
+    void send(const std::string& bytes) {
+        alpacacore::test::pty_write_bounded(pty_.master_fd(), bytes.data(), bytes.size(), stop_);
+    }
 
 private:
     void run() {
@@ -199,8 +204,7 @@ TEST_CASE("WandererAstro Rotator Protocol Wrapper - Disconnected behavior", "[wa
     require_alpaca_error([&]() { wrapper.set_zero(); }, alpacacore::AlpacaError::NotConnected);
 
     // Connecting to a missing port must fail with NotConnected and leave the
-    // wrapper disconnected. (/dev/null is not used here: it opens fine but is
-    // not a tty, so serial configuration fails with DriverException instead.)
+    // wrapper disconnected.
     alpacacore::vendor::wandererastro::RotatorConnectionConfig config;
     config.serial_port = "/nonexistent/wanderer-rotator-test-port";
     config.serial_timeout_s = 1;
@@ -286,4 +290,71 @@ TEST_CASE("WandererAstro Rotator Driver - Connect with empty serial port names p
     }
     CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1202: the rotator opens its port through util::SerialLink, so a port
+// another device holds is refused untouched, its own claim is released on
+// disconnect, and a retuned port cannot park the move monitor in read() and
+// hang Disconnect (the WandererRotator hang reported in #1202).
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/serial_port_registry.h>
+
+#include "wandererastro_serial_ownership_helpers.h"
+
+TEST_CASE("WandererAstro Rotator Driver - Refuses a port another device holds (issue #1202)",
+          "[wandererastro][rotator][serial][issue1202]") {
+    namespace util = alpacacore::util;
+    SilentMotorRotator rotator;
+    const speed_t before = alpacacore::test::wanderer::line_speed(rotator.keepalive_fd());
+    auto claim = util::SerialPortClaim::acquire(rotator.slave_path(), util::SerialClaimKind::Link, "Other device");
+    REQUIRE(claim);
+
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string error = alpacacore::test::wanderer::connect_error([&] { driver->set_connected(true); });
+    CHECK(error.find("Other device") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    // Refused before the open: the holder's line settings are untouched.
+    CHECK(alpacacore::test::wanderer::line_speed(rotator.keepalive_fd()) == before);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - Holds its port while connected and releases it (issue #1202)",
+          "[wandererastro][rotator][serial][issue1202]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(alpacacore::util::is_serial_port_in_use(rotator.slave_path()));
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rotator.slave_path()));
+    // TIOCEXCL and the claim are both gone: the same port connects again.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "WandererAstro Rotator Protocol Wrapper - Disconnect returns after the port is retuned to VMIN=1 mid-move "
+    "(issue #1202)",
+    "[wandererastro][rotator][serial][issue1202]") {
+    SilentMotorRotator rotator;
+    alpacacore::vendor::wandererastro::WandererRotatorProtocolWrapper wrapper;
+    alpacacore::vendor::wandererastro::RotatorConnectionConfig config;
+    config.serial_port = rotator.slave_path();
+    REQUIRE(wrapper.connect(config) == "WandererRotatorMini");
+
+    // 30 degrees: the monitor's own budget is about 19 s, so only its stop
+    // flag can end it inside the bound below. The fake never reports.
+    wrapper.move_relative(30.0);
+    REQUIRE(wrapper.get_state().moving);
+    alpacacore::test::wanderer::retune_to_blocking_read(rotator.keepalive_fd());
+    // Outlast one read window so the monitor's next read runs under VMIN=1.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // The wrapper's disconnect() is synchronous: it joins the monitor.
+    CHECK(alpacacore::test::wanderer::returns_within([&] { wrapper.disconnect(); }, std::chrono::seconds(3),
+                                                     [&] { rotator.send("A"); }));
+    CHECK_FALSE(wrapper.is_connected());
 }

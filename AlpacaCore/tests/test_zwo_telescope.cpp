@@ -15,6 +15,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <exception>
 #include <mutex>
 #include <string>
@@ -534,6 +535,54 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
         // The other axis is idle now, so the generic stop is sent.
         CHECK(counts->stop_all.load() > 0);
         CHECK(alpacacore::test::settle_connected(*driver, false));
+    }
+}
+
+TEST_CASE("ZWO mount site longitude converts between east-positive API and west-positive wire",
+          "[zwo][telescope][unit][longitude]") {
+    struct SiteCase {
+        double longitude;
+        const char* wire_longitude;
+    };
+    for (const auto& site :
+         {SiteCase{-82.755, "+082*45:18"}, SiteCase{82.755, "-082*45:18"}, SiteCase{0.0, "+000*00:00"},
+          SiteCase{-180.0, "+180*00:00"}, SiteCase{180.0, "-180*00:00"}}) {
+        CAPTURE(site.longitude);
+        const std::string wire_site = std::string("+28*04:58&") + site.wire_longitude;
+        // Fixed wire expectations, independent of the wrapper's read/write conversion.
+        alpacacore::test::FakeMountServer server(
+            [wire_site, pending = std::string{}](const std::string& chunk) mutable -> std::string {
+                pending += chunk;
+                std::string response;
+                for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
+                    const auto command = pending.substr(0, end + 1);
+                    pending.erase(0, end + 1);
+                    if (command == ":GMGE#") {
+                        response += wire_site + "#";
+                    } else if (command == ":SMGE" + wire_site + "#") {
+                        response += "1#";
+                    } else {
+                        response += "0#";
+                    }
+                }
+                return response;
+            });
+        REQUIRE(server.ok());
+        alpacacore::vendor::zwo::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 250;
+        auto& protocol = alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance();
+        struct Disconnect {
+            ~Disconnect() { alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance().disconnect(); }
+        } disconnect;
+        REQUIRE(protocol.connect(conn));
+        const auto actual = protocol.get_site_info();
+        const double latitude = 28.0 + 4.0 / 60.0 + 58.0 / 3600.0;
+        CHECK(std::abs(actual.latitude_degrees - latitude) < 1e-9);
+        CHECK(std::abs(actual.longitude_degrees - site.longitude) < 1e-9);
+        CHECK_NOTHROW(protocol.set_site_info({latitude, site.longitude}));
     }
 }
 

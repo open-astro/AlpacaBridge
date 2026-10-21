@@ -11,7 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The iOptron schemas (telescope, iMate PowerBox switch, iEAF focuser, iEFW
-// filter wheel, iCAM camera). No vendor header: compiles in every build
+// filter wheel, iGuider guide camera, iCAM camera). No vendor header: compiles in every build
 // (including vendors-OFF), so `available` in GET /management/v1/devicecatalog
 // reflects only whether a factory is registered. The iCAM camera is a rebadged
 // Player One, so it is built by ALPACACORE_ENABLE_PLAYERONE, not the iOptron option.
@@ -77,6 +77,13 @@ NormalizeResult normalize_ioptron_filterwheel(const DeviceConfig& in, Source) {
     return result;
 }
 
+NormalizeResult normalize_iguider_camera(const DeviceConfig& in, Source) {
+    NormalizeResult result;
+    result.config = in;
+    result.rejection = iguider_camera_refusal(in);
+    return result;
+}
+
 NormalizeResult normalize_ioptron_switch(const DeviceConfig& in, Source) {
     NormalizeResult result;
     result.config = in;
@@ -107,6 +114,18 @@ void register_ioptron_schema(DeviceCatalog& catalog) {
     add_schema(catalog, DeviceType::FilterWheel, "iOptron iEFW Filter Wheel", kIoptronBuildOption,
                ioptron_filterwheel_fields(), normalize_ioptron_filterwheel);
     add_schema(catalog, DeviceType::Camera, "iOptron iCAM Camera", kIoptronCameraBuildOption, ioptron_camera_fields());
+
+    // The iGuider guide camera is its own vendor entry ("iOptron iGuider" in the
+    // web UI) so it is never confused with the iCAM imaging cameras above. It is
+    // a UVC camera built with the iOptron option, not the Player One one.
+    Schema iguider;
+    iguider.key = DeviceKey{"iguider", DeviceType::Camera};
+    iguider.display_name = "iOptron iGuider Camera";
+    iguider.build_option = kIoptronBuildOption;
+    iguider.vendor_label = "iOptron iGuider";
+    iguider.fields = iguider_camera_fields();
+    iguider.normalize = normalize_iguider_camera;
+    catalog.add(std::move(iguider));
 }
 
 }  // namespace alpacacore::catalog

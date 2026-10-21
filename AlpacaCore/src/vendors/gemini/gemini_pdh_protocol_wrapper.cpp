@@ -14,7 +14,6 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
-#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
 
 #include <algorithm>
@@ -32,11 +31,12 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
+#include <alpacacore/util/serial_link.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -75,9 +75,14 @@ constexpr int kLinkFaultPolls = 3;
 // inside the ASCOM client's 10 s connect budget).
 constexpr int kHandshakeRetries = 3;
 
-using util::is_serial_port_in_use;
-using util::mark_serial_port_closed;
-using util::mark_serial_port_open;
+// Operator-facing owner name for the port registry (#1202), shared by the
+// probe and the connected link, so a scan counts a connected hub's port as a
+// sibling instead of opening it.
+constexpr const char* kSerialOwner = "Gemini power hub";
+
+// The reader's per-read window (the old VTIME of 0.5 s), so the loop notices
+// its stop flag and the stale-cache poll promptly.
+constexpr int kReadWindowMs = 500;
 
 double parse_double_or(const std::string& text, double fallback) {
     if (text.empty()) return fallback;
@@ -125,39 +130,13 @@ std::string strip_frame(const std::string& frame_in) {
 }
 
 #ifndef _WIN32
-// Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
-// DTR stays asserted on close: the CH340 adapter asserts DTR on open, which
-// pulses the MCU reset line; keeping DTR high across close means a subsequent
-// reopen does not reset the hub again (Gemini focuser / flat panel lesson).
-bool configure_serial_fd(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        return false;
-    }
-    cfsetospeed(&tty, B19200);
-    cfsetispeed(&tty, B19200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
+// 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close: the CH340
+// adapter asserts DTR on open, which pulses the MCU reset line; keeping DTR
+// high across close means a subsequent reopen does not reset the hub again
+// (Gemini focuser / flat panel lesson).
+void configure_pdh_line(struct termios& tty) {
+    util::make_raw_8n1(tty, B19200);
     tty.c_cflag &= ~HUPCL;  // keep DTR high on close -- avoids CH340 MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;  // 0.5 s per-read timeout so loops can poll their stop flags
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        return false;
-    }
-    if (!util::clear_nonblocking(fd)) {
-        return false;
-    }
-    tcflush(fd, TCIOFLUSH);
-    return true;
 }
 
 // Read one '#'-terminated frame (terminator stripped, CR/LF skipped) within
@@ -169,8 +148,11 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
         char ch = 0;
-        // Bounded by VMIN=0/VTIME=0.5s (same pattern as the other serial wrappers).
-        const ssize_t r = ::read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        // Bounded by poll() (util::tty_read), never by VMIN/VTIME: a port
+        // another program retunes to VMIN=1 cannot park this read (#1202).
+        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(std::max<long long>(remaining.count(), 0)));
         if (r == 1) {
             if (ch == '#') {
                 return frame;
@@ -182,11 +164,12 @@ std::optional<std::string> read_frame(int fd, int timeout_ms, std::string& carry
             if (frame.size() > kMaxFrameLen) {
                 frame.clear();  // garbage -- resynchronise on the next terminator
             }
-        } else if (r == 0 || errno != EINTR) {
-            // Persistent read error, or no byte: VTIME expired, or the tty is
-            // hung up (unplugged adapter, closed pty master), where read()
-            // returns 0 at once (issue #772). Back off instead of spinning.
-            // Connected stays true; the unanswered polls latch the fault (#237).
+        } else if (r < 0) {
+            // Persistent read error: the tty is hung up (unplugged adapter,
+            // closed pty master), which tty_read reports at once as EIO
+            // (issue #772). Back off instead of spinning. Connected stays
+            // true; the unanswered polls latch the fault (#237). A 0 is the
+            // window running out, which ends the loop.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
@@ -198,27 +181,25 @@ bool write_line(int fd, const std::string& cmd) {
     // The vendor driver sends every command via SerialPort.WriteLine(), i.e.
     // ">X#\n". Mirror it exactly: the firmware is only proven against that.
     const std::string payload = cmd + "\n";
-    return util::write_all(fd, payload.data(), payload.size());
+    return util::tty_write_all(fd, payload.data(), payload.size());
 }
 
 // Probe a serial port with the hub's identity handshake. Returns true only
 // when the exact kPdhHandshakeReply comes back, so ports hosting the Gemini
 // focuser or a flat panel (same CH340 adapter family) are rejected.
 bool probe_pdh_port(const std::string& port_path) {
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe's claim lasts exactly as long as `link`: a connect or another
+    // scan waits for it, and a port a connected driver holds is refused here
+    // without being opened (#1202).
+    std::string error;
+    auto link =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_pdh_line, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("Gemini", "Power hub probe skipped " + port_path + ": " + error);
         return false;
     }
-    if (!configure_serial_fd(fd)) {
-        close(fd);
-        return false;
-    }
-    // Re-check after opening: a driver may have claimed this port between the
-    // caller's is_serial_port_in_use() check and this open().
-    if (is_serial_port_in_use(port_path)) {
-        close(fd);
-        return false;
-    }
+    const int fd = link.fd();
+    tcflush(fd, TCIOFLUSH);
 
     bool found = false;
     for (int attempt = 0; attempt < 2 && !found; ++attempt) {
@@ -253,8 +234,8 @@ bool probe_pdh_port(const std::string& port_path) {
         }
     }
 
-    // HUPCL is already cleared by configure_serial_fd(); DTR stays high on close.
-    close(fd);
+    // HUPCL is already cleared by configure_pdh_line(); DTR stays high when
+    // `link` closes the port.
     return found;
 }
 
@@ -366,7 +347,6 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, ec).string();
             if (ec) continue;  // unplugged mid-scan -- skip, don't abort the enumeration
             probed.insert(resolved);
-            if (is_serial_port_in_use(resolved)) continue;  // held by a connected device
             candidates.push_back({resolved, name});
         }
     }
@@ -383,18 +363,31 @@ std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_pdh_candidate(resolved)) continue;
         probed.insert(resolved);
-        if (is_serial_port_in_use(resolved)) continue;
         candidates.push_back({resolved, ""});
     }
 
     // Probe every candidate concurrently: a non-responsive port costs the full
     // handshake timeout, so one thread per port bounds the scan to one port's
     // worst case (issue #218 lesson).
+    //
+    // A port a connected device holds is never opened (#1202). Another kind's
+    // port is skipped; a connected hub's port keeps its place in the results
+    // unprobed, so the auto-detect index stays stable while it is connected.
     std::vector<char> found(candidates.size(), 0);
     std::vector<std::thread> workers;
     workers.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& c = candidates[i];
+        const auto use = util::serial_candidate_use(c.path, kSerialOwner);
+        if (use == util::SerialCandidateUse::HeldByOther) {
+            ALPACA_LOG_DEBUG("Gemini", "Skipping " + c.path + ": held by another connected device");
+            continue;
+        }
+        if (use == util::SerialCandidateUse::HeldBySibling) {
+            found[i] = 1;
+            ALPACA_LOG_DEBUG("Gemini", "Counting " + c.path + " without probing it: a connected power hub holds it");
+            continue;
+        }
         ALPACA_LOG_INFO("Gemini", "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") +
                                       " for a Power & Data Hubs Advanced 3...");
         workers.emplace_back([&, i] { found[i] = probe_pdh_port(candidates[i].path) ? 1 : 0; });
@@ -429,7 +422,7 @@ public:
                 throw AlpacaException("Gemini power hub already connected; call disconnect() first",
                                       AlpacaError::InvalidOperation);
             }
-            // configure_serial_fd() hardcodes B19200; reject any other rate
+            // configure_pdh_line() hardcodes B19200; reject any other rate
             // rather than silently ignoring it.
             if (config.baud_rate != kPdhBaudRate) {
                 throw AlpacaException(
@@ -619,11 +612,11 @@ private:
 
 #ifndef _WIN32
     void write_locked(const std::string& cmd) {
-        if (serial_fd_ < 0) {
+        if (!link_.is_open()) {
             throw AlpacaException("Gemini power hub serial port is not open", AlpacaError::NotConnected);
         }
         ALPACA_LOG_TRACE("Gemini", "Power hub command: " + cmd);
-        if (!write_line(serial_fd_, cmd)) {
+        if (!write_line(link_.fd(), cmd)) {
             throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
     }
@@ -706,12 +699,12 @@ private:
             int fd;
             {
                 std::lock_guard<std::mutex> lock(io_mutex_);
-                fd = serial_fd_;
+                fd = link_.fd();
             }
             if (fd < 0) {
                 return;  // closed under us
             }
-            auto frame = read_frame(fd, 500, carry);
+            auto frame = read_frame(fd, kReadWindowMs, carry);
             if (frame.has_value()) {
                 dispatch_frame(*frame);
             }
@@ -728,15 +721,22 @@ private:
                 bool polled = false;
                 {
                     std::lock_guard<std::mutex> lock(io_mutex_);
-                    if (connected_ && serial_fd_ >= 0) {
+                    if (connected_ && link_.is_open()) {
                         polled = true;
-                        if (!write_line(serial_fd_, ">G#")) {
+                        if (!write_line(link_.fd(), ">G#")) {
                             write_error = util::errno_string(errno);
                         }
                     }
                 }
-                if (polled) {
-                    record_poll_outcome(write_error);
+                if (polled && record_poll_outcome(write_error)) {
+                    // The link just latched faulted. If another program
+                    // retuned the port (the #1202 flat panel scan left it at
+                    // 9600 baud), put the hub's settings back so the next
+                    // frames parse again. tty_read() does the same on a read
+                    // timeout; this covers garbage that arrives without a gap.
+                    // The fd stays open: teardown closes it only after joining
+                    // this thread.
+                    util::restore_serial_line_settings(fd);
                 }
             }
         }
@@ -748,8 +748,9 @@ private:
     // the link is latched faulted -- the cache is invalidated and the driver
     // refuses to serve it -- until a frame arrives again. Polling continues
     // at the normal cadence so recovery (a re-plugged hub on the same node)
-    // is noticed without a reconnect.
-    void record_poll_outcome(const std::optional<std::string>& write_error) {
+    // is noticed without a reconnect. Returns true when this poll latched the
+    // fault (once per latch, not on every later unanswered poll).
+    bool record_poll_outcome(const std::optional<std::string>& write_error) {
         std::string latched;
         std::string transient;
         int polls = 0;
@@ -785,42 +786,25 @@ private:
         } else if (write_error.has_value()) {
             ALPACA_LOG_DEBUG("Gemini", "Power hub: status poll write failed: " + *write_error);
         }
+        return !latched.empty();
     }
 
     void open_serial_locked() {
-        // Claim the port in the registry BEFORE opening it so a concurrent
-        // auto-detect scan (ours, or the focuser's/flat panel's) can't slip in
-        // between check and open. Canonical path so by-id and ttyUSBn compare equal.
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
-        opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_serial_port_open(opened_port_);
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
+        // Claims the port (#1202): a port another connected device holds is
+        // refused before it is opened or retuned, the refusal names the
+        // holder for the operator, and a concurrent auto-detect probe (ours,
+        // or the focuser's/flat panel's) is waited out before the open.
+        std::string error;
+        auto link = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+                                           configure_pdh_line, &error);
+        if (!link) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        if (!configure_serial_fd(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
+        link_ = std::move(link);
+        tcflush(link_.fd(), TCIOFLUSH);
     }
 
-    void close_serial_locked() {
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        mark_serial_port_closed(opened_port_);
-        opened_port_.clear();
-    }
+    void close_serial_locked() { link_.close(); }
 #endif
 
     // Full teardown; caller holds transition_mutex_. Marks disconnected under
@@ -856,11 +840,10 @@ private:
     }
 
     std::mutex transition_mutex_;     // serializes connect()/disconnect()
-    mutable std::mutex io_mutex_;     // guards serial fd + connected_/config_
+    mutable std::mutex io_mutex_;     // guards link_ + connected_/config_
     mutable std::mutex state_mutex_;  // guards state_/firmware_/last_frame_
     PdhConnectionConfig config_;
     bool connected_ = false;
-    std::string opened_port_;  // path registered in the in-use registry while open
 
     PdhState state_;
     std::string firmware_;  // "3.0.8", from >V#
@@ -879,7 +862,7 @@ private:
     std::thread reader_thread_;
 
 #ifndef _WIN32
-    int serial_fd_ = -1;
+    util::SerialLink link_;  // the claimed, open port (#1202); guarded by io_mutex_
 #endif
 };
 

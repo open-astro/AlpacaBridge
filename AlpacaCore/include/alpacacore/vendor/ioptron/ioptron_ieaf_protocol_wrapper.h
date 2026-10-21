@@ -81,6 +81,13 @@ struct IeafPortInfo {
 std::vector<IeafPortInfo> enumerate_ieaf_ports();
 
 /**
+ * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
+ *        serial-port probe claim (waits out another scan's probe of the same
+ *        port). True, with @p info filled, only for an iEAF model code.
+ */
+bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info);
+
+/**
  * @brief Protocol wrapper for the iOptron iEAF electronic focuser.
  *
  * Serial protocol at 115200 8N1. Commands are ":XX#"; query responses end

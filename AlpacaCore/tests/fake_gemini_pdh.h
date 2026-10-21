@@ -22,6 +22,7 @@
 // exercise the reader thread's routing (streamed frame vs. pending request).
 
 #include <poll.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include <array>
@@ -58,6 +59,9 @@ public:
     FakeGeminiPdh& operator=(const FakeGeminiPdh&) = delete;
 
     std::string slave_path() const { return pty_.slave_path(); }
+    /// The keep-alive slave fd: shares the driver's termios, so a test can read
+    /// back (or retune, as another program would) the line settings (#1202).
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
 
     std::vector<std::string> commands() const {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -102,6 +106,34 @@ public:
     /// Muted: commands are still recorded but nothing is ever sent back
     /// (a hung MCU / broken RX line). Writes keep succeeding at the fd level.
     void set_muted(bool muted) { muted_.store(muted); }
+    /// Model a real UART at the wrong line speed (#1202): while enabled and
+    /// the slave's baud (read through the keep-alive fd, which shares the
+    /// driver's termios) is not the hub's 19200, every reply is lost and the
+    /// line carries continuous garbage with no '#', so the driver's reader
+    /// never sees a quiet read window. Off by default: the keep-alive starts
+    /// at the pty's default speed, so enable it only after the driver
+    /// connected.
+    void set_garble_at_wrong_baud(bool on) { garble_at_wrong_baud_.store(on); }
+    /// Retune the line the way another program would (#1202): @p baud, and
+    /// VMIN=1/VTIME=0, through the keep-alive fd. With the garble mode on, the
+    /// garbage starts in this same call, so the driver's reader never gets a
+    /// quiet window between the retune and the noise.
+    void retune(speed_t baud) {
+        struct termios tty {};
+        if (tcgetattr(pty_.keepalive_fd(), &tty) != 0) return;
+        cfsetispeed(&tty, baud);
+        cfsetospeed(&tty, baud);
+        tty.c_cc[VMIN] = 1;
+        tty.c_cc[VTIME] = 0;
+        tcsetattr(pty_.keepalive_fd(), TCSANOW, &tty);
+        if (wrong_baud()) flood_garbage();
+    }
+    /// The slave's current output speed (B19200 once the driver configured it).
+    speed_t line_baud() const {
+        struct termios tty {};
+        if (tcgetattr(pty_.keepalive_fd(), &tty) != 0) return 0;
+        return cfgetospeed(&tty);
+    }
 
     /// Tear the pty down underneath the driver: the master side closes, so
     /// the driver's writes on the slave fail with EIO and its reads return 0
@@ -140,11 +172,19 @@ private:
         std::string pending;
         char buf[64];
         auto last_stream = std::chrono::steady_clock::now();
+        bool was_garbling = false;
         while (!stop_.load()) {
             struct pollfd pfd {};
             pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
-            const int r = poll(&pfd, 1, 10);
+            const bool garbling = wrong_baud();
+            if (was_garbling && !garbling) {
+                // The noise ends at a frame boundary, so the next reply is not
+                // glued onto the tail of the garbage.
+                pty_write_bounded(pty_.master_fd(), std::string("#"), stop_);
+            }
+            was_garbling = garbling;
+            const int r = poll(&pfd, 1, garbling ? 1 : 10);
             if (r > 0) {
                 const ssize_t n = read(pty_.master_fd(), buf, sizeof(buf));
                 for (ssize_t i = 0; i < n; ++i) {
@@ -159,6 +199,9 @@ private:
                     }
                 }
             }
+            if (garbling) {
+                flood_garbage();
+            }
             const int stream_ms = stream_ms_.load();
             if (stream_ms > 0) {
                 const auto now = std::chrono::steady_clock::now();
@@ -170,8 +213,20 @@ private:
         }
     }
 
+    bool wrong_baud() const { return garble_at_wrong_baud_.load() && line_baud() != B19200; }
+
+    // Fill the slave's input queue with bytes that never form a frame. The
+    // master is non-blocking (PtyPair), so this stops at EAGAIN.
+    void flood_garbage() {
+        static const std::string junk(512, 'x');
+        for (int i = 0; i < 64 && !stop_.load(); ++i) {
+            const ssize_t n = ::write(pty_.master_fd(), junk.data(), junk.size());
+            if (n <= 0) break;
+        }
+    }
+
     void send(const std::string& reply) {
-        if (muted_.load()) return;
+        if (muted_.load() || wrong_baud()) return;
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -238,6 +293,7 @@ private:
     std::atomic<int> firmware_{308};
     std::atomic<int> stream_ms_{0};
     std::atomic<bool> muted_{false};
+    std::atomic<bool> garble_at_wrong_baud_{false};
 
     mutable std::mutex mutex_;
     std::vector<std::string> commands_;

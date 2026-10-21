@@ -14,6 +14,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -46,57 +47,40 @@ namespace alpacacore::vendor::celestron {
 
 namespace {
 
+// Operator-facing owner of this wrapper's ports, for both the auto-detect
+// probe and the connected link (issue #1202): a probe skips a port another
+// device holds, and lists one a Celestron mount holds without opening it.
+constexpr const char* kSerialOwner = "Celestron mount";
+
+#ifndef _WIN32
+// NexStar spec: 8N1 raw, no flow control.
+void configure_nexstar_line(struct termios& tty, speed_t speed) { util::make_raw_8n1(tty, speed); }
+#endif
+
 // Probe a serial port for a NexStar hand controller using the echo command (Kx).
 // Returns HC firmware version string (e.g. "5.35") on success, empty on failure.
 std::string probe_nexstar_port(const std::string& port_path) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // Probe claim, held for exactly this function: a connected device's port
+    // is refused before it is opened, another scan's probe is waited for.
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_nexstar_line(tty, B9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("Celestron", "Skipping " + port_path + ": " + error);
         return "";
     }
-
-    struct termios tty{};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    // NexStar spec: 9600 baud, 8N1, no flow control
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 20; // 2-second per-character timeout
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
+    const int fd = link.fd();
     tcflush(fd, TCIOFLUSH);
 
     // Probe with NexStar echo command: "K" + chr(0x42) -> should return chr(0x42) + "#"
-    const char echo_cmd[] = {'K', 0x42};
-    if (!util::write_all(fd, echo_cmd, 2)) {
-        close(fd);
+    if (!util::tty_write_all(fd, std::string{'K', 0x42})) {
         return "";
     }
 
-    // Read response: expect chr(0x42) + '#'
+    // Read response: expect chr(0x42) + '#'. Each read waits up to 2 s for a
+    // character; the 3 s deadline bounds the loop.
     char resp[4] = {};
     int total = 0;
     auto start = std::chrono::steady_clock::now();
@@ -107,7 +91,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
             break;
         }
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
+        ssize_t r = util::tty_read(fd, &ch, 1, 2000);
         if (r == 1) {
             resp[total++] = ch;
             if (ch == '#') break;
@@ -119,15 +103,12 @@ std::string probe_nexstar_port(const std::string& port_path) {
     }
 
     if (total < 2 || resp[0] != 0x42 || resp[1] != '#') {
-        close(fd);
         return "";
     }
 
     // Echo confirmed — now query firmware version with "V" command
     tcflush(fd, TCIOFLUSH);
-    const char ver_cmd[] = {'V'};
-    if (!util::write_all(fd, ver_cmd, 1)) {
-        close(fd);
+    if (!util::tty_write_all(fd, std::string("V"))) {
         return "";
     }
 
@@ -141,7 +122,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
             break;
         }
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
+        ssize_t r = util::tty_read(fd, &ch, 1, 2000);
         if (r == 1) {
             ver_resp[total++] = ch;
             if (ch == '#') break;
@@ -152,7 +133,7 @@ std::string probe_nexstar_port(const std::string& port_path) {
         }
     }
 
-    close(fd);
+    link.close();
 
     if (total >= 3 && ver_resp[2] == '#') {
         int major = static_cast<unsigned char>(ver_resp[0]);
@@ -179,6 +160,27 @@ bool raw_port_looks_like_celestron_candidate(const std::string& port_path) {
     if (!descriptor) return false;
     return alpacacore::util::usb_tty_descriptor_matches(
         *descriptor, {"Prolific", "PL2303", "067b", "FTDI", "CP210", "USB_Serial", "USB-Serial"});
+}
+
+// Issue #1202: whether the scan may probe @p resolved. A port another
+// connected device holds is never opened. One a connected Celestron mount
+// holds is listed at its scan position without being probed (firmware
+// unknown), so a mount index stays stable; a driver that then picks it is
+// refused by its link claim, which names the holder.
+bool celestron_candidate_free(const std::string& resolved, const std::string& name,
+                              std::vector<CelestronPortInfo>& results) {
+    switch (alpacacore::util::serial_candidate_use(resolved, kSerialOwner)) {
+        case alpacacore::util::SerialCandidateUse::HeldByOther:
+            ALPACA_LOG_DEBUG("Celestron", "Skipping " + resolved + ": held by another connected device");
+            return false;
+        case alpacacore::util::SerialCandidateUse::HeldBySibling:
+            ALPACA_LOG_DEBUG("Celestron", "Listing " + resolved + " unprobed: a connected Celestron mount holds it");
+            results.push_back({resolved, name, ""});
+            return false;
+        case alpacacore::util::SerialCandidateUse::Free:
+            break;
+    }
+    return true;
 }
 #endif  // _WIN32
 
@@ -213,13 +215,12 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            if (!alpacacore::util::try_mark_serial_port_open(resolved)) continue;
+            if (!celestron_candidate_free(resolved, name, results)) continue;
             std::string probe_message = "Probing ";
             probe_message.append(resolved).append(" (").append(name).append(")...");
             ALPACA_LOG_INFO("Celestron", probe_message);
 
             std::string fw = probe_nexstar_port(resolved);
-            alpacacore::util::mark_serial_port_closed(resolved);
             if (!fw.empty()) {
                 std::string found_message = "Found NexStar mount on ";
                 found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
@@ -249,13 +250,12 @@ std::vector<CelestronPortInfo> enumerate_celestron_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_celestron_candidate(resolved)) continue;
         probed.insert(resolved);
-        if (!alpacacore::util::try_mark_serial_port_open(resolved)) continue;
+        if (!celestron_candidate_free(resolved, "", results)) continue;
 
         std::string probe_message = "Probing ";
         probe_message.append(resolved).append("...");
         ALPACA_LOG_INFO("Celestron", probe_message);
         std::string fw = probe_nexstar_port(resolved);
-        alpacacore::util::mark_serial_port_closed(resolved);
         if (!fw.empty()) {
             std::string found_message = "Found NexStar mount on ";
             found_message.append(resolved).append(" (HC firmware ").append(fw).append(")");
@@ -407,22 +407,11 @@ public:
 
         connection_type_ = info.type;
         connection_info_ = info;
+        last_connect_error_.clear();
 
         bool success = false;
         if (info.type == ConnectionType::Serial) {
-            std::error_code canonical_error;
-            const auto canonical = std::filesystem::canonical(info.port_path, canonical_error);
-            serial_registry_path_ = canonical_error ? info.port_path : canonical.string();
-            if (!util::try_mark_serial_port_open(serial_registry_path_)) {
-                serial_registry_path_.clear();
-                throw AlpacaException("Celestron serial port is already in use: " + info.port_path,
-                                      AlpacaError::InvalidOperation);
-            }
             success = connect_serial(info.port_path, info.baud_rate);
-            if (!success) {
-                util::mark_serial_port_closed(serial_registry_path_);
-                serial_registry_path_.clear();
-            }
         } else {
             success = connect_network(info.host, info.tcp_port);
         }
@@ -442,19 +431,24 @@ public:
         if (!connected_) {
             return;
         }
+        // Connection state first, then the port (#1202): nothing can see a
+        // connected wrapper whose fd is already closed.
+        connected_ = false;
         if (connection_type_ == ConnectionType::Serial) {
             disconnect_serial();
-            util::mark_serial_port_closed(serial_registry_path_);
-            serial_registry_path_.clear();
         } else {
             disconnect_network();
         }
-        connected_ = false;
     }
 
     bool is_connected() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return connected_;
+    }
+
+    std::string last_connect_error() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_connect_error_;
     }
 
     std::string send_command(const std::string& command,
@@ -1427,16 +1421,6 @@ public:
 
 private:
     bool connect_serial(const std::string& port_path, int baud_rate) {
-        serial_fd_ = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            return false;
-        }
-        termios tty{};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
         // NexStar spec: 9600 bits/sec, no parity, one stop bit
         speed_t speed = B9600;
         switch (baud_rate) {
@@ -1447,36 +1431,19 @@ private:
             case 115200: speed = B115200; break;
             default: speed = B9600; break;
         }
-
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_oflag &= ~OPOST;
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 1;
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
+        // SerialLink (issue #1202) claims the port for this mount, so another
+        // driver's connect or another vendor's auto-detect probe never opens
+        // it while it is ours, and locks it for exclusive use so another
+        // program cannot either. The fd stays non-blocking; every read and
+        // write below is bounded with poll().
+        link_ = util::SerialLink::open(
+            port_path, util::SerialClaimKind::Link, kSerialOwner,
+            [speed](struct termios& tty) { configure_nexstar_line(tty, speed); }, &last_connect_error_);
+        if (!link_) {
+            ALPACA_LOG_ERROR("Celestron", last_connect_error_);
             return false;
         }
-        // The fd was opened O_NONBLOCK; clear it so reads honour VMIN/VTIME and
-        // write_all()/read don't spuriously fail with EAGAIN (matches the probe
-        // path and the other serial wrappers).
-        if (!util::clear_nonblocking(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            return false;
-        }
+        serial_fd_ = link_.fd();
         return true;
     }
 
@@ -1543,10 +1510,8 @@ private:
     }
 
     void disconnect_serial() {
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        serial_fd_ = -1;
+        link_.close();
     }
 
     void disconnect_network() {
@@ -1563,7 +1528,7 @@ private:
         return write_network(data);
     }
 
-    bool write_serial(const std::string& data) { return util::write_all(serial_fd_, data.c_str(), data.length()); }
+    bool write_serial(const std::string& data) { return util::tty_write_all(serial_fd_, data); }
 
     bool write_network(const std::string& data) {
         // Loop over short sends; MSG_NOSIGNAL so a dropped peer can't SIGPIPE
@@ -1659,8 +1624,8 @@ private:
     }
 
     bool read_serial_char(char& ch) {
-        ssize_t bytes_read = read(serial_fd_, &ch, 1);
-        return bytes_read == 1;
+        // Up to 100 ms for a character, the read window this link always had.
+        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
     }
 
     bool read_network_char(char& ch) {
@@ -1683,9 +1648,10 @@ private:
     ConnectionType connection_type_;
     ConnectionInfo connection_info_;
 
-    int serial_fd_;
+    util::SerialLink link_;
+    int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
-    std::string serial_registry_path_;
+    std::string last_connect_error_;
 };
 
 CelestronProtocolWrapper::CelestronProtocolWrapper() : pimpl_(std::make_unique<Impl>()) {}
@@ -1699,6 +1665,8 @@ CelestronProtocolWrapper& CelestronProtocolWrapper::instance() {
 bool CelestronProtocolWrapper::connect(const ConnectionInfo& info) {
     return pimpl_->connect(info);
 }
+
+std::string CelestronProtocolWrapper::last_connect_error() const { return pimpl_->last_connect_error(); }
 
 void CelestronProtocolWrapper::disconnect() {
     pimpl_->disconnect();

@@ -58,6 +58,10 @@ public:
     FakeQhyQFocuser& operator=(const FakeQhyQFocuser&) = delete;
 
     std::string slave_path() const { return pty_.slave_path(); }
+    /// The pty's keep-alive slave fd: lets a test read or retune the line the
+    /// driver holds without opening the slave path, which TIOCEXCL refuses
+    /// while the driver is connected (#1202).
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
 
     /// Close both pty ends now, so the driver's next read sees the port vanish
     /// (POLLHUP / EOF / EIO) exactly like a mid-session USB unplug. Used to test

@@ -1,6 +1,7 @@
 # iOptron vendor support
-# iOptron mounts use RS-232 protocol over serial or TCP connection
-# No SDK required - uses standard platform serial/socket APIs
+# iOptron mounts use RS-232 protocol over serial or TCP connection; the iGuider
+# guide camera is UVC over V4L2.
+# No SDK required - uses standard platform serial/socket/V4L2 APIs
 
 if(ALPACACORE_ENABLE_IOPTRON)
     message(STATUS "Building iOptron mount driver support")
@@ -16,6 +17,10 @@ if(ALPACACORE_ENABLE_IOPTRON)
         ioptron_ieaf_focuser_driver.cpp
         ioptron_iefw_protocol_wrapper.cpp
         ioptron_filterwheel_driver.cpp
+        # iGuider guide camera: UVC over V4L2 (<linux/videodev2.h>), no vendor
+        # SDK and no shared library to package.
+        ioptron_iguider_v4l2_wrapper.cpp
+        ioptron_iguider_camera_driver.cpp
         ioptron_catalog.cpp
     )
 

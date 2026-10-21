@@ -29,13 +29,14 @@
 #include <string>
 #include <thread>
 
+#include "wandererastro_serial_scan.h"
+
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <alpacacore/util/serial_link.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <termios.h>
-#include <unistd.h>
 #endif
 
 namespace alpacacore::vendor::wandererastro {
@@ -52,43 +53,23 @@ constexpr char kFilterWheelModelPrefix[] = "WSFW";
 constexpr int kFilterWheelLinkSilenceMs = 10000;
 constexpr int MAX_TOKEN_LEN = 64;
 
-using util::is_serial_port_in_use;
-using util::mark_serial_port_closed;
-using util::mark_serial_port_open;
+// The registry owner name for this wrapper's probe AND connected link
+// (issue #1202), see enumerate_wanderer_filterwheel_ports().
+constexpr const char* kSerialOwner = "Wanderer filter wheel";
 
-// Configure an already-open POSIX fd for 19200 8N1 raw I/O. HUPCL is cleared so
-// DTR stays asserted on close (CH340 adapters pulse the MCU reset line via DTR
-// on open; keeping DTR high across close avoids a reset on reopen).
+// Each read waits at most this long, so the reader loop and probe poll their
+// stop flags at the cadence the old VTIME=5 window gave them. The fd is
+// non-blocking (SerialLink), so a retune to VMIN=1/VTIME=0 by another program
+// cannot park a read and hang Disconnect (#1202).
+constexpr int kReadWindowMs = 500;
+
 #ifndef _WIN32
-bool configure_serial_fd(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        return false;
-    }
-    cfsetospeed(&tty, B19200);
-    cfsetispeed(&tty, B19200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_cflag &= ~HUPCL;  // keep DTR high on close — avoids CH340 MCU reset on reopen
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;  // 0.5s per-read timeout so the reader loop can poll its stop flag
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        return false;
-    }
-    if (!util::clear_nonblocking(fd)) {
-        return false;
-    }
-    tcflush(fd, TCIOFLUSH);
-    return true;
+// 19200 8N1 raw. HUPCL is cleared so DTR stays asserted on close (CH340
+// adapters pulse the MCU reset line via DTR on open; keeping DTR high across
+// close avoids a reset on reopen).
+void configure_line(struct termios& tty) {
+    util::make_raw_8n1(tty, B19200);
+    tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);  // keep DTR high on close — avoids CH340 MCU reset on reopen
 }
 #endif
 
@@ -204,22 +185,18 @@ private:
 // No bytes are written during the probe.
 bool probe_port(const std::string& port_path, FilterWheelPortInfo& info) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe claim is held for exactly this function: a driver that claimed
+    // the port first refuses the probe before it opens anything, so the probe
+    // never steals bytes from a connected device's stream.
+    std::string error;
+    util::SerialLink probe =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_line, &error);
+    if (!probe) {
+        ALPACA_LOG_DEBUG("WandererAstro", "Filter wheel probe skipped " + port_path + ": " + error);
         return false;
     }
-    if (!configure_serial_fd(fd)) {
-        close(fd);
-        return false;
-    }
-
-    // Re-check after opening: a driver may have claimed this port in the window
-    // between the caller's is_serial_port_in_use() check and this open(). Bail
-    // rather than stealing bytes from that device's stream.
-    if (is_serial_port_in_use(port_path)) {
-        close(fd);
-        return false;
-    }
+    const int fd = probe.fd();
+    tcflush(fd, TCIOFLUSH);
 
     TokenStreamParser parser;
     FilterWheelStatus status;
@@ -228,26 +205,23 @@ bool probe_port(const std::string& port_path, FilterWheelPortInfo& info) {
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            3000) {
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
+        ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
         if (r == 1) {
             if (parser.feed(ch, status) && status.valid) {
                 found = true;
                 break;
             }
-        } else if (r < 0 && errno != EINTR) {
-            // Persistent read error (device unplugged mid-probe): VTIME
-            // rate-limits only the no-data path, so back off explicitly.
+        } else if (r < 0) {
+            // Persistent read error (device unplugged mid-probe): the read
+            // window bounds only the no-data path, so back off explicitly.
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
     }
 
-    // Re-apply HUPCL-clear before closing so DTR stays asserted.
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) == 0) {
-        tty.c_cflag &= ~HUPCL;
-        tcsetattr(fd, TCSANOW, &tty);
-    }
-    close(fd);
+    // Put back the HUPCL-clear settings if anything changed them, so DTR stays
+    // asserted across the close below.
+    probe.restore_line_settings();
+    probe.close();
 
     if (found) {
         info.port_path = port_path;
@@ -304,8 +278,7 @@ std::vector<FilterWheelPortInfo> enumerate_wanderer_filterwheel_ports() {
             if (ec) continue;
             probed.insert(resolved);
 
-            // Don't probe a port another connected device is streaming on.
-            if (is_serial_port_in_use(resolved)) continue;
+            if (!detail::admit_serial_candidate(resolved, name, kSerialOwner, results)) continue;
             std::string probe_msg = "Probing ";
             probe_msg.append(resolved).append(" (").append(name).append(") for filter wheel...");
             ALPACA_LOG_INFO("WandererAstro", probe_msg);
@@ -340,7 +313,7 @@ std::vector<FilterWheelPortInfo> enumerate_wanderer_filterwheel_ports() {
         if (!raw_port_looks_like_filterwheel_candidate(resolved)) continue;
         probed.insert(resolved);
 
-        if (is_serial_port_in_use(resolved)) continue;  // held by another connected serial device
+        if (!detail::admit_serial_candidate(resolved, std::string(), kSerialOwner, results)) continue;
         ALPACA_LOG_INFO("WandererAstro", "Probing " + resolved + " for filter wheel...");
         FilterWheelPortInfo info;
         if (probe_port(resolved, info)) {
@@ -502,7 +475,7 @@ private:
             total += written;
         }
 #else
-        if (!util::write_all(serial_fd_, payload.data(), payload.size())) {
+        if (!util::tty_write_all(serial_link_.fd(), payload)) {
             throw AlpacaException("Serial write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #endif
@@ -528,20 +501,24 @@ private:
             } else {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
+            const int fd = -1;
 #else
             int fd;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                fd = serial_fd_;
+                fd = serial_link_.fd();
             }
             if (fd < 0) break;
-            ssize_t r = ::read(fd, &ch, 1);
+            // Bounded by poll(), not VTIME: the loop re-checks running_ every
+            // read window even if another program retuned the port to a
+            // blocking VMIN=1/VTIME=0 (#1202).
+            ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
             if (r == 1) {
                 got = true;
-            } else if (r < 0 && errno != EINTR) {
-                // Persistent read error (device unplugged): VTIME rate-limits
-                // the no-data path but not errors, so back off to avoid a CPU
-                // spin until stop_reader() runs.
+            } else if (r < 0) {
+                // Persistent read error (device unplugged): the read window
+                // bounds the no-data path but not errors, so back off to avoid
+                // a CPU spin until stop_reader() runs.
                 {
                     std::lock_guard<std::mutex> lock(status_mutex_);
                     link_.note_read_error(errno);
@@ -549,9 +526,9 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
             }
 #endif
-            check_link_silence();
+            check_link_silence(fd);
             if (!got) {
-                continue;  // VTIME timeout — loop and re-check running_
+                continue;  // read-window timeout — loop and re-check running_
             }
             FilterWheelStatus updated;
             {
@@ -587,8 +564,11 @@ private:
 
     // Issue #237: latch a link fault after kFilterWheelLinkSilenceMs without
     // a frame. The cache is invalidated (valid=false) and the driver refuses
-    // Position reads and moves until the next frame clears the latch.
-    void check_link_silence() {
+    // Position reads and moves until the next frame clears the latch. On the
+    // latching pass only, put back the line settings if another program
+    // retuned the port (#1202): a stream arriving at the wrong baud never
+    // times out a read, so tty_read()'s own restore would never run.
+    void check_link_silence(int fd) {
         std::optional<std::string> latched;
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
@@ -600,6 +580,11 @@ private:
         if (latched.has_value()) {
             ALPACA_LOG_ERROR("WandererAstro", "Filter wheel: serial link faulted (" + *latched +
                                                   "); cached status is invalid until frames resume");
+#ifndef _WIN32
+            util::restore_serial_line_settings(fd);
+#else
+            (void)fd;
+#endif
         }
     }
 
@@ -659,30 +644,16 @@ private:
         SetCommTimeouts(serial_handle_, &timeouts);
         PurgeComm(serial_handle_, PURGE_RXCLEAR | PURGE_TXCLEAR);
 #else
-        // Claim the port in the in-use set BEFORE opening it, so a concurrent
-        // auto-detect scan can't slip between its is_serial_port_in_use() check
-        // and our open() and probe this same node. Store the canonical path so
-        // the check matches what the enumerators compare against.
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(config_.serial_port, path_ec).string();
-        opened_port_ = path_ec ? config_.serial_port : canonical_path;
-        mark_serial_port_open(opened_port_);
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
+        // SerialLink claims the port before it opens it (a port another
+        // connected device holds is refused untouched, a scan's probe is waited
+        // for) and holds it exclusively until close_serial() (#1202).
+        std::string error;
+        serial_link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+                                              configure_line, &error);
+        if (!serial_link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        if (!configure_serial_fd(serial_fd_)) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-            mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException("Failed to configure serial port", AlpacaError::DriverException);
-        }
+        tcflush(serial_link_.fd(), TCIOFLUSH);
 #endif
     }
 
@@ -693,12 +664,7 @@ private:
             serial_handle_ = INVALID_HANDLE_VALUE;
         }
 #else
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        mark_serial_port_closed(opened_port_);
-        opened_port_.clear();
+        serial_link_.close();  // releases the port's claim with the fd
 #endif
     }
 
@@ -706,7 +672,6 @@ private:
     mutable std::mutex status_mutex_;  // guards the latest status frame
     FilterWheelConnectionConfig config_;
     bool connected_ = false;
-    std::string opened_port_;  // path registered in the in-use set while open
 
     std::atomic<bool> running_{false};
     std::thread reader_thread_;
@@ -720,7 +685,7 @@ private:
 #ifdef _WIN32
     HANDLE serial_handle_ = INVALID_HANDLE_VALUE;
 #else
-    int serial_fd_ = -1;
+    util::SerialLink serial_link_;  // the claimed, exclusively held port; guarded by mutex_
 #endif
 };
 

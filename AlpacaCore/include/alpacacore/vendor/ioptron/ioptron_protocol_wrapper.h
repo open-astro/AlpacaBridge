@@ -33,6 +33,11 @@ struct iOptronNetworkHostInfo {
 
 std::vector<iOptronPortInfo> enumerate_ioptron_ports();
 
+/// The auto-detect probe of one serial port: :MountInfo# under a serial-port
+/// probe claim (waits out another scan's probe of the same port). Returns the
+/// 4-digit model code, or empty when no mount answers.
+std::string probe_ioptron_serial_port(const std::string& port_path);
+
 std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts();
 
 std::string model_code_to_name(const std::string& code);
@@ -150,7 +155,14 @@ public:
      * @brief Disconnect from the mount.
      */
     void disconnect();
-    
+
+    /**
+     * @brief Why the last connect() returned false, written for an operator
+     *        (e.g. the serial port is held by another connected device).
+     *        Empty when connect() gave no specific reason.
+     */
+    std::string last_connect_error() const;
+
     /**
      * @brief Check if connected to mount.
      */

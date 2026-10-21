@@ -177,13 +177,16 @@ it is never reachable through `router.cpp` or the web UI.
   implementation) hung every slew/site/time write until timeout and was the root cause of the
   first several ConformU failures (`SlewToCoordinatesAsync`, site/time writes).
   `kSetAckTimeoutMs = 1000` bounds the failure case only; real acks arrive in well under 100ms.
-- **Serial `VTIME` must be 1 (100ms), not higher**: an earlier version copied Gemini's one-time
-  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every blocking read
+- **The serial per-read window must be 100 ms, not higher** (`util::tty_read(..., 100)` since
+  #1202; it was `VTIME=1` on a blocking fd before): an earlier version copied Gemini's one-time
+  probe `VTIME=20` (2s) into the production `connect_serial()` path, causing every read
   to cost up to 2 real seconds — most visibly a ~2s stall on `PulseGuide` and pushing `AbortSlew`
   (5 sequential blind commands) toward ConformU's 1.0s STANDARD timeout. `send_command_blind()`'s
-  stale-input drain window is `50ms` (one VTIME cycle) for the same reason — `120ms` (2+ cycles)
+  stale-input drain window is `50ms` (half a read window) for the same reason — `120ms` (2+ windows)
   pushed `AbortSlew` to 1.04s, just over budget. After an aborted GOTO, `AbortSlew` also reads
-  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17.
+  `:GU#` once to decide the tracking restore (#1230): 0.59s in total on the TeSeek HM-17. The fd is
+  non-blocking (`util::SerialLink`), so a port another program retunes to `VMIN=1` can no longer park
+  the drain after a blind command (the TeSeek HM-17 hang reported on #1202).
 - **A pulled adapter is a lost link, not a stuck one** (#1241, decision 0009): the wrapper records
   the node the configured path reached at connect, and `link_alive()` (no I/O) reports the link
   lost when that path is gone or points elsewhere, or when a read or write on the fd fails with

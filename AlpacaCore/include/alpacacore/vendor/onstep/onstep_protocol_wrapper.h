@@ -138,6 +138,11 @@ public:
     void disconnect();
     bool is_connected() const;
 
+    /// Operator-facing reason the last connect() returned false (e.g. the
+    /// serial port is held by another connected device, #1202); empty when
+    /// it gave none.
+    std::string last_connect_error() const;
+
     /**
      * @brief Whether the serial link is still there (decision 0009, #1241).
      *

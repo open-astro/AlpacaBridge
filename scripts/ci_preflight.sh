@@ -424,6 +424,15 @@ else
   record FAIL "connect-error hook"
 fi
 
+# --- gate 2e2: serial port ownership -------------------------------------
+
+section "Serial port ownership"
+if python3 scripts/check_serial_port_ownership.py --self-test && python3 scripts/check_serial_port_ownership.py; then
+  record PASS "serial port ownership"
+else
+  record FAIL "serial port ownership"
+fi
+
 # --- gate 2f: layering gate ------------------------------------------------
 
 section "Layering gate"

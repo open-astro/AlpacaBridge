@@ -13,7 +13,7 @@
 #pragma once
 
 // iOptron catalog field declarations (telescope, iMate PowerBox switch, iEAF
-// focuser, iEFW filter wheel, iCAM camera), shared by ioptron_schema.cpp (no
+// focuser, iEFW filter wheel, iGuider guide camera, iCAM camera), shared by ioptron_schema.cpp (no
 // vendor header) and ioptron_catalog.cpp (the factories, vendor header
 // allowed). No vendor header here either: the schema file includes this one and
 // compiles in every build (including vendors-OFF).
@@ -125,6 +125,29 @@ inline std::optional<std::string> ioptron_filterwheel_refusal(const DeviceConfig
         if (config.get(kIoptronPortPath).empty()) return kIoptronSerialPortRequired;
     } else if (config.get(kIoptronFilterwheelIndex) < 0) {
         return "filterwheelIndex must be >= 0.";
+    }
+    return std::nullopt;
+}
+
+// ---- iGuider guide camera (UVC over V4L2) ---------------------------------
+
+// Empty finds the first iGuider at connect; otherwise the V4L2 node to open
+// (a /dev/v4l/by-id link survives a replug, /dev/videoN may not).
+inline const Field<std::string> kIguiderDevicePath{.key = "devicePath", .default_value = "", .role = Role::PortPath};
+
+inline const std::vector<FieldRef>& iguider_camera_fields() {
+    static const std::vector<FieldRef> fields{kIguiderDevicePath.ref()};
+    return fields;
+}
+
+// A config may name only a V4L2 capture node (decision 0007, rule 6): the driver
+// opens the path read-write and issues V4L2 ioctls on it.
+inline std::optional<std::string> iguider_camera_refusal(const DeviceConfig& config) {
+    const std::string path = config.get(kIguiderDevicePath);
+    if (path.empty()) return std::nullopt;
+    const bool v4l2_node = path.rfind("/dev/video", 0) == 0 || path.rfind("/dev/v4l/", 0) == 0;
+    if (!v4l2_node || path.size() > 256 || path.find("..") != std::string::npos) {
+        return "devicePath must be empty (auto-detect) or a /dev/video* or /dev/v4l/... capture node.";
     }
     return std::nullopt;
 }

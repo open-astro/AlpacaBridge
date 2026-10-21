@@ -15,6 +15,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
@@ -28,7 +29,6 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
-#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <termios.h>
@@ -318,10 +318,45 @@ uint32_t SkyWatcherProtocolWrapper::decode_u24(const std::string& data) {
 // ── Serial probe / enumeration ──────────────────────────────────────────────
 
 #ifndef _WIN32
+namespace {
+
+// Operator-facing owner name for the serial-port registry (#1202): the probe
+// and the connected link use the same one, so the auto-detect scan can tell
+// a connected Sky-Watcher mount (a sibling) from another vendor's device.
+constexpr const char* kSerialOwner = "Sky-Watcher mount";
+
+// How long the SynScan echo guard waits for a handset to answer (see
+// util/synscan_handset_probe.h: a live handset answers in 16-135 ms).
+constexpr int kSynScanEchoTimeoutMs = 300;
+
+// 8N1 raw at @p baud_rate (9600 unless 115200). CH340/CH341-style adapters
+// assert DTR on open and reset an attached MCU on close when HUPCL is set;
+// clear it so neither the probe nor a reconnect double-resets the
+// controller (~4 s penalty per probe).
+void configure_skywatcher_line(struct termios& tty, int baud_rate) {
+    util::make_raw_8n1(tty, baud_rate == 115200 ? B115200 : B9600);
+    tty.c_cflag &= ~static_cast<tcflag_t>(HUPCL);
+}
+
+}  // namespace
+
 // Open a serial port at @p baud_rate 8N1 and probe it with ":e1\r". Returns
 // the motor board version payload on success, empty on failure. Declared in
 // the public header (with probe_skywatcher_port_any_baud) for the pty tests.
 std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
+    // One probe claim covers the echo guard and the ":e1" probe (#1202): a
+    // port a connected device holds is refused here before anything is
+    // opened, and no other scan or connect can take it between the two.
+    std::string error;
+    util::SerialLink link = util::SerialLink::open(
+        port_path, util::SerialClaimKind::Probe, kSerialOwner,
+        [](struct termios& tty) { configure_skywatcher_line(tty, 9600); }, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("SkyWatcher", "Not probing " + port_path + ": " + error);
+        return "";
+    }
+    const int fd = link.fd();
+
     // A SynScan hand controller shares the adapter classes this scan targets
     // and speaks its own protocol at 9600. It is only put at risk by a probe
     // at some OTHER rate: one motor-controller probe at 115200 is enough to
@@ -331,79 +366,28 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
     // the guard's full timeout on every port for a hazard that baud does
     // not create: the 9600 attempt of probe_skywatcher_port_any_baud() below
     // never trips it, the 115200 attempt (Synta EQ boards over their own USB
-    // port) always runs it first. See util/synscan_handset_probe.h.
-    // The echo guard below opens the port itself, before the open()/re-check
-    // pair further down, so it needs its own look at the cross-vendor
-    // registry: the caller's check happened before the 9600 attempt, and
-    // another vendor's connect may have claimed the port since.
-    if (alpacacore::util::is_serial_port_in_use(port_path)) {
-        return "";
-    }
-    if (baud_rate != 9600 && util::port_answers_synscan_echo(port_path)) {
-        ALPACA_LOG_INFO("SkyWatcher", "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
-        return "";
-    }
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
-        return "";
-    }
-    // Re-check after opening: another vendor's driver may have claimed this
-    // port (its connect marks it before opening) in the window between the
-    // caller's is_serial_port_in_use() check and this open(). Bail rather
-    // than reading for up to 1.5s and stealing bytes from that device's
-    // stream (issue #230: EQDIR cables share PL2303/CH340/FTDI chips with
-    // other vendor probes, e.g. iOptron, ZWO EAF, Gemini).
-    if (alpacacore::util::is_serial_port_in_use(port_path)) {
-        close(fd);
-        return "";
+    // port) always runs it first, at 9600 on this same link, before the line
+    // is switched. See util/synscan_handset_probe.h.
+    if (baud_rate != 9600) {
+        tcflush(fd, TCIOFLUSH);
+        if (util::exchange_synscan_echo_on_fd(fd, kSynScanEchoTimeoutMs)) {
+            ALPACA_LOG_INFO("SkyWatcher",
+                            "Skipping " + port_path + ": a SynScan hand controller answered the echo test");
+            return "";
+        }
+        if (!link.reconfigure([baud_rate](struct termios& tty) { configure_skywatcher_line(tty, baud_rate); })) {
+            return "";
+        }
     }
 
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-    speed_t speed = baud_rate == 115200 ? B115200 : B9600;
-    cfsetospeed(&tty, speed);
-    cfsetispeed(&tty, speed);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 5;
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return "";
-    }
-    // CH340/CH341-style adapters assert DTR on open and reset an attached MCU
-    // on close when HUPCL is set; clear it so the probe doesn't double-reset
-    // the controller (~4 s penalty per probe).
-    tty.c_cflag &= ~HUPCL;
-    tcsetattr(fd, TCSANOW, &tty);
-
-    // Keep the fd non-blocking and bound every read with poll(), as the
-    // connected link does (see SkyWatcherProtocolWrapper::connect): a USB
-    // CDC-ACM port that ignores VMIN/VTIME parks a blocking read() on a
-    // silent candidate forever, hanging the whole auto-detect scan. The
-    // 4-byte ":e1" fits an empty TX buffer; should write_all() still hit
-    // EAGAIN, the probe just reports no board.
-    if (!util::set_nonblocking(fd)) {
-        close(fd);
-        return "";
-    }
+    // The fd stays non-blocking and every read is bounded with poll() (via
+    // util::tty_read), as on the connected link: a USB CDC-ACM port that
+    // ignores VMIN/VTIME parks a blocking read() on a silent candidate
+    // forever, hanging the whole auto-detect scan.
     tcflush(fd, TCIOFLUSH);
 
     const char probe[] = ":e1\r";
-    if (!util::write_all(fd, probe, sizeof(probe) - 1)) {
-        close(fd);
+    if (!util::tty_write_all(fd, probe, sizeof(probe) - 1)) {
         return "";
     }
 
@@ -413,26 +397,14 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
         const auto remaining =
             std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
         if (remaining <= 0) break;
-        struct pollfd pfd {};
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        const int pr = ::poll(&pfd, 1, static_cast<int>(remaining));
-        if (pr == 0) break;
-        if (pr < 0) {
-            if (errno == EINTR) continue;
-            break;
-        }
         char ch = 0;
-        ssize_t r = read(fd, &ch, 1);
-        if (r == 1) {
-            if (ch == kFrameEnd) break;
-            reply.push_back(ch);
-            if (reply.size() > 16) break;
-        } else if (r == 0 || (errno != EAGAIN && errno != EINTR)) {
-            break;  // hangup or read error; EAGAIN is a spurious "readable"
-        }
+        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
+        if (r != 1) break;  // 0: silent for the rest of the budget; -1: hangup or read error
+        if (ch == kFrameEnd) break;
+        reply.push_back(ch);
+        if (reply.size() > 16) break;
     }
-    close(fd);
+    link.close();
 
     if (reply.size() < 7 || reply[0] != kReplyOk) {
         return "";
@@ -496,6 +468,35 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
 #ifndef _WIN32
     std::set<std::string> probed;
 
+    // One candidate, in scan order (#1202; issue #230 before it). A port
+    // another vendor's connected device (iOptron, ZWO EAF, Gemini, ...: several
+    // share the PL2303/CH340/FTDI chip families) holds is never opened. A port
+    // a connected Sky-Watcher mount holds is not probed either, but keeps its
+    // place in the results so the auto-detect index of every other mount stays
+    // stable; a driver that picks it is refused by its link claim, which names
+    // the holder.
+    auto consider = [&results](const std::string& resolved, const std::string& name) {
+        switch (util::serial_candidate_use(resolved, kSerialOwner)) {
+            case util::SerialCandidateUse::HeldByOther:
+                ALPACA_LOG_DEBUG("SkyWatcher", "Skipping " + resolved + ": held by another connected device");
+                return;
+            case util::SerialCandidateUse::HeldBySibling:
+                ALPACA_LOG_DEBUG("SkyWatcher", "Not probing " + resolved + ": a connected Sky-Watcher mount holds it");
+                results.push_back(SkyWatcherPortInfo{resolved, name, "", 9600, 0, ""});
+                return;
+            case util::SerialCandidateUse::Free:
+                break;
+        }
+        ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + (name.empty() ? "" : " (" + name + ")") + "...");
+        int baud = 9600;
+        MotorBoardInfo board;
+        if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
+            SkyWatcherPortInfo found{resolved, name, board.firmware_version, baud, board.mount_code, board.model_name};
+            ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
+            results.push_back(std::move(found));
+        }
+    };
+
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
         for (const auto& sym : alpacacore::util::list_serial_by_id(serial_by_id)) {
@@ -513,26 +514,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            // issue #230: don't steal bytes from a port another connected
-            // vendor's device (iOptron, ZWO EAF, Gemini, ...) is streaming on
-            // -- several share the same PL2303/CH340/FTDI chip families.
-            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
-            {
-                std::string msg = "Probing ";
-                msg += resolved;
-                msg += " (";
-                msg += name;
-                msg += ")...";
-                ALPACA_LOG_INFO("SkyWatcher", msg);
-            }
-            int baud = 9600;
-            MotorBoardInfo board;
-            if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
-                SkyWatcherPortInfo found{resolved,        name, board.firmware_version, baud, board.mount_code,
-                                         board.model_name};
-                ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
-                results.push_back(std::move(found));
-            }
+            consider(resolved, name);
         }
     }
 
@@ -554,15 +536,7 @@ std::vector<SkyWatcherPortInfo> enumerate_skywatcher_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_skywatcher_candidate(resolved)) continue;
         probed.insert(resolved);
-        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
-        ALPACA_LOG_INFO("SkyWatcher", "Probing " + resolved + "...");
-        int baud = 9600;
-        MotorBoardInfo board;
-        if (probe_skywatcher_port_any_baud(resolved, board, baud)) {
-            SkyWatcherPortInfo found{resolved, "", board.firmware_version, baud, board.mount_code, board.model_name};
-            ALPACA_LOG_INFO("SkyWatcher", describe_found_port(found));
-            results.push_back(std::move(found));
-        }
+        consider(resolved, "");
     }
 #endif
 
@@ -871,8 +845,8 @@ public:
                     // fd, so another process's open can leave it at the wrong
                     // rate while this fd keeps talking. Re-apply ours on every
                     // silent timeout so the next exchange can clear the latch.
-                    if (serial_fd_ >= 0 && info_.type == ConnectionType::Serial) {
-                        (void)tcsetattr(serial_fd_, TCSANOW, &serial_termios_);
+                    if (info_.type == ConnectionType::Serial) {
+                        (void)link_.restore_line_settings();
                     }
 #endif
                 }
@@ -1014,22 +988,6 @@ private:
         // store left Connected reading true mid-close (open-astro#882).
         connected_ = false;
 #ifndef _WIN32
-        if (serial_fd_ >= 0) {
-            // open-astro#912: the exclusive flag lives on the tty and survives
-            // our close while anything else still holds it open, so drop it
-            // explicitly or a reconnect would fail EBUSY.
-            (void)ioctl(serial_fd_, TIOCNXCL);
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        if (socket_fd_ >= 0) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-        }
-        if (!registered_port_.empty()) {
-            alpacacore::util::mark_serial_port_closed(registered_port_);
-            registered_port_.clear();
-        }
         {
             std::lock_guard<std::mutex> lock(link_id_mutex_);
             link_path_.clear();
@@ -1040,6 +998,18 @@ private:
             std::lock_guard<std::mutex> lock(health_mutex_);
             link_health_.reset();
         }
+#ifndef _WIN32
+        // SerialLink::close() drops TIOCEXCL (open-astro#912: the flag lives on
+        // the tty and survives our close while anything else still holds it
+        // open, so a reconnect would fail EBUSY), closes the fd and releases
+        // the registry claim.
+        serial_fd_ = -1;
+        link_.close();
+        if (socket_fd_ >= 0) {
+            close(socket_fd_);
+            socket_fd_ = -1;
+        }
+#endif
     }
 
     // Decision 0009 point 2: a socket errno is lost-at-once only when it says
@@ -1094,97 +1064,42 @@ private:
 
     bool connect_serial(const ConnectionInfo& info) {
 #ifndef _WIN32
-        // Canonicalize so this matches whatever form enumerate_skywatcher_ports()
-        // or a user-typed config path resolves to (issue #230: a by-id symlink
-        // and its /dev/ttyUSBn target must compare equal in the registry).
-        std::error_code path_ec;
-        std::string canonical_path = std::filesystem::canonical(info.port_path, path_ec).string();
-        std::string registry_key = path_ec ? info.port_path : canonical_path;
-
-        // Claim BEFORE opening: a concurrent auto-detect scan (this vendor's
-        // own, or another's) checks is_serial_port_in_use() then opens -- claiming
-        // first closes the window where it could slip in between our check and
-        // our open() and start reading this mount's replies. The check and the
-        // claim are one atomic step so two racing connects cannot both pass a
-        // separate check and both claim the port (PR #251 review).
-        if (!alpacacore::util::try_mark_serial_port_open(registry_key)) {
-            ALPACA_LOG_ERROR("SkyWatcher",
-                             "Port " + registry_key + " is already held open by another connected device");
-            connect_failure_ = "the port is already in use by another connected device";
+        // SerialLink::open (#1202) claims the port in the cross-vendor registry
+        // BEFORE opening it (issue #230: a by-id symlink and its /dev/ttyUSBn
+        // target compare equal there), so a port another connected device
+        // holds is refused untouched and a concurrent auto-detect scan cannot
+        // slip in between a check and our open. It then takes TIOCEXCL
+        // (open-astro#912: no other non-root process can open the tty and
+        // reprogram the shared line settings; ignored where a pty back end
+        // does not support it) and records the line settings, re-applied on
+        // every silent timeout (see exchange()).
+        //
+        // The fd stays NON-blocking and every read goes through poll() (see
+        // poll_serial_readable / exchange_serial / settle_serial). Some USB
+        // CDC-ACM virtual COM ports do NOT honour VMIN/VTIME as a read timeout
+        // -- a blocking read(fd,&ch,1) on a board that has gone quiet then
+        // parks forever in n_tty_read, and because the worker holds the I/O
+        // mutex (and the driver mutex above it) every Alpaca request blocks
+        // until the service is killed. Such a port can also return a spurious
+        // poll() "readable" after which a blocking read still parks, so poll
+        // alone is not enough: the read must be non-blocking so it returns
+        // EAGAIN instead of parking, bounded by the poll deadline. WRITES on
+        // the same non-blocking fd can likewise hit EAGAIN before the first
+        // byte when the TX buffer fills, so frame sends go through
+        // write_all_bounded(), which waits for POLLOUT within the command
+        // budget -- the write-side mirror of the reads.
+        std::string error;
+        const int baud_rate = info.baud_rate;
+        link_ = util::SerialLink::open(
+            info.port_path, util::SerialClaimKind::Link, kSerialOwner,
+            [baud_rate](struct termios& tty) { configure_skywatcher_line(tty, baud_rate); }, &error);
+        if (!link_) {
+            ALPACA_LOG_ERROR("SkyWatcher", error);
+            connect_failure_ = error;
             return false;
         }
-
-        serial_fd_ = open(info.port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            connect_failure_ = util::errno_string(errno);
-            ALPACA_LOG_ERROR("SkyWatcher", "Failed to open " + info.port_path + ": " + connect_failure_);
-            alpacacore::util::mark_serial_port_closed(registry_key);
-            return false;
-        }
-        // open-astro#912: claim the tty so no other non-root process can open
-        // it (an outside open reprograms the shared line settings and a
-        // reconnect then fails EBUSY). Released by close() in
-        // disconnect_locked(). Ignored on failure: pty back ends may not
-        // support it, and a mount that works without it keeps working.
-        (void)ioctl(serial_fd_, TIOCEXCL);
-        struct termios tty {};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            connect_failure_ = "the port is not a serial device (" + util::errno_string(errno) + ")";
-            close(serial_fd_);
-            serial_fd_ = -1;
-            alpacacore::util::mark_serial_port_closed(registry_key);
-            return false;
-        }
-        speed_t speed = info.baud_rate == 115200 ? B115200 : B9600;
-        cfsetospeed(&tty, speed);
-        cfsetispeed(&tty, speed);
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_cflag &= ~HUPCL;  // keep DTR asserted on close (CH340 MCU-reset quirk)
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_oflag &= ~OPOST;
-        tty.c_oflag &= ~ONLCR;
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 1;
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            connect_failure_ = "the serial settings were refused (" + util::errno_string(errno) + ")";
-            close(serial_fd_);
-            serial_fd_ = -1;
-            alpacacore::util::mark_serial_port_closed(registry_key);
-            return false;
-        }
-        serial_termios_ = tty;
-        // Keep the fd NON-blocking (it was opened O_NONBLOCK) and drive every
-        // read through poll() (see poll_serial_readable / exchange_serial /
-        // settle_serial). Some USB CDC-ACM virtual COM ports do NOT honour
-        // VMIN/VTIME as a read timeout -- a blocking read(fd,&ch,1) on a board
-        // that has gone quiet then parks forever in n_tty_read, and because the
-        // worker holds the I/O mutex (and the driver mutex above it) every Alpaca
-        // request blocks until the service is killed. Such a port can also return
-        // a spurious poll() "readable" after which a blocking read still parks, so
-        // poll alone is not enough: the read must be non-blocking so it returns
-        // EAGAIN instead of parking, bounded by the poll deadline. WRITES on the
-        // same non-blocking fd can likewise hit EAGAIN before the first byte when
-        // the TX buffer fills (util::write_all only retries EAGAIN after a partial
-        // write), so frame sends go through write_all_bounded(), which waits for
-        // POLLOUT within the command budget -- the write-side mirror of the reads.
-        // (The other serial vendors keep clear_nonblocking + VTIME; this is a
-        // Sky-Watcher-specific hardening for a tty that ignores VTIME.)
-        if (!util::set_nonblocking(serial_fd_)) {
-            connect_failure_ = "the port could not be set non-blocking (" + util::errno_string(errno) + ")";
-            close(serial_fd_);
-            serial_fd_ = -1;
-            alpacacore::util::mark_serial_port_closed(registry_key);
-            return false;
-        }
+        serial_fd_ = link_.fd();
         tcflush(serial_fd_, TCIOFLUSH);
-        registered_port_ = registry_key;
         // open-astro#445: remember which node this path reached, for link_alive().
         // fstat on a just-opened fd essentially cannot fail; if it ever does,
         // link_path_ stays empty and link_alive() silently falls back to the
@@ -1756,10 +1671,12 @@ private:
     ConnectionInfo info_{};
     std::atomic<bool> step_period_readback_{true};  // see step_period_readback()
 #ifndef _WIN32
+    // The connected serial port (#1202): registry claim + fd + TIOCEXCL, and
+    // the line settings re-applied on silence (#912). Closed while
+    // disconnected or on UDP. serial_fd_ is link_.fd() while it is open.
+    util::SerialLink link_;
     int serial_fd_ = -1;
-    struct termios serial_termios_ {};  // line settings applied at connect, re-applied on silence (#912)
     int socket_fd_ = -1;
-    std::string registered_port_;  // canonical path marked open in the cross-vendor registry
     // open-astro#445: the configured path and the node it reached at connect.
     // open-astro#505: own leaf mutex, for the same reason link_id_mutex_ has
     // one — a driver read path asking whether the link is faulted must not

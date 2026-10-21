@@ -3525,6 +3525,21 @@ int main() {
         remove_device(router, "ioptron", "telescope", 9615);
     }
     {
+        // case: iguider camera devicePath round-trip
+        // The iOptron iGuider guide camera, its own catalog vendor: devicePath
+        // survives the sanitizer.
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "iguider"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9625},
+                                           {"devicePath", "/dev/v4l/by-id/usb-iOptron_iGuider_External-video-index0"}},
+                                          "Camera", 9625);
+        EXPECT(cfg.is_object() && !cfg.empty());
+        EXPECT(cfg.value("vendor", "") == "iguider");
+        EXPECT(cfg.value("devicePath", "") == "/dev/v4l/by-id/usb-iOptron_iGuider_External-video-index0");
+        remove_device(router, "iguider", "camera", 9625);
+    }
+    {
         // ioptron / focuser (iEAF) — serial mode persists portPath (no
         // baudRate: the iEAF runs at a fixed 115200) and auto mode persists
         // focuserIndex through sanitize_device_config.
@@ -5626,6 +5641,16 @@ int main() {
         pin("serial with empty portPath is DROPPED (#508 item 1)", "ioptron", "filterwheel", "FilterWheel",
             R"({"connectionType":"serial","portPath":""})", kPortRequired, "{}", false, "{}",
             {"config normalized: " + kPortRequired}, {});
+        // The iGuider opens its devicePath read-write and issues V4L2 ioctls on it, so a
+        // path that is not a V4L2 node is refused (decision 0007 rule 6) and dropped the same way.
+        const std::string kIguiderPath =
+            "devicePath must be empty (auto-detect) or a /dev/video* or /dev/v4l/... capture node.";
+        pin("devicePath outside /dev/video* and /dev/v4l/ is DROPPED", "iguider", "camera", "Camera",
+            R"({"devicePath":"/dev/sda"})", kIguiderPath, "{}", false, "{}", {"config normalized: " + kIguiderPath},
+            {});
+        pin("devicePath with a parent step is DROPPED", "iguider", "camera", "Camera",
+            R"({"devicePath":"/dev/v4l/../sda"})", kIguiderPath, "{}", false, "{}",
+            {"config normalized: " + kIguiderPath}, {});
 #endif
 #ifdef ALPACACORE_ENABLE_QHY
         // The catalog turns the refusal into a normalize warning for a saved config and the
@@ -7960,7 +7985,7 @@ int main() {
         std::ifstream fixture_in(fixture_path);
         EXPECT(fixture_in.good());
         nlohmann::json fixture = nlohmann::json::parse(fixture_in, nullptr, false);
-        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 40);
+        EXPECT(!fixture.is_discarded() && fixture.is_array() && fixture.size() == 41);
         // The fixture is written for the all-vendors build. `available` is the
         // one value that depends on the build (true with the vendor on, false
         // with ALPACACORE_ENABLE_<VENDOR>=OFF), so it is set from this build
@@ -8038,6 +8063,14 @@ int main() {
             }
             if (entry.value("vendor", "") == "svbony") {
 #ifdef ALPACACORE_ENABLE_SVBONY
+                entry["available"] = true;
+#else
+                entry["available"] = false;
+#endif
+            }
+            if (entry.value("vendor", "") == "iguider") {
+                // The iOptron iGuider guide camera: an iOptron driver under its own vendor key.
+#ifdef ALPACACORE_ENABLE_IOPTRON
                 entry["available"] = true;
 #else
                 entry["available"] = false;

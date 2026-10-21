@@ -11,6 +11,11 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/serial_by_id_scan.h>
+#include <unistd.h>
+
+#include <filesystem>
+#include <string>
+#include <system_error>
 
 #include "catch2_compat.h"
 
@@ -69,4 +74,23 @@ TEST_CASE("path_exists never throws and treats unreachable paths as absent", "[s
     // Traversing through a regular file as if it were a directory is the
     // error case that makes the throwing exists() overload abort a scan.
     REQUIRE_FALSE(path_exists("/etc/hostname/not-a-directory"));
+}
+
+TEST_CASE("list_serial_by_id: entries come back sorted by name (issue #1202)", "[serial_by_id_scan]") {
+    // directory_iterator order is unspecified; an auto-detect index ("the second
+    // matching device") must name the same port on every scan.
+    const auto dir = std::filesystem::temp_directory_path() / ("serial-by-id-sort-" + std::to_string(::getpid()));
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    REQUIRE(std::filesystem::create_directory(dir));
+    for (const char* name : {"usb-z-port0", "usb-a-port0", "usb-m-port0"}) {
+        std::filesystem::create_symlink("/dev/null", dir / name, ec);
+        REQUIRE_FALSE(ec);
+    }
+    const auto entries = alpacacore::util::list_serial_by_id(dir);
+    REQUIRE(entries.size() == 3);
+    CHECK(entries[0].name == "usb-a-port0");
+    CHECK(entries[1].name == "usb-m-port0");
+    CHECK(entries[2].name == "usb-z-port0");
+    std::filesystem::remove_all(dir, ec);
 }

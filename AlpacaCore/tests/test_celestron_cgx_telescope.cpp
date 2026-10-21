@@ -14,6 +14,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -28,6 +29,7 @@
 #include <future>
 #include <limits>
 #include <numbers>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -723,6 +725,112 @@ TEST_CASE("Celestron CGX USB Telescope Driver - disconnect serializes with the s
     CHECK(connected);
     CHECK_FALSE(driver->get_connected());
 }
+
+#ifndef _WIN32
+// Issue #1457: a stop retry reconnects under the driver mutex_. Since #1456
+// the reconnect's port claim waits out another device's probe (up to 20 s per
+// attempt), so the retry must not wait there, or every getter that takes
+// mutex_ blocks behind it.
+TEST_CASE("Celestron CGX USB Telescope Driver - a stop retry does not wait for another device's probe",
+          "[celestron][cgx][telescope][integration][issue1457]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    mount.set_auto_complete_motions(true);
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const std::string path = info.port_path;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    driver->set_connected(true);
+
+    // The adapter goes away: the first stop finds the node gone, closes the
+    // link and fails, which releases the port claim.
+    mount.sever_link();
+    CHECK_NOTHROW(driver->abort_slew());
+    REQUIRE(wait_until(
+        [&] {
+            try {
+                static_cast<void>(driver->get_slewing());
+                return false;
+            } catch (const alpacacore::AlpacaException& error) {
+                return error.error_code() == alpacacore::AlpacaError::DriverException;
+            }
+        },
+        std::chrono::seconds(10)));
+    REQUIRE_FALSE(util::is_serial_port_in_use(path));
+
+    // Another device's probe now holds the node for 3 s while a second stop
+    // retries its reconnect.
+    auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
+    REQUIRE(probe);
+    auto release = std::async(std::launch::async, [&probe] {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        probe.release();
+    });
+    CHECK_NOTHROW(driver->abort_slew());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        static_cast<void>(driver->get_tracking());
+    } catch (const alpacacore::AlpacaException&) {
+        // The link is gone, so the getter refuses; only its latency matters.
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < std::chrono::seconds(2));
+    release.get();
+}
+
+TEST_CASE("Celestron CGX USB Telescope Driver - a tracking rollback does not wait for another device's probe",
+          "[celestron][cgx][telescope][integration][issue1457]") {
+    namespace util = alpacacore::util;
+    alpacacore::test::FakeCelestronCgxMount mount;
+    REQUIRE(mount.ok());
+    auto info = test_info();
+    info.port_path = mount.slave_path();
+    const std::string path = info.port_path;
+    auto driver = alpacacore::vendor::celestron::create_celestron_cgx_telescope(0, info);
+    driver->set_connected(true);
+
+    // The adapter goes away: the first tracking write fails, and its rollback
+    // reconnect finds the node gone, closes the link and releases the claim.
+    mount.sever_link();
+    try {
+        driver->set_tracking(false);
+    } catch (const alpacacore::AlpacaException&) {
+        // Expected: the write and its rollback both fail.
+    }
+    REQUIRE_FALSE(util::is_serial_port_in_use(path));
+
+    // Another device's probe holds the node for 5 s while a second tracking
+    // write fails and its rollback reconnects under mutex_.
+    auto probe = util::SerialPortClaim::acquire(path, util::SerialClaimKind::Probe, "Other probe");
+    REQUIRE(probe);
+    auto release = std::async(std::launch::async, [&probe] {
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        probe.release();
+    });
+    auto write = std::async(std::launch::async, [&driver] {
+        try {
+            driver->set_tracking(false);
+        } catch (const alpacacore::AlpacaException&) {
+            // Expected: the link is gone.
+        }
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    const auto started = std::chrono::steady_clock::now();
+    try {
+        static_cast<void>(driver->get_tracking());
+    } catch (const alpacacore::AlpacaException&) {
+        // The link is gone, so the getter refuses; only its latency matters.
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    CHECK(elapsed < std::chrono::seconds(2));
+    write.get();
+    release.get();
+}
+#endif
 
 TEST_CASE("Celestron CGX USB Telescope Driver - stop communication failures persist through completion properties",
           "[celestron][cgx][telescope][integration]") {

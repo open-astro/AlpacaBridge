@@ -690,7 +690,7 @@ private:
     int device_number_;
     std::string port_path_;
     std::atomic<bool> connected_{false};
-    CelestronCgxProtocol protocol_;
+    CelestronCgxProtocol protocol_{"Celestron focuser"};
     // Serializes the calibration commands (0x2A start and abort) with the
     // poll's 0x2B read and its decision. Held across an exchange; taken before
     // the protocol's mutex and before calibration_mutex_.
