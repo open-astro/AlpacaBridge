@@ -440,8 +440,8 @@ TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect waits for the exchange in
 
 // A disconnect that wins the I/O lock while status reads queue behind a write is not a link failure: every reader
 // gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
-// Falsified by: zwo_switch_driver.cpp read_status() throwing NotConnected inside the cache refill instead of returning the closed
-// frame (the third queued reader then gets DriverException "communications compromised").
+// Falsified by: zwo_switch_driver.cpp read_status() throwing NotConnected inside the cache refill instead of returning
+// the closed frame (the third queued reader then gets DriverException "communications compromised").
 TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect during queued status reads is not a link failure",
           "[zwo][switch][unit][getter-stall]") {
     using namespace alpacacore::test;
