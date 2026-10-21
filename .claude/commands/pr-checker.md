@@ -111,16 +111,16 @@ Checks to make before waiting on anything:
 
 ## Step 2 — Poll for the verdict (3-minute cadence, background)
 
-Never foreground-sleep. Run this with `run_in_background` and a 80-minute deadline (the review job first
+Never foreground-sleep. Run this with `run_in_background` and a 95-minute deadline (the review job first
 waits up to 45 minutes for CI's build and test jobs, then reviews):
 
 ```bash
-PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4800} ))
+PR=<N>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-5700} ))
 # A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-if [ "${BUDGET:-4800}" -gt 0 ]; then sleep "$TICK"; fi
+if [ "${BUDGET:-5700}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -196,7 +196,7 @@ while :; do
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
-echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-5700} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
 Exit codes: `0` = verdict on stdout. `1` = no verdict within the budget (with `BUDGET=0`, just

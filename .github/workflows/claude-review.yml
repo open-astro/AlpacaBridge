@@ -28,8 +28,8 @@ jobs:
         || contains(github.event.pull_request.labels.*.name, 'safe-to-review')
       )
     runs-on: ubuntu-latest
-    # Up to 45 min waiting for CI (below) plus the review itself.
-    timeout-minutes: 75
+    # Up to 45 min waiting for CI (below) plus up to 45 for the review itself.
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
@@ -44,7 +44,9 @@ jobs:
       # "never reported". A newer push cancels this wait through the
       # concurrency group above. The job fails here, before the action runs,
       # and /pr-checker and /submit-pr read that as "fix CI", not as a broken
-      # review workflow.
+      # review workflow. Only `success` is green: a job that was skipped,
+      # neutral or ended any other way counts as red, so a needs: or if: that
+      # skips one cannot let the review run on a red head.
       - name: Wait for the CI build and test jobs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,14 +70,14 @@ jobs:
                 '[.[] | select(.name == $n)] | max_by(.started_at) | if . == null then "missing" elif .status != "completed" then "pending" else .conclusion end' \
                 <<<"${runs}")"
               case "${state}" in
-                success|skipped|neutral) ;;
+                success) ;;
                 pending) waiting+=("${name}") ;;
                 missing) missing+=("${name}") ;;
                 *) failed+=("${name}: ${state}") ;;
               esac
             done
             if [ "${#failed[@]}" -gt 0 ]; then
-              printf '::error::CI is red on %s, so the review is skipped. Fix CI and push again: %s\n' \
+              printf '::error::CI is red on %s, so the review is skipped. The review needs every waited-for job to run green; a job that is skipped, neutral or anything but success counts as red (a needs: or if: that skips one must not let the review run on a red head). Fix CI and push again: %s\n' \
                 "${HEAD_SHA}" "$(IFS=';'; echo "${failed[*]}")"
               exit 1
             fi
