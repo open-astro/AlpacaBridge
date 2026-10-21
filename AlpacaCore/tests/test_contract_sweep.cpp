@@ -511,6 +511,37 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     }
 }
 
+// Filter wheels while disconnected (AGENTS.md "FilterWheel semantics"): every name is non-empty, and a names
+// write and an offsets write are accepted and read back. One case over all filter wheel entries; it is
+// registered once, not per entry, because the registry macro carries no device-type kind. Most drivers size
+// their name and offset vectors only at connect, so a fresh disconnected read is empty: the non-empty-name loop
+// then checks nothing, and the write legs use a fixed five-slot list so the read-back is not `{} == {}`.
+[[maybe_unused]] void case_filterwheel_names_offsets_disconnected(const ContractEntry& e) {
+    INFO(e.id);
+    auto d = e.make(0);
+    REQUIRE(d != nullptr);
+    auto& f = dynamic_cast<alpacacore::FilterWheelDriver&>(*d);
+    REQUIRE_FALSE(f.get_connected());
+    std::vector<std::string> names;
+    CHECK(thrown_code([&] { names = f.get_names(); }) == -1);
+    for (const auto& n : names) {
+        INFO(e.id << " name '" << n << "'");
+        CHECK_FALSE(n.empty());
+    }
+    std::vector<std::string> written = names;
+    written.resize(names.empty() ? 5 : names.size());
+    for (std::size_t i = 0; i < written.size(); ++i) written[i] = "Sweep " + std::to_string(i + 1);
+    CHECK(thrown_code([&] { f.set_names(written); }) == -1);
+    CHECK(f.get_names() == written);
+    std::vector<int> offsets;
+    CHECK(thrown_code([&] { offsets = f.get_focus_offsets(); }) == -1);
+    std::vector<int> written_offsets = offsets;
+    written_offsets.resize(offsets.empty() ? 5 : offsets.size());
+    for (std::size_t i = 0; i < written_offsets.size(); ++i) written_offsets[i] = static_cast<int>(10 * (i + 1));
+    CHECK(thrown_code([&] { f.set_focus_offsets(written_offsets); }) == -1);
+    CHECK(f.get_focus_offsets() == written_offsets);
+}
+
 [[maybe_unused]] void case_can_getters(const ContractEntry& e) {
     auto d = e.make(0);
     REQUIRE(d != nullptr);
@@ -562,6 +593,12 @@ struct Tier2Host {
     // sample after connect() is Connecting or Connected. Never left empty for such a row.
     const char* connecting_unobservable = nullptr;
     int target_unset_error = err::ValueNotSet;
+    // Telescope rows whose fake cannot reach a parked state (CanPark false, or a park the fake cannot answer)
+    // say why and where here, and case_t2_async_initiators then skips the Park leg. Null on every row that parks.
+    const char* park_unavailable = nullptr;
+    // Likewise for MoveAxis(axis, 0) on a row whose fake does not answer the rate command. A row whose driver
+    // reports CanMoveAxis false on every axis needs no reason: there is no call to time.
+    const char* move_axis_unavailable = nullptr;
 };
 
 using Clock = std::chrono::steady_clock;
@@ -727,6 +764,94 @@ Hosted connected_host(const Tier2Host& h) {
     const bool has_timestamp =
         std::any_of(state.begin(), state.end(), [](const alpacacore::DeviceState& s) { return s.name == "TimeStamp"; });
     CHECK(has_timestamp);
+}
+
+// Upper bound for the firmware / SDK-version hooks. They return a cached value without taking the driver
+// mutex (alpacadriver.h; decision 0016), so they take microseconds. 100 ms is about three orders above that,
+// which a sanitizer build or a loaded CI runner does not reach, and below the shortest per-row handshake
+// hold (kSerialBoardHold, 150 ms), so a hook that waits for the handshake exceeds it on every row that holds.
+constexpr std::chrono::milliseconds kHookBound{100};
+
+// Firmware and SDK hooks. get_device_firmware() and get_device_sdk_version() are cheap: they return at once while a
+// connect is in flight, and never throw while disconnected.
+[[maybe_unused]] void case_t2_firmware_sdk_hooks(const Tier2Host& h) {
+    INFO(h.id << " over " << h.fake_header);
+    {
+        Hosted hosted = h.connectable(false);
+        REQUIRE(hosted.driver != nullptr);
+        CHECK(thrown_code([&] { (void)hosted.driver->get_device_firmware(); }) == -1);
+        CHECK(thrown_code([&] { (void)hosted.driver->get_device_sdk_version(); }) == -1);
+    }
+    Hosted hosted = h.connectable(h.can_hold_connect);
+    REQUIRE(hosted.driver != nullptr);
+    hosted.driver->connect();
+    const auto t0 = Clock::now();
+    int fw_code = 0;
+    int sdk_code = 0;
+    fw_code = thrown_code([&] { (void)hosted.driver->get_device_firmware(); });
+    sdk_code = thrown_code([&] { (void)hosted.driver->get_device_sdk_version(); });
+    const auto took = Clock::now() - t0;
+    // A hook that waited for the handshake leaves Connecting false by the time it returns.
+    const bool still_connecting = hosted.driver->get_connecting();
+    INFO("both hooks took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
+    CHECK(fw_code == -1);
+    CHECK(sdk_code == -1);
+    CHECK(took < kHookBound);
+    if (h.can_hold_connect) {
+        CHECK(still_connecting);
+    } else {
+        INFO(h.id << " cannot show Connecting reading true: "
+                  << (h.connecting_unobservable != nullptr ? h.connecting_unobservable : "(no reason stated)"));
+        REQUIRE(h.connecting_unobservable != nullptr);
+        REQUIRE(std::string(h.connecting_unobservable).size() > 0);
+    }
+    const auto deadline = Clock::now() + std::chrono::seconds(30);
+    while (hosted.driver->get_connecting() && Clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    REQUIRE_FALSE(hosted.driver->get_connecting());
+}
+
+// Asynchronous initiators, telescope rows only. MoveAxis(axis, 0) and Park are asynchronous initiators: each returns
+// well under ConformU's 1 s STANDARD target (AGENTS.md "Telescope Park / MoveAxis(axis, 0)"). MoveAxis runs on one
+// connected host and Park on another, so a driver that is parked does not turn the MoveAxis leg into a fast
+// InvalidWhileParked throw; each call must also return without throwing.
+constexpr std::chrono::milliseconds kInitiatorBound{1000};
+
+[[maybe_unused]] void case_t2_async_initiators(const Tier2Host& h) {
+    REQUIRE(h.type == DeviceType::Telescope);
+    INFO(h.id << " over " << h.fake_header);
+    {
+        Hosted hosted = connected_host(h);
+        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+        if (h.move_axis_unavailable != nullptr) {
+            INFO(h.id << " cannot answer MoveAxis(axis, 0): " << h.move_axis_unavailable);
+            CHECK(std::string(h.move_axis_unavailable).size() > 0);
+        } else {
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!t.get_can_move_axis(axis)) continue;
+                INFO("move_axis(" << axis << ", 0)");
+                const auto t0 = Clock::now();
+                const int code = thrown_code([&] { t.move_axis(axis, 0.0); });
+                const auto took = Clock::now() - t0;
+                CHECK(code == -1);
+                CHECK(took < kInitiatorBound);
+            }
+        }
+    }
+    Hosted hosted = connected_host(h);
+    auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*hosted.driver);
+    if (h.park_unavailable != nullptr || !t.get_can_park()) {
+        INFO(h.id << " cannot park: " << (h.park_unavailable != nullptr ? h.park_unavailable : "(no reason stated)"));
+        REQUIRE(h.park_unavailable != nullptr);
+        REQUIRE(std::string(h.park_unavailable).size() > 0);
+        return;
+    }
+    const auto t0 = Clock::now();
+    const int code = thrown_code([&] { t.park(); });
+    const auto took = Clock::now() - t0;
+    INFO("park() took " << std::chrono::duration_cast<std::chrono::milliseconds>(took).count() << " ms");
+    CHECK(code == -1);
+    CHECK(took < kInitiatorBound);
 }
 
 // The ASCOM type of each DeviceState member, per device type, from the Platform 7 interface docs: the
@@ -1059,7 +1184,7 @@ Tier2Host tier2_host_zwo_rotator() {
 // Recipe of test_celestron_concurrency_stress.cpp: a position-pair sized reply ends every read at once.
 Tier2Host tier2_host_celestron_telescope() {
     namespace cel = alpacacore::vendor::celestron;
-    return mount_server_host(
+    Tier2Host h = mount_server_host(
         "celestron_telescope", "celestron", "celestron_telescope",
         [](const std::string&) { return std::string("00000000,00000000#"); },
         [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
@@ -1070,6 +1195,13 @@ Tier2Host tier2_host_celestron_telescope() {
             info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
             return cel::create_celestron_telescope(0, info);
         });
+    h.move_axis_unavailable =
+        "the fixed-reply responder does not answer the variable-rate axis frame, so move_axis() times out and "
+        "throws (fake_mount_server.h, celestron_protocol_wrapper move_axis_variable_rate)";
+    h.park_unavailable =
+        "the fixed-reply responder does not answer the park command, so park() times out after the 50 ms reply timeout "
+        "and throws (fake_mount_server.h)";
+    return h;
 }
 
 Tier2Host tier2_host_celestron_cgx_telescope() {
@@ -1134,16 +1266,21 @@ Tier2Host tier2_host_celestron_focuser() {
 // Recipe of test_synscan_concurrency_stress.cpp: V4 and the default responder's 'K' echo, which the connect gates on.
 Tier2Host tier2_host_synscan_telescope() {
     namespace syn = alpacacore::vendor::synscan;
-    return mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
-                             alpacacore::test::FakeMountServer::default_responder(),
-                             [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
-                                 syn::ConnectionInfo info;
-                                 info.type = syn::ConnectionType::Network;
-                                 info.host = "127.0.0.1";
-                                 info.tcp_port = port;
-                                 info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
-                                 return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
-                             });
+    Tier2Host h = mount_server_host("synscan_telescope", "synscan", "synscan_telescope",
+                                    alpacacore::test::FakeMountServer::default_responder(),
+                                    [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
+                                        syn::ConnectionInfo info;
+                                        info.type = syn::ConnectionType::Network;
+                                        info.host = "127.0.0.1";
+                                        info.tcp_port = port;
+                                        info.response_timeout_ms = hold ? kHeldReplyTimeoutMs : 50;
+                                        return syn::create_synscan_telescope(0, info, syn::SynScanVersion::V4);
+                                    });
+    h.park_unavailable =
+        "FakeMountServer::default_responder() does not answer the SynScan position read (the driver logs 'Invalid "
+        "SynScan RA/Dec response'), so park() throws DriverException before it can start the slew "
+        "(fake_mount_server.h, synscan_telescope_driver.cpp park())";
+    return h;
 }
 #endif
 
@@ -2013,10 +2150,26 @@ CONTRACT_SWEEP_ENTRIES(CS_T1_ACTION)
 CONTRACT_SWEEP_ENTRIES(CS_T1_ERRVOCAB)
 CONTRACT_SWEEP_ENTRIES(CS_T1_CAN)
 
+TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected", "[contract][tier1][filterwheel]") {
+    int seen = 0;
+    for (const auto& e : alpacacore::test::contract::contract_entries()) {
+        if (e.type != DeviceType::FilterWheel) continue;
+        ++seen;
+        case_filterwheel_names_offsets_disconnected(e);
+    }
+    INFO("filter wheel entries in this build: " << seen);
+}
+
 #ifndef _WIN32
 #define CS2_CASE(id, casename, body) \
     TEST_CASE("Contract sweep tier 2 - " #id " - " casename, "[contract][tier2][" #id "]") { body(tier2_host_##id()); }
 #define CS2_CONNECTING(id, kind) CS2_CASE(id, "Connecting semantics", case_t2_connecting)
+#define CS2_HOOKS(id, kind) CS2_CASE(id, "firmware and SDK hooks do not block", case_t2_firmware_sdk_hooks)
+#define CS2_INITIATORS(id, kind) CS2_INITIATORS_##kind(id)
+#define CS2_INITIATORS_TEL(id) CS2_CASE(id, "Park and MoveAxis return at once", case_t2_async_initiators)
+#define CS2_INITIATORS_PRB(id)
+#define CS2_INITIATORS_NPR(id)
+#define CS2_INITIATORS_CAM(id)
 #define CS2_STATE(id, kind) CS2_CASE(id, "connected DeviceState has TimeStamp", case_t2_device_state_connected)
 #define CS2_STATE_TYPES(id, kind) \
     CS2_CASE(id, "DeviceState value types match the ASCOM members", case_t2_device_state_value_types)
@@ -2045,6 +2198,8 @@ CONTRACT_SWEEP_TIER2_HOSTS(CS2_INVALID)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_STATE_TYPES)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_IMAGE)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_HOOKS)
+CONTRACT_SWEEP_TIER2_HOSTS(CS2_INITIATORS)
 #endif
 
 #ifndef _WIN32
@@ -2151,6 +2306,10 @@ TEST_CASE("Contract sweep tier 2 - hosts match kFakeConnectableRoster", "[contra
         }
         CHECK((h.can_hold_connect ||
                (h.connecting_unobservable != nullptr && std::string(h.connecting_unobservable).size() > 0)));
+        CHECK(
+            ((h.park_unavailable == nullptr && h.move_axis_unavailable == nullptr) || h.type == DeviceType::Telescope));
+        CHECK((h.move_axis_unavailable == nullptr || std::string(h.move_axis_unavailable).size() > 0));
+        CHECK((h.park_unavailable == nullptr || std::string(h.park_unavailable).size() > 0));
         CHECK((static_cast<bool>(h.failing) || std::string(h.failing_unavailable).size() > 0));
     }
     for (const auto& r : from_roster) {

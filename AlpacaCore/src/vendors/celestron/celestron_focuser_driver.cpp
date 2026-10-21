@@ -205,8 +205,15 @@ public:
                 health_.reset();
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns.
+            // answer the moment Connect returns. Connect may do I/O (decision
+            // 0016 rule 4); a getter may not. A lost first reply gets one
+            // retry here. A connect whose retry also publishes nothing still
+            // connects, and getters answer "not available yet" until the
+            // 250 ms poll publishes.
             poll_state_once();
+            if (!snapshot_.read().has_value()) {
+                poll_state_once();
+            }
             connected_.store(true);
             start_state_poll();
             const auto limits = current_limits();
@@ -246,8 +253,12 @@ public:
             return "";
         }
         if (same_action(action_name, kActionCalibrationStatus)) {
-            ensure_connected();
             std::lock_guard<std::mutex> lock(calibration_mutex_);
+            // Under the lock, as usable_limits(): a call that overlaps a
+            // disconnect and reconnect would read the next connect's cleared
+            // calibration; connected_ is set only after that connect has
+            // read the limits.
+            ensure_connected();
             // Until the poll reads the limits after it ends, the old ones are
             // not the answer (an abort can wipe them).
             if (calibration_.running || calibration_.refresh_limits) return "Calibrating";
@@ -417,6 +428,10 @@ private:
     // while the motor has none.
     Limits usable_limits() const {
         std::lock_guard<std::mutex> lock(calibration_mutex_);
+        // A getter that passed its own check before a disconnect and reconnect
+        // would read the next connect's cleared calibration; connected_ is set
+        // only after that connect has read the limits.
+        ensure_connected();
         if (calibration_.running) {
             throw AlpacaException("Celestron focus motor calibration is in progress", AlpacaError::InvalidOperation);
         }
@@ -601,14 +616,10 @@ private:
         throw_if_faulted();
         auto reading = snapshot_.read();
         if (!reading.has_value()) {
-            // Connected but no frame: the connect's first poll was lost, or a
-            // racing Move/Halt write dropped it. Measure the motor now rather
-            // than wait up to a poll period. A disconnect in between makes the
-            // exchange fail and the check below report NotConnected.
-            const_cast<CelestronFocuserDriver*>(this)->poll_state_once();
-            reading = snapshot_.read();
-        }
-        if (!reading.has_value()) {
+            // Connected but no frame: the connect's polls were lost, or a
+            // racing Move/Halt write dropped it. Getters never touch the
+            // device (decisions 0010 and 0016): answer "not available yet"
+            // until the next poll, at most one poll period away.
             ensure_connected();
             throw_if_faulted();
             throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
