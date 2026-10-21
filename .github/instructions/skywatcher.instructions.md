@@ -7,6 +7,7 @@ applyTo: "AlpacaCore/src/vendors/skywatcher/**,AlpacaCore/include/alpacacore/ven
 Related decisions and failures — read when changing the behavior they explain:
 
 - [Pointing-clock decision](../../docs/decisions/0001-skywatcher-pointing-clock.md)
+- [Connect-without-site decision](../../docs/decisions/0019-connect-without-site.md)
 - [EQMOD board-detection failures](../../docs/failures/0006-eqmod-board-detection.md)
 - [EQMOD pointing-validation failures](../../docs/failures/0007-eqmod-pointing-validation.md)
 - [EQMOD cross-axis motion failures](../../docs/failures/0008-eqmod-cross-axis-motion.md)
@@ -44,10 +45,14 @@ datagrams before each send so replies cannot get off-by-one.
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
   the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
-  vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
-  `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
-  config or by its setter. A config **already on disk** is registered anyway, with a WARN,
-  and left for the connect-time guard to refuse: a device dropped at startup never enters
+  vendor** (#274): `configuredevice` rejects a skywatcher config without both. Since #1474
+  ([decision 0019](../../docs/decisions/0019-connect-without-site.md)) `Connected = true`
+  succeeds without them and `require_site_locked()` makes every member that reads the
+  hemisphere or the longitude throw `InvalidOperation` until each has been set, by config
+  or by its setter; the site getters throw `InvalidOperation` until their own value is set
+  (SiteElevation included). A new call site of `hemisphere_south_locked()` or
+  `site_longitude_` in a public member must call it. A config **already on disk** is
+  registered anyway, with a WARN, and left for those refusals: a device dropped at startup never enters
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
@@ -76,26 +81,26 @@ datagrams before each send so replies cannot get off-by-one.
   still says as history: the pier-side label is picked from the sky hour angle and is
   hemisphere-independent, which is one of #432's findings; the mechanical branch is
   `k * side` and mirrors with the hemisphere only on a board with a measured sense (#458).
-  The driver comment on the connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
-  feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
-  client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
-  the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
-  path through `detail::host_synchronized_probe()` (one `adjtimex` read, no device I/O; #405), so
-  a client's clock error never steers pointing on an NTP-good host and stops steering it within
-  about 30 s of the host becoming disciplined by slewing (INFO log; the flag only moves
-  undisciplined to disciplined, since ignoring the offset is the safe side);
-  `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
-  because that property is the client's to set and ConformU reads back what it wrote (#287,
-  #351). On an NTP-less host the router also steps the system clock from that write (#289). The
+  Time comes from one function ([decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md),
+  #1472): `utc_now_locked()` feeds the `UTCDate` readback and every LST computation (pointing,
+  `SiderealTime`, pier side, gotos), so a client can explain `SiderealTime` from its own
+  `UTCDate` and `SiteLongitude` reads. On a host the kernel reports NTP-disciplined
+  (`detail::host_synchronized_probe()`, one `adjtimex` read) a `UTCDate` write throws
+  `PropertyNotImplemented` and changes nothing. On an undisciplined host the write is accepted
+  and its offset applies to all three; while it is armed the probe is re-sampled at most once
+  per 30 s on the time path (#405), so the offset stops applying within about 30 s of the host
+  becoming disciplined by slewing (INFO log; the flag only moves undisciplined to disciplined,
+  since ignoring the offset is the safe side). Before #1472 the readback always honoured the
+  write while a disciplined host's pointing ignored it. On an NTP-less host the router also steps the system clock from that write (#289). The
   offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
   underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
   disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
-  clock state (#395). **This split is Sky-Watcher-only.** A mount with its own clock (OnStep,
+  clock state (#395). **This policy is Sky-Watcher-only.** A mount with its own clock (OnStep,
   Celestron, SynScan, iOptron, ZWO AM) has the ASCOM `UTCDate` setter write the MOUNT's time,
   and the driver's goto and sidereal logic then run on that clock (the mount itself may discard the write, as an aligned Celestron does), so those drivers keep aiming by the
-  client's instant on purpose; what they share with #301 is the once-per-connection WARN when
+  client's instant on purpose. They log the once-per-connection WARN when
   an NTP-disciplined host disagrees with the client by more than
   `HostClock::kClientDisagreementWarn`, through `alpacacore/util/client_utc_warning.h`
   (`ClientUtcWarning::warn_once()` after the write, flag re-armed on each real connect but
@@ -217,11 +222,9 @@ datagrams before each send so replies cannot get off-by-one.
   the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
-- ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
-  `Connected` outright, so the run fails at connect. Since #358 the client is told why:
-  the router reports the driver's own sentence naming the two fields as the
-  `ErrorMessage` (the error number is still `NotConnected`), rather than a bare
-  "Connection failed" with the reason left in the server log.
+- ConformU needs a real site. Since #1474 a Sky-Watcher device with no site connects
+  and then fails every pointing test with `InvalidOperation`, whose message names the
+  missing fields (from #274 to #1474 it refused `Connected` outright).
   Set the observing site in the web UI before validating. Before #274 the site collapsed
   to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
   available is below the horizon".

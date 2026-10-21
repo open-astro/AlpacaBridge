@@ -1398,7 +1398,7 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
     // Rule 4: only a saved config reaches the factory with a coordinate
     // missing (the API is refused in normalize). The factory logs the arm's
     // exact WARNING, names the missing half, and builds the driver, which
-    // refuses the connect itself.
+    // connects and refuses to point until the site is set (decision 0019).
     struct Case {
         bool latitude;
         bool longitude;
@@ -1419,7 +1419,8 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
         if (c.longitude) config.set("siteLongitude", -104.9903);
         const int number = device_number++;
         const std::string expected = "Persisted Sky-Watcher telescope " + std::to_string(number) + " has no " +
-                                     c.missing + " and will refuse to connect. " + kSkyWatcherMissingSite;
+                                     c.missing + "; it connects but refuses to point until the site is set. " +
+                                     kSkyWatcherMissingSite;
 
         WarnCapture warns;
         std::unique_ptr<AlpacaDriver> driver;
@@ -1429,15 +1430,6 @@ TEST_CASE("Builtin catalog - the SkyWatcher factory warns about a saved config w
         CHECK(warns.messages[0] == expected);
 
         CHECK_FALSE(driver->get_connected());
-        try {
-            driver->set_connected(true);
-            FAIL("set_connected(true) must be refused without a site (#274)");
-        } catch (const AlpacaException& e) {
-            INFO(e.what());
-            CHECK_FALSE(driver->get_connected());
-            CHECK(std::string(e.what()).find("Site latitude and longitude must be set before connecting") !=
-                  std::string::npos);
-        }
     }
 }
 

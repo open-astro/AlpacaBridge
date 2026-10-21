@@ -348,3 +348,13 @@ test('formatSiteCoordinate prints finite numbers at 6 decimals and defers other 
         assert.strictEqual(formatSiteCoordinate(v), null);
     }
 });
+
+// #1471: the saved config carries the device's GUID as `uniqueId`, which the
+// card already shows in its Unique ID row; the settings list must not repeat it.
+test('deviceSettingShown hides the keys the card shows elsewhere', () => withFormat(({ deviceSettingShown }) => {
+    for (const key of ['uniqueId', 'vendor', 'deviceType', 'deviceNumber']) {
+        assert.strictEqual(deviceSettingShown(key), false, key);
+    }
+    assert.strictEqual(deviceSettingShown('portPath'), true);
+    assert.strictEqual(deviceSettingShown('siteLatitude'), true);
+}));

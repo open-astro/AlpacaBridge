@@ -23,8 +23,8 @@ Decided 2026-10-21 on issue #1470. It replaces the earlier decision, under which
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. `UTCDate`, `SiderealTime` and pointing time (LST and goto) read the same time source, so a client can explain `SiderealTime` from its own `UTCDate` and `SiteLongitude` reads. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: review, until issue #1472 adds the test cases.
-2. While the host clock is disciplined, a `UTCDate` write throws `PropertyNotImplemented` and changes nothing; while it is undisciplined, the write is accepted and the offset applies to all three. The discipline state is re-sampled while an offset is armed. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: review, until issue #1472 adds the test cases; `AlpacaCore/tests/test_skywatcher_async.cpp` holds the #287, #301 and NTP-disciplined cases.
+1. `UTCDate`, `SiderealTime` and pointing time (LST and goto) read the same time source, so a client can explain `SiderealTime` from its own `UTCDate` and `SiteLongitude` reads. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("UTCDate, SiderealTime and pointing read one time source").
+2. While the host clock is disciplined, a `UTCDate` write throws `PropertyNotImplemented` and changes nothing; while it is undisciplined, the write is accepted and the offset applies to all three. The discipline state is re-sampled while an offset is armed. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("UTCDate, SiderealTime and pointing read one time source", "an accepted UTCDate write reads back on an undisciplined host", "discipline gained after the write moves UTCDate and pointing to the host clock").
 3. A system-clock step, found by comparing system and steady elapsed time, invalidates the stored offset. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` (external clock step case).
 4. Clock-policy tests set both host-discipline states through the probe seam, never the state of the runner. Scope: `AlpacaCore/tests/test_skywatcher_*.cpp`. Checked by: review.
 
@@ -37,13 +37,13 @@ The rules a change is checked against. Each names where it applies and what chec
 
 ## Consequences
 
-- A client that writes `UTCDate` on a disciplined host gets `PropertyNotImplemented` instead of a stored value. How each client reacts to that is not checked here; the rig run for issue #1472 records what NINA does.
+- A client that writes `UTCDate` on a disciplined host gets `PropertyNotImplemented` instead of a stored value. OpenAstro Ara never writes it: its telescope interface reads `UTCDate` only (`ITelescope.UTCDate` has no setter in `openastro-ara` 36de10754), and its time sync sets the host clock instead. How other clients react, NINA included, is not checked here.
 - Whether a write is accepted can change while the driver runs, when the host gains or loses NTP. A client that wrote once can be refused later.
 - The clock policy must be tested under both host-discipline states through the probe seam, not whichever state the CI runner happens to have.
-- The driver on `main` still follows the earlier decision until issue #1472 lands. That change needs a ConformU run on the rig: ConformU accepts `PropertyNotImplemented` from the optional `UTCDate` write.
+- ConformU accepts `PropertyNotImplemented` from the optional `UTCDate` write; the rig run for issue #1472 records it.
 
 ## Links
 
 - Issues [#287](https://github.com/open-astro/AlpacaBridge/issues/287), [#301](https://github.com/open-astro/AlpacaBridge/issues/301), [#1470](https://github.com/open-astro/AlpacaBridge/issues/1470) (item 2), [#1472](https://github.com/open-astro/AlpacaBridge/issues/1472); PRs [#291](https://github.com/open-astro/AlpacaBridge/pull/291), [#351](https://github.com/open-astro/AlpacaBridge/pull/351).
-- Implementation: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` (`utc_now_locked()`, `client_utc_now_locked()`).
-- Regression tests: `AlpacaCore/tests/test_skywatcher_async.cpp` cases for the #287/#301 branches, the NTP-disciplined host, UTCDate readback, and an external clock step.
+- Implementation: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` (`utc_now_locked()`, `set_utc_date()`).
+- Regression tests: `AlpacaCore/tests/test_skywatcher_async.cpp` cases for the one time source under both host-discipline states, the UTCDate readback on an undisciplined host, discipline gained after a write, and an external clock step.

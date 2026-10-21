@@ -5044,11 +5044,8 @@ function renderDeviceSettings(config) {
         addRowValue('Aperture Area (m^2)', area.toFixed(6));
     }
 
-    const hiddenKeys = new Set(['vendor', 'deviceType', 'deviceNumber',
-        'apertureDiameter', 'focalLength']);
-
     Object.keys(config)
-        .filter(key => !labelMap.has(key) && !hiddenKeys.has(key))
+        .filter(key => !labelMap.has(key) && deviceSettingShown(key))
         .sort()
         .forEach(key => addRow(key, humanizeSettingKey(key)));
 
