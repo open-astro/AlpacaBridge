@@ -4442,9 +4442,10 @@ int main() {
         // The assertion that matters is the CLEAR. Replacing the warn-and-skip
         // with `*field.out = value;` -- which restores the #398 bug for every
         // device already on disk, the larger population -- still registers the
-        // device, so registration alone proves nothing. SkyWatcher's
-        // get_site_latitude() just returns the stored value under its mutex,
-        // with no connection check, so the value itself is observable here.
+        // device, so registration alone proves nothing. SkyWatcher's site
+        // getters answer without a connection, and since decision 0019 a
+        // coordinate that was never set reads as InvalidOperation, so the clear
+        // is observable here: the cleared latitude is unset, not 200.
         const std::filesystem::path persisted = std::filesystem::path("config") / "registered_devices.json";
         std::string original;
         if (std::filesystem::exists(persisted)) {
@@ -4481,9 +4482,10 @@ int main() {
         restore_original();
 
         // Registered despite the bad coordinate, and the bad coordinate did
-        // NOT reach the driver.
-        EXPECT(!lat_json.is_discarded() && lat_json.value("ErrorNumber", -1) == 0);
-        EXPECT(lat_json["Value"].get<double>() != 200.0);
+        // NOT reach the driver: the latitude reads as never set.
+        EXPECT(!lat_json.is_discarded() &&
+               lat_json.value("ErrorNumber", -1) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+        EXPECT(lat_json.value("ErrorMessage", std::string()) == "SiteLatitude has not been set");
         // The valid sibling on the same entry is still applied -- the skip is
         // per field, not per entry.
         EXPECT(!lon_json.is_discarded() && lon_json.value("ErrorNumber", -1) == 0);
@@ -4544,11 +4546,12 @@ int main() {
         restore_original();
         bool lat_only = false;
         bool lon_only = false;
+        const std::string refusal = "; it connects but refuses to point until the site is set";
         for (const auto& w : warnings) {
-            if (w.find("telescope 9631 has no site longitude and will refuse to connect") != std::string::npos) {
+            if (w.find("telescope 9631 has no site longitude" + refusal) != std::string::npos) {
                 lat_only = true;
             }
-            if (w.find("telescope 9632 has no site latitude and will refuse to connect") != std::string::npos) {
+            if (w.find("telescope 9632 has no site latitude" + refusal) != std::string::npos) {
                 lon_only = true;
             }
         }
@@ -5487,14 +5490,15 @@ int main() {
         // -90) (max 90)"; it was read_site_coordinates()' "siteLatitude
         // 200.000000 is out of range: must be between -90.000000 and 90.000000
         // degrees"). A saved value is dropped to unset with the catalog's
-        // wrapped warning, so the factory then logs the #274 missing-site
-        // WARNING as well: two WARNs, the persisted outcome unchanged.
+        // wrapped warning, so the factory then logs the missing-site WARNING
+        // (#274, connect refusal moved to the pointing members by #1474) as
+        // well: two WARNs, the persisted outcome unchanged.
         pin("siteLatitude 200 (#508 item 5)", "skywatcher", "telescope", "Telescope",
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLatitude":200.0,"siteLongitude":151.215297})",
             "siteLatitude is out of range (min -90) (max 90)", "{}", true,
             R"({"connectionType":"serial","portPath":"/dev/ttyUSB8","siteLongitude":151.215297})",
             {"config normalized: siteLatitude is out of range (min -90) (max 90)", "Persisted Sky-Watcher telescope",
-             "has no site latitude and will refuse to connect"},
+             "has no site latitude; it connects but refuses to point until the site is set"},
             {"Skipping persisted device", "The coordinate is ignored", "siteLatitude 200 is out of range: must be"});
 #endif
 #ifdef ALPACACORE_ENABLE_BISQUE
