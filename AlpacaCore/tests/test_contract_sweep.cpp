@@ -2302,7 +2302,7 @@ double snap_text(const T& v) {
 // zeroed frame is far outside it.
 constexpr double kSnapshotValueMargin = 0.01;
 
-std::vector<SnapshotGetter> snapshot_telescope_getters(bool with_slewing) {
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_telescope_getters(bool with_slewing) {
     using alpacacore::TelescopeDriver;
     std::vector<SnapshotGetter> g;
 #define SNAP_TEL(label, call) \
@@ -2320,7 +2320,7 @@ std::vector<SnapshotGetter> snapshot_telescope_getters(bool with_slewing) {
 
 // The Celestron focus motor has no temperature sensor (its Temperature getter throws NotImplemented, not served
 // from the frame), so its list leaves Temperature out.
-std::vector<SnapshotGetter> snapshot_focuser_getters(bool with_temperature = true) {
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_focuser_getters(bool with_temperature = true) {
     using alpacacore::FocuserDriver;
     std::vector<SnapshotGetter> g;
 #define SNAP_FOC(label, call) \
@@ -2663,7 +2663,7 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     return values;
 }
 
-void snapshot_stale_is_served(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+[[maybe_unused]] void snapshot_stale_is_served(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
     REQUIRE(rig.driver != nullptr);
     const auto baseline = snapshot_baseline(rig, getters);
     rig.hold_frame();
@@ -2680,7 +2680,7 @@ void snapshot_stale_is_served(SnapshotRig& rig, const std::vector<SnapshotGetter
     CHECK(snapshot_has_time_stamp(*rig.driver));
 }
 
-void snapshot_lost_throws_not_connected(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+[[maybe_unused]] void snapshot_lost_throws_not_connected(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
     REQUIRE(rig.driver != nullptr);
     (void)snapshot_baseline(rig, getters);
     if (rig.lose_link) {
@@ -2737,7 +2737,7 @@ CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_CASE)
 // scripts/check_docs_drift.py holds the table itself to the drivers that use StateSnapshot.
 namespace {
 
-bool snapshot_vendor_built(const std::string& vendor) {
+bool snapshot_vendor_built([[maybe_unused]] const std::string& vendor) {
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
     if (vendor == "skywatcher") return true;
 #endif
