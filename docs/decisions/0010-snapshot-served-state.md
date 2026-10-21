@@ -54,7 +54,7 @@ The rules a change is checked against. Each names where it applies and what chec
 3. A poll takes `begin_poll()` before it samples, and a write or `reset()` after that drops its publish. Scope: `AlpacaCore/include/alpacacore/util/state_snapshot.h`, `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_state_snapshot.cpp`.
 4. The snapshot mutex is never held across device I/O, and a `write()` callback does no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
 5. A telescope that serves `DeviceState` from the snapshot stamps `TimeStamp` with `measured_at` through `device_state_age()`. Scope: `AlpacaCore/include/alpacacore/telescope_driver.h`, `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_snapshot.cpp`, review.
-6. Each adopter states per getter what a stale frame means, in its instruction file; stale alone never refuses. Scope: `.github/instructions/*.instructions.md`. Checked by: review.
+6. Each adopter states per getter what a stale frame means, in its instruction file; stale alone never refuses. Scope: `.github/instructions/*.instructions.md`. Checked by: `AlpacaCore/tests/test_contract_sweep.cpp` (the "Contract sweep snapshot" cases: a stale frame is served, never refused, for every adopted driver), `scripts/check_contract_sweep.py` (rule 6: the sweep roster matches the Adoption table), review (the per-getter statement in the instruction file).
 
 ## Alternatives rejected
 

@@ -27,6 +27,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/version.h>
 
 #include <algorithm>
@@ -46,6 +47,7 @@
 
 #include "catch2_compat.h"
 #include "contract_sweep.h"
+#include "fake_task_clock.h"
 
 // Tier 2 hosts: the roster fakes, each under its vendor guard. Fakes over a pty or a loopback socket
 // are POSIX only.
@@ -80,8 +82,13 @@
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 #include <alpacacore/vendor/onstep/onstep_telescope_driver.h>
 #endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+#include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
+
+#include "fake_bisque_mount.h"
+#endif
 #if defined(ALPACACORE_ENABLE_ZWO) || defined(ALPACACORE_ENABLE_CELESTRON) || defined(ALPACACORE_ENABLE_SYNSCAN) || \
-    defined(ALPACACORE_ENABLE_ONSTEP)
+    defined(ALPACACORE_ENABLE_ONSTEP) || defined(ALPACACORE_ENABLE_BISQUE)
 #include "fake_mount_server.h"
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -2480,3 +2487,525 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
     CHECK(ids.count("touptek_switch") == 1);
 #endif
 }
+
+// Snapshot adopters (decision 0010 rule 6, issue #1443): "stale alone never refuses". For every driver whose
+// Adoption row is `adopted`, the cases below connect over the driver's fake on a FakeTaskClock, let the
+// connect's frame publish, hold the device so no newer frame comes, and move the task clock.
+//  - Past the snapshot max_age (largest is 3 s, Celestron telescope) and under util::kLinkStalenessBound (30 s)
+//    with no fault latched: Connected stays true, no link fault is reported, every snapshot-served getter
+//    still returns the value it returned before (within kSnapshotValueMargin), and DeviceState still lists
+//    the frame.
+//  - Past the bound (decision 0009), where the adopter has a lost-link stage: every one of the same getters
+//    throws NotConnected, Connected reads false and DeviceState is empty. The Gemini focuser and the Celestron
+//    focus motor have none (SnapshotRig::no_lost_link_stage): decision 0009 says a driver not yet adopted keeps
+//    Connected true while faulted, so their getters keep throwing the latched fault's DriverException.
+// How the frame is held differs by backend and each rig says where it comes from: a telescope with a poll
+// pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
+// so the one poll the clock step wakes fails, which stays under every latch threshold.
+// The loss case fails kSnapshotLatchPolls polls (a latch needs three where an adopter has one), then passes the
+// bound: SynScan, Celestron (telescope) and Bisque lose the link from the latched fault's age; Sky-Watcher, QHY
+// and Astroasis also from the age of the frame.
+// The roster is kSnapshotAdopterRoster (contract_sweep.h); rule 6 of scripts/check_contract_sweep.py holds it,
+// and the hooks below, to the ADR table.
+#ifndef _WIN32
+namespace {
+
+using alpacacore::test::FakeTaskClock;
+namespace snap_chrono = std::chrono;
+
+constexpr snap_chrono::seconds kSnapshotStaleStep{10};  // above every max_age (<= 3 s), far under the 30 s bound
+// Loss (decision 0009) is a latched fault that has stood for util::kLinkStalenessBound, or (Sky-Watcher, QHY,
+// Astroasis) a frame that old: the poll fails on each of kSnapshotLatchPolls one-second steps (the adopters with
+// a latch threshold use three), then the clock passes the bound.
+constexpr int kSnapshotLatchPolls = 4;
+constexpr snap_chrono::seconds kSnapshotLostStep{31};
+static_assert(kSnapshotStaleStep < alpacacore::util::kLinkStalenessBound);
+static_assert(kSnapshotLostStep > alpacacore::util::kLinkStalenessBound);
+constexpr snap_chrono::milliseconds kSnapshotBound{10000};
+
+// One connected adopter with its fake and clock. Members are destroyed in reverse order: the driver first.
+struct SnapshotRig {
+    std::shared_ptr<void> fake;
+    std::shared_ptr<FakeTaskClock> clock = std::make_shared<FakeTaskClock>();
+    std::unique_ptr<AlpacaDriver> driver;
+    // Keeps newer frames from arriving without a failed poll (pauses the poll) or by muting the fake; runs after
+    // the baseline reads.
+    std::function<void()> hold_frame;
+    // The loss case: the device stops answering and the poll runs on (a paused poll never notices a loss).
+    // Empty means hold_frame already does that.
+    std::function<void()> lose_link;
+    // Optional: one direct poll tick after the clock passed the bound, for backends whose loss is noticed there.
+    std::function<void()> tick;
+    // Getter names left out; the rig that fills it says why next to the assignment.
+    std::vector<std::string> left_out;
+    // Non-null when the adopter has no lost-link stage yet, so a latched fault past the bound stays a fault
+    // (Connected true, getters DriverException) instead of NotConnected; the text says where that is decided.
+    const char* no_lost_link_stage = nullptr;
+
+    SnapshotRig() = default;
+    SnapshotRig(const SnapshotRig&) = delete;
+    SnapshotRig& operator=(const SnapshotRig&) = delete;
+    ~SnapshotRig() {
+        if (!driver) return;
+        try {
+            driver->set_connected(false);
+        } catch (...) {
+        }
+    }
+
+    // Moves the task clock and lets the woken poll body finish its tick.
+    void pass(snap_chrono::seconds d) {
+        clock->advance(d);
+        (void)clock->wait_for_woken_settled(kSnapshotBound);
+        (void)clock->wait_for_waiters(1, snap_chrono::milliseconds(300));  // parked again, unless the poll body ended
+    }
+    // The connect's poll body parks on the clock after Connect returns.
+    void await_poll() { (void)clock->wait_for_waiters(1, snap_chrono::milliseconds(2000)); }
+};
+
+struct SnapshotGetter {
+    std::string name;
+    std::function<double(AlpacaDriver&)> read;
+};
+
+// Every served value as a number: a position, a flag, a pier side.
+template <class T>
+double snap_text(const T& v) {
+    return static_cast<double>(v);
+}
+
+// A dead-reckoning mount (Sky-Watcher, decision 0010 Sky-Watcher adoption point 2) advances its position with the
+// clock between two reads, so a value is compared within this margin; a refused getter throws, and a dropped or
+// zeroed frame is far outside it.
+constexpr double kSnapshotValueMargin = 0.01;
+
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_telescope_getters(bool with_slewing) {
+    using alpacacore::TelescopeDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_TEL(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<TelescopeDriver&>(d).call); }});
+    SNAP_TEL("RightAscension", get_right_ascension())
+    SNAP_TEL("Declination", get_declination())
+    SNAP_TEL("Altitude", get_altitude())
+    SNAP_TEL("Azimuth", get_azimuth())
+    SNAP_TEL("SideOfPier", get_side_of_pier())
+    SNAP_TEL("Tracking", get_tracking())
+    if (with_slewing) SNAP_TEL("Slewing", get_slewing())
+#undef SNAP_TEL
+    return g;
+}
+
+// The Celestron focus motor has no temperature sensor (its Temperature getter throws NotImplemented, not served
+// from the frame), so its list leaves Temperature out.
+[[maybe_unused]] std::vector<SnapshotGetter> snapshot_focuser_getters(bool with_temperature = true) {
+    using alpacacore::FocuserDriver;
+    std::vector<SnapshotGetter> g;
+#define SNAP_FOC(label, call) \
+    g.push_back({label, [](AlpacaDriver& d) { return snap_text(static_cast<FocuserDriver&>(d).call); }});
+    SNAP_FOC("Position", get_position())
+    SNAP_FOC("IsMoving", get_is_moving())
+    if (with_temperature) SNAP_FOC("Temperature", get_temperature())
+#undef SNAP_FOC
+    return g;
+}
+
+bool snapshot_has_time_stamp(const AlpacaDriver& driver) {
+    const auto state = driver.get_device_state();
+    return std::any_of(state.begin(), state.end(), [](const auto& e) { return e.name == "TimeStamp"; });
+}
+
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+// Poll pause seam of the Sky-Watcher driver; the connect recipe of test_skywatcher_snapshot.cpp.
+std::unique_ptr<SnapshotRig> snapshot_rig_skywatcher_telescope() {
+    namespace sw = alpacacore::vendor::skywatcher;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto mount = std::make_shared<alpacacore::test::FakeSkyWatcherMount>();
+    sw::ConnectionInfo info;
+    info.type = sw::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.udp_port = mount->port();
+    info.response_timeout_ms = 250;
+    rig.fake = mount;
+    rig.driver = sw::create_skywatcher_telescope(0, info, -33.856784, 151.215297, 42.0, {}, {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        sw::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, mount] {
+        mount->set_silent(true);
+        sw::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_BISQUE
+// Recipe of test_bisque_telescope_snapshot.cpp (Rig): paused poll, one direct tick for the loss.
+// Slewing is control-path state there (decision 0010, Bisque adoption), so it is not swept.
+std::unique_ptr<SnapshotRig> snapshot_rig_bisque_telescope() {
+    namespace bq = alpacacore::vendor::bisque;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto mount = std::make_shared<alpacacore::test::FakeBisqueMount>();
+    auto server = std::make_shared<alpacacore::test::FakeMountServer>(mount->responder());
+    REQUIRE(server->ok());
+    bq::ConnectionInfo info;
+    info.host = "127.0.0.1";
+    info.tcp_port = server->port();
+    info.response_timeout_ms = 300;
+    rig.fake = std::make_shared<std::pair<decltype(mount), decltype(server)>>(mount, server);
+    rig.driver = bq::create_bisque_telescope(0, info, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        bq::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, mount] {
+        mount->mute = true;
+        bq::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    rig.tick = [driver] { bq::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    rig.left_out = {"Slewing"};
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+struct SnapshotHandset {
+    std::atomic<bool> mute{false};
+};
+
+// The handset answers of test_synscan_telescope_snapshot.cpp (reply()), an EQ mount idle on a fixed position.
+std::string snapshot_synscan_reply(SnapshotHandset& st, const std::string& chunk) {
+    if (chunk.empty()) return "0#";
+    if (st.mute.load() && chunk[0] != 'K' && chunk[0] != 'V') return "";
+    switch (chunk[0]) {
+        case 'K':
+            return std::string(1, chunk.size() > 1 ? chunk[1] : 'K') + "#";
+        case 'V':
+            return "042A00#";
+        case 'e':
+            return "5CECE200,D001B900#";
+        case 'z':
+            return "8A4FDA00,0D527400#";
+        case 'L':
+            return "0#";
+        case 'm':
+            return std::string(1, '\x32') + "#";
+        case 'p':
+            return "E#";
+        case 't':
+            return std::string(1, '\x01') + "#";
+        default:
+            return "#";
+    }
+}
+
+std::unique_ptr<SnapshotRig> snapshot_rig_synscan_telescope() {
+    namespace sc = alpacacore::vendor::synscan;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto st = std::make_shared<SnapshotHandset>();
+    auto server = std::make_shared<alpacacore::test::FakeMountServer>(
+        [st](const std::string& c) { return snapshot_synscan_reply(*st, c); });
+    REQUIRE(server->ok());
+    sc::ConnectionInfo info;
+    info.type = sc::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server->port();
+    info.response_timeout_ms = 300;
+    rig.fake = std::make_shared<std::pair<decltype(st), decltype(server)>>(st, server);
+    rig.driver = sc::create_synscan_telescope_with_site(0, info, sc::SynScanVersion::V4, -33.856784, 151.215297, 42.0,
+                                                        false, sc::SynScanAlignmentSetting::Auto, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        sc::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, st] {
+        st->mute = true;
+        sc::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    rig.tick = [driver] { sc::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+struct SnapshotNexStar {
+    std::atomic<bool> mute{false};
+};
+
+// The mount answers of test_celestron_telescope.cpp (snapshot_reply()): a German equatorial idle, tracking on.
+std::string snapshot_celestron_reply(SnapshotNexStar& st, const std::string& chunk) {
+    if (chunk.empty()) return "0#";
+    if (st.mute.load()) return "";
+    switch (chunk[0]) {
+        case 'm':
+            return std::string(1, static_cast<char>(24)) + "#";
+        case 'V':
+            return std::string("\x05\x23#", 3);
+        case 'w':
+            return std::string(8, '\0') + "#";
+        case 'e':
+        case 'E':
+            return "12AB0500,20000500#";
+        case 'z':
+        case 'Z':
+            return "20AB0500,10000500#";
+        case 'L':
+            return "0#";
+        case 'J':
+            return "1#";
+        case 'p':
+            return "W#";
+        case 't':
+            return std::string("\x02#");
+        case 'P': {
+            const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
+            const unsigned char device = chunk.size() > 2 ? static_cast<unsigned char>(chunk[2]) : 0;
+            if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);
+            if (op == 0xFE) return std::string("\x00\x00#", 3);
+            if (op == 0x26) return "#";
+            return std::string("\xFF#");
+        }
+        default:
+            return "#";
+    }
+}
+
+std::unique_ptr<SnapshotRig> snapshot_rig_celestron_telescope() {
+    namespace cel = alpacacore::vendor::celestron;
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto st = std::make_shared<SnapshotNexStar>();
+    auto server = std::make_shared<alpacacore::test::FakeMountServer>(
+        [st](const std::string& c) { return snapshot_celestron_reply(*st, c); });
+    REQUIRE(server->ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server->port();
+    info.response_timeout_ms = 300;
+    rig.fake = std::make_shared<std::pair<decltype(st), decltype(server)>>(st, server);
+    rig.driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                           cel::CelestronAlignmentSetting::Auto, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    auto* driver = rig.driver.get();
+    rig.hold_frame = [driver] {
+        cel::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), true);
+    };
+    rig.lose_link = [driver, st] {
+        st->mute = true;
+        cel::set_status_poll_paused_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver), false);
+    };
+    rig.tick = [driver] { cel::poll_status_now_for_testing(static_cast<alpacacore::TelescopeDriver&>(*driver)); };
+    return rig_owner;
+}
+
+// Recipe of test_celestron_focuser.cpp: the AUX fake over a pty, muted to hold the frame.
+std::unique_ptr<SnapshotRig> snapshot_rig_celestron_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<alpacacore::test::FakeCelestronFocuser>();
+    rig.fake = fake;
+    rig.driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake->slave_path(), *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->set_muted(true); };
+    rig.no_lost_link_stage =
+        "decision 0009: a driver not yet adopted keeps Connected true while faulted (the Celestron focus motor has "
+        "no lost-link stage; celestron_focuser_driver.cpp throw_if_faulted)";
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_GEMINI
+// Recipe of test_gemini_focuser_snapshot.cpp. The fake has no mute: its garbage state replies fail a poll at
+// once, without the serial timeout.
+std::unique_ptr<SnapshotRig> snapshot_rig_gemini_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<alpacacore::test::FakeGeminiFocuser>();
+    rig.fake = fake;
+    rig.driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake->slave_path(), 9600, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->set_garbage_state_replies(true); };
+    rig.no_lost_link_stage =
+        "decision 0009 roster: the Gemini focuser is planned, a polled latch where Connected stays true";
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_QHY
+// Recipe of test_qhy_focuser_snapshot.cpp.
+std::unique_ptr<SnapshotRig> snapshot_rig_qhy_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto fake = std::make_shared<alpacacore::test::FakeQhyQFocuser>();
+    rig.fake = fake;
+    rig.driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake->slave_path(), {}, *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [fake] { fake->set_muted(true); };
+    return rig_owner;
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+// Recipe of test_astroasis_focuser.cpp: the HID fake with its reads timing out ("dead") holds the frame.
+std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
+    auto rig_owner = std::make_unique<SnapshotRig>();
+    SnapshotRig& rig = *rig_owner;
+    auto state = std::make_shared<alpacacore::test::FakeHidState>();
+    rig.fake = state;
+    rig.driver = alpacacore::vendor::astroasis::create_astroasis_focuser(
+        0, "/dev/hidraw-fake",
+        std::make_unique<alpacacore::test::LockedAstroasisHidTransport>(
+            std::make_unique<alpacacore::test::FakeHidTransport>(state)),
+        *rig.clock);
+    rig.driver->set_connected(true);
+    rig.await_poll();
+    rig.hold_frame = [state] {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        state->dead = true;
+    };
+    return rig_owner;
+}
+#endif
+
+// One X(id, getters) per adopter this build compiles in. `id` is the roster id in contract_sweep.h.
+// clang-format off
+#ifdef ALPACACORE_ENABLE_SKYWATCHER
+#define CS3_SKYWATCHER(X) X(skywatcher_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_SKYWATCHER(X)
+#endif
+#ifdef ALPACACORE_ENABLE_CELESTRON
+#define CS3_CELESTRON(X) X(celestron_telescope, snapshot_telescope_getters(true)) X(celestron_focuser, snapshot_focuser_getters(false))
+#else
+#define CS3_CELESTRON(X)
+#endif
+#ifdef ALPACACORE_ENABLE_BISQUE
+#define CS3_BISQUE(X) X(bisque_telescope, snapshot_telescope_getters(false))
+#else
+#define CS3_BISQUE(X)
+#endif
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+#define CS3_SYNSCAN(X) X(synscan_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_SYNSCAN(X)
+#endif
+#ifdef ALPACACORE_ENABLE_GEMINI
+#define CS3_GEMINI(X) X(gemini_focuser, snapshot_focuser_getters())
+#else
+#define CS3_GEMINI(X)
+#endif
+#ifdef ALPACACORE_ENABLE_QHY
+#define CS3_QHY(X) X(qhy_focuser, snapshot_focuser_getters())
+#else
+#define CS3_QHY(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ASTROASIS
+#define CS3_ASTROASIS(X) X(astroasis_focuser, snapshot_focuser_getters())
+#else
+#define CS3_ASTROASIS(X)
+#endif
+#define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
+    CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
+// clang-format on
+
+// Every getter must answer on the live link first: a getter that throws here is a setup defect of the hook,
+// never dropped from the list (the Bisque Slewing exclusion is the ADR's, stated in the rig).
+std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+    std::vector<double> values;
+    for (const auto& g : getters) {
+        if (std::find(rig.left_out.begin(), rig.left_out.end(), g.name) != rig.left_out.end()) {
+            values.push_back(0.0);
+            continue;
+        }
+        INFO("baseline getter " << g.name);
+        double value = 0.0;
+        REQUIRE_NOTHROW(value = g.read(*rig.driver));
+        values.push_back(value);
+    }
+    REQUIRE(rig.driver->get_connected());
+    REQUIRE(snapshot_has_time_stamp(*rig.driver));
+    return values;
+}
+
+[[maybe_unused]] void snapshot_stale_is_served(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+    REQUIRE(rig.driver != nullptr);
+    const auto baseline = snapshot_baseline(rig, getters);
+    rig.hold_frame();
+    rig.pass(kSnapshotStaleStep);
+    CHECK(rig.driver->get_connected());
+    CHECK(rig.driver->get_link_fault().empty());
+    for (std::size_t i = 0; i < getters.size(); ++i) {
+        if (std::find(rig.left_out.begin(), rig.left_out.end(), getters[i].name) != rig.left_out.end()) continue;
+        INFO(getters[i].name << " past max_age and under the bound must still be served");
+        double value = 0.0;
+        CHECK_NOTHROW(value = getters[i].read(*rig.driver));
+        CHECK(value == Catch::Approx(baseline[i]).margin(kSnapshotValueMargin));
+    }
+    CHECK(snapshot_has_time_stamp(*rig.driver));
+}
+
+[[maybe_unused]] void snapshot_past_bound_stops_serving(SnapshotRig& rig, const std::vector<SnapshotGetter>& getters) {
+    REQUIRE(rig.driver != nullptr);
+    (void)snapshot_baseline(rig, getters);
+    if (rig.lose_link) {
+        rig.lose_link();
+    } else {
+        rig.hold_frame();
+    }
+    for (int i = 0; i < kSnapshotLatchPolls; ++i) rig.pass(snap_chrono::seconds(1));
+    rig.pass(kSnapshotLostStep);
+    if (rig.tick) rig.tick();
+    // The code the getters throw past the bound: NotConnected once the link is lost (decision 0009), or, for an
+    // adopter with no lost-link stage yet, the DriverException of its latched fault with Connected still true.
+    const bool faulted_only = rig.no_lost_link_stage != nullptr;
+    if (faulted_only) {
+        INFO(rig.no_lost_link_stage);
+        CHECK(rig.driver->get_connected());
+    } else {
+        CHECK_FALSE(rig.driver->get_connected());
+        CHECK(rig.driver->get_device_state().empty());
+    }
+    const auto expected =
+        faulted_only ? alpacacore::AlpacaError::DriverException : alpacacore::AlpacaError::NotConnected;
+    for (const auto& g : getters) {
+        if (std::find(rig.left_out.begin(), rig.left_out.end(), g.name) != rig.left_out.end()) continue;
+        INFO(g.name << " past the link-loss bound must throw " << (faulted_only ? "DriverException" : "NotConnected"));
+        try {
+            (void)g.read(*rig.driver);
+            FAIL_CHECK("no throw");
+        } catch (const AlpacaException& e) {
+            CHECK(e.error_code() == expected);
+        }
+    }
+}
+
+}  // namespace
+
+#define CS3_CASE(id, getters)                                                                                    \
+    TEST_CASE("Contract sweep snapshot - " #id " - a stale frame is served, never refused",                      \
+              "[contract][snapshot][" #id "]") {                                                                 \
+        auto rig_owner = snapshot_rig_##id();                                                                    \
+        snapshot_stale_is_served(*rig_owner, getters);                                                           \
+    }                                                                                                            \
+    TEST_CASE("Contract sweep snapshot - " #id " - past the link-loss bound the getters stop serving the frame", \
+              "[contract][snapshot][" #id "]") {                                                                 \
+        auto rig_owner = snapshot_rig_##id();                                                                    \
+        snapshot_past_bound_stops_serving(*rig_owner, getters);                                                  \
+    }
+CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(CS3_CASE)
+#undef CS3_CASE
+#endif  // !_WIN32
