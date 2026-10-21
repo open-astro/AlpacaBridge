@@ -40,8 +40,9 @@
 # /bin/bash -u and checks that: read_lines keeps lines literal and gives 0 elements
 # on empty input; the script has no bash 4 construct; an empty diff (PREFLIGHT_BASE=HEAD)
 # makes every change-scoped gate record SKIP, aborts nowhere and lists every gate; and
-# a quick run records the quick-run SKIP for each build gate. It needs no network and
-# no compiler. It exits non-zero and names each failed check.
+# a quick run records the quick-run SKIP for the build+test gates and sanitizers, and
+# clang-tidy, sanitizers and both build+test gates are only reached through full_only.
+# It needs no network and no compiler. It exits non-zero and names each failed check.
 
 # Intentionally NOT using `set -e`: we want to run every gate and report a full
 # summary rather than abort on the first failure. -u and pipefail still apply.
@@ -265,6 +266,7 @@ self_test() {
 
   # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
   # this pattern from matching its own line).
+  local hits
   if hits="$(grep -nE 'map[f]ile|read[a]rray|declare +-[a-zA-Z]*A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|[&]|[&]>>' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
     st_fail "bash 4 construct in scripts/ci_preflight.sh:"
     echo "${hits}" >&2
@@ -275,7 +277,7 @@ self_test() {
   # Check 2, static half: bash 3.2 aborts on an empty array expanded bare under -u
   # (bash 4.4+ does not, so the run below cannot see it). CHANGED can be empty; every
   # expansion must be the ${CHANGED[@]+"${CHANGED[@]}"} form.
-  if grep -nE '(^|[^+])"\$\{CHANGED\[@\]\}"' "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+  if grep -nE '(^|[^"]|[^+]")\$\{CHANGED\[[@*]\]\}' "${ROOT_DIR}/scripts/ci_preflight.sh"; then
     st_fail "CHANGED expanded without the empty-array guard"
   else
     st_ok "CHANGED is only expanded with the empty-array guard"
@@ -301,7 +303,7 @@ self_test() {
     'docs drift check' 'connect-error hook' 'serial port ownership' 'layering gate' 'contract sweep registration' \
     'beta VERSION split'; do
     if ! printf '%s\n' "${summary}" | grep -qE "^  \[(PASS|SKIP|FAIL)\] ${n}"; then
-      st_fail "summary does not list the ${n} gate"
+      st_fail "summary does not list ${n}"
     fi
   done
   for n in 'build\+test \(vendors OFF\)' 'build\+test \(vendors ON\)' 'sanitizers'; do
@@ -309,8 +311,15 @@ self_test() {
       st_fail "quick run: ${n} did not record the quick-run SKIP"
     fi
   done
+  # Check 3, clang-tidy: the empty diff never reaches its full_only call (no C++ changes),
+  # so check statically that each build gate is only run through full_only "<name>".
+  for n in 'build+test (vendors OFF)' 'build+test (vendors ON)' 'clang-tidy' 'sanitizers'; do
+    if ! grep -qF "full_only \"${n}\"" "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+      st_fail "build gate ${n} is not guarded by full_only"
+    fi
+  done
   if [ "${failed}" -eq 0 ]; then
-    st_ok "empty-diff and quick-run summary lists every gate with the expected SKIP"
+    st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
   fi
   return "${failed}"
 }
