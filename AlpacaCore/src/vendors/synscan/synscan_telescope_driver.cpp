@@ -3056,8 +3056,8 @@ private:
     // Control path only: asks the handset now (the Park and landing loops are what detect a GOTO's end). The
     // getters serve the frame instead. ignore_dec_jog: a Dec-only MoveAxis does not touch the RA motor or
     // tracking, so ra_motion_active_locked() leaves it out.
-    // A body passes `release` (its lock) and `lost`: the read then runs with mutex_ released and nothing is applied
-    // when `lost()` says a newer operation owns the state meanwhile (the caller checks that itself).
+    // A body passes `release` (its lock) and `lost`: the read runs with mutex_ released, and nothing is applied, not
+    // even a failed read's count, once `lost()` says a newer operation owns the state (the caller checks that itself).
     bool poll_hardware_slewing_locked(bool propagate_error = false, bool ignore_dec_jog = false,
                                       std::unique_lock<std::mutex>* release = nullptr,
                                       const std::function<bool()>& lost = {}) const {
@@ -3083,6 +3083,9 @@ private:
                 park_poll_failures_ = 0;
             }
         } catch (const std::exception& ex) {
+            if (lost && lost()) {
+                return slewing_cached_;  // the failure count belongs to the operation that replaced this body
+            }
             if (propagate_error) {
                 // One lost reply must not stop the mount mid-Park: only a run of failures fails it.
                 const int failures = ++park_poll_failures_;
@@ -3095,6 +3098,9 @@ private:
             }
             // Keep last known state if polling times out.
         } catch (...) {
+            if (lost && lost()) {
+                return slewing_cached_;
+            }
             if (propagate_error) {
                 const int failures = ++park_poll_failures_;
                 if (failures >= kParkPollFailureThreshold) {
