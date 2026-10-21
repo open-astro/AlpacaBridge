@@ -298,7 +298,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   body that a HEAD client must not receive. Tests: the HEAD and chunked cases
   in `test_server_socket.cpp`, and the `Content-Length` default case in
   `test_routing.cpp` (every `Response::to_string()` emits exactly one).
-- **`Transfer-Encoding` is rejected with 501, not ignored** (same review).
+- **`Transfer-Encoding` is rejected with 501, not ignored** (same review; listed as a deliberate departure in [the LAN surface threat model](../../docs/decisions/0007-lan-surface-threat-model.md)).
   `read_request` frames bodies from `Content-Length` only, so a chunked body
   read as zero-length left its chunk framing on the wire to be parsed as the
   next request — request-smuggling-shaped behind any intermediary that does
