@@ -1833,10 +1833,15 @@ public:
         }
         auto& protocol = SynScanProtocolWrapper::instance();
         // A variable-rate P slew replaces tracking on the handset, so the stop leaves the RA motor stopped; ASCOM
-        // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked).
-        const int restore_mode = !moving && axis == 0 ? tracking_mode_cached_ : 0;
+        // resumes the tracking rate when MoveAxis stops (see ra_motor_rate_locked). The mode is read at the turn, as
+        // AbortSlew's: a Tracking write queued ahead has sent its `T` by then.
+        int restore_mode = 0;
         if (!send_in_turn(
-                lock, [&] { return motion_generation_ == owner_generation && connected_; },
+                lock,
+                [&] {
+                    restore_mode = !moving && axis == 0 ? tracking_mode_cached_ : 0;
+                    return motion_generation_ == owner_generation && connected_;
+                },
                 [&] {
                     protocol.move_axis_variable_rate(axis, moving ? rate : 0.0);
                     if (restore_mode > 0) {
@@ -1917,11 +1922,16 @@ public:
             };
             // The stops and the tracking restore go out in one wire turn: after anything an older body is committed
             // to send, and before nothing, since a body sends nothing once the claim above is visible to it. The
-            // restore (below, the mode the handset reported) runs only when every stop was answered.
-            const int restore_mode = tracking_mode_cached_;
+            // restore (below) runs only when every stop was answered. Its mode is read at the turn: a Tracking
+            // write queued ahead of this turn has sent its `T` by then, and the mode it asked for is the one kept.
+            int restore_mode = 0;
             std::exception_ptr restore_error;
             if (!send_in_turn(
-                    lock, [&] { return motion_generation_ == owner_generation && connected_; },
+                    lock,
+                    [&] {
+                        restore_mode = tracking_mode_cached_;
+                        return motion_generation_ == owner_generation && connected_;
+                    },
                     [&] {
                         try_stop([&protocol]() { protocol.cancel_goto(); });
                         try_stop([&protocol]() { protocol.move_axis_fixed_rate(0, 0); });

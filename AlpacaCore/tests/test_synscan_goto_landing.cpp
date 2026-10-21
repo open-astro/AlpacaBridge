@@ -1110,6 +1110,90 @@ TEST_CASE("SynScan initiator supersede - Tracking off during a long RA landing m
     driver->set_connected(false);
 }
 
+namespace {
+
+// A Tracking write queued behind the RA landing move, then `initiator` (AbortSlew, or MoveAxis(0, 0)) behind it: the
+// write's `T0` goes out first, so the initiator's tracking restore must use the mode at its own turn (off), not the
+// one cached when it was called.
+void check_initiator_behind_queued_tracking_write(const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    st->ra_offset_counts.store(150);  // 11.6" off: one timed RA move of several seconds at 2"/s
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    driver->set_guide_rate(alpacacore::GuideRate{2.0 / 3600.0, 2.0 / 3600.0});
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
+    const auto deadline = clock.now() + std::chrono::seconds(40);
+    while (st->nudge_starts.load() < 1 && clock.now() < deadline) {
+        step_virtual(clock);
+    }
+    REQUIRE(st->nudge_starts.load() == 1);
+    const auto started = st->wire_log();
+    const auto start = std::find_if(started.begin(), started.end(), is_ra_rate_start);
+    REQUIRE(start != started.end());
+    const auto move_start = static_cast<std::ptrdiff_t>(start - started.begin());
+
+    std::promise<void> written;
+    auto write_done = written.get_future();
+    std::thread writer([&] {
+        try {
+            driver->set_tracking(false);
+            written.set_value();
+        } catch (...) {
+            written.set_exception(std::current_exception());
+        }
+    });
+    // Virtual time stands still: the write has its ticket and waits for the move's turn.
+    CHECK(write_done.wait_for(std::chrono::milliseconds(300)) == std::future_status::timeout);
+    // The initiator claims, which ends the move at once; it then waits for the write's turn.
+    std::exception_ptr initiator_error;
+    try {
+        initiator(*driver);
+    } catch (...) {
+        initiator_error = std::current_exception();
+    }
+    const bool wrote = write_done.wait_for(std::chrono::seconds(3)) == std::future_status::ready;
+    if (!wrote) {
+        driver->set_connected(false);  // ends the move so the writer can be joined
+    }
+    writer.join();
+    REQUIRE(wrote);
+    CHECK_NOTHROW(write_done.get());
+    CHECK_FALSE(initiator_error);
+    advance_idle(clock, std::chrono::milliseconds(600));
+
+    const auto wire = st->wire_log();
+    std::string order;
+    for (const auto& command : wire) order += command.empty() ? '?' : command[0];
+    INFO("wire order " << order);
+    std::vector<int> modes;  // every tracking write after the move's start, in wire order
+    for (auto it = wire.begin() + move_start + 1; it != wire.end(); ++it) {
+        if (is_tracking_write(*it)) modes.push_back(static_cast<unsigned char>((*it)[1]));
+    }
+    REQUIRE_FALSE(modes.empty());
+    CHECK(modes.back() == 0);  // nothing turned tracking back on after the client's write
+    CHECK(st->ra_motor_speed() == 0.0);
+    CHECK(st->tracking_mode.load() == 0);
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+}  // namespace
+
+TEST_CASE("SynScan initiator supersede - AbortSlew queued behind a Tracking write keeps tracking off",
+          "[synscan][initiator-supersede][goto-landing]") {
+    check_initiator_behind_queued_tracking_write([](auto& driver) { driver.abort_slew(); });
+}
+
+TEST_CASE("SynScan initiator supersede - an RA MoveAxis stop queued behind a Tracking write keeps tracking off",
+          "[synscan][initiator-supersede][goto-landing]") {
+    check_initiator_behind_queued_tracking_write([](auto& driver) { driver.move_axis(0, 0.0); });
+}
+
 // With no motion in flight the turn is free: the write goes out at once and is the same `T` as before.
 TEST_CASE("SynScan initiator supersede - a Tracking write while idle sends its T at once",
           "[synscan][initiator-supersede][goto-landing]") {
