@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -117,7 +118,15 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
                         ++stale;
                     }
                 } catch (const alpacacore::AlpacaException& ex) {
-                    if (ex.error_code() != alpacacore::AlpacaError::NotConnected) {
+                    // A snapshot reader that overlaps a reconnect can find
+                    // the new session's snapshot still empty: "not available
+                    // yet" is then a true answer. Any other error, or that
+                    // one from a call inside one session, is a regression.
+                    const bool overlapped = before == -1 || epoch.load() != before;
+                    const bool not_yet =
+                        kind <= 1 && overlapped && ex.error_code() == alpacacore::AlpacaError::DriverException &&
+                        std::string_view(ex.what()).find("Focuser state not available yet") != std::string_view::npos;
+                    if (ex.error_code() != alpacacore::AlpacaError::NotConnected && !not_yet) {
                         if (unexpected.fetch_add(1) == 0) {
                             std::lock_guard<std::mutex> lock(first_mutex);
                             first_unexpected = ex.what();
