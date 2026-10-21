@@ -1953,12 +1953,14 @@ public:
                 check_connected();
                 stop_error = "the stops were not sent";
             }
+            // An aborted park never reaches AtPark, even when a stop failed: the claim above superseded the park
+            // body, whose abandon hook (park()) then leaves parking_ alone, so nothing else would end it.
+            parking_ = false;
             if (!stop_error.empty()) {
                 last_slew_error_ = "AbortSlew stop failed: " + stop_error;
-                // The mount may still be moving: leave Slewing and the slew state as they were.
+                // The mount may still be moving: leave Slewing and the rest of the slew state as they were.
                 throw AlpacaException("AbortSlew stop failed: " + stop_error, AlpacaError::DriverException);
             }
-            parking_ = false;  // an aborted park never reaches AtPark
             bump_motion_generation();
             set_slewing_locked(false);
             clear_pulse_guiding_locked();
