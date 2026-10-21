@@ -4273,8 +4273,8 @@ private:
     // run would do it). XOR-ing the branch test with the hemisphere is the
     // full fix: MoveAxis, which then applied no sign transform at all (since #297 it does), is the
     // hardware-observed reference for which way a raw axis rate moves reported Dec
-    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -33.856784). The sign is evaluated once at
-    // (re)apply time and held: it is NOT re-evaluated as this offset's own motion carries the axis across the branch
+    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -33.856784). The sign is evaluated once
+    // at (re)apply time and held: it is NOT re-evaluated as this offset's own motion carries the axis across the branch
     // boundary (a2 through 0). This was tracked as a bug for a while (open-astro#255, deferred from #214) and even
     // implemented -- and the "fix" made the axis reverse and oscillate right at the crossing, breaking the
     // "DeclinationRate drives Dec with the east-branch sign" loopback test, which asserts a HELD sign for exactly this

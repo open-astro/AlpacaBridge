@@ -8479,13 +8479,13 @@ int main() {
         // The vendor-agnostic keys sanitize_device_config() keeps for every
         // device (responseTimeoutMs, site, optics, syncTimeOnConnect) survive
         // a catalog-sanitized save too, as they did through the deleted arm.
-        const auto shared =
-            api_attempt(router,
-                        nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
-                                              R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
-                                              R"("siteLatitude":-33.856784,"siteLongitude":151.215297,"siteElevation":30.0,)"
-                                              R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
-                        "Focuser");
+        const auto shared = api_attempt(
+            router,
+            nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
+                                  R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
+                                  R"("siteLatitude":-33.856784,"siteLongitude":151.215297,"siteElevation":30.0,)"
+                                  R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
+            "Focuser");
         EXPECT(shared.ok);
         EXPECT(shared.config.value("count", -1) == 3);
         EXPECT(shared.config.value("responseTimeoutMs", -1) == 2500);
