@@ -612,19 +612,10 @@ private:
     }
 
     StateFrame served_frame() const {
-        // Read before the check: the generation rises at the open, before the
-        // connect resets the snapshot and before connected_ is set.
-        const auto session = protocol_.session_generation();
         ensure_connected();
         throw_if_faulted();
         auto reading = snapshot_.read();
         if (!reading.has_value()) {
-            // A reconnect since the check above reset the snapshot: this
-            // call belongs to a session that is gone, not to a connected one
-            // waiting for its first frame.
-            if (protocol_.session_generation() != session) {
-                throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
-            }
             // Connected but no frame: the connect's polls were lost, or a
             // racing Move/Halt write dropped it. Getters never touch the
             // device (decisions 0010 and 0016): answer "not available yet"
