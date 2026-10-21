@@ -59,6 +59,7 @@ struct FakeSynScanState {
     std::atomic<bool> report_slewing{false};  // true: slewing queries answer "slewing" whatever the fake clock says
     std::atomic<int> gate_l_ms{0};  // >0: the next slewing query is held this long, then answered "not slewing"
     std::atomic<Clock::rep> gate_l_entered{0};
+    std::atomic<int> model{50};  // the handset's model id ('m'): 50 is equatorial, 5 an AZ-EQ mount
     std::mutex command_mutex;
     std::vector<std::string> commands;
     void record(const std::string& command) {
@@ -125,7 +126,7 @@ alpacacore::test::FakeMountServer::Responder synscan_responder(const std::shared
             case 'P':  // passthrough
                 return "#";
             case 'm':
-                return std::string(1, static_cast<char>(50)) + "#";
+                return std::string(1, static_cast<char>(st->model.load())) + "#";
             case 't':  // tracking mode read: sidereal tracking on
                 return std::string(1, '\x01') + "#";
             case 'h':  // handset time, 8 binary bytes: 12:00:00 on 1 Jan 2026, UTC (a short answer times out)
@@ -164,8 +165,9 @@ struct Rig {
     std::shared_ptr<FakeSynScanState> st = std::make_shared<FakeSynScanState>();
     std::unique_ptr<alpacacore::test::FakeMountServer> server;
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
-    Rig() {
+    explicit Rig(int model = 50) {
         st->clock = &clock;
+        st->model.store(model);
         server = std::make_unique<alpacacore::test::FakeMountServer>(synscan_responder(st));
         REQUIRE(server->ok());
         driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
@@ -189,8 +191,8 @@ struct Timing {
 };
 
 Timing time_second_initiator(const char* name, const std::function<void(alpacacore::TelescopeDriver&)>& first,
-                             const std::function<void(alpacacore::TelescopeDriver&)>& second) {
-    Rig rig;
+                             const std::function<void(alpacacore::TelescopeDriver&)>& second, int model = 50) {
+    Rig rig(model);
     rig.st->gate_ms.store(kHoldMs);
     first(*rig.driver);
     REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
@@ -274,6 +276,32 @@ TEST_CASE("SynScan initiator supersede - Park during a blocked goto exchange", "
         "slew->Park", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); });
     CHECK(timing.probe_ms < kHoldMs / 2);
     CHECK(timing.took_ms < kHoldMs / 2);
+}
+
+// An AZ-EQ mount with alignment Auto has no known geometry, so Park saves its target as RA/Dec, the position then.
+TEST_CASE("SynScan initiator supersede - Park on an AZ-EQ mount during a blocked goto exchange",
+          "[synscan][initiator-supersede]") {
+    const auto timing = time_second_initiator(
+        "slew->Park AZ-EQ", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); }, 5);
+    CHECK(timing.took_ms < kHoldMs / 2);
+}
+
+// Park reads no tracking mode, so on a fresh connect AbortSlew's is the first since connect. AbortSlew may wait for
+// the exchange in flight, but without the driver lock: a getter answers meanwhile.
+TEST_CASE("SynScan initiator supersede - AbortSlew during a Park on a fresh connect",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.st->gate_ms.store(kHoldMs);
+    rig.driver->park();
+    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
+    std::thread abort([&] { rig.driver->abort_slew(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const auto probe_t0 = Clock::now();
+    (void)rig.driver->get_at_park();
+    const long probe_ms = ms_since(probe_t0);
+    abort.join();
+    std::printf("AbortSlew during Park: probe answered after %ld ms (hold %d ms)\n", probe_ms, kHoldMs);
+    CHECK(probe_ms < kHoldMs / 2);
 }
 
 // The old body is inside its second slewing query (held) when MoveAxis replaces it. The query then answers "not
