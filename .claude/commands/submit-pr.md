@@ -416,18 +416,18 @@ head SHA that was not cancelled or skipped has completed (a failed run counts: t
 fail after the verdict was posted), none is still queued or running, and the newest bot verdict
 was updated after that run started. Commit dates are not used: a commit's committer date is when it
 was made locally, so a verdict on the previous head can be newer than it. The block below applies that
-rule every three minutes (`TICK`) within a 80-minute budget (the review job first waits up to 45 minutes for CI's build and test jobs), first look after one tick so a
+rule every three minutes (`TICK`) within a 95-minute budget (the review job first waits up to 45 minutes for CI's build and test jobs), first look after one tick so a
 run just re-triggered on the same head has appeared; `BUDGET=0` gives a single immediate look
 when nothing was just re-triggered (do NOT foreground-sleep; run
 it with `run_in_background`). It is the same block as `/pr-checker` Step 2:
 
 ```bash
-PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-4800} ))
+PR=<number>; TICK=${TICK:-180}; DEADLINE=$(( $(date +%s) + ${BUDGET:-5700} ))
 # A re-trigger on the same head (relabel, update-branch) takes a few seconds to show a
 # new check-run; a first look inside that window classifies the OLD run as final. So a
 # real poll sleeps one tick before it looks. BUDGET=0 is the one-pass pre-check, which
 # is only valid when nothing was just re-triggered, and looks at once.
-if [ "${BUDGET:-4800}" -gt 0 ]; then sleep "$TICK"; fi
+if [ "${BUDGET:-5700}" -gt 0 ]; then sleep "$TICK"; fi
 while :; do
   # Bind the verdict to the review check-run on the head SHA (filter=all so a later
   # cancelled attempt cannot hide the finished one). Everything is fetched with
@@ -503,13 +503,13 @@ while :; do
   [ "$(date +%s)" -ge "$DEADLINE" ] && break
   sleep "$TICK"
 done
-echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-4800} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
+echo "NO VERDICT for head ${SHA:-?} after $(( ${BUDGET:-5700} / 60 )) min (review runs pending: ${PENDING:-?}, newest finished: ${RUN_STATE:-none})" >&2; exit 1
 ```
 
 **Exit `1` from a `BUDGET=0` pre-check is not a timeout.** Right after `gh pr create` or a push
 there is no `review` check-run yet, so the single look finds nothing and exits `1` with "after
 0 min": that means **no verdict yet**, start the real poll. Only an exit `1` from the full
-80-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
+95-minute budget is a stall. **Skip the pre-check when the bot was just re-triggered on the same
 head** (the maintainer just applied `safe-to-review`, or you just ran `update-branch`): for a
 few seconds the only check-run is the old skipped or cancelled one, and the pre-check would
 report it as final. Start the real poll instead; its first look comes after one tick.
