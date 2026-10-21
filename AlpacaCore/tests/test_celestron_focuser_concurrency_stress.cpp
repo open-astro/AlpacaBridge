@@ -102,6 +102,7 @@ TEST_CASE("Celestron focuser - getters across reconnects never serve a prior ses
                 try {
                     const int position = focuser.get_position();
                     static_cast<void>(focuser.get_is_moving());
+                    static_cast<void>(focuser.get_max_step());
                     static_cast<void>(focuser.get_device_state());
                     if (before >= 0 && epoch.load() == before) {
                         ++served;
