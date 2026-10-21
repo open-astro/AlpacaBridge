@@ -8483,7 +8483,7 @@ int main() {
             api_attempt(router,
                         nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":3,)"
                                               R"("responseTimeoutMs":2500,"apertureDiameter":0.2,"focalLength":1.0,)"
-                                              R"("siteLatitude":-41.5,"siteLongitude":174.5,"siteElevation":30.0,)"
+                                              R"("siteLatitude":-33.856784,"siteLongitude":151.215297,"siteElevation":30.0,)"
                                               R"("learnSiteFromClient":true,"syncTimeOnConnect":false})"),
                         "Focuser");
         EXPECT(shared.ok);
@@ -8491,8 +8491,8 @@ int main() {
         EXPECT(shared.config.value("responseTimeoutMs", -1) == 2500);
         EXPECT(shared.config.value("apertureDiameter", -1.0) == 0.2);
         EXPECT(shared.config.value("focalLength", -1.0) == 1.0);
-        EXPECT(shared.config.value("siteLatitude", 0.0) == -41.5);
-        EXPECT(shared.config.value("siteLongitude", 0.0) == 174.5);
+        EXPECT(shared.config.value("siteLatitude", 0.0) == -33.856784);
+        EXPECT(shared.config.value("siteLongitude", 0.0) == 151.215297);
         EXPECT(shared.config.value("siteElevation", 0.0) == 30.0);
         EXPECT(shared.config.value("learnSiteFromClient", false) == true);
         EXPECT(shared.config.value("syncTimeOnConnect", true) == false);

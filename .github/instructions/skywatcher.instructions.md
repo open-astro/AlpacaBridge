@@ -122,7 +122,7 @@ datagrams before each send so replies cannot get off-by-one.
   because a mount facing the other pole is the same mount turned half a turn about the
   vertical, and with the board's dec-axis count sense `eps`, which is wiring, not
   latitude (#458). `eps` is **measured, per mount code** (`measured_dec_axis_sense()`):
-  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +37.2 latitude on the same rig
+  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +51.477833 latitude on the same rig
   2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north), +1 for the
   EQ-AL55i Pro (0x09; a reporter's mount at about +40, 2026-09-20, #579). Every other
   board keeps `k = +1`, the shipped model, which is 12 h out wherever that board's
@@ -647,7 +647,7 @@ against its checklist, 2026-09-06:
   internal contradiction to expose (whichever side the code calls pierEast, it consistently
   slews to and reports that side). Loopback regressions asserting the flip contract on the
   EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
-  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at -37, TRACE log): gotos
+  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at -33.856784, TRACE log): gotos
   across the meridian and back, with the board's `:j` counts at every exposure. Every landing's
   dec branch was on the side of the meridian the solved hour angle puts it: `a2 < 0` for the
   east-side (HA < 0) targets IC 5148 and a Capricornus field, `a2 >= 0` for every west one, with
@@ -830,7 +830,7 @@ and each time the assertion itself was the review finding.
 
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
-  - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
+  - Pointing math at latitude -33.856784: home points at the SOUTH celestial pole, so
     `dec = -90 + a2`. The session "verified" this against raw counts — reported HA
     matched axis 1 to 0.0004 deg, and alt/az recomputed from the reported RA/Dec matched
     to 4 decimal places. **That was self-consistency only**: the driver reports the model
@@ -896,7 +896,7 @@ and each time the assertion itself was the review finding.
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
   - **Absolute pointing and the southern meridian flip: plate-solved 2026-09-24.** Same
-    EQM-35 Pro at -37, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
+    EQM-35 Pro at -33.856784, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
     so every `:S` goto target, `:j` read and `:E` sync is in the log. The driver sent exactly
     its formula's axes on the 12 gotos that have a solve (a2 to 0.000 deg, a1 within the
     seconds between computing and logging the frame), and the board landed on the commanded
@@ -977,7 +977,7 @@ exposed to this rule (since #297 it applies the same branch/hemisphere XOR).
 `(branch_from_axis_locked(a2) > 0) != hemisphere_south_locked()` (XOR), which reproduces the
 table above (the reader is the plain `a2 >= 0` sign outside the sub-arcsecond deadband at
 the pole, see #459). Two loopback regressions on the EQM-35 Pro
-profile at latitude -37.2 assert the ASCOM contract against the driver's own pointing
+profile at latitude -33.856784 assert the ASCOM contract against the driver's own pointing
 model -- reported Declination RISES under `+DeclinationRate` and after a North pulse --
 and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11.25
 arcsec respectively, the exact mirror of the passing northern-hemisphere cases). The

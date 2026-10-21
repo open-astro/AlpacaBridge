@@ -71,7 +71,7 @@ constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
     switch (mount_code) {
         case 0x09:  // EQ-AL55i Pro: dovetail west at a2 = +89.4, north (+40), 2026-09-20
             return +1;
-        case 0x32:  // EQM-35 Pro: -37.2 on 2026-09-12, and at +37.2 on 2026-09-19
+        case 0x32:  // EQM-35 Pro: -33.856784 on 2026-09-12, and at +51.477833 on 2026-09-19
             return -1;
         case 0x45:  // Wave 150i: the #432 report, +45.45
             return +1;
@@ -3244,7 +3244,7 @@ private:
     // sky position while the driver reported the target back. It passed
     // ConformU because the driver reports the same model it commands.
     //
-    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at latitude -37.2 (rounded)
+    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at latitude -33.856784
     // with the shipped 3.5.1 build, tube position read off the mount by hand.
     // Each row is an axis position the driver was commanded to, and where the
     // OTA physically ended up:
@@ -3269,7 +3269,7 @@ private:
     //
     // The fifth (open-astro#458), 2026-09-19, the same EQM-35 Pro with the
     // 4.0.0 build, still set up facing the south pole but with the driver's
-    // latitude at +37.2, which is a northern mount turned half a turn about
+    // latitude at +51.477833, which is a northern mount turned half a turn about
     // the vertical. For HA -3 h, dec +30 the driver sent a1 = +45, a2 = -60
     // and reported alt 52, az 87; the saddle ended front-left and slightly
     // down (SE, about -8 deg), which is HA +9 h, alt -10.7: 12 h out, the k
@@ -4273,7 +4273,7 @@ private:
     // run would do it). XOR-ing the branch test with the hemisphere is the
     // full fix: MoveAxis, which then applied no sign transform at all (since #297 it does), is the
     // hardware-observed reference for which way a raw axis rate moves reported Dec
-    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -37.2). The sign is evaluated once at
+    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -33.856784). The sign is evaluated once at
     // (re)apply time and held: it is NOT re-evaluated as this offset's own motion carries the axis across the branch
     // boundary (a2 through 0). This was tracked as a bug for a while (open-astro#255, deferred from #214) and even
     // implemented -- and the "fix" made the axis reverse and oscillate right at the crossing, breaking the

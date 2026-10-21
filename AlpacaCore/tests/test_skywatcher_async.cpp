@@ -2505,7 +2505,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the R
     CHECK(south_after < south_before);
 
     // A write that stays in the same hemisphere must not disturb the drive.
-    driver->set_site_latitude(-37.2);
+    driver->set_site_latitude(-33.856784);
     const double same_before = mount.axis_degrees(1);
     elapse(clock, std::chrono::milliseconds(800));
     const double same_after = mount.axis_degrees(1);
@@ -2873,7 +2873,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 //
 // The hardware-validated MoveAxis data point
 // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at
-// latitude -37.2: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
+// latitude -33.856784: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
 // axis rate on the a2 >= 0 branch increases sky Dec below the equator) is
 // the independent check that the south-of-equator direction asserted here
 // is the physically correct one, not just internally consistent.
@@ -4030,12 +4030,12 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
     CHECK(has("Tracking"));
 
     // Writing the second coordinate makes the mount usable without a reconnect.
-    driver->set_site_latitude(-37.2);
+    driver->set_site_latitude(-33.856784);
     expect_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
-    driver->set_site_longitude(174.9);
+    driver->set_site_longitude(151.215297);
     CHECK_NOTHROW(driver->get_right_ascension());
     CHECK_NOTHROW(driver->get_sidereal_time());
-    CHECK(driver->get_site_latitude() == -37.2);
+    CHECK(driver->get_site_latitude() == -33.856784);
     REQUIRE_NOTHROW(driver->set_tracking(true));
     CHECK(driver->get_tracking());
     // Elevation waits for its own write, not for the coordinates.
