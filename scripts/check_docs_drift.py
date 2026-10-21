@@ -188,6 +188,13 @@ Checks:
      the issue that finishes it. The rosters were prose in five places and
      three disagreed with the code (PR #1410). Check 7 also resolves a
      comment that cites a record by number only (`docs/decisions/0008`).
+ 24. The review job's time budget agrees everywhere it is restated: the
+     `timeout-minutes` of the `review` job and the `N * 60` wait deadline in
+     claude-review.yml against the ci-gates instructions (wait, job timeout,
+     poll) and both skills (the "up to N minutes" wait, the `BUDGET:-<seconds>`
+     defaults and the "N-minute budget" prose); the two skills agree with each
+     other, and the poll budget is greater than the job timeout (a poll that
+     ends first reports a healthy run as a stall).
 """
 
 import glob
@@ -2488,6 +2495,76 @@ def check_decision_adoption(root=ROOT):
 MIN_ADOPTION_RECORDS = 6
 
 
+# --- check 24: review job time budget ------------------------------------------
+
+REVIEW_WORKFLOW = ".github/workflows/claude-review.yml"
+REVIEW_GATES_DOC = ".github/instructions/ci-gates.instructions.md"
+REVIEW_SKILLS = (".claude/commands/pr-checker.md", ".claude/commands/submit-pr.md")
+
+
+def _review_budget_findings(workflow, gates, skills):
+    """Check 24 over the texts ({skill path: text} for skills). Pure, so --self-test can drive it.
+
+    The workflow owns two figures: the review job's `timeout-minutes` and the
+    `N * 60` deadline of its wait step. The ci-gates line and both skills
+    restate them (wait minutes, job minutes, poll budget), and the poll has to
+    outlast the job or a healthy run reads as a stall.
+    """
+    findings = []
+    job = re.search(r"^  review:\n(?:(?!^  \S).*\n)*?    timeout-minutes: (\d+)", workflow, re.M)
+    wait = re.search(r"\+ (\d+) \* 60 \)\)", workflow)
+    if not job or not wait:
+        return ["%s: could not read the review job's timeout-minutes or the wait step's `N * 60` deadline: "
+                "the reader is stale" % REVIEW_WORKFLOW]
+    job_min, wait_min = int(job.group(1)), int(wait.group(1))
+
+    def figures(path, text, pattern, what, scale=1):
+        found = [int(m.group(1)) // scale for m in re.finditer(pattern, text)]
+        if not found:
+            findings.append("%s: found no %s: the reader is stale" % (path, what))
+        return [(path, n) for n in found]
+
+    polls = []
+    expected = []
+    flat = {path: re.sub(r"\s+", " ", text) for path, text in [(REVIEW_GATES_DOC, gates)] + sorted(skills.items())}
+    g = flat[REVIEW_GATES_DOC]
+    expected += [(n, "wait", wait_min) for n in figures(REVIEW_GATES_DOC, g, r"waits up to (\d+) minutes", "wait prose")]
+    expected += [(n, "wait", wait_min) for n in figures(REVIEW_GATES_DOC, g, r"up to (\d+) waiting for CI", "wait figure")]
+    expected += [(n, "job timeout", job_min) for n in figures(REVIEW_GATES_DOC, g, r"`claude-review` \((\d+) min", "job timeout figure")]
+    gate_poll = figures(REVIEW_GATES_DOC, g, r"(\d+)-minute verdict poll", "poll figure")
+    polls += gate_poll
+    for path, text in sorted(flat.items()):
+        if path == REVIEW_GATES_DOC:
+            continue
+        expected += [(n, "wait", wait_min) for n in figures(path, text, r"waits (?:first )?up to (\d+) minutes", "wait prose")]
+        budget = figures(path, text, r"BUDGET:-(\d+)", "`BUDGET:-<seconds>` default", scale=60)
+        prose = figures(path, text, r"(\d+)-minute (?:budget|deadline)", "`N-minute budget` prose")
+        polls += budget + prose
+    for (path, n), what, want in expected:
+        if n != want:
+            findings.append("%s says %d minutes for the %s, but %s says %d" % (path, n, what, REVIEW_WORKFLOW, want))
+    values = sorted({n for _, n in polls})
+    if len(values) > 1:
+        findings.append("the poll budget disagrees across the docs: %s" % "; ".join(
+            "%s says %d minutes" % (path, n) for path, n in sorted(polls)))
+    for path, n in polls:
+        if n <= job_min:
+            findings.append("%s: the %d-minute poll budget must be greater than the review job's %d-minute "
+                            "timeout in %s, or a healthy run reads as a stall" % (path, n, job_min, REVIEW_WORKFLOW))
+    return findings
+
+
+def check_review_budget_agrees(root=ROOT):
+    root = Path(root)
+    try:
+        return _review_budget_findings(
+            (root / REVIEW_WORKFLOW).read_text(encoding="utf-8"),
+            (root / REVIEW_GATES_DOC).read_text(encoding="utf-8"),
+            {p: (root / p).read_text(encoding="utf-8") for p in REVIEW_SKILLS})
+    except OSError as e:
+        return ["could not read %s: %s" % (e.filename, e.strerror)]
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2513,6 +2590,8 @@ CHECKS = [
     ("AGENTS.md stays within its size budget", check_agents_md_size),
     ("Decision records follow the README shape (status, sections, Rules lines, index)", check_decision_records),
     ("Decision record Adoption tables match the code", check_decision_adoption),
+    ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
+     check_review_budget_agrees),
 ]
 
 
@@ -3332,6 +3411,37 @@ def self_test():
           f is not None and len(f) == 2 and all("nightly.yml:2" in x for x in f))
     f = cache_prefixes("jobs:\n  a:\n    steps:\n      - run: echo\n")
     check("cache prefixes: no key at all is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
+
+    # check 24: review job time budget.
+    rwf = "jobs:\n  review:\n    runs-on: x\n    timeout-minutes: 90\n    steps:\n      - run: |\n          deadline=$(( $(date +%s) + 45 * 60 ))\n"
+    rgates = ("waits up to 45 minutes for them. `claude-review` (90 min:\n  up to 45 waiting for CI, then up to 45 for the review) "
+              "is outlasted by the 95-minute verdict poll in")
+    rskill = lambda n: "waits up to 45 minutes for CI; a 95-minute budget; DEADLINE=$(( x + ${BUDGET:-%d} ))" % n
+    rskills = {REVIEW_SKILLS[0]: rskill(5700), REVIEW_SKILLS[1]: rskill(5700)}
+
+    def budget(wf=rwf, gates=rgates, skills=rskills):
+        return attempt("review budget", lambda: _review_budget_findings(wf, gates, skills))
+
+    check("review budget: agreeing figures are clean", budget() == [])
+    f = budget(wf=rwf.replace("timeout-minutes: 90", "timeout-minutes: 75"))
+    check("review budget: a changed job timeout is reported against ci-gates",
+          f is not None and any("90 minutes for the job timeout" in x for x in f))
+    f = budget(wf=rwf.replace("45 * 60", "50 * 60"))
+    check("review budget: a changed wait deadline is reported", f is not None and any("for the wait" in x for x in f))
+    f = budget(gates=rgates.replace("95-minute", "80-minute"))
+    check("review budget: a stale ci-gates poll figure is reported", f is not None and any("disagrees" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700), REVIEW_SKILLS[1]: rskill(4800)})
+    check("review budget: one skill left on the old BUDGET default is reported",
+          f is not None and any("disagrees" in x and "80 minutes" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700).replace("a 95-minute", "a 80-minute"), REVIEW_SKILLS[1]: rskill(5700)})
+    check("review budget: stale N-minute prose in a skill is reported", f is not None and any("80 minutes" in x for x in f))
+    f = budget(skills={REVIEW_SKILLS[0]: rskill(5700).replace("up to 45", "up to 40"), REVIEW_SKILLS[1]: rskill(5700)})
+    check("review budget: a skill's wait prose is checked", f is not None and any("40 minutes for the wait" in x for x in f))
+    f = budget(wf=rwf.replace("timeout-minutes: 90", "timeout-minutes: 120"))
+    check("review budget: a poll budget not above the job timeout is reported",
+          f is not None and any("must be greater" in x for x in f))
+    f = budget(wf="jobs:\n  other:\n    timeout-minutes: 5\n")
+    check("review budget: an unreadable workflow is a finding, not a pass", f is not None and len(f) == 1 and "stale" in f[0])
 
     # check 21: AGENTS.md size budget.
     check("agents size: a file at the budget is clean", _agents_md_size_findings(AGENTS_MD_MAX_BYTES) == [])

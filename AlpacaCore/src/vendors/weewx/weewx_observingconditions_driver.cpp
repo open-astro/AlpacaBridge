@@ -333,9 +333,7 @@ public:
         return DeviceType::ObservingConditions;
     }
 
-    std::string get_unique_id() const override {
-        return "WEEWX_OC_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "WEEWX_OC_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "WeeWX ObservingConditions from HTTP JSON";

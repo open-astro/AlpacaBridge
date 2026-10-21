@@ -119,8 +119,7 @@ NormalizeResult normalize_camera(const DeviceConfig& in, Source source) {
         bool (*valid)(const std::string&);
         const char* why;
     } checks[] = {{kZwoCamSerial, zwo_serial_valid, "is not a hexadecimal serial of at most 64 digits"},
-                  {kZwoCamName, zwo_identity_text_valid, "contains control characters"},
-                  {kZwoCamUniqueId, zwo_identity_text_valid, "contains control characters"}};
+                  {kZwoCamName, zwo_identity_text_valid, "contains control characters"}};
     for (const auto& check : checks) {
         if (check.valid(in.get(check.field))) continue;
         if (source == Source::Api) {

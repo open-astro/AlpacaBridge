@@ -73,7 +73,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override { return "GEMINI_FLATPANEL_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "GEMINI_FLATPANEL_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "Gemini Astro Flat Panel Cover Lite Driver"; }
 
@@ -433,7 +433,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         return (is_pro() ? "GEMINI_FLATPANEL_PRO_" : "GEMINI_FLATPANEL_V2_") + std::to_string(device_number_);
     }
 

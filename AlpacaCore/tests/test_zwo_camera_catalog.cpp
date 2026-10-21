@@ -94,7 +94,7 @@ TEST_CASE("ZWO camera catalog - learns the serial and model name from the camera
     CHECK_FALSE(result.rejection.has_value());
     CHECK(learned(result, "serialNumber") == std::string(kFakeSerial));
     CHECK(learned(result, "cameraName") == std::string(kFakeName));
-    // A body that reports a serial needs no generated UniqueID.
+    // The UniqueID is the router's persisted GUID (decision 0018): bind never learns one.
     CHECK_FALSE(learned(result, "uniqueId").has_value());
     CHECK(rig.sdk.call_count("enumerate_identified_cameras") == 1);
 
@@ -107,7 +107,7 @@ TEST_CASE("ZWO camera catalog - learns the serial and model name from the camera
     CHECK(again.learned.entries().empty());
 }
 
-TEST_CASE("ZWO camera catalog - generates a UniqueID when no serial is known and the SDK fails",
+TEST_CASE("ZWO camera catalog - registers a serial-less camera without learning a UniqueID",
           "[catalog][zwo][camera][unit]") {
     Rig rig;
     rig.sdk.before_call = [](const std::string& call) {
@@ -118,38 +118,24 @@ TEST_CASE("ZWO camera catalog - generates a UniqueID when no serial is known and
     REQUIRE(result.driver != nullptr);
     CHECK_FALSE(result.rejection.has_value());
     CHECK_FALSE(learned(result, "serialNumber").has_value());
-    const auto unique_id = learned(result, "uniqueId");
-    REQUIRE(unique_id.has_value());
-    CHECK(unique_id->rfind("ZWO_UID_", 0) == 0);
+    // Decision 0018: no ZWO_UID_ is generated or stored; the router assigns the GUID.
+    CHECK_FALSE(learned(result, "uniqueId").has_value());
 }
 
-TEST_CASE("ZWO camera catalog - keeps the UniqueID stored for the same device number", "[catalog][zwo][camera][unit]") {
+TEST_CASE("ZWO camera catalog - ignores a uniqueId in the config and in its peers", "[catalog][zwo][camera][unit]") {
     Rig rig;
     rig.sdk.before_call = [](const std::string&) { throw AlpacaException("no usb", AlpacaError::DriverException); };
-    // A re-configure that does not resend uniqueId keeps the one stored for this number,
-    // and hands it back so the entry stores it again.
-    const BindResult kept =
-        bind(rig, camera_config(1), 4, Source::Api, {peer(4, std::nullopt, "ZWO_UID_0011223344556677")});
-    REQUIRE(kept.driver != nullptr);
-    CHECK(learned(kept, "uniqueId") == std::string("ZWO_UID_0011223344556677"));
-
-    // A stored id with a control byte is not trusted: a new one is generated.
-    const BindResult forged =
-        bind(rig, camera_config(1), 4, Source::Persisted, {peer(4, std::nullopt, "ZWO_UID_\n77")});
-    const auto regenerated = learned(forged, "uniqueId");
-    REQUIRE(regenerated.has_value());
-    CHECK(regenerated->rfind("ZWO_UID_", 0) == 0);
-    CHECK(*regenerated != "ZWO_UID_\n77");
-
-    // The id the client supplies wins over the stored one and is not "learned".
-    DeviceConfig supplied = camera_config(1);
-    supplied.set("uniqueId", std::string("ZWO_UID_aaaaaaaaaaaaaaaa"));
-    const BindResult mine = bind(rig, supplied, 4, Source::Api, {peer(4, std::nullopt, "ZWO_UID_0011223344556677")});
-    REQUIRE(mine.driver != nullptr);
-    CHECK_FALSE(learned(mine, "uniqueId").has_value());
+    // uniqueId is not a ZWO field any more (decision 0018): the same value on two
+    // entries is no duplicate for bind, and nothing about it is learned or refused.
+    DeviceConfig with_uid = camera_config(1);
+    with_uid.set("uniqueId", std::string("ZWO_UID_00112233445566ff"));
+    const BindResult result = bind(rig, with_uid, 4, Source::Api, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
+    REQUIRE(result.driver != nullptr);
+    CHECK_FALSE(result.rejection.has_value());
+    CHECK_FALSE(learned(result, "uniqueId").has_value());
 }
 
-TEST_CASE("ZWO camera catalog - refuses a serial or UniqueID another entry holds", "[catalog][zwo][camera][unit]") {
+TEST_CASE("ZWO camera catalog - refuses a serial another entry holds", "[catalog][zwo][camera][unit]") {
     Rig rig;
     DeviceConfig config = camera_config(2);
     config.set("serialNumber", std::string(kOtherSerial));
@@ -166,12 +152,6 @@ TEST_CASE("ZWO camera catalog - refuses a serial or UniqueID another entry holds
     // An empty serial is no claim on a camera, even when another entry also has none.
     const BindResult blank = bind(rig, camera_config(2), 9, Source::Api, {peer(8, std::string())});
     CHECK_FALSE(blank.rejection.has_value());
-
-    DeviceConfig with_uid = camera_config(2);
-    with_uid.set("uniqueId", std::string("ZWO_UID_00112233445566ff"));
-    const BindResult dup_uid = bind(rig, with_uid, 9, Source::Api, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
-    REQUIRE(dup_uid.rejection.has_value());
-    CHECK(*dup_uid.rejection == "Invalid value for uniqueId: another ZWO camera already uses it");
 }
 
 TEST_CASE("ZWO camera catalog - a stored duplicate is cleared and relearned", "[catalog][zwo][camera][unit]") {
@@ -193,17 +173,6 @@ TEST_CASE("ZWO camera catalog - a stored duplicate is cleared and relearned", "[
     const BindResult cleared = bind(rig, absent, 9, Source::Persisted, {peer(8, std::string(kOtherSerial))});
     REQUIRE(cleared.driver != nullptr);
     CHECK(learned(cleared, "serialNumber") == std::string());
-
-    // A duplicated UniqueID is cleared on its own.
-    DeviceConfig uid = camera_config(0);
-    uid.set("uniqueId", std::string("ZWO_UID_00112233445566ff"));
-    const BindResult fresh = bind(rig, uid, 9, Source::Persisted, {peer(8, std::nullopt, "ZWO_UID_00112233445566ff")});
-    REQUIRE(fresh.driver != nullptr);
-    CHECK_FALSE(fresh.rejection.has_value());
-    // The camera has a serial, so no UniqueID is generated: the clear is handed back as an
-    // empty uniqueId, as for a serial, so the duplicate leaves the stored file.
-    CHECK(learned(fresh, "uniqueId") == std::string());
-    CHECK(learned(fresh, "serialNumber") == std::string(kFakeSerial));
 }
 
 TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entries claim",
@@ -216,9 +185,7 @@ TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entr
     const BindResult skipped = bind(rig, by_name, 6, Source::Persisted, {peer(5, std::string(kFakeSerial))});
     REQUIRE(skipped.driver != nullptr);
     CHECK_FALSE(learned(skipped, "serialNumber").has_value());
-    const auto generated = learned(skipped, "uniqueId");
-    REQUIRE(generated.has_value());
-    CHECK(generated->rfind("ZWO_UID_", 0) == 0);
+    CHECK_FALSE(learned(skipped, "uniqueId").has_value());  // the router's GUID (decision 0018)
 
     // Without the claim the same entry binds the camera and learns its serial.
     const BindResult taken = bind(rig, by_name, 6, Source::Persisted, {});

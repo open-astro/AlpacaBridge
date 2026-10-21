@@ -1,0 +1,3 @@
+### Fixed
+
+- **The review job's wait step counts only `success` as green, and its time budget has room for the review** (CI, issue #1454): a waited-for job that is skipped, neutral or ends any other way now fails the step with the job and its conclusion, so a `needs:` or `if:` that skips one cannot let the review run on a red head. The `review` job's `timeout-minutes` is 90 (45 waiting for CI, 45 for the review) and the `/pr-checker` and `/submit-pr` poll budget is 95 minutes. Docs-drift check 24 pins those figures across the workflow, the ci-gates instructions and both skills, with a case in `--self-test` for each way they can disagree.

@@ -90,7 +90,7 @@ public:
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override { return "QHY Q-Focuser"; }
     DeviceType get_device_type() const override { return DeviceType::Focuser; }
-    std::string get_unique_id() const override { return "QHY_QFOCUSER_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "QHY_QFOCUSER_" + std::to_string(device_number_); }
     std::string get_description() const override { return "QHY Q-Focuser Driver"; }
     std::string get_driver_info() const override { return "AlpacaCore QHY Q-Focuser Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }

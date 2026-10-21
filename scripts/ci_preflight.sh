@@ -24,6 +24,7 @@
 #   RUN_SCAN_BUILD=1 ./scripts/ci_preflight.sh # also run Clang Static Analyzer (advisory)
 #     (RUN_TSAN and RUN_SCAN_BUILD build their own trees and work in either mode)
 #   PREFLIGHT_NO_INSTALL=1 ./scripts/ci_preflight.sh         # never apt-install
+#   ./scripts/ci_preflight.sh --self-test      # bash 3.2 and quick-run guards (see below)
 #
 # Missing analysis tools (clang-tidy, cppcheck, shellcheck, clang-format, node)
 # are auto-installed via `sudo apt-get` unless PREFLIGHT_NO_INSTALL=1, in which case
@@ -34,6 +35,14 @@
 # ZIZMOR_VER / ZIZMOR_SHA256 below in sync with .github/workflows/ci.yml.
 #
 # Exit status: 0 only if every mandatory check passed.
+#
+# --self-test (issue #1453, run by the CI shellcheck job) re-runs the script under
+# /bin/bash -u and checks that: read_lines keeps lines literal and gives 0 elements
+# on empty input; the script has no bash 4 construct; an empty diff (PREFLIGHT_BASE=HEAD)
+# makes every change-scoped gate record SKIP, aborts nowhere and lists every gate; and
+# a quick run records the quick-run SKIP for the build+test gates and sanitizers, and
+# clang-tidy, sanitizers and both build+test gates are only reached through full_only.
+# It needs no network and no compiler. It exits non-zero and names each failed check.
 
 # Intentionally NOT using `set -e`: we want to run every gate and report a full
 # summary rather than abort on the first failure. -u and pipefail still apply.
@@ -213,8 +222,8 @@ ensure_zizmor() {
 
 # --- changed-file sets -----------------------------------------------------
 
-# read_lines <array name>: sets the named array to the lines of stdin. mapfile is
-# bash 4+, and macOS ships bash 3.2, where the quick run must work too.
+# read_lines <array name>: sets the named array to the lines of stdin. The bash 4
+# array builtin is not used: macOS ships bash 3.2, where the quick run must work too.
 read_lines() {
   local _line
   eval "$1=()"
@@ -222,6 +231,103 @@ read_lines() {
     eval "$1+=(\"\${_line}\")"
   done
 }
+
+# --- self-test (issue #1453) -----------------------------------------------
+
+# The single-quoted test strings are meant literally ($(...) must not expand).
+# shellcheck disable=SC2016
+self_test() {
+  local failed=0 out n
+  st_fail() { echo "SELF-TEST FAIL: $1" >&2; failed=1; }
+  st_ok() { echo "SELF-TEST ok: $1"; }
+
+  # Run under the system bash (macOS: 3.2) where one exists and is not this shell.
+  if [ -x /bin/bash ] && [ "${BASH:-}" != "/bin/bash" ] && [ -z "${PREFLIGHT_SELF_TEST_REEXEC:-}" ]; then
+    PREFLIGHT_SELF_TEST_REEXEC=1 exec /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" --self-test
+  fi
+  echo "Self-test shell: ${BASH_VERSION:-unknown}"
+
+  # Check 1: read_lines is literal and handles empty input.
+  local -a got=()
+  read_lines got < <(printf '%s\n' 'a b' '$(echo pwned)' "it's \"q\"" '`x`' '  lead' 'trail  ' 'a:b')
+  if [ "${#got[@]}" -eq 7 ] && [ "${got[0]}" = 'a b' ] && [ "${got[1]}" = '$(echo pwned)' ] \
+    && [ "${got[2]}" = "it's \"q\"" ] && [ "${got[3]}" = '`x`' ] \
+    && [ "${got[4]}" = '  lead' ] && [ "${got[5]}" = 'trail  ' ] && [ "${got[6]}" = 'a:b' ]; then
+    st_ok "read_lines keeps spaces, \$(...) and quotes literal"
+  else
+    st_fail "read_lines: a line differs or the count is ${#got[@]}, expected 7"
+  fi
+  read_lines got < <(printf '')
+  if [ "${#got[@]}" -eq 0 ]; then
+    st_ok "read_lines gives 0 elements on empty input"
+  else
+    st_fail "read_lines: empty input gave ${#got[@]} elements"
+  fi
+
+  # Check 4: no bash 4 construct anywhere in the script (the bracketed letters keep
+  # this pattern from matching its own line).
+  local hits
+  if hits="$(grep -nE 'map[f]ile|read[a]rray|declare +-[a-zA-Z]*A|\$\{[A-Za-z_]+(,,|\^\^)\}|\|[&]|[&]>>' "${ROOT_DIR}/scripts/ci_preflight.sh")" && [ -n "${hits}" ]; then
+    st_fail "bash 4 construct in scripts/ci_preflight.sh:"
+    echo "${hits}" >&2
+  else
+    st_ok "no bash 4 construct in scripts/ci_preflight.sh"
+  fi
+
+  # Check 2, static half: bash 3.2 aborts on an empty array expanded bare under -u
+  # (bash 4.4+ does not, so the run below cannot see it). CHANGED can be empty; every
+  # expansion must be the ${CHANGED[@]+"${CHANGED[@]}"} form.
+  if grep -nE '(^|[^"]|[^+]")\$\{CHANGED\[[@*]\]\}' "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+    st_fail "CHANGED expanded without the empty-array guard"
+  else
+    st_ok "CHANGED is only expanded with the empty-array guard"
+  fi
+
+  # Checks 2 and 3: a quick run against an empty diff (base = HEAD).
+  out="$(PREFLIGHT_BASE=HEAD PREFLIGHT_NO_INSTALL=1 PREFLIGHT_FULL=0 PREFLIGHT_SELF_TEST_REEXEC='' \
+    /bin/bash "${ROOT_DIR}/scripts/ci_preflight.sh" 2>&1 </dev/null)" || true
+  if printf '%s\n' "${out}" | grep -qE 'unbound variable|(map[f]ile|read[a]rray): command not found'; then
+    st_fail "empty-diff run aborted:"
+    printf '%s\n' "${out}" | grep -E 'unbound variable|(map[f]ile|read[a]rray): command not found' >&2
+  else
+    st_ok "empty-diff run has no unbound-variable or bash 4 builtin error"
+  fi
+  local summary
+  summary="$(printf '%s\n' "${out}" | sed -n '/Pre-flight summary/,$p')"
+  for n in 'clang-format' 'clang-tidy' 'cppcheck' 'shellcheck' 'javascript' 'zizmor'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n} \(no "; then
+      st_fail "empty diff: ${n} did not record SKIP (no ... changes)"
+    fi
+  done
+  for n in 'unicode scan' 'stress-test registration' 'falsified-by' 'pr-template' 'ConformU report validation' \
+    'docs drift check' 'connect-error hook' 'serial port ownership' 'layering gate' 'contract sweep registration' \
+    'beta VERSION split'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[(PASS|SKIP|FAIL)\] ${n}"; then
+      st_fail "summary does not list ${n}"
+    fi
+  done
+  for n in 'build\+test \(vendors OFF\)' 'build\+test \(vendors ON\)' 'sanitizers'; do
+    if ! printf '%s\n' "${summary}" | grep -qE "^  \[SKIP\] ${n} \(quick run; PREFLIGHT_FULL=1 runs it, CI always does\)"; then
+      st_fail "quick run: ${n} did not record the quick-run SKIP"
+    fi
+  done
+  # Check 3, clang-tidy: the empty diff never reaches its full_only call (no C++ changes),
+  # so check statically that each build gate is only run through full_only "<name>".
+  for n in 'build+test (vendors OFF)' 'build+test (vendors ON)' 'clang-tidy' 'sanitizers'; do
+    if ! grep -qF "full_only \"${n}\"" "${ROOT_DIR}/scripts/ci_preflight.sh"; then
+      st_fail "build gate ${n} is not guarded by full_only"
+    fi
+  done
+  if [ "${failed}" -eq 0 ]; then
+    st_ok "empty-diff and quick-run summary lists every gate; every build gate (build+test, clang-tidy, sanitizers) is quick-run guarded"
+  fi
+  return "${failed}"
+}
+
+if [ "${1:-}" = "--self-test" ]; then
+  self_test
+  exit $?
+fi
 
 # Refresh the base from the remote it names (issue #708). BASE is <remote>/<branch>
 # when its prefix is a configured remote; a failed fetch is a warning, not fatal,

@@ -166,14 +166,14 @@ public:
     DeviceType get_device_type() const override {
         return DeviceType::Telescope;
     }
-    
-    std::string get_unique_id() const override {
+
+    std::string fallback_unique_id() const override {
         if (mount_info_.model_code.empty()) {
             return "iOptron_" + std::to_string(device_number_);
         }
         return "iOptron_" + mount_info_.model_code + "_" + std::to_string(device_number_);
     }
-    
+
     std::string get_description() const override {
         return "iOptron CEM120,70,40,26, GEM, HEM, HAE, HAZ series and SkyHunter Mount Driver";
     }

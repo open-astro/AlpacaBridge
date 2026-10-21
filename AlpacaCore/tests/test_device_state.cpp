@@ -58,7 +58,7 @@ class DisconnectedDriverBase : public Base {
 public:
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "Disconnected Driver"; }
-    std::string get_unique_id() const override { return "disconnected-driver"; }
+    std::string fallback_unique_id() const override { return "disconnected-driver"; }
     std::string get_description() const override { return "test double"; }
     std::string get_driver_info() const override { return "test double"; }
     std::string get_driver_version() const override { return "0.0.0"; }

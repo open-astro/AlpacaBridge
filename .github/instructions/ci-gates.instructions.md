@@ -27,7 +27,9 @@ them collaborator/write access; the `safe-to-review` label stays the per-PR trus
 
 The bot reviews only a head whose CI build and test jobs passed: the job's first step
 ("Wait for the CI build and test jobs", which owns the list) waits up to 45 minutes for them
-and fails before the agent runs when one is red, so a red push costs no review. The step
+and fails before the agent runs when one is red, so a red push costs no review. Only `success`
+is green: a waited-for job that is skipped, neutral or ends any other way counts as red, so a
+`needs:` or `if:` that skips one cannot let the review run on a red head. The step
 matches those jobs' `name:` in `ci.yml`, so renaming one means updating the list in the same
 PR (the step fails at once with "never reported" otherwise).
 `/pr-checker` and `/submit-pr` read that failure as poll exit `4` (CI red: fix and push) or
@@ -65,7 +67,8 @@ author must do. Read the docstring before changing a gate.
   needs one registry entry; a driver that differs states its expectation in that entry with a
   source (protocol document, hardware run, or assumption), never a copy of the assertions. A
   catalog-built pair cannot be allow-listed. A connectable fake goes in `kFakeConnectableRoster`
-  (tier 2); a row whose fake cannot hold a connect open says why in `connecting_unobservable`.
+  (tier 2); a row whose fake cannot hold a connect open says why in `connecting_unobservable`. Tier 2 also checks each connected DeviceState value's
+  JSON type against the ASCOM member table in `test_contract_sweep.cpp`; a new member needs a row.
 - **Docs drift** (`scripts/check_docs_drift.py`, the `docs-drift` job): its docstring lists all
   checks. The ones authors trip: bump the `zizmor` version and sha256 in `ci.yml` and
   `ci_preflight.sh` together; keep the cppcheck `--suppress` lists identical; give each new CI job id
@@ -88,11 +91,12 @@ author must do. Read the docstring before changing a gate.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job
-  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (75 min:
-  up to 45 waiting for CI, then the review) is outlasted by the 80-minute verdict poll in
+  legitimately outgrows it, raise the number rather than trim the work. `claude-review` (90 min:
+  up to 45 waiting for CI, then up to 45 for the review) is outlasted by the 95-minute verdict poll in
   `/pr-checker` and `/submit-pr`; a poll timeout is a re-poll.
 - **Pre-flight** (`scripts/ci_preflight.sh`, the `/submit-pr` Step 4 gate) runs every gate that
-  needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2.
+  needs no build, in about a minute, and installs missing tools; it also runs on macOS's bash 3.2
+  (`ci_preflight.sh --self-test`, a step in the ShellCheck job, guards that: issue #1453).
   The build and test gates (both `run_all_tests.sh` passes, clang-tidy, ASan+UBSan) run
   only with `PREFLIGHT_FULL=1` and are reported `[SKIP]` otherwise: CI runs them on every PR, and
   the review waits for them. In a full run the ASan+UBSan pass is on by default (issue #588;

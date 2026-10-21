@@ -3102,7 +3102,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
     }
     // The camera's selectors are its own: unlike the dew heater switch's, they carry no applies_when.
     CHECK(keys_of(find_view(views, kZwoCameraKey)) ==
-          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName", "uniqueId"});
+          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName"});
     CHECK_FALSE(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->applies_when.has_value());
     CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->role == Role::EnumerationIndex);
     CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraId")->role == Role::DeviceId);
@@ -3376,11 +3376,13 @@ TEST_CASE("Builtin catalog - ZWO sanitize keeps the declared fields per device t
     camera.set("uniqueId", std::string{"ZWO_UID_00112233445566ff"});
     camera.set("switchType", std::string{"asiair"});  // a switch key, not a camera one
     const DeviceConfig kept_camera = catalog.sanitize(kZwoCameraKey, camera);
-    for (const char* key : {"cameraIndex", "cameraId", "serialNumber", "cameraName", "uniqueId"}) {
+    for (const char* key : {"cameraIndex", "cameraId", "serialNumber", "cameraName"}) {
         INFO(key);
         CHECK(kept_camera.has(key));
     }
     CHECK_FALSE(kept_camera.has("switchType"));
+    // uniqueId is the router's key for every device (decision 0018), not a ZWO camera field.
+    CHECK_FALSE(kept_camera.has("uniqueId"));
 
     DeviceConfig scope;
     scope.set("connectionType", std::string{"network"});
@@ -3446,8 +3448,7 @@ TEST_CASE("Builtin catalog - ZWO camera identity strings and selector rule", "[c
     const Bad bad[] = {{"serialNumber", "not-hex!"},
                        {"serialNumber", "0c19\nforged"},
                        {"cameraName", "ZWO\nASI"},
-                       {"cameraName", "ZWO\x7f"},
-                       {"uniqueId", "ZWO_UID_\x01"}};
+                       {"cameraName", "ZWO\x7f"}};
     for (const Bad& b : bad) {
         INFO(b.field << "=" << b.value);
         DeviceConfig config = by_index;

@@ -63,7 +63,24 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Rotator; }
 
-    std::string get_unique_id() const override { return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override {
+        return "WANDERERASTRO_ROTATOR_" + std::to_string(device_number_);
+    }
+
+    // Decision 0018: the router calls this at the upgrade start only, so the
+    // offset saved under the device-number ID moves to the device that held that
+    // number then. A client that connected first has read 0 from the GUID key,
+    // so a connected driver takes the moved offset too. Lock order:
+    // transition_mutex_, sync_mutex_, state_mutex_.
+    void adopt_legacy_state() override {
+        std::lock_guard<std::mutex> transition(transition_mutex_);
+        std::lock_guard<std::mutex> serial(sync_mutex_);
+        const double offset = util::RotatorSyncOffsetStore::load_or_adopt(get_unique_id(), fallback_unique_id());
+        if (connected_.load()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            sync_offset_ = offset;
+        }
+    }
 
     std::string get_description() const override { return "WandererAstro WandererRotator Mini Rotator Driver"; }
 
@@ -144,6 +161,9 @@ public:
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
+                // Keyed by the persisted GUID (decision 0018). The offset saved under
+                // the device-number ID is moved by adopt_legacy_state(), never here: a
+                // rotator added later on the same number must not inherit it.
                 const double saved_offset = util::RotatorSyncOffsetStore::load(get_unique_id());
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 sync_offset_ = saved_offset;
@@ -274,13 +294,21 @@ public:
         ensure_connected();
         const double mechanical = protocol_.get_state().mechanical_angle;
         const double target = normalize_angle(position);
+        const double new_offset = normalize_angle(target - mechanical);
+        std::lock_guard<std::mutex> serial(sync_mutex_);
+        // IRotatorV4: the offset must persist. A Sync that cannot store it has
+        // failed, so it throws and keeps the previous offset (decision 0008).
+        if (!util::RotatorSyncOffsetStore::save(get_unique_id(), new_offset)) {
+            throw AlpacaException(
+                "WandererAstro rotator: Sync could not save the offset, so it was not applied. "
+                "Check that the service can write config/rotator_sync_offsets.json.",
+                AlpacaError::DriverException);
+        }
         protocol_.clear_completion_missing();
         std::lock_guard<std::mutex> lock(state_mutex_);
-        sync_offset_ = normalize_angle(target - mechanical);
+        sync_offset_ = new_offset;
         target_position_ = target;
         has_target_position_ = true;
-        // Best effort: a storage failure logs a WARNING and never fails Sync.
-        util::RotatorSyncOffsetStore::save(get_unique_id(), sync_offset_);
     }
 
 private:
@@ -337,6 +365,10 @@ private:
     bool has_target_position_ = false;
 
     std::mutex transition_mutex_;  // serializes set_connected() connect/disconnect transitions
+    // Serializes sync() from its save through its in-memory write, so the stored
+    // offset and sync_offset_ always come from the same Sync. Taken before
+    // state_mutex_; never held by a getter, so a slow save never stalls one.
+    std::mutex sync_mutex_;
 };
 
 std::unique_ptr<RotatorDriver> create_wandererastro_rotator(int device_number, const std::string& serial_port,

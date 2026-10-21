@@ -114,9 +114,11 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   everywhere else in this class — lifecycle mutex first, then `mutex_`) before its `with_handle()`
   call, so it blocks until any in-flight `exposure_thread_` has actually been joined. Any future
   SDK-touching setter needs the same `exposure_lifecycle_mutex_` guard, not just `with_handle()`.
-- **`get_unique_id()` keys on `device_number_`, not the libgphoto2 USB port string** (review PR
-  #485 round 4) — `camera_info_.port` (e.g. `usb:001,005`) looks like a natural per-camera
-  identity, but it isn't stable: it changes across every unplug/replug (the bus device number
+- **`fallback_unique_id()` keys on `device_number_`, not the libgphoto2 USB port string** (review PR
+  #485 round 4). Since [decision 0018](../../docs/decisions/0018-persisted-unique-id.md) the
+  `UniqueID` a client sees is the GUID the router stores for the configured device; this fallback
+  answers only for a driver a unit test builds directly. The reasoning still holds for it:
+  `camera_info_.port` (e.g. `usb:001,005`) looks like a natural per-camera identity, but it isn't stable: it changes across every unplug/replug (the bus device number
   increments) and even within one session, since a DSLR that was powered off when
   `preload_camera_info_locked()` ran and switched on later re-enumerates with a new port. Unlike
   every other camera vendor here, libgphoto2/PTP exposes no serial number to fall back to, so

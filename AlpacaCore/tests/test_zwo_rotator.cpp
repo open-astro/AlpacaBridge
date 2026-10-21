@@ -11,6 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/version.h>
@@ -18,6 +20,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <stdexcept>
 #include <thread>
@@ -170,6 +173,108 @@ TEST_CASE("ZWO CAA Rotator Driver - Sync offset is keyed by serial number", "[zw
     auto other = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
     other->set_connected(true);
     CHECK(other->get_position() == 10.0);
+}
+
+// Decision 0008 (#1473): a Sync that cannot store its offset fails and keeps the old one.
+TEST_CASE("ZWO CAA Rotator Driver - Sync that cannot save throws and keeps the offset",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->sync(30.0);
+    REQUIRE(driver->get_position() == 30.0);
+
+    const auto blocker = dir.file().parent_path().parent_path() / "blocker";
+    { std::ofstream(blocker) << "x"; }
+    alpacacore::util::RotatorSyncOffsetStore::set_default_path((blocker / "offsets.json").string());
+    require_alpaca_error([&] { driver->sync(50.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_position() == 30.0);
+}
+
+// Decision 0018 (#1471): the serial-keyed offset moves to the assigned GUID at connect,
+// which is the first moment the serial (and so the old key) is known.
+TEST_CASE("ZWO CAA Rotator Driver - Connect adopts the offset saved under the serial-based ID",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    std::string legacy;
+    {
+        auto before_upgrade = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+        before_upgrade->set_connected(true);
+        legacy = before_upgrade->get_unique_id();  // serial-based once connected
+        before_upgrade->sync(30.0);
+        before_upgrade->set_connected(false);
+    }
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 20.0);  // offset = 30 - mechanical 10
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 20.0);
+    // Sync now saves under the GUID.
+    driver->sync(45.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 35.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
+}
+
+// A CAA without a serial saved its offset under an SDK-ID key, which names a
+// slot, not a body. Only the router's call at the start that gives the stored
+// entry its first GUID moves it; a connect never does, so a rotator added later
+// cannot inherit it (decision 0018).
+TEST_CASE("ZWO CAA Rotator Driver - Connect does not adopt an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 20.0);
+}
+
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state moves an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 20.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+}
+
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("ZWO_CAA_ID_" + std::to_string(sdk.id), 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 10.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
 }
 
 // Falsified by: zwo_rotator_driver.cpp get_mechanical_position() dropping the
