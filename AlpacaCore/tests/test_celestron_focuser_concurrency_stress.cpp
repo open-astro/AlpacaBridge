@@ -16,10 +16,17 @@
 #ifndef _WIN32
 
 #include <alpacacore/focuser_driver.h>
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -67,6 +74,83 @@ TEST_CASE("Celestron focuser - concurrent connect/disconnect/operate stress", "[
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("Celestron focuser - getters across reconnects never serve a prior session's frame",
+          "[celestron][focuser][stress]") {
+    // A getter that passed ensure_connected() can still be running while
+    // set_connected(false) then set_connected(true) runs. Each
+    // session has its own encoder reading; a getter that sees the session
+    // current before and after its call must read that session's value.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    auto driver = alpacacore::vendor::celestron::create_celestron_focuser(0, fake.slave_path());
+
+    std::atomic<int> epoch{-1};
+    std::atomic<bool> done{false};
+    std::atomic<int> stale{0};
+    std::atomic<int> unexpected{0};
+    std::atomic<int> served{0};
+    std::mutex first_mutex;
+    std::string first_unexpected;
+    std::vector<std::thread> readers;
+    // One call kind per thread, so a slow call does not hide the window of
+    // the others. The fake is calibrated for every session, so a
+    // CalibrationStatus other than "Calibrated" is wrong whatever the epoch.
+    for (int t = 0; t < 8; ++t) {
+        readers.emplace_back([&, kind = t % 4] {
+            auto& focuser = static_cast<alpacacore::FocuserDriver&>(*driver);
+            while (!done.load()) {
+                const int before = epoch.load();
+                try {
+                    if (kind == 0) {
+                        const int position = focuser.get_position();
+                        if (before >= 0 && epoch.load() == before) {
+                            ++served;
+                            if (position != 61000 - (30000 + before * 10)) ++stale;
+                        }
+                    } else if (kind == 1) {
+                        static_cast<void>(focuser.get_is_moving());
+                        static_cast<void>(focuser.get_device_state());
+                    } else if (kind == 2) {
+                        static_cast<void>(focuser.get_max_step());
+                    } else if (focuser.action("CalibrationStatus", "") == "NotCalibrated") {
+                        ++stale;
+                    }
+                } catch (const alpacacore::AlpacaException& ex) {
+                    // A snapshot reader that overlaps a reconnect can find
+                    // the new session's snapshot still empty: "not available
+                    // yet" is then a true answer. Any other error, or that
+                    // one from a call inside one session, is a regression.
+                    const bool overlapped = before == -1 || epoch.load() != before;
+                    const bool not_yet =
+                        kind <= 1 && overlapped && ex.error_code() == alpacacore::AlpacaError::DriverException &&
+                        std::string_view(ex.what()).find("Focuser state not available yet") != std::string_view::npos;
+                    if (ex.error_code() != alpacacore::AlpacaError::NotConnected && !not_yet) {
+                        if (unexpected.fetch_add(1) == 0) {
+                            std::lock_guard<std::mutex> lock(first_mutex);
+                            first_unexpected = ex.what();
+                        }
+                    }
+                }
+            }
+        });
+    }
+    for (int cycle = 0; cycle < 150; ++cycle) {
+        fake.set_raw_position(static_cast<std::uint32_t>(30000 + cycle * 10));
+        driver->set_connected(true);
+        epoch.store(cycle);
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        epoch.store(-1);
+        driver->set_connected(false);
+    }
+    done.store(true);
+    for (auto& reader : readers) reader.join();
+
+    INFO(first_unexpected);
+    CHECK(stale.load() == 0);
+    CHECK(unexpected.load() == 0);
+    CHECK(served.load() > 0);
 }
 
 TEST_CASE("Celestron focuser - destruction races an in-flight connect", "[celestron][focuser][stress]") {
