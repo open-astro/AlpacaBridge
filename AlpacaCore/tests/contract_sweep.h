@@ -34,6 +34,8 @@
 // The kFakeConnectableRoster at the bottom lists the drivers that can connect to
 // an in-process fake; scripts/check_docs_drift.py pins it to the fake_*.h files on
 // disk in both directions.
+// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; rule 6 of
+// scripts/check_contract_sweep.py holds it to that table and to the snapshot hooks in test_contract_sweep.cpp.
 
 #pragma once
 
@@ -946,6 +948,32 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},
     {"wandererastro", "switch", "fake_serial_streamer.h"},
+};
+
+// ---------------------------------------------------------------------------
+// Snapshot-adopter roster (decision 0010, rule 6): the drivers whose Adoption row in
+// docs/decisions/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
+// guard. scripts/check_contract_sweep.py (rule 6) fails when an `adopted` row has no entry here, when an entry
+// is not `adopted`, or when an entry has no CONTRACT_SWEEP_SNAPSHOT_ADOPTERS hook in test_contract_sweep.cpp (and
+// the reverse). `source` is the
+// ADR row's Source column, verbatim; `vendor` is the router vendor string.
+// ---------------------------------------------------------------------------
+
+struct SnapshotAdopterRow {
+    const char* id;
+    const char* vendor;
+    const char* source;
+};
+
+inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
+    {"skywatcher_telescope", "skywatcher", "AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp"},
+    {"celestron_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp"},
+    {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
+    {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
+    {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
+    {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
+    {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
+    {"celestron_focuser", "celestron", "AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract
