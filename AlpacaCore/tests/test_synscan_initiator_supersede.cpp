@@ -38,6 +38,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -422,6 +423,33 @@ TEST_CASE("SynScan initiator supersede - a superseded Park body does not count i
     REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::milliseconds(kHoldMs + 5000)));
     unpark.join();
     CHECK(counted.load() == 0);
+}
+
+// AbortSlew's claim supersedes the Park body, which then leaves the park state alone, so a failed stop must end the
+// park itself: nothing is left to complete it. The link drops once the park GOTO is out, so every stop fails. The fake
+// clock stands still, so the dropped link is never declared lost; a relink would clear the park state itself.
+TEST_CASE("SynScan initiator supersede - a failed AbortSlew during a Park ends the park",
+          "[synscan][initiator-supersede]") {
+    Rig rig;
+    rig.driver->park();
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(rig.server->drop_connections());
+    const auto error_of = [](const std::function<void()>& call) -> std::pair<int, std::string> {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return {ex.error_code(), ex.what()};
+        }
+        return {0, ""};
+    };
+    const auto aborted = error_of([&] { rig.driver->abort_slew(); });
+    REQUIRE(aborted.first == alpacacore::AlpacaError::DriverException);
+    REQUIRE(aborted.second.rfind("AbortSlew stop failed: ", 0) == 0);
+    // Refused only while a park is in flight or done; on the dropped link it fails on the wire instead.
+    CHECK(error_of([&] { rig.driver->set_tracking(true); }).first != alpacacore::AlpacaError::InvalidWhileParked);
+    // A Park that starts clears the stored AbortSlew error at once; Park during a park returns doing nothing.
+    rig.driver->park();
+    CHECK(error_of([&] { (void)rig.driver->get_slewing(); }).second.rfind("AbortSlew stop failed: ", 0) != 0);
 }
 
 #endif  // _WIN32
