@@ -1390,7 +1390,7 @@ public:
     void set_site_latitude(double latitude) override {
         validate_latitude(latitude);
 
-        // One site write at a time, so two concurrent setters reach the mount in the order they published.
+        // One site write at a time, so two concurrent setters, or a setter and the connect's site apply/re-send, reach the mount in the order they published.
         // No getter takes it.
         std::lock_guard<std::mutex> site_write(site_write_mutex_);
         std::optional<SiteInfo> to_send;

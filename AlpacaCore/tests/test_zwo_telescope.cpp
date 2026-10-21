@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -563,9 +564,19 @@ TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under 
 #ifndef _WIN32
 namespace {
 
-// A mount that answers ":GVP" (mount info) and ":SMGE" (site) only after kHoldOpen, once armed, and
-// reports when such a request is in flight. Every other request gets the dumb "0#" reply.
+// A mount that answers ":GVP" (mount info), ":SMGE" (site write) and ":GMGE" (site read) only after kHoldOpen,
+// once armed, and reports when such a request is in flight. ":GMGE" is unreadable ("0#") until hold_site_read
+// arms it, then reports the Sydney landmark; the last ":SMGE" payload is recorded. ":SMTI" and ":GAT" get "1"
+// and "1#". Every other request gets the dumb "0#" reply.
 struct SlowMount {
+    std::mutex write_mutex;
+    std::string last_site_write;  // guarded by write_mutex
+
+    std::string site_write() {
+        std::lock_guard<std::mutex> lock(write_mutex);
+        return last_site_write;
+    }
+
     std::atomic<bool> hold_info{false};
     std::atomic<bool> hold_site{false};
     std::atomic<bool> hold_site_read{false};
@@ -592,6 +603,10 @@ struct SlowMount {
                 return hold_site_read.load() ? "-33*51:24&+151*12:55#" : "0#";
             }
             if (chunk.find(":SMGE") != std::string::npos) {
+                {
+                    std::lock_guard<std::mutex> lock(write_mutex);
+                    last_site_write = chunk;
+                }
                 if (hold_site.load()) {
                     site_entered = true;
                     std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
@@ -699,6 +714,8 @@ TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in fl
 // A site write that lands while the connect refresh is reading the site back must survive that read-back.
 // Falsified by: zwo_telescope_driver.cpp apply_or_load_site_info() running without site_write_mutex_ (the
 // :GMGE reply then overwrites the latitude the setter just published, and SiteLatitude reads -33.9).
+// MUTATION: not claimed for dropping only the lock in sync_mount_time_if_configured(): whether its re-send lands
+// after the setter's write is a race, so no test here kills that mutant reliably.
 TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site read-back is kept",
           "[zwo][telescope][unit][getter-stall]") {
     using namespace alpacacore::test;
@@ -729,6 +746,8 @@ TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site rea
     mount.hold_site_read = false;
 
     CHECK(driver->get_site_latitude() == 51.477833);
+    // The mount keeps the write too: the last site payload on the wire is the Greenwich latitude, not a stale re-send.
+    CHECK(mount.site_write().find("+51*28:40") != std::string::npos);
     driver->set_connected(false);
 }
 
