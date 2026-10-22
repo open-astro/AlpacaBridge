@@ -1559,10 +1559,10 @@ TEST_CASE("Celestron site and time writes - the write exchange does not hold the
           "[celestron][telescope][snapshot][iolock]") {
     SlowMountDriver mount;
     SECTION("SiteLatitude") {
-        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_latitude(-33.5); });
+        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_latitude(-33.856784); });
     }
     SECTION("SiteLongitude") {
-        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_longitude(151.5); });
+        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_longitude(151.215297); });
     }
     SECTION("UTCDate") {
         check_getters_during(mount.clock, *mount.st, *mount.driver,
