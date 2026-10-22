@@ -15,9 +15,11 @@
 #include <alpacacore/camera_driver.h>
 #include <alpacacore/util/task_clock.h>
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace alpacacore::vendor::gphoto {
@@ -67,21 +69,32 @@ public:
     DecodedFrame decode(const std::vector<std::uint8_t>& raw_bytes) override;
 };
 
+/// Catalog settings the driver reads once at construction (gphoto_fields.h).
+struct GPhotoOptions {
+    /// Wait between the two shutter presses of a mirror lock-up (MLU) exposure.
+    std::chrono::milliseconds mirror_lockup_settle{2000};
+    /// "camera" (write nothing), "off" or "on": written to the camera's longexpnr widget at connect.
+    std::string long_exposure_nr{"camera"};
+};
+
 /**
  * @brief Create a libgphoto2-backed DSLR/mirrorless camera driver.
  *
  * @param device_number Alpaca device number
  * @param camera_index libgphoto2 USB autodetect index (0-based), matching
  *        the SDK-enumerated convention used by the other camera vendors.
+ * @param options mirror lock-up settle and long-exposure noise reduction mode.
  * @return Unique pointer to camera driver
  */
-std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index);
+std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index,
+                                                   const GPhotoOptions& options = {});
 
 // Test seam: identical driver wired to an injected SDK and RAW decoder. Every
 // driver wait and deadline reads `clock` (decision 0005); tests pass a
 // FakeTaskClock. `clock` must outlive the driver.
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
                                                    RawDecoder& decoder,
-                                                   util::TaskClock& clock = util::default_task_clock());
+                                                   util::TaskClock& clock = util::default_task_clock(),
+                                                   const GPhotoOptions& options = {});
 
 }  // namespace alpacacore::vendor::gphoto

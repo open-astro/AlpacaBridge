@@ -25,6 +25,8 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <sstream>
+#include <string>
 #include <thread>
 #include <unordered_map>
 
@@ -422,23 +424,56 @@ private:
         return widget;
     }
 
-    // Shared body of get_choice_value / get_text_value: both are string-valued
-    // widgets to libgphoto2 (radio/menu and text).
+    // Shared body of get_choice_value / get_text_value. The value is returned as text whatever the widget
+    // type, because the caller cannot know it: libgphoto2's gp_widget_get_value writes through an untyped
+    // void* whose pointee depends on the widget type (const char* for text/radio/menu, float for a range, int
+    // for a toggle/date), so reading every widget as a char* is undefined behaviour on the others. The Canon
+    // mirror lock-up widgets are the case that matters: mirrorlock is a range or text widget by body and model.
     std::string get_string_value(int handle, const std::string& name) {
         Camera* camera = camera_for(handle);
         CameraWidget* widget = get_single_widget_or_throw(camera, name);
-        char* value = nullptr;
-        // libgphoto2's C API takes an untyped void* out-param whose pointee
-        // type depends on the widget type; for a text/radio/menu widget it
-        // writes a `const char*` through it, so a char** here is required,
-        // not a mistake.
-        int result = gp_widget_get_value(widget, &value);  // NOLINT(bugprone-multi-level-implicit-pointer-conversion)
-        std::string out = (result == GP_OK && value != nullptr) ? value : "";
+        CameraWidgetType type = GP_WIDGET_TEXT;
+        int result = gp_widget_get_type(widget, &type);
+        std::string out;
+        if (result == GP_OK) {
+            switch (type) {
+                case GP_WIDGET_RANGE: {
+                    float value = 0.0F;
+                    result = gp_widget_get_value(widget, &value);
+                    if (result == GP_OK) out = format_number(static_cast<double>(value));
+                    break;
+                }
+                case GP_WIDGET_TOGGLE:
+                case GP_WIDGET_DATE: {
+                    int value = 0;
+                    result = gp_widget_get_value(widget, &value);
+                    if (result == GP_OK) out = std::to_string(value);
+                    break;
+                }
+                default: {
+                    char* value = nullptr;
+                    // Text, radio and menu widgets write a `const char*` through the void* out-param, so a
+                    // char** here is required, not a mistake.
+                    // NOLINTNEXTLINE(bugprone-multi-level-implicit-pointer-conversion)
+                    result = gp_widget_get_value(widget, &value);
+                    if (result == GP_OK && value != nullptr) out = value;
+                    break;
+                }
+            }
+        }
         gp_widget_free(widget);
         if (result != GP_OK) {
             throw_gp_error("gp_widget_get_value failed for " + name, result);
         }
         return out;
+    }
+
+    // A whole-valued float prints without a fraction ("1", not "1.000000"), which is how a range widget's
+    // 0/1 reads to the driver.
+    static std::string format_number(double value) {
+        std::ostringstream stream;
+        stream << value;
+        return stream.str();
     }
 
     GPhotoCaptureResult download_and_delete(Camera* camera, const CameraFilePath& path) {

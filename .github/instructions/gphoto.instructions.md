@@ -174,7 +174,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   - **The frame wait scales with the exposure.** With the body's long-exposure noise reduction on,
     the file is posted a full exposure-length after the close (the dark frame), so a fixed 15 s
     wait lost every long frame; the watchdog deadline in `start_exposure` includes that window
-    for a bulb capture. Tell users to turn "Long exposure NR" **Off** for astro use regardless:
+    for a bulb capture (and for a mirror lock-up exposure). Tell users to turn "Long exposure NR" **Off** for astro use regardless:
     it doubles the time to every frame and the dark is better taken separately. Also from the
     bench: mode dial on M with the shutter speed on Bulb, and the lens/body on MF (with AF the
     body refuses to fire, which is also why a priming capture can fail "Unspecified error" on a
@@ -198,6 +198,33 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   frame through NINA and a ConformU re-run (#1063; its camera-side settings are not recorded), and
   other Canon bodies need their own check. Written from libgphoto2's documented behaviour only
   (INDI is LGPL; copy nothing from it).
+- **Mirror lock-up (MLU) follows the camera's own menu; the driver never writes it** (issue #1062).
+  With MLU on, a Canon body answers `gp_camera_capture` only after a 60 s timeout (EOS 70D and
+  250D, bench-proven), so the driver reads the state at exposure start and fires the shutter by hand.
+  The state is a single-widget lookup (never a config walk, `docs/failures/0009-gphoto-nikon-bulb-full-config-walk.md`):
+  `/main/status/mirrorlock` (70D, 0/1; a range or text widget, read through the wrapper's
+  type-aware `get_string_value`), else the read-only `/main/status/mirrorlockstatus` (250D: 0 off, 1
+  on, 2 after the first press; any non-zero number is on). A body with neither widget is MLU off and
+  keeps today's paths. With MLU on, the sequence is the `eosremoterelease` pair (found by name
+  whatever the mode dial says, never by index): Press, Release (mirror up), wait
+  `mirrorLockupSettleMs`, Press, Release, then wait for the file-added event and download. In bulb
+  the second Press is held for the exposure. The settle runs on the injected `util::TaskClock`
+  (ADR 0005) pumping events; an abort cuts it short but still sends the second pair, because a body
+  left with the mirror up would fire on the next exposure's first press, and the frame is discarded.
+  Never `gp_camera_capture` with MLU on, so the connect priming capture is skipped too (geometry is
+  learned from the first exposure). A body that reports MLU on but has no usable pair fails
+  `StartExposure` with `InvalidOperation` telling the user to turn mirror lock-up off in the camera
+  menu; it never stalls. The watchdog deadline adds the settle and the frame wait. The driver was
+  run on a rig with the EOS 70D; the EOS 250D is proven only by the gphoto2 CLI bench probe, and the
+  driver is tested on the fake for both. Fields: `mirrorLockupSettleMs` (500 to 10000, default 2000).
+- **Long-exposure noise reduction (LENR): `longExposureNR` is `camera` (default, writes nothing), `off` or `on`.**
+  For `off`/`on` the driver writes `/main/capturesettings/longexpnr` once at connect, camera idle,
+  with a single-widget set, matching the camera's own On/Off text without regard to case (libgphoto2
+  translates it). It is never written during an exposure. Nikon's widget comes from the libgphoto2
+  source and is tested on the fake only; no Canon body tested shows an LENR widget over gphoto2 (the
+  70D and 250D, mode dial M or B), so there the driver logs one WARN, "long-exposure NR is not
+  settable on this camera; set it in the camera menu", and connects anyway. A refused write warns
+  and does not fail the connect either. Tell Canon users to set LENR in the camera menu.
 - **RAW format selection**: at connect, the driver scans the `"imageformat"`/`"imagequality"`
   widget's choices for one containing `raw`/`nef`/`cr2`/`cr3`/`arw` (case-insensitive), preferring
   a pure-RAW choice over a combined RAW+JPEG one, and sets it. If no RAW choice is found, capture

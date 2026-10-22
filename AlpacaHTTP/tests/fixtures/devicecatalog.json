@@ -119,7 +119,9 @@
     "available": true,
     "buildOption": "ALPACACORE_ENABLE_GPHOTO",
     "fields": [
-      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"}
+      {"key": "cameraIndex", "type": "int", "default": 0, "required": false, "secret": false, "role": "EnumerationIndex"},
+      {"key": "mirrorLockupSettleMs", "type": "int", "default": 2000, "required": false, "secret": false, "role": "Plain", "range": {"min": 500, "max": 10000}},
+      {"key": "longExposureNR", "type": "string", "default": "camera", "required": false, "secret": false, "role": "Plain", "enum": ["camera", "off", "on"]}
     ]
   },
   {

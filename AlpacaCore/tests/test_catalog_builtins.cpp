@@ -414,9 +414,11 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the gphoto camer
     CHECK(v->display_name.substr(0, 7) == "gphoto ");
     CHECK(v->build_option == "ALPACACORE_ENABLE_GPHOTO");
     CHECK_FALSE(v->available);
-    REQUIRE(v->fields.size() == 1);
+    REQUIRE(v->fields.size() == 3);
+    CHECK(std::string_view(v->fields[0].key) == "cameraIndex");
+    CHECK(std::string_view(v->fields[1].key) == "mirrorLockupSettleMs");
+    CHECK(std::string_view(v->fields[2].key) == "longExposureNR");
     const FieldRef& index = v->fields[0];
-    CHECK(std::string_view(index.key) == "cameraIndex");
     CHECK(index.kind == FieldRef::Kind::Int);
     CHECK(index.role == Role::EnumerationIndex);
     CHECK_FALSE(index.required);
@@ -425,12 +427,42 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the gphoto camer
     REQUIRE(std::holds_alternative<std::int64_t>(index.default_value));
     CHECK(std::get<std::int64_t>(index.default_value) == 0);
 
+    // Mirror lock-up settle: 500 to 10000 ms, default 2000 (#1062).
+    const FieldRef& settle = v->fields[1];
+    CHECK(settle.kind == FieldRef::Kind::Int);
+    CHECK(settle.role == Role::Plain);
+    CHECK_FALSE(settle.required);
+    CHECK(settle.min == std::optional<double>{500});
+    CHECK(settle.max == std::optional<double>{10000});
+    REQUIRE(std::holds_alternative<std::int64_t>(settle.default_value));
+    CHECK(std::get<std::int64_t>(settle.default_value) == 2000);
+
+    // Long-exposure NR: camera (default, write nothing) | off | on.
+    const FieldRef& lenr = v->fields[2];
+    CHECK(lenr.kind == FieldRef::Kind::String);
+    CHECK(lenr.role == Role::Plain);
+    CHECK_FALSE(lenr.required);
+    REQUIRE(lenr.allowed_values.size() == 3);
+    CHECK(std::string_view(lenr.allowed_values[0]) == "camera");
+    CHECK(std::string_view(lenr.allowed_values[1]) == "off");
+    CHECK(std::string_view(lenr.allowed_values[2]) == "on");
+    REQUIRE(std::holds_alternative<std::string>(lenr.default_value));
+    CHECK(std::get<std::string>(lenr.default_value) == "camera");
+
     DeviceConfig all;
     all.set("cameraIndex", std::int64_t{2});
     all.set("cameraId", std::string{"x"});
+    all.set("mirrorLockupSettleMs", std::int64_t{3500});
+    all.set("longExposureNR", std::string{"on"});
     const DeviceConfig sanitized = catalog.sanitize(kGphotoKey, all);
     CHECK(sanitized.has("cameraIndex"));
     CHECK_FALSE(sanitized.has("cameraId"));
+    const ConfigValue* kept_settle = sanitized.find_value("mirrorLockupSettleMs");
+    REQUIRE(kept_settle != nullptr);
+    CHECK(std::get<std::int64_t>(*kept_settle) == 3500);
+    const ConfigValue* kept_lenr = sanitized.find_value("longExposureNR");
+    REQUIRE(kept_lenr != nullptr);
+    CHECK(std::get<std::string>(*kept_lenr) == "on");
 }
 
 TEST_CASE("Builtin catalog - register_builtin_factories makes the gphoto camera available only when built",

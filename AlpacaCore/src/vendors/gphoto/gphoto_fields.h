@@ -20,6 +20,7 @@
 #include <alpacacore/catalog/device_catalog.h>
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // Designated initializers of Field<T> leave most members defaulted on purpose
@@ -37,8 +38,22 @@ namespace alpacacore::catalog {
 inline const Field<std::int64_t> kGphotoCameraIndex{
     .key = "cameraIndex", .default_value = 0, .role = Role::EnumerationIndex};
 
+// How long the mirror stays up between the two shutter presses a body with mirror lock-up (MLU) on needs. The
+// driver follows the camera's own MLU menu setting and never writes it; this is only the settle between the
+// presses. Unused while MLU is off.
+inline const Field<std::int64_t> kGphotoMirrorLockupSettleMs{
+    .key = "mirrorLockupSettleMs", .default_value = 2000, .min = 500, .max = 10000};
+
+// Long-exposure noise reduction. "camera" writes nothing and leaves the camera's own setting; "off" and "on"
+// write the Nikon longexpnr widget once at connect. A body without the widget (every Canon tested) logs a
+// warning and carries on.
+inline constexpr const char* kGphotoLongExposureNrModes[] = {"camera", "off", "on"};
+inline const Field<std::string> kGphotoLongExposureNr{
+    .key = "longExposureNR", .default_value = "camera", .allowed_values = kGphotoLongExposureNrModes};
+
 inline const std::vector<FieldRef>& gphoto_camera_fields() {
-    static const std::vector<FieldRef> fields{kGphotoCameraIndex.ref()};
+    static const std::vector<FieldRef> fields{kGphotoCameraIndex.ref(), kGphotoMirrorLockupSettleMs.ref(),
+                                              kGphotoLongExposureNr.ref()};
     return fields;
 }
 
