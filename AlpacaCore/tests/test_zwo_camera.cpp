@@ -23,6 +23,7 @@
 
 #include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 
 namespace {
@@ -194,8 +195,11 @@ TEST_CASE("ZWO Camera Driver - A name query keeps the configured camera id", "[z
 // PropertyNotImplemented on a camera without a cooler.
 TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][camera][unit]") {
     alpacacore::test::FakeZWOSDK sdk;
-    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    alpacacore::test::FakeTaskClock clock;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
     camera->set_connected(true);
+    // The retry window is measured from the epoch before the first retry.
+    clock.advance(std::chrono::seconds(1));
 
     SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*camera); }
     SECTION("idle after a completed exposure") {
@@ -204,16 +208,16 @@ TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][cam
         alpacacore::test::require_percent_completed_unavailable(*camera);
     }
     SECTION("after a failed exposure") {
-        // Three Failed statuses exhaust the retries (the driver waits ~250 ms between them); the old value
+        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them); the old value
         // here was 100 because the failed frame still counted as an image.
         camera->start_exposure(0.001, true);
         sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
         CHECK_FALSE(camera->get_image_ready());
-        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        clock.advance(std::chrono::milliseconds(250));
         CHECK_FALSE(camera->get_image_ready());
-        std::this_thread::sleep_for(std::chrono::milliseconds(260));
+        clock.advance(std::chrono::milliseconds(250));
         alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
                                              alpacacore::AlpacaError::DriverException);
         alpacacore::test::require_percent_completed_unavailable(*camera);
