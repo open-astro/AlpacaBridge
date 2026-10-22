@@ -400,14 +400,15 @@ struct PersistedKey {
 };
 
 // Decision 0018: the persisted UniqueID of a configured device. A stored or
-// client-sent value is kept when it is a version 4 UUID that no other entry
-// holds (the web UI edits a device by removing and re-adding it, sending the
-// GUID back); anything else gets a fresh one.
+// client-sent value is kept when it is a keepable ID (a version 4 UUID or a
+// long non-slot string such as ZWO_UID_<hex>) that no other entry holds (the
+// web UI edits a device by removing and re-adding it, sending the ID back);
+// only an entry with none, a device-number ID or a duplicate gets a fresh GUID.
 std::string stored_unique_id(const nlohmann::json& entry) {
     const auto it = entry.find("uniqueId");
     if (it == entry.end() || !it->is_string()) return {};
     const std::string value = it->get<std::string>();
-    return alpacacore::util::is_unique_id(value) ? value : std::string();
+    return alpacacore::util::is_keepable_unique_id(value) ? value : std::string();
 }
 
 std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {

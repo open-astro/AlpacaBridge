@@ -109,8 +109,8 @@ site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemin
 
 ### UniqueID is the router's persisted GUID (all drivers)
 
-A driver does not build its `UniqueID`. The router assigns each configured device the version 4
-UUID stored in its config entry (`uniqueId`) through `AlpacaDriver::assign_unique_id()` before it
+A driver does not build its `UniqueID`. The router assigns each configured device the ID stored
+in its config entry (`uniqueId`; a version 4 UUID it minted, or a kept `ZWO_UID_`, never changed once stored) through `AlpacaDriver::assign_unique_id()` before it
 registers the driver, and the base class's non-virtual `get_unique_id()` returns it. A new driver
 implements only `fallback_unique_id()`, which answers for a driver a unit test builds directly; never
 key persistent state on the fallback. A driver that keys state on its ID (the rotator Sync offset)

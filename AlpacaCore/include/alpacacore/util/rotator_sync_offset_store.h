@@ -58,7 +58,7 @@ public:
 
     // Removes every GUID-shaped key (util::is_unique_id) that is not in
     // @p live_unique_ids: the offsets of removed rotators. Driver-built legacy
-    // keys are left alone. Returns how many entries went.
+    // keys and kept non-GUID IDs (ZWO_UID_) are left alone. Returns how many entries went.
     static std::size_t prune_unknown_unique_ids(const std::set<std::string>& live_unique_ids);
 };
 
