@@ -214,9 +214,9 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   Never `gp_camera_capture` with MLU on, so the connect priming capture is skipped too (geometry is
   learned from the first exposure). A body that reports MLU on but has no usable pair fails
   `StartExposure` with `InvalidOperation` telling the user to turn mirror lock-up off in the camera
-  menu; it never stalls. The watchdog deadline adds the settle and the frame wait. The sequence
-  was bench-proven with the gphoto2 CLI on the EOS 70D and 250D; the driver is tested on the fake
-  only so far. Fields: `mirrorLockupSettleMs` (500 to 10000, default 2000).
+  menu; it never stalls. The watchdog deadline adds the settle and the frame wait. The driver was
+  run on a rig with the EOS 70D; the EOS 250D is proven only by the gphoto2 CLI bench probe, and the
+  driver is tested on the fake for both. Fields: `mirrorLockupSettleMs` (500 to 10000, default 2000).
 - **Long-exposure noise reduction (LENR): `longExposureNR` is `camera` (default, writes nothing), `off` or `on`.**
   For `off`/`on` the driver writes `/main/capturesettings/longexpnr` once at connect, camera idle,
   with a single-widget set, matching the camera's own On/Off text without regard to case (libgphoto2

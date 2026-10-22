@@ -1310,6 +1310,32 @@ TEST_CASE("GPhoto camera fake - MLU on skips the connect priming capture", "[gph
     driver->set_connected(false);
 }
 
+TEST_CASE("GPhoto camera fake - an unreadable MLU state at connect skips the priming capture quietly",
+          "[gphoto][camera][unit][fakesdk][mlu]") {
+    // Falsified by: initialise skip_priming to false in the connect path (an unreadable state then runs the
+    // priming capture, which stalls 60 s with MLU on). Priming is best-effort, so the failed read neither
+    // fails the connect nor logs a warning.
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_mlu_camera());
+    FakeRawDecoder decoder;
+    fake.before_call = [&](const std::string& name) {
+        if (name == "get_text_value") {
+            throw alpacacore::AlpacaException("mirrorlock read failed", alpacacore::AlpacaError::DriverException);
+        }
+    };
+
+    GPhotoWarnCapture warnings;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    CHECK(driver->get_connected() == true);
+    CHECK(count_calls(fake, "capture_and_download") == 0);
+    CHECK(warnings.messages.empty());
+
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - the MLU exposure deadline includes the settle and the file wait",
           "[gphoto][camera][unit][fakesdk][taskclock][mlu]") {
     reset_gphoto_sensor_cache();
