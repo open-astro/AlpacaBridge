@@ -240,10 +240,15 @@ TEST_CASE("SkyWatcher snapshot - a poll that sampled before a rate setter anchor
     REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(10)));
     mount.set_reply_latency(milliseconds(0));
 
+    // The model runs on the task clock and RA's LST on host time (decision
+    // 0001): let task time catch up with the wall time this case took (the 150 ms
+    // advanced above included), so the two agree as they do in service.
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    clock.advance(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(elapsed) -
+                                                                       milliseconds(150)));
     const double after = driver->get_right_ascension();
     // Model motion only: the new offset (0.5 s of RA per sidereal second) runs
     // for the time the setter took, and is far under the jump (1.3e-3 h).
-    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     CHECK(std::abs(after - before) < 0.5 / 3600.0 * elapsed + 5e-5);
     driver->set_right_ascension_rate(0.0);
     driver->set_connected(false);
@@ -363,6 +368,7 @@ TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the
     // start transactions take 50 ms each. The new rate applies from the start,
     // not from that anchor or from the first of those transactions.
     std::this_thread::sleep_for(milliseconds(400));
+    clock.advance(milliseconds(400));  // the model runs on the task clock
     const double at_rest = driver->get_declination();
     mount.set_reply_latency(milliseconds(50));
     driver->move_axis(1, kRate);
@@ -372,6 +378,7 @@ TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the
 
     // A new rate on the moving axis: the 0.4 deg covered so far is kept.
     std::this_thread::sleep_for(milliseconds(400));
+    clock.advance(milliseconds(400));  // the model runs on the task clock
     const double moving = driver->get_declination();
     REQUIRE(std::abs(moving - started) > 0.3);
     driver->move_axis(1, -kRate);
@@ -380,10 +387,32 @@ TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the
 
     // Stop: the motion up to the stop is kept too.
     std::this_thread::sleep_for(milliseconds(400));
+    clock.advance(milliseconds(400));  // the model runs on the task clock
     const double moving_back = driver->get_declination();
     REQUIRE(std::abs(moving_back - reversed) > 0.3);
     driver->move_axis(1, 0.0);
     CHECK(std::abs(driver->get_declination() - moving_back) < 0.1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher snapshot - the dead-reckoned position follows the task clock, not wall time (open-astro#1405)",
+          "[skywatcher][snapshot]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock);
+    driver->set_tracking(true);
+    driver->set_right_ascension_rate(10.0);  // an offset session: the poll holds the model
+    REQUIRE(clock.wait_for_waiters(1, kRendezvous));
+    const double before = driver->get_right_ascension();
+
+    // 5 s of task time pass in a few ms of wall time. The offset RA axis runs
+    // at the commanded rate, so the model must have moved by about 5 s x rate;
+    // on the wall clock it moved by the few ms the case took.
+    step(clock, seconds(5));
+    const double after = driver->get_right_ascension();
+    CHECK(std::abs(after - before) > 1.0 / 3600.0);
+    driver->set_right_ascension_rate(0.0);
     driver->set_connected(false);
 }
 
