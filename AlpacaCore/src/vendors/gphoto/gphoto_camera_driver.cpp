@@ -1472,7 +1472,8 @@ private:
     // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
     // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
     // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
-    // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
+    // close handle_, so handle_ only changes under mutex_ (here and in mark_device_gone_locked, which
+    // start_exposure also calls from the caller's thread). A stop in progress is not a failure.
     void record_exposure_failure(int handle, const char* what, bool device_gone) {
         if (abort_requested_.load()) return;
         std::lock_guard<std::mutex> lock(mutex_);
