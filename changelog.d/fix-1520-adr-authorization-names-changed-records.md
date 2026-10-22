@@ -1,0 +1,3 @@
+### Fixed
+
+- **`adr-authorization` failure text names the changed records**, CI script `scripts/check_adr_authorization.py`, issue #1520. When an earlier `ADR authorized <sha>` no longer covers the head, the status reads `Authorized at <sha>; <record>.md changed since: comment 'ADR authorized <head12>'`, listing the records whose content differs between that commit and the head (a record added or deleted since counts), or `<n> records changed since` when the names do not fit in 140 characters; the instruction always ends the text. With no valid earlier authorization the text is unchanged. Covered by the `--self-test` cases after "A failure after an aged authorization names the records".
