@@ -25,6 +25,7 @@
 #include <string>
 #include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "fake_qhy_sdk.h"
 #include "fake_task_clock.h"
@@ -1504,4 +1505,80 @@ TEST_CASE("QHY Camera Driver - the polling workers skip a cycle during an exposu
 
     gate.release = true;
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; CoolerOn raises
+// PropertyNotImplemented on a camera without a cooler (CoolerPower always does: CanGetCoolerPower is false).
+TEST_CASE("QHY Camera Driver - PercentCompleted only while Exposing", "[qhy][camera][unit]") {
+    std::atomic<bool> hold_frame{false};
+    std::atomic<bool> in_frame{false};
+    std::atomic<bool> release{false};
+    auto fake = FakeQHYSDK::with_one_camera();
+    fake.before_call = [&](const std::string& fn) {
+        if (hold_frame.load() && fn == "get_single_frame") {
+            in_frame = true;
+            while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    // Declared after the driver so a failed REQUIRE releases the held frame before the driver joins its worker.
+    struct ReleaseOnExit {
+        std::atomic<bool>& flag;
+        ~ReleaseOnExit() { flag = true; }
+    } release_on_exit{release};
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*driver); }
+    SECTION("idle after a completed exposure") {
+        driver->start_exposure(0.001, true);
+        REQUIRE(eventually([&]() { return driver->get_image_ready(); }));
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("idle after a failed exposure") {
+        fake.frame_ok = false;
+        driver->start_exposure(0.001, true);
+        REQUIRE(eventually([&]() {
+            try {
+                (void)driver->get_image_ready();
+                return false;
+            } catch (const alpacacore::AlpacaException&) {
+                return true;  // the failed frame is reported, not served
+            }
+        }));
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("while exposing") {
+        hold_frame = true;
+        driver->start_exposure(1.0, true);
+        REQUIRE(eventually([&]() { return in_frame.load(); }));
+        alpacacore::test::require_percent_completed_available(*driver);
+    }
+    release = true;
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - CoolerOn needs the cooler capability", "[qhy][camera][unit]") {
+    auto fake = FakeQHYSDK::with_one_camera();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(driver->get_can_set_ccd_temperature());
+    alpacacore::test::require_no_cooler_members(*driver);
+    driver->set_connected(false);
+}
+
+TEST_CASE("QHY Camera Driver - CoolerOn works with the cooler capability", "[qhy][camera][unit]") {
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(driver->get_can_set_ccd_temperature());
+    driver->set_cooler_on(true);
+    CHECK(driver->get_cooler_on());
+    require_alpaca_error([&] { (void)driver->get_cooler_power(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
 }

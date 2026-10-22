@@ -673,7 +673,7 @@ public:
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!camera_info_valid_ || !camera_info_.has_cooler) {
-            return false;
+            throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         return cooler_on_;
     }
@@ -684,8 +684,7 @@ public:
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (camera_info_valid_ && !camera_info_.has_cooler) {
-                    throw AlpacaException("Cooler not available on this camera",
-                                          AlpacaError::NotImplemented);
+                    throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
                 }
                 cooler_on_ = true;
                 if (!connected_.load()) {
@@ -701,7 +700,7 @@ public:
         // (temp or telemetry thread, or SDK) can hold it or contend for ~10s;
         // doing the full turn-off in a background thread avoids ConformU timeouts.
         if (camera_info_valid_ && !camera_info_.has_cooler) {
-            return;
+            throw AlpacaException("This QHY camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         // Serialise spawn vs join under cooler_off_lifecycle_mutex_; the
         // previous worker (if any) has either finished or is finishing —

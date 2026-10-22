@@ -55,9 +55,13 @@ author must do. Read the docstring before changing a gate.
   every record in `docs/decisions/` the PR changes.
   `gh pr create --body` and agents skip GitHub's template fill-in, so write every section.
 - **Decision-record authorization** (`.github/workflows/decision-records.yml`, the `adr-authorization`
-  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <head sha>`
-  comment; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
-  review bot gets the in-scope rules from `scripts/check_adr_scope.py --list`, run from the base branch.
+  commit status): a PR that changes `docs/decisions/` needs a collaborator's `ADR authorized <sha>`
+  comment, which holds until a push changes one of the PR's record files; `scripts/check_adr_authorization.py` runs from the default branch, never from the PR. The
+  review bot gets the in-scope rules from the default branch's `scripts/check_adr_scope.py --list`, run
+  over the base branch's records; when a base with records gives no list, the review does not run. The
+  bot answers every listed rule with a `- NNNN-slug.md rule N: pass|defect|n/a: reason` line, and
+  `check_adr_scope.py --checklist` fails the job before posting when one is missing, a rule gets two
+  verdicts, or a defect line sits under the approving sign-off.
   See `docs/decisions/README.md` ("Changing a record").
 - **Layering** (`scripts/check_layering.py`, gate 2f): the vendor-include baselines in the script
   only go down; the PR that deletes includes lowers them. It also enforces CMake rules L1-L3

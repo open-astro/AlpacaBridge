@@ -1150,6 +1150,19 @@ int main() {
     }
 
     {
+        // case: GET PercentCompleted outside Exposing is InvalidOperation, not the driver's raw 0 (#1477)
+        constexpr int kCameraNumber = 8982;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kCameraNumber)));
+        const auto resp =
+            route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/percentcompleted");
+        EXPECT(resp.status_code() == 200);
+        const auto body = nlohmann::json::parse(resp.body());
+        EXPECT(body.value("ErrorNumber", 0) == static_cast<int>(alpacacore::AlpacaError::InvalidOperation));
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
         // case: ImageBytes preserves metadata, ordering, and element bytes
         constexpr int kCameraNumber = 8980;
         auto& registry = alpacacore::management::DeviceRegistry::instance();
@@ -2271,11 +2284,10 @@ int main() {
         }
         EXPECT(found_cover);
 
-        // MaxBrightness is a static capability and reports without hardware.
+        // MaxBrightness is a property: the registered cover is not connected, so the read answers NotConnected.
         const auto maxbright_response = route_request(router, "GET", "/api/v1/covercalibrator/9401/maxbrightness");
         const auto maxbright_json = nlohmann::json::parse(maxbright_response.body());
-        EXPECT(maxbright_json.value("ErrorNumber", -1) == 0);
-        EXPECT(maxbright_json.value("Value", -1) == 255);
+        EXPECT(maxbright_json.value("ErrorNumber", -1) == 0x407);
 
         nlohmann::json remove_body = {
             {"vendor", "wandererastro"}, {"deviceType", "covercalibrator"}, {"deviceNumber", 9401}};

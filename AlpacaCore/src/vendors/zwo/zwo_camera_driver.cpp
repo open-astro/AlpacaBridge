@@ -396,7 +396,7 @@ public:
     bool get_cooler_on() const override {
         ensure_connected();
         if (!can_get_control(ZWOControlType::CoolerOn)) {
-            return false;
+            throw AlpacaException("This ZWO camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         long value = get_control_value_or_throw(ZWOControlType::CoolerOn);
         return value != 0;
@@ -405,10 +405,7 @@ public:
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (!can_get_control(ZWOControlType::CoolerOn)) {
-            if (cooler_on) {
-                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-            }
-            return;
+            throw AlpacaException("This ZWO camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         set_control_value_or_throw(ZWOControlType::CoolerOn, cooler_on ? 1 : 0);
     }
@@ -416,7 +413,7 @@ public:
     double get_cooler_power() const override {
         ensure_connected();
         if (!can_get_control(ZWOControlType::CoolerPower)) {
-            return 0.0;
+            throw AlpacaException("This ZWO camera cannot report cooler power", AlpacaError::PropertyNotImplemented);
         }
         long value = get_control_value_or_throw(ZWOControlType::CoolerPower);
         return static_cast<double>(value);

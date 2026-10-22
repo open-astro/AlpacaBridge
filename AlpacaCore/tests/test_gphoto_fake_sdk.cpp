@@ -26,6 +26,7 @@
 #include <string>
 #include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "fake_gphoto_sdk.h"
 #include "fake_raw_decoder.h"
@@ -173,10 +174,11 @@ TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names
     driver->set_connected(false);
 }
 
-TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler values",
+TEST_CASE("GPhoto camera fake - connected cooler members raise PropertyNotImplemented",
           "[gphoto][camera][unit][fakesdk]") {
     // While disconnected these throw NotConnected first (driver-lifecycle.instructions.md "ASCOM contract precedence",
-    // #658); once connected a camera without a cooler answers its own no-cooler values.
+    // #658); once connected a camera without a cooler raises PropertyNotImplemented (ICameraV4 CoolerOn,
+    // CoolerPower: "if not supported"), never a made-up false or 0.0 (issue #1477).
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_camera());
@@ -186,7 +188,8 @@ TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler va
     driver->set_connected(true);
     REQUIRE(driver->get_connected() == true);
 
-    CHECK(driver->get_cooler_on() == false);
+    CHECK_FALSE(driver->get_can_get_cooler_power());
+    alpacacore::test::require_no_cooler_members(*driver);
     for (auto fn : {std::function<void()>([&] { (void)driver->get_set_ccd_temperature(); }),
                     std::function<void()>([&] { driver->set_set_ccd_temperature(0.0); })}) {
         bool threw = false;
@@ -199,6 +202,37 @@ TEST_CASE("GPhoto camera fake - connected cooler members answer the no-cooler va
         CHECK(threw);
     }
 
+    driver->set_connected(false);
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing.
+TEST_CASE("GPhoto camera fake - PercentCompleted only while Exposing", "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*driver); }
+    SECTION("idle after a completed exposure") {
+        driver->start_exposure(0.01, true);
+        wait_for_exposure_to_finish(*driver);
+        REQUIRE(driver->get_image_ready());
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("idle after a failed exposure") {
+        fake.throw_from.insert("drain_events");
+        driver->start_exposure(0.25, true);  // > 1/50 s native ceiling => bulb path
+        wait_for_exposure_to_finish(*driver);
+        require_exposure_failure_reported(*driver, "injected failure in drain_events");
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("while exposing") {
+        driver->start_exposure(5.0, true);
+        alpacacore::test::require_percent_completed_available(*driver);
+        driver->stop_exposure();
+    }
     driver->set_connected(false);
 }
 

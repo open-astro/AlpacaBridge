@@ -40,8 +40,8 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Defaults", "[wandererastro][co
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "WandererAstro WandererCover V4");
-    // MaxBrightness is a static capability and must be readable without a connection.
-    CHECK(driver->get_max_brightness() == 255);
+    // MaxBrightness is a property: disconnected it refuses (issue #1478), the value is read connected.
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("WandererAstro CoverCalibrator Driver - Device metadata", "[wandererastro][covercalibrator][unit]") {
@@ -105,8 +105,8 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Unsupported actions", "[wander
 TEST_CASE("WandererAstro CoverCalibrator Driver - Calibrator capabilities", "[wandererastro][covercalibrator][unit]") {
     auto driver = alpacacore::vendor::wandererastro::create_wandererastro_covercalibrator(2, "/dev/ttyUSB0");
 
-    // MaxBrightness reflects the WandererCover PWM range and is connection-independent.
-    REQUIRE(driver->get_max_brightness() == 255);
+    // MaxBrightness reflects the WandererCover PWM range, but a disconnected read refuses (issue #1478).
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 
     // set_brightness shares CalibratorOn's validation: a valid value falls
     // through to the connection check, an invalid one is rejected up front.
@@ -215,6 +215,7 @@ TEST_CASE("WandererAstro CoverCalibrator Driver - Silent link reads Unknown and 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(driver->get_cover_state() == CoverState::Closed);
+    CHECK(driver->get_max_brightness() == 255);
     driver->calibrator_on(100);
     CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
     CHECK(driver->get_brightness() == 100);

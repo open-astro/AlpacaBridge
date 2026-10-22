@@ -530,7 +530,8 @@ While waiting, also keep an eye on CI: `gh pr checks <number>`. A red CI check s
 
 ## Step 9 — Act on the review verdict
 
-Read the bot's newest review comment in full. It has two sections (`claude-review.yml` prompt):
+Read the bot's newest review comment in full. Besides its **Decision records** checklist (one
+verdict line per rule in scope; a `defect` line is repeated under Defects), it has two sections (`claude-review.yml` prompt):
 **Defects**, which are what made the verdict a rejection, and **Notes**, which never block. Only
 Defects are work in this PR. A Note is a follow-up issue only when the user wants one; a Note the
 bot marks "out of scope, open an issue" is listed for the user in Step 10, never fixed here.

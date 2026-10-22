@@ -4889,7 +4889,7 @@ Response Router::dispatch_camera_method(
                 response.set_body(alpaca_response);
                 return response;
             } else if (method_name == "percentcompleted") {
-                auto percent = camera->get_percent_completed();
+                auto percent = camera->get_percent_completed_checked();
                 auto value = static_cast<std::int32_t>(percent);
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, value);

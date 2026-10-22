@@ -570,30 +570,28 @@ public:
 
     bool get_cooler_on() const override {
         ensure_connected();
-        if (!cooler_available_copy()) return false;
+        if (!cooler_available_copy()) {
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
+        }
         return with_camera([this](int id) { return sdk_.get_cooler_on(id); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (!cooler_available_copy()) {
-            if (cooler_on) {
-                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-            }
-            return;
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         with_camera([&](int id) { sdk_.set_cooler_on(id, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
-        if (!cooler_available_copy()) return 0.0;
-        try {
-            int pct = with_camera([this](int id) { return sdk_.get_cooler_power_percent(id); });
-            if (pct < 0) pct = 0;
-            if (pct > 100) pct = 100;
-            return static_cast<double>(pct);
-        } catch (const std::exception&) {
-            return 0.0;
+        if (!cooler_available_copy()) {
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
+        // An SDK failure propagates like get_cooler_on() does; it is never reported as 0 % power.
+        int pct = with_camera([this](int id) { return sdk_.get_cooler_power_percent(id); });
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        return static_cast<double>(pct);
     }
 
     double get_electrons_per_adu() const override {

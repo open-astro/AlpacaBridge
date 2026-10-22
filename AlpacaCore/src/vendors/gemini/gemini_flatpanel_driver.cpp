@@ -168,7 +168,9 @@ public:
                 const int bri = protocol_.get_brightness();
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 calibrator_engaged_ = on;
-                commanded_brightness_ = bri;
+                // The panel remembers its level while the light is off; Brightness is 0 while CalibratorState is
+                // Off (ICoverCalibratorV2).
+                commanded_brightness_ = on ? bri : 0;
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel state seed failed: " + std::string(e.what()));
             }
@@ -225,7 +227,10 @@ public:
 
     // --- CoverCalibrator interface: calibrator ---
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();
@@ -527,7 +532,9 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(state_mutex_);
                     calibrator_engaged_ = status.light_on;
-                    commanded_brightness_ = bri;
+                    // The panel remembers its level while the light is off; Brightness is 0 while CalibratorState
+                    // is Off (ICoverCalibratorV2).
+                    commanded_brightness_ = status.light_on ? bri : 0;
                 }
                 // Seed the idle cover-status cache from this same read: ConformU
                 // reads DeviceState ~0.2 s and CoverState ~0.4 s after Connect(),
@@ -591,7 +598,10 @@ public:
     // see GeminiFlatPanelDriver::calibrator_on()/calibrator_off() for the
     // vendor-app-derived ON/OFF command ordering this mirrors.
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();
@@ -714,10 +724,10 @@ public:
         return CoverState::Unknown;
     }
 
-    bool get_cover_moving() const override {
-        ensure_connected();
-        return cover_in_flight_.load() && !cover_halted_.load();
-    }
+    // True exactly when CoverState is Moving (ICoverCalibratorV2), including a move the panel reports with no
+    // command in flight. It asks get_cover_state(), so it takes the same short TTL-cached status read under the
+    // cache lock (decision 0016: a getter that must reach the device takes the I/O lock) and never disagrees.
+    bool get_cover_moving() const override { return get_cover_state() == CoverState::Moving; }
 
     void open_cover() override {
         ensure_connected();

@@ -43,6 +43,9 @@ public:
         // TimeStamp names when it was measured (decision 0010).
         const auto age = device_state_age();
         std::vector<DeviceState> state;
+        // IsMoving, Position, Temperature and TimeStamp: one allocation. GCC 14 reported
+        // -Werror=stringop-overflow in std::variant for the QHY focuser build when the vector grew by push_back.
+        state.reserve(4);
         auto add = [&state](const char* name, auto getter) {
             try {
                 state.push_back({name, DeviceStateValue{getter()}});

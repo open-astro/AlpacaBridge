@@ -173,6 +173,11 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
+    // Telescope only (with_rate_getters_answering): what RightAscensionRate and DeclinationRate do while
+    // disconnected. NotConnected is the rule; Static is a stated exemption, with its reason, that the sweep pins
+    // (the read must return) so a driver that is fixed flips the case and the entry is updated.
+    DisconnectedRead rate_getters_disconnected = DisconnectedRead::NotConnected;
+    const char* rate_getters_reason = "";
 };
 
 // Platform 7 interface versions per device type.
@@ -233,6 +238,12 @@ inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_swit
     e.switch_caps_disconnected = can_write_async;
     e.switch_writable_id = writable_id;
     e.switch_caps_source = source;
+    return e;
+}
+
+inline ContractEntry with_rate_getters_answering(ContractEntry e, const char* reason) {
+    e.rate_getters_disconnected = DisconnectedRead::Static;
+    e.rate_getters_reason = reason;
     return e;
 }
 
@@ -481,7 +492,7 @@ inline ContractEntry contract_entry_skywatcher_telescope() {
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
 inline ContractEntry contract_entry_onstep_telescope() {
-    return with_command_passthrough(make_entry(
+    auto entry = with_command_passthrough(make_entry(
         "onstep_telescope", "onstep", "telescope", DeviceType::Telescope,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             vendor::onstep::ConnectionInfo conn;
@@ -491,6 +502,8 @@ inline ContractEntry contract_entry_onstep_telescope() {
             return vendor::onstep::create_onstep_telescope(n, conn);
         },
         kSrcAgentsAxis));
+    return with_rate_getters_answering(std::move(entry),
+                                       "OnStep rows of #1478 are left to the OnStep maintainer (open PR #1494)");
 }
 #endif
 

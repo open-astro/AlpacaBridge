@@ -240,8 +240,9 @@ Neither counts toward the broken-workflow hard stop.
 
 ### `⚠️ Issues found`
 
-The bot's comment has two sections (`claude-review.yml` prompt): **Defects**, which are what made
-the verdict a rejection, and **Notes**, which never block. Fix **every Defect** on this PR, in this
+The bot's comment has three sections (`claude-review.yml` prompt): **Defects**, which are what made
+the verdict a rejection, **Notes**, which never block, and **Decision records**, one verdict line
+per rule in scope (a `defect` line is repeated under Defects). Fix **every Defect** on this PR, in this
 PR, in **one batched push** (one commit per Defect, see "Prove it before you push" below); do not
 defer a Defect to a follow-up issue and do not decline one as low priority unless the user says
 so. Handle the **Notes** by the classification rules in the `✅ Approved` section below: a
