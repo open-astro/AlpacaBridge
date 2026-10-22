@@ -51,16 +51,42 @@ TEST_CASE("ZWO mount serial - a connect refuses a port another device holds", "[
 
 TEST_CASE("ZWO mount serial - the link holds its port and releases it on disconnect", "[zwo][serial][issue1202]") {
     alpacacore::test::PtyResponder device(alpacacore::test::answer_handset_echo, "ZWO mount handset");
-    cases::wrapper_holds_and_releases_port(ZWOMountProtocolWrapper::instance(), serial_info(device.slave_path()),
-                                           device.slave_path());
+    ZWOMountProtocolWrapper wrapper;
+    cases::wrapper_holds_and_releases_port(wrapper, serial_info(device.slave_path()), device.slave_path());
 }
 
 TEST_CASE("ZWO mount serial - a command on a retuned port times out and the line settings come back",
           "[zwo][serial][issue1202]") {
     alpacacore::test::PtyResponder device(alpacacore::test::answer_handset_echo, "ZWO mount handset");
-    auto& wrapper = ZWOMountProtocolWrapper::instance();
+    ZWOMountProtocolWrapper wrapper;
     cases::retuned_port_times_out_and_recovers(wrapper, serial_info(device.slave_path()), device,
                                                [&] { (void)wrapper.send_command(":GVP#", true, 300); });
+}
+
+TEST_CASE("ZWO mount serial - independent links retain their own exclusive port claims", "[zwo][serial][isolation]") {
+    const auto responder = [](const std::string&) { return std::string("AM5#"); };
+    alpacacore::test::PtyResponder a(responder), b(responder);
+    ZWOMountProtocolWrapper first, second, collision;
+    const auto first_info = serial_info(a.slave_path());
+    const auto second_info = serial_info(b.slave_path());
+    REQUIRE(first.connect(first_info));
+    REQUIRE(second.connect(second_info));
+    CHECK(alpacacore::util::is_serial_port_in_use(a.slave_path()));
+    CHECK(alpacacore::util::is_serial_port_in_use(b.slave_path()));
+    CHECK_FALSE(collision.connect(first_info));
+    CHECK(collision.last_connect_error().find("ZWO mount") != std::string::npos);
+    CHECK(first.send_command(":GVP") == "AM5");
+    second.cancel_pending_io();
+    second.disconnect();
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(b.slave_path()));
+    CHECK(alpacacore::util::is_serial_port_in_use(a.slave_path()));
+    CHECK(first.send_command(":GVP") == "AM5");
+    REQUIRE(second.connect(second_info));
+    CHECK(second.send_command(":GVP") == "AM5");
+    first.disconnect();
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(a.slave_path()));
+    CHECK(alpacacore::util::is_serial_port_in_use(b.slave_path()));
+    CHECK(second.send_command(":GVP") == "AM5");
 }
 
 #endif  // _WIN32

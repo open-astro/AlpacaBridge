@@ -33,6 +33,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -103,6 +105,16 @@ public:
     /// silent decision is taken before the count becomes visible.
     void set_reply_latency(std::chrono::milliseconds latency) { latency_ms_.store(static_cast<int>(latency.count())); }
 
+    /// Runs on the fake's thread once per transaction, next to the latency
+    /// sleep, so a case on a fake task clock can let task time pass during a
+    /// multi-transaction command. Set it before the traffic it covers; an empty
+    /// function clears it. The hook must not take a lock the driver holds
+    /// across a transaction: a clock advance takes each due waiter's mutex.
+    void set_reply_hook(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(hook_mutex_);
+        reply_hook_ = std::move(hook);
+    }
+
     /// A reply latency long enough that a slew still runs after the driver's
     /// first poll of it: the named constant a case uses to keep a slew alive.
     static constexpr std::chrono::milliseconds kSlewPastFirstPollLatency{30};
@@ -134,6 +146,12 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
             if (const int latency_ms = latency_ms_.load(); latency_ms > 0)
                 std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms));
+            std::function<void()> hook;
+            {
+                std::lock_guard<std::mutex> lock(hook_mutex_);
+                hook = reply_hook_;
+            }
+            if (hook) hook();
             // Decide silence before the count is visible: a case that waits for the count and then
             // calls set_silent() must not see its late reply dropped. Count before the send, so a
             // client that has its reply already sees it counted.
@@ -152,6 +170,8 @@ private:
     std::atomic<int> latency_ms_{0};
     std::atomic<bool> silent_{false};
     std::atomic<int> served_{0};
+    std::mutex hook_mutex_;
+    std::function<void()> reply_hook_;
 };
 
 }  // namespace alpacacore::test

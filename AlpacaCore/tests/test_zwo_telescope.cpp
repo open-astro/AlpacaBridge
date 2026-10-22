@@ -581,10 +581,7 @@ TEST_CASE("ZWO mount site longitude converts between east-positive API and west-
         conn.host = "127.0.0.1";
         conn.tcp_port = server.port();
         conn.response_timeout_ms = 250;
-        auto& protocol = alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance();
-        struct Disconnect {
-            ~Disconnect() { alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance().disconnect(); }
-        } disconnect;
+        alpacacore::vendor::zwo::ZWOMountProtocolWrapper protocol;
         REQUIRE(protocol.connect(conn));
         const auto actual = protocol.get_site_info();
         const double latitude = 28.0 + 4.0 / 60.0 + 58.0 / 3600.0;

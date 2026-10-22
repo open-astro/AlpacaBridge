@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <mutex>
@@ -52,8 +53,9 @@ class FakeMountServer {
 public:
     using Responder = std::function<std::string(const std::string& chunk)>;
 
-    /// Starts listening on an ephemeral loopback port immediately.
-    explicit FakeMountServer(Responder responder = default_responder()) : responder_(std::move(responder)) {
+    /// Starts listening on an ephemeral port; bind_ipv4 is in host byte order.
+    explicit FakeMountServer(Responder responder = default_responder(), std::uint32_t bind_ipv4 = INADDR_LOOPBACK)
+        : responder_(std::move(responder)) {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (listen_fd_ < 0) {
             return;
@@ -62,7 +64,7 @@ public:
         ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        addr.sin_addr.s_addr = htonl(bind_ipv4);
         addr.sin_port = 0;  // ephemeral
         if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(listen_fd_, 16) != 0) {

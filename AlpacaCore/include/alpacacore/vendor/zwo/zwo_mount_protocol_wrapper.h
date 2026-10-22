@@ -113,7 +113,10 @@ enum class ParkStatus {
 
 class ZWOMountProtocolWrapper {
 public:
-    static ZWOMountProtocolWrapper& instance();
+    ZWOMountProtocolWrapper();
+    ~ZWOMountProtocolWrapper();
+    ZWOMountProtocolWrapper(const ZWOMountProtocolWrapper&) = delete;
+    ZWOMountProtocolWrapper& operator=(const ZWOMountProtocolWrapper&) = delete;
 
     bool connect(const ConnectionInfo& info);
     void disconnect();
@@ -184,9 +187,6 @@ public:
     bool has_successful_homing();
 
 private:
-    ZWOMountProtocolWrapper();
-    ~ZWOMountProtocolWrapper();
-
     class Impl;
     std::unique_ptr<Impl> pimpl_;
 };

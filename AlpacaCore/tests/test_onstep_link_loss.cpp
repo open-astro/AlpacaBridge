@@ -317,6 +317,33 @@ TEST_CASE("OnStep link loss - a reply cut off by the unplug fails NotConnected b
     CHECK(protocol.consume_link_lost_at().has_value());
 }
 
+// #1430: FindHome reads :GE# right after :hC#. A link lost in between must
+// fail that read (NotConnected), not read as "no code": FindHome would then
+// report success on a dead link.
+TEST_CASE("OnStep link loss - a link lost before the :GE# read fails it instead of reading no code",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto& protocol = OnStepProtocolWrapper::instance();
+    REQUIRE(protocol.connect(serial_info(link)));
+    REQUIRE(protocol.link_alive());
+
+    mount.sever_on(":GE#");
+    protocol.find_home();
+    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+    CHECK_FALSE(protocol.link_alive());
+}
+
+// #1430: on a link that is closed rather than lost, the :GE# read fails too,
+// instead of reading as "no code".
+TEST_CASE("OnStep link loss - the :GE# read fails NotConnected while disconnected", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    REQUIRE_FALSE(protocol.is_connected());
+    require_not_connected_error([&] { (void)protocol.get_last_command_error(); });
+}
+
 TEST_CASE("OnStep link loss - Connected=true on a lost link reconnects instead of short-circuiting",
           "[onstep][serial][connected]") {
     WrapperReset reset;
@@ -586,6 +613,98 @@ TEST_CASE("OnStep link loss - the reconnect stops motion only after a long outag
         CHECK(replugged.received(":Qn#"));
     }
     driver->set_connected(false);
+}
+
+// #1460: the process-wide wrapper takes its loss stamps on the clock of the
+// driver that connected last. A stamp taken on one driver's clock means
+// nothing on the next driver's, so it goes with the clock instead of being
+// timed as an outage there.
+TEST_CASE("OnStep link loss - a loss stamped on one driver's clock is not timed on the next driver's",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock first_clock;
+    alpacacore::test::FakeTaskClock second_clock;
+    FakeOnStepSerialMount first;
+    FakeOnStepSerialMount replugged;
+    PortLink link(first.slave_path());
+    {
+        auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), first_clock);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        first.sever_link();
+        link.repoint(replugged.slave_path());
+        REQUIRE_FALSE(driver->get_connected());  // the loss is seen, and stamped on first_clock, here
+    }
+    // Any recorded outage would stop motion now.
+    alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), second_clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK_FALSE(replugged.received_any_stop());
+    driver->set_connected(false);
+}
+
+// #1460: setting another clock, or releasing the one in use, forgets the
+// loss and last-alive stamps taken on the old one.
+TEST_CASE("OnStep link loss - a change of clock forgets the wrapper's loss stamps", "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock first_clock;
+    alpacacore::test::FakeTaskClock second_clock;
+    auto& protocol = OnStepProtocolWrapper::instance();
+    struct ClockReset {
+        alpacacore::test::FakeTaskClock& a;
+        alpacacore::test::FakeTaskClock& b;
+        ~ClockReset() {
+            auto& wrapper = OnStepProtocolWrapper::instance();
+            wrapper.release_task_clock(a);
+            wrapper.release_task_clock(b);
+        }
+    } clock_reset{first_clock, second_clock};
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    protocol.set_task_clock(first_clock);
+    REQUIRE(protocol.connect(serial_info(link)));
+    mount.sever_link();
+    REQUIRE_FALSE(protocol.link_alive());  // the loss is stamped on first_clock
+
+    SECTION("another clock is set") { protocol.set_task_clock(second_clock); }
+    SECTION("the clock in use is released") { protocol.release_task_clock(first_clock); }
+    CHECK_FALSE(protocol.consume_link_lost_at().has_value());
+    CHECK_FALSE(protocol.consume_last_alive_before_loss().has_value());
+}
+
+// #1460: only a change of the clock in use forgets the stamps. A driver that
+// never connected, or one on the process clock, releases nothing, so the
+// lost driver's own reconnect still times its outage.
+TEST_CASE("OnStep link loss - a driver that does not own the clock leaves the loss stamps alone",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    WindowReset window_reset;
+    alpacacore::test::FakeTaskClock fake_clock;
+    alpacacore::test::FakeTaskClock other_clock;
+    FakeOnStepSerialMount first;
+    FakeOnStepSerialMount replugged;
+    PortLink link(first.slave_path());
+
+    const auto lose_then_reconnect = [&](alpacacore::util::TaskClock& own, alpacacore::util::TaskClock& other) {
+        auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, serial_info(link), own);
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        first.sever_link();
+        link.repoint(replugged.slave_path());
+        REQUIRE_FALSE(driver->get_connected());  // the loss is stamped here
+        { auto bystander = alpacacore::vendor::onstep::create_onstep_telescope(1, serial_info(link), other); }
+        alpacacore::vendor::onstep::detail::set_relink_motion_preserve_window(std::chrono::milliseconds(0));
+        driver->set_connected(true);
+        REQUIRE(driver->get_connected());
+        CHECK(replugged.received(":Q#"));  // the outage was still timed
+        driver->set_connected(false);
+    };
+    SECTION("a driver on another clock that never connected") { lose_then_reconnect(fake_clock, other_clock); }
+    SECTION("two drivers on the process clock") {
+        lose_then_reconnect(alpacacore::util::default_task_clock(), alpacacore::util::default_task_clock());
+    }
 }
 
 TEST_CASE("OnStep link loss - a loss found during an exchange closes the fd once the exchange ends",
