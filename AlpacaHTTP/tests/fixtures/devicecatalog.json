@@ -125,6 +125,16 @@
     ]
   },
   {
+    "vendor": "iguider",
+    "deviceType": "camera",
+    "displayName": "iOptron iGuider Camera",
+    "available": true,
+    "buildOption": "ALPACACORE_ENABLE_IOPTRON",
+    "fields": [
+      {"key": "devicePath", "type": "string", "default": "", "required": false, "secret": false, "role": "PortPath"}
+    ]
+  },
+  {
     "vendor": "ioptron",
     "deviceType": "camera",
     "displayName": "iOptron iCAM Camera",
@@ -484,8 +494,7 @@
       {"key": "cameraIndex", "type": "int", "default": -1, "required": false, "secret": false, "role": "EnumerationIndex"},
       {"key": "cameraId", "type": "int", "default": -1, "required": false, "secret": false, "role": "DeviceId"},
       {"key": "serialNumber", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
-      {"key": "cameraName", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"},
-      {"key": "uniqueId", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
+      {"key": "cameraName", "type": "string", "default": "", "required": false, "secret": false, "role": "Plain"}
     ]
   },
   {

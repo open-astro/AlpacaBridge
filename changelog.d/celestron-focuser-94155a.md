@@ -1,0 +1,2 @@
+### Changed
+- **Celestron focus motor model and port name** (AlpacaHTTP, docs, issue #896): the validated motor is the 94155-A (the reissue with a notch for the EdgeHD focal reducer), firmware 7.16.9300, so the supported-drivers row and the ConformU report folder now say 94155-A; the earlier 94155 is untested. The web form's serial-port placeholder is now the motor's `/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00` name.

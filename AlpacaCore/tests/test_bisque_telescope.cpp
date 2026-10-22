@@ -489,7 +489,7 @@ TEST_CASE("Bisque Telescope Driver - non-finite slew coordinates and MoveAxis ra
     }
 }
 
-// #627: argument validation precedes the connection check (AGENTS.md), so a
+// #627: argument validation precedes the connection check (driver-lifecycle.instructions.md), so a
 // non-finite coordinate or rate is InvalidValue on a disconnected driver too.
 TEST_CASE("Bisque Telescope Driver - non-finite slew, sync and MoveAxis arguments are InvalidValue while disconnected",
           "[bisque][telescope][unit][nonfinite]") {

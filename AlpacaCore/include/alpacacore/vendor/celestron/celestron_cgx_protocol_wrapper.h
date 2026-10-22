@@ -12,12 +12,14 @@
 
 #pragma once
 
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol.h>
 
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace alpacacore::vendor::celestron {
@@ -31,13 +33,20 @@ enum class AuxLinkSpeed : std::uint8_t { Baud115200, Baud9600 };
 /// Per-driver serial link to a Celestron CGX/CGX-L direct AUX interface.
 class CelestronCgxProtocol final {
 public:
-    CelestronCgxProtocol() = default;
+    /// @param owner The device name a refused operator reads while this link
+    ///              holds its port (decision 0017): the mount or the focuser.
+    explicit CelestronCgxProtocol(std::string owner = "Celestron CGX mount") : owner_(std::move(owner)) {}
     ~CelestronCgxProtocol();
 
     CelestronCgxProtocol(const CelestronCgxProtocol&) = delete;
     CelestronCgxProtocol& operator=(const CelestronCgxProtocol&) = delete;
 
-    void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200);
+    /// @param probe_wait How long the port claim waits out another device's
+    ///                   auto-detect probe on the port. A reconnect made under
+    ///                   a driver lock passes zero, so it fails at once instead
+    ///                   of blocking that lock's getters (#1457).
+    void connect_serial(const std::string& port_path, AuxLinkSpeed speed = AuxLinkSpeed::Baud115200,
+                        std::chrono::milliseconds probe_wait = util::kSerialProbeClaimWait);
     void disconnect();
     /// Clears a desynchronized link on the port already held: flushes stale input
     /// and accepts exchanges again. Never opens a port, so a racing disconnect
@@ -70,12 +79,13 @@ private:
     void wait_for_locked(short events, std::chrono::steady_clock::time_point deadline);
     std::vector<std::uint8_t> read_frame_locked(std::chrono::steady_clock::time_point deadline);
 
+    const std::string owner_;
     mutable std::mutex mutex_;
     int serial_fd_ = -1;
     std::atomic<std::uint64_t> session_generation_{0};
     std::atomic<bool> healthy_{false};
     bool desynchronized_ = false;
-    std::string registered_port_path_;
+    util::SerialLink link_;  // the claim, TIOCEXCL and the fd; serial_fd_ is link_.fd() while open
     std::vector<std::uint8_t> receive_buffer_;
 };
 

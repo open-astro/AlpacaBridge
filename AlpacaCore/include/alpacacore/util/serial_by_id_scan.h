@@ -29,6 +29,7 @@
 // missing) without indiscriminately opening -- and for CH340/CH341-class
 // hardware, DTR-resetting -- every unrelated serial device on the box.
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -97,6 +98,11 @@ inline std::vector<SerialByIdEntry> list_serial_by_id(const std::filesystem::pat
         if (!entry.is_symlink(symlink_ec) || symlink_ec) continue;
         results.push_back({entry.path().filename().string(), entry.path()});
     }
+    // directory_iterator order is unspecified. Sort by name so an auto-detect
+    // index ("the second matching device") names the same port on every scan
+    // (issue #1202).
+    std::sort(results.begin(), results.end(),
+              [](const SerialByIdEntry& a, const SerialByIdEntry& b) { return a.name < b.name; });
     return results;
 }
 

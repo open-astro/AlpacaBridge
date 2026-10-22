@@ -27,9 +27,9 @@
 #include <vector>
 
 #ifndef _WIN32
+#include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #endif
@@ -46,6 +46,17 @@ constexpr int MAX_RESPONSE_LEN = 32;
 constexpr int HANDSHAKE_RETRIES = 3;
 constexpr int HANDSHAKE_READ_TIMEOUT_S = 2;        // Shorter than the 4s runtime timeout (INDI iEAFFOCUS_TIMEOUT)
 constexpr std::int32_t IEAF_MAX_POSITION = 99999;  // matches INDI FocusAbsPos max
+// Old VMIN=0/VTIME=10 per-character window, now the tty_read() bound.
+constexpr int READ_CHAR_TIMEOUT_MS = 1000;
+
+// Names this wrapper's probe and its connected link in the serial-port
+// registry (#1202): the iEAF and the iAFS2/3 are one kind of device to it.
+constexpr const char* kSerialOwner = "iOptron focuser";
+
+#ifndef _WIN32
+// The iEAF runs at a fixed 115200 8N1 raw, whatever the config's baud says.
+void configure_ieaf_line(struct termios& tty) { util::make_raw_8n1(tty, B115200); }
+#endif
 
 bool parse_device_info(const std::string& resp, IeafDeviceInfo& out) {
     // ":DeviceInfo#" → "%6d%2d%4d#": position, model code, firmware/build.
@@ -74,44 +85,19 @@ bool is_ieaf_model(std::int32_t model) {
 // iAFS2/3 uses 067b:23a3, "ATEN Serial Bridge") wired
 // straight to the focuser MCU — no Arduino-style DTR reset on open, so no
 // CH340 HUPCL dance is needed here.
-static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
+bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
+    // The probe claim waits out another scan's probe of this port (the mount
+    // and the iEFW scans match the same Prolific adapters) and is held until
+    // this function returns.
+    std::string error;
+    util::SerialLink link =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_ieaf_line, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG("iOptron", "iEAF probe skipped " + port_path + ": " + error);
         return false;
     }
-
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) {
-        close(fd);
-        return false;
-    }
-
-    cfsetospeed(&tty, B115200);
-    cfsetispeed(&tty, B115200);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 10;  // 1s per-character timeout
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        close(fd);
-        return false;
-    }
-
-    if (!util::clear_nonblocking(fd)) {
-        close(fd);
-        return false;
-    }
+    const int fd = link.fd();
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         // First attempt is quick; second waits out any port-open settling.
@@ -119,7 +105,7 @@ static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
         tcflush(fd, TCIOFLUSH);
 
         const char* cmd = ":DeviceInfo#";
-        if (!util::write_all(fd, cmd, std::strlen(cmd))) {
+        if (!util::tty_write_all(fd, cmd, std::strlen(cmd))) {
             continue;
         }
 
@@ -132,7 +118,7 @@ static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
                 break;
             }
             char ch = 0;
-            ssize_t r = read(fd, &ch, 1);
+            ssize_t r = util::tty_read(fd, &ch, 1, READ_CHAR_TIMEOUT_MS);
             if (r == 1) {
                 if (ch == '\r' || ch == '\n') continue;
                 if (ch == '#') break;
@@ -144,13 +130,10 @@ static bool probe_port(const std::string& port_path, IeafDeviceInfo& info) {
 
         IeafDeviceInfo parsed;
         if (parse_device_info(resp, parsed) && is_ieaf_model(parsed.model)) {
-            close(fd);
             info = parsed;
             return true;
         }
     }
-
-    close(fd);
 #else
     (void)port_path;
     (void)info;
@@ -185,8 +168,26 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
     struct Candidate {
         std::string path;
         std::string name;  // by-id symlink name, empty for raw nodes
+        bool sibling = false;  // a connected iOptron focuser holds it: count it, never open it
     };
     std::vector<Candidate> candidates;
+    // A port another connected device holds is never opened. One a connected
+    // focuser holds keeps its place in the list (no probe, identity unknown),
+    // so "focuser index 1" stays the same unit while index 0 is connected; the
+    // driver that picks it is then refused by its link claim, which names the holder.
+    auto add_candidate = [&candidates](const std::string& path, const std::string& name) {
+        switch (util::serial_candidate_use(path, kSerialOwner)) {
+            case util::SerialCandidateUse::HeldByOther:
+                ALPACA_LOG_DEBUG("iOptron", "iEAF scan skipped " + path + ": another connected device holds it");
+                return;
+            case util::SerialCandidateUse::HeldBySibling:
+                candidates.push_back({path, name, true});
+                return;
+            case util::SerialCandidateUse::Free:
+                candidates.push_back({path, name, false});
+                return;
+        }
+    };
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
@@ -205,7 +206,7 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
             probed.insert(resolved);
-            candidates.push_back({resolved, name});
+            add_candidate(resolved, name);
         }
     }
 
@@ -222,7 +223,7 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
         if (probed.count(resolved) != 0) continue;
         if (!raw_port_looks_like_ieaf_candidate(resolved)) continue;
         probed.insert(resolved);
-        candidates.push_back({resolved, ""});
+        add_candidate(resolved, "");
     }
 
     // Probe every candidate concurrently. A non-responsive port (an iOptron
@@ -235,14 +236,20 @@ std::vector<IeafPortInfo> enumerate_ieaf_ports() {
     workers.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& c = candidates[i];
+        if (c.sibling) continue;
         ALPACA_LOG_INFO("iOptron", "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for iEAF...");
-        workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path, infos[i]) ? 1 : 0; });
+        workers.emplace_back([&, i] { found[i] = probe_ieaf_port(candidates[i].path, infos[i]) ? 1 : 0; });
     }
     for (auto& w : workers) w.join();
 
     for (std::size_t i = 0; i < candidates.size(); ++i) {
-        if (!found[i]) continue;
         const auto& c = candidates[i];
+        if (c.sibling) {
+            ALPACA_LOG_INFO("iOptron", "Counted " + c.path + " without probing: a connected iOptron focuser holds it");
+            results.push_back({c.path, c.name, IeafDeviceInfo{}});
+            continue;
+        }
+        if (!found[i]) continue;
         const auto& info = infos[i];
         ALPACA_LOG_INFO("iOptron", "Found iEAF on " + c.path + " (model " + std::to_string(info.model) + ", firmware " +
                                        std::to_string(info.firmware) + ")");
@@ -261,6 +268,9 @@ public:
 
     IeafDeviceInfo connect(const IeafConnectionConfig& config) {
         std::lock_guard<std::mutex> lock(mutex_);
+        // A reconnect releases this wrapper's own port first: its link claim
+        // would otherwise refuse the new open as held by "the connected iOptron focuser".
+        disconnect_locked();
         config_ = config;
 
         connect_serial();
@@ -368,62 +378,16 @@ private:
 
     void connect_serial() {
 #ifndef _WIN32
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(errno) + ")",
-                AlpacaError::NotConnected);
+        // SerialLink claims the port (a port another connected device holds is
+        // refused, naming it), takes TIOCEXCL and keeps the fd non-blocking.
+        std::string error;
+        link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner,
+                                       configure_ieaf_line, &error);
+        if (!link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
 
-        // Exclusive access (issue #995): a later open() of this node, e.g. an
-        // auto-detect probe of another iOptron driver scanning the same
-        // Prolific/FTDI candidates, then fails with EBUSY and the probe skips
-        // the port, instead of flushing our pending reply and writing its own
-        // query. Same as the SynScan and Sky-Watcher wrappers: connected link
-        // only, ignored on failure (pty back ends may not support it).
-        (void)ioctl(serial_fd_, TIOCEXCL);
-        struct termios tty {};
-        if (tcgetattr(serial_fd_, &tty) != 0) {
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to get serial port attributes", AlpacaError::DriverException);
-        }
-
-        // The iEAF runs at a fixed 115200 regardless of config_.baud_rate.
-        cfsetospeed(&tty, B115200);
-        cfsetispeed(&tty, B115200);
-
-        // 8N1, raw
-        tty.c_cflag &= ~PARENB;
-        tty.c_cflag &= ~CSTOPB;
-        tty.c_cflag &= ~CSIZE;
-        tty.c_cflag |= CS8;
-        tty.c_cflag &= ~CRTSCTS;
-        tty.c_cflag |= CREAD | CLOCAL;
-        tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-        tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-        tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-        tty.c_oflag &= ~OPOST;
-        tty.c_oflag &= ~ONLCR;
-        tty.c_cc[VMIN] = 0;
-        tty.c_cc[VTIME] = 10;  // 1s per-character timeout; read_response() has its own timeout
-
-        if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port attributes", AlpacaError::DriverException);
-        }
-
-        if (!util::clear_nonblocking(serial_fd_)) {
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-            throw AlpacaException("Failed to set serial port to blocking mode", AlpacaError::DriverException);
-        }
-
-        tcflush(serial_fd_, TCIOFLUSH);
+        tcflush(link_.fd(), TCIOFLUSH);
 #else
         throw AlpacaException("iEAF driver is Linux-only", AlpacaError::DriverException);
 #endif
@@ -432,25 +396,21 @@ private:
     void disconnect_locked() {
         connected_ = false;
 #ifndef _WIN32
-        if (serial_fd_ >= 0) {
-            (void)ioctl(serial_fd_, TIOCNXCL);  // drop the exclusive lock so a reconnect can reopen
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
+        link_.close();  // releases TIOCEXCL and the registry claim
 #endif
     }
 
     void tcflush_port() {
 #ifndef _WIN32
-        if (serial_fd_ >= 0) {
-            tcflush(serial_fd_, TCIOFLUSH);
+        if (link_) {
+            tcflush(link_.fd(), TCIOFLUSH);
         }
 #endif
     }
 
     void write_data(const std::string& data) {
 #ifndef _WIN32
-        if (!util::write_all(serial_fd_, data.c_str(), data.length())) {
+        if (!util::tty_write_all(link_.fd(), data.c_str(), data.length())) {
             throw AlpacaException("Write failed: " + util::errno_string(errno), AlpacaError::DriverException);
         }
 #else
@@ -475,7 +435,7 @@ private:
             char ch = 0;
             bool got_char = false;
 #ifndef _WIN32
-            ssize_t r = read(serial_fd_, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            ssize_t r = util::tty_read(link_.fd(), &ch, 1, READ_CHAR_TIMEOUT_MS);
             if (r == 1) {
                 got_char = true;
             }
@@ -525,7 +485,7 @@ private:
         while (true) {
             char ch = 0;
 #ifndef _WIN32
-            if (read(serial_fd_, &ch, 1) == 1) {  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
+            if (util::tty_read(link_.fd(), &ch, 1, READ_CHAR_TIMEOUT_MS) == 1) {
                 if (ch == '\r' || ch == '\n') {
                     continue;
                 }
@@ -550,7 +510,7 @@ private:
     bool connected_ = false;
 
 #ifndef _WIN32
-    int serial_fd_ = -1;
+    util::SerialLink link_;
 #endif
 };
 

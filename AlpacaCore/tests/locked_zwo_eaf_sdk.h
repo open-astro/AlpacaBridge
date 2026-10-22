@@ -27,7 +27,8 @@ namespace alpacacore::test {
  * rather than a shared template, because the interfaces share no signatures.
  *
  * Wraps all 16 entry points; the mutex is a leaf (the inner SDK never calls back into
- * this interface). No EAF call blocks, so there is no blocking-mode caveat.
+ * this interface). No EAF call blocks, so there is no blocking-mode caveat (the fake's opt-in
+ * delays are not used behind this decorator).
  */
 class LockedZWOEAFSDK final : public vendor::zwo::ZWOEAFSDK {
 public:

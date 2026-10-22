@@ -1,3 +1,0 @@
-### Fixed (tooling)
-
-- **The `Falsified by:` gate no longer reports a false "no marker" error for a new hand-rolled block inserted directly before another one** (CI, `scripts/check_falsified_by.py`, issue #993). Git can slide such an insertion so the added `    {` is the next block's opener; the gate now judges each top-level block by its body in the file at HEAD: an added `// case:` first line names a case (also when a later body line is unchanged, as when a block is split), and a block with no marker is an error only when every body line was added. Editing the top of an existing block is not a new block. `--self-test` case "slid block: real case name collected, no false marker error" fails on the old code with the false error and passes now.

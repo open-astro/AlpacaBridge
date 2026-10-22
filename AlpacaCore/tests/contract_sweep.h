@@ -34,6 +34,8 @@
 // The kFakeConnectableRoster at the bottom lists the drivers that can connect to
 // an in-process fake; scripts/check_docs_drift.py pins it to the fake_*.h files on
 // disk in both directions.
+// kSnapshotAdopterRoster after it lists the drivers whose ADR 0010 Adoption row is `adopted`; rule 6 of
+// scripts/check_contract_sweep.py holds it to that table and to the snapshot hooks in test_contract_sweep.cpp.
 
 #pragma once
 
@@ -66,6 +68,7 @@
 #ifdef ALPACACORE_ENABLE_IOPTRON
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #endif
@@ -170,6 +173,11 @@ struct ContractEntry {
     DisconnectedRead switch_caps_disconnected = DisconnectedRead::Static;
     int switch_writable_id = -1;
     const char* switch_caps_source = "";
+    // Telescope only (with_rate_getters_answering): what RightAscensionRate and DeclinationRate do while
+    // disconnected. NotConnected is the rule; Static is a stated exemption, with its reason, that the sweep pins
+    // (the read must return) so a driver that is fixed flips the case and the entry is updated.
+    DisconnectedRead rate_getters_disconnected = DisconnectedRead::NotConnected;
+    const char* rate_getters_reason = "";
 };
 
 // Platform 7 interface versions per device type.
@@ -233,13 +241,19 @@ inline ContractEntry with_switch_caps(ContractEntry e, DisconnectedRead max_swit
     return e;
 }
 
+inline ContractEntry with_rate_getters_answering(ContractEntry e, const char* reason) {
+    e.rate_getters_disconnected = DisconnectedRead::Static;
+    e.rate_getters_reason = reason;
+    return e;
+}
+
 // Source strings, kept short so every entry states one.
 inline constexpr const char* kSrcAgents =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM Platform 7 interface docs; "
     "assumption: the factory arguments are placeholders copied from the vendor Defaults case, not a hardware run";
 inline constexpr const char* kSrcAgentsAxis =
-    "protocol document: AGENTS.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis (axes 0/1 movable, 2 "
-    "tertiary not); "
+    "protocol document: driver-lifecycle.instructions.md ASCOM contract precedence + ASCOM ITelescopeV4 CanMoveAxis "
+    "(axes 0/1 movable, 2 tertiary not); "
     "the per-vendor disconnected unit tests this sweep replaced (fake/disconnected only, not a hardware run); "
     "Command* passthrough flag and Bisque's absence of it are assumptions read from driver source";
 inline constexpr const char* kSrcCelestronCgx =
@@ -294,8 +308,8 @@ inline ContractEntry contract_entry_zwo_switch() {
             [](int n) -> std::unique_ptr<AlpacaDriver> {
                 return vendor::zwo::create_zwo_dew_heater_switch_by_index(n, 0);
             },
-            "protocol document: AGENTS.md + ASCOM ISwitchV3; assumption: the ASIAIR switch drivers behind the same "
-            "descriptor have their own entries below"),
+            "protocol document: driver-lifecycle.instructions.md + ASCOM ISwitchV3; assumption: the ASIAIR switch "
+            "drivers behind the same descriptor have their own entries below"),
         DisconnectedRead::Static, DisconnectedRead::NotConnected, 0,
         "ZWODewHeaterSwitchDriver: MaxSwitch returns 1; CanWrite and CanAsync validate the id then "
         "ensure_connected()");
@@ -384,6 +398,13 @@ inline ContractEntry contract_entry_ioptron_filterwheel() {
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iefw_filterwheel_by_index(n, 0); },
         kSrcAgents);
 }
+// The iGuider guide camera has its own catalog vendor ("iguider") but is an
+// iOptron driver built under the iOptron flag (GUARD_OVERRIDE in the gate).
+inline ContractEntry contract_entry_iguider_camera() {
+    return make_entry(
+        "iguider_camera", "iguider", "camera", DeviceType::Camera,
+        [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::ioptron::create_iguider_camera(n); }, kSrcAgents);
+}
 #endif
 
 #if defined(ALPACACORE_ENABLE_IOPTRON) && defined(ALPACACORE_IOPTRON_POWERBOX)
@@ -415,7 +436,7 @@ inline ContractEntry contract_entry_ioptron_camera() {
         "ioptron_camera", "ioptron", "camera", DeviceType::Camera,
         [](int n) -> std::unique_ptr<AlpacaDriver> { return vendor::playerone::create_playerone_camera(n, 0); },
         "assumption: the ioptron/camera descriptor reuses the Player One camera driver (playerone_catalog.cpp); "
-        "protocol document: AGENTS.md contract"));
+        "protocol document: driver-lifecycle.instructions.md contract"));
 }
 inline ContractEntry contract_entry_playerone_camera() {
     return with_playerone_actions(make_entry(
@@ -471,7 +492,7 @@ inline ContractEntry contract_entry_skywatcher_telescope() {
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
 inline ContractEntry contract_entry_onstep_telescope() {
-    return with_command_passthrough(make_entry(
+    auto entry = with_command_passthrough(make_entry(
         "onstep_telescope", "onstep", "telescope", DeviceType::Telescope,
         [](int n) -> std::unique_ptr<AlpacaDriver> {
             vendor::onstep::ConnectionInfo conn;
@@ -481,6 +502,8 @@ inline ContractEntry contract_entry_onstep_telescope() {
             return vendor::onstep::create_onstep_telescope(n, conn);
         },
         kSrcAgentsAxis));
+    return with_rate_getters_answering(std::move(entry),
+                                       "OnStep rows of #1478 are left to the OnStep maintainer (open PR #1494)");
 }
 #endif
 
@@ -752,7 +775,7 @@ inline ContractEntry contract_entry_astroasis_focuser() {
 #define CS_QHY(X)
 #endif
 #ifdef ALPACACORE_ENABLE_IOPTRON
-#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel)
+#define CS_IOPTRON(X) X(ioptron_telescope) X(ioptron_focuser) X(ioptron_filterwheel) X(iguider_camera)
 #else
 #define CS_IOPTRON(X)
 #endif
@@ -919,6 +942,7 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"onstep", "telescope", "fake_mount_server.h"},
     {"ioptron", "telescope", "fake_ioptron_mount.h"},
     {"ioptron", "focuser", "fake_ioptron_ieaf.h"},
+    {"iguider", "camera", "fake_iguider_v4l2.h"},
     {"astroasis", "focuser", "fake_astroasis_hid.h"},
     {"gemini", "focuser", "fake_gemini_focuser.h"},
     {"gemini", "covercalibrator", "fake_gemini_flatpanel.h"},  // Pro firmware only: gemini_covercalibrator_pro
@@ -937,6 +961,32 @@ inline constexpr FakeRosterRow kFakeConnectableRoster[] = {
     {"wandererastro", "covercalibrator", "fake_serial_streamer.h"},
     {"wandererastro", "filterwheel", "fake_serial_streamer.h"},
     {"wandererastro", "switch", "fake_serial_streamer.h"},
+};
+
+// ---------------------------------------------------------------------------
+// Snapshot-adopter roster (decision 0010, rule 6): the drivers whose Adoption row in
+// docs/decisions/0010-snapshot-served-state.md is `adopted`. Unlike the arrays above it is not under a vendor
+// guard. scripts/check_contract_sweep.py (rule 6) fails when an `adopted` row has no entry here, when an entry
+// is not `adopted`, or when an entry has no CONTRACT_SWEEP_SNAPSHOT_ADOPTERS hook in test_contract_sweep.cpp (and
+// the reverse). `source` is the
+// ADR row's Source column, verbatim; `vendor` is the router vendor string.
+// ---------------------------------------------------------------------------
+
+struct SnapshotAdopterRow {
+    const char* id;
+    const char* vendor;
+    const char* source;
+};
+
+inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
+    {"skywatcher_telescope", "skywatcher", "AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp"},
+    {"celestron_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp"},
+    {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},
+    {"synscan_telescope", "synscan", "AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp"},
+    {"gemini_focuser", "gemini", "AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp"},
+    {"qhy_focuser", "qhy", "AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp"},
+    {"astroasis_focuser", "astroasis", "AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp"},
+    {"celestron_focuser", "celestron", "AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp"},
 };
 
 }  // namespace alpacacore::test::contract

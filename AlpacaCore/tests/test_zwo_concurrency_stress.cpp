@@ -458,7 +458,7 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
     // open-astro#326: one guard per call -- before this the callback stopped at
     // the first throw, so only the first getter was ever storm-tested.
     // Unlike the other five storms in this file, this one runs CONNECTED over
-    // FakeMountServer, so the set is widened per AGENTS.md. The set REPLACES
+    // FakeMountServer, so the set is widened per ci-gates.instructions.md. The set REPLACES
     // the default {NotConnected}. DriverException is here for the FAKE rather
     // than the driver: the canned replies cannot answer a position query, so
     // the driver correctly reports "Invalid RA response from ZWO mount".

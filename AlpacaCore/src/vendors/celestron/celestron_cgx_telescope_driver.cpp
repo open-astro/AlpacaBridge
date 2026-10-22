@@ -121,7 +121,7 @@ public:
     int get_device_number() const override { return device_number_; }
     std::string get_name() const override { return "Celestron CGX/CGX-L USB Telescope"; }
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
-    std::string get_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "Celestron_CGX_USB_" + std::to_string(device_number_); }
     std::string get_description() const override { return "Celestron CGX/CGX-L direct USB mount"; }
     std::string get_driver_info() const override { return "AlpacaCore Celestron CGX AUX Driver"; }
     std::string get_driver_version() const override { return alpacacore::kVersion; }
@@ -353,7 +353,7 @@ private:
     util::AsyncOperation pulse_slot_;
     util::OperationGeneration stop_generation_;
     util::AsyncOperation stop_slot_;
-    bool stop_pending_ = false;
+    std::atomic<bool> stop_pending_{false};  // Slewing reads progress without waiting for stop I/O under mutex_.
     bool unpark_after_stop_ = false;
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
@@ -573,12 +573,10 @@ CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32
 }
 
 std::pair<std::uint32_t, std::uint32_t> CelestronCgxTelescopeDriver::read_stopped_checkpoint() {
-    // This connection check uses wall time, independently of the operational
-    // clock used by motion workers. Every exchange shares the whole-check budget.
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    // Every exchange shares the whole-check budget.
+    const auto deadline = clock_.now() + std::chrono::milliseconds(500);
     const auto budget = [&] {
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock_.now());
         if (remaining <= std::chrono::milliseconds::zero())
             throw AlpacaException("Celestron CGX reference continuity check timed out", AlpacaError::DriverException);
         return remaining;
@@ -603,7 +601,7 @@ std::pair<std::uint32_t, std::uint32_t> CelestronCgxTelescopeDriver::read_stoppe
         if (state == util::ConsecutiveSettle::State::TimedOut)
             throw AlpacaException("Celestron CGX encoders did not settle for reference continuity",
                                   AlpacaError::DriverException);
-        util::default_task_clock().sleep_for(std::chrono::milliseconds(20));
+        clock_.sleep_for(std::chrono::milliseconds(20));
     }
 }
 
@@ -1170,7 +1168,8 @@ void CelestronCgxTelescopeDriver::write_tracking_state_locked(bool tracking, int
         try {
             // Lost matching invalidates the reference. Recover on the owned fd
             // and leave tracking off rather than resume an uncertain frame.
-            protocol_.connect_serial(info_.port_path);
+            // Under mutex_: never wait out another device's probe (#1457).
+            protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200, std::chrono::milliseconds(0));
             rollback_succeeded = !write(false, tracking_rate_, "tracking rollback");
             if (rollback_succeeded) tracking_ = false;
         } catch (...) {
@@ -1222,6 +1221,8 @@ void CelestronCgxTelescopeDriver::set_site_longitude(double longitude) {
     info_.site_longitude_degrees = longitude;
 }
 bool CelestronCgxTelescopeDriver::get_slewing() const {
+    require_connected();
+    if (stop_pending_ || stop_slot_.running()) return true;
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
     if (stop_pending_ || stop_slot_.running()) return true;
@@ -1631,7 +1632,9 @@ void CelestronCgxTelescopeDriver::stop_axes_checked(std::chrono::milliseconds ve
                     try {
                         // AUX synchronization is shared: a missing RA reply must
                         // not prevent the responsive Dec controller receiving stop.
-                        protocol_.connect_serial(info_.port_path);
+                        // Under mutex_: never wait out another device's probe (#1457).
+                        protocol_.connect_serial(info_.port_path, AuxLinkSpeed::Baud115200,
+                                                 std::chrono::milliseconds(0));
                     } catch (const std::exception& error) {
                         ALPACA_LOG_WARN(
                             "Celestron CGX",

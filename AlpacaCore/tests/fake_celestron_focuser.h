@@ -71,10 +71,11 @@ public:
         version_ = std::move(version);
     }
     void set_muted(bool muted) { muted_.store(muted); }
-    // One-shot: the next request with this command gets no reply (a lost frame).
-    void drop_next_reply(std::uint8_t command) {
+    // The next `times` requests with this command get no reply (lost frames).
+    void drop_next_reply(std::uint8_t command, int times = 1) {
         std::lock_guard<std::mutex> lock(mutex_);
         drop_next_ = command;
+        drop_times_ = times;
     }
 
     // Finishes the motion a GOTO started: the encoder reaches the target.
@@ -207,7 +208,7 @@ private:
     bool take_drop(std::uint8_t command) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (drop_next_ != command) return false;
-        drop_next_.reset();
+        if (--drop_times_ <= 0) drop_next_.reset();
         return true;
     }
 
@@ -274,6 +275,7 @@ private:
     std::optional<std::uint32_t> target_;
     std::optional<std::uint32_t> last_goto_;
     std::optional<std::uint8_t> drop_next_;
+    int drop_times_ = 0;
     bool calibrating_ = false;
     bool calibration_complete_ = false;
     bool status_idle_held_ = false;

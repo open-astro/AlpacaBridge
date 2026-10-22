@@ -164,7 +164,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "GEMINI_PDH_ADV3_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "GEMINI_PDH_ADV3_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Gemini Power & Data Hubs Advanced 3 Power Box Switch Driver";
@@ -260,7 +260,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Power & Data Hubs Advanced 3 connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour. The cached

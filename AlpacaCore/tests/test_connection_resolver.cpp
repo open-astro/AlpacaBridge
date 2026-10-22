@@ -200,3 +200,23 @@ TEST_CASE("connect_resolved - device_node_missing is false for a stat error othe
 
     CHECK_FALSE(alpacacore::util::device_node_missing(inside));
 }
+
+TEST_CASE("connect_resolved - a serial endpoint another connected device now holds is stale (issue #1202)",
+          "[util][unit][issue1202]") {
+    using alpacacore::util::SerialClaimKind;
+    using alpacacore::util::SerialPortClaim;
+    const std::string port = "/dev/alpacabridge-1202-resolver-test";  // absent node: claim keys by the given path
+    const std::string present = "/dev/null";
+    CHECK_FALSE(alpacacore::util::serial_endpoint_stale(present));
+    {
+        auto scan = SerialPortClaim::acquire(present, SerialClaimKind::Probe, "Gemini flat panel");
+        REQUIRE(scan);
+        CHECK_FALSE(alpacacore::util::serial_endpoint_stale(present));  // a probe is waited for, not scanned around
+    }
+    auto other = SerialPortClaim::acquire(present, SerialClaimKind::Link, "Gemini power hub");
+    REQUIRE(other);
+    CHECK(alpacacore::util::serial_endpoint_stale(present));
+    other.release();
+    CHECK_FALSE(alpacacore::util::serial_endpoint_stale(present));
+    CHECK(alpacacore::util::serial_endpoint_stale(port));  // still stale when the node is gone
+}

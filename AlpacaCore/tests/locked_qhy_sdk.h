@@ -254,7 +254,7 @@ private:
  * cooler-off, pulse-guide and telemetry workers are all detachable.
  *
  * The rule was stated in three places (the QHYSDK interface comment, the
- * FakeQHYSDK class comment, and AGENTS.md) and enforced by nothing. Member
+ * FakeQHYSDK class comment, and testing.instructions.md) and enforced by nothing. Member
  * declaration order here gives the right destruction order once, in one
  * place: driver first, then the decorator, then the fake.
  */

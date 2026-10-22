@@ -86,13 +86,19 @@ inline catalog::Schema make_schema() {
     return s;
 }
 
+// The device numbers whose stub was asked to adopt_legacy_state(), in order.
+inline std::vector<int>& adopted_device_numbers() {
+    static std::vector<int> numbers;
+    return numbers;
+}
+
 class StubFocuser final : public alpacacore::AlpacaDriver {
 public:
     StubFocuser(int number, std::string name) : number_(number), name_(std::move(name)) {}
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return name_; }
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
-    std::string get_unique_id() const override { return "zzz-focuser-" + std::to_string(number_); }
+    std::string fallback_unique_id() const override { return "zzz-focuser-" + std::to_string(number_); }
     std::string get_description() const override { return "test descriptor stub"; }
     std::string get_driver_info() const override { return "test descriptor stub"; }
     std::string get_driver_version() const override { return "0.0.1"; }
@@ -105,6 +111,7 @@ public:
     std::string command_blind(std::string_view, bool) override { return "ok"; }
     bool command_bool(std::string_view, bool) override { return true; }
     std::string command_string(std::string_view, bool) override { return "ok"; }
+    void adopt_legacy_state() override { adopted_device_numbers().push_back(number_); }
 
 private:
     int number_;

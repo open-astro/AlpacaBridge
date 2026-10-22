@@ -15,13 +15,16 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <exception>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "getter_stall_probe.h"
 #include "sidereal_time_check.h"
 
 #ifndef _WIN32
@@ -535,6 +538,54 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
     }
 }
 
+TEST_CASE("ZWO mount site longitude converts between east-positive API and west-positive wire",
+          "[zwo][telescope][unit][longitude]") {
+    struct SiteCase {
+        double longitude;
+        const char* wire_longitude;
+    };
+    for (const auto& site :
+         {SiteCase{-82.755, "+082*45:18"}, SiteCase{82.755, "-082*45:18"}, SiteCase{0.0, "+000*00:00"},
+          SiteCase{-180.0, "+180*00:00"}, SiteCase{180.0, "-180*00:00"}}) {
+        CAPTURE(site.longitude);
+        const std::string wire_site = std::string("+28*04:58&") + site.wire_longitude;
+        // Fixed wire expectations, independent of the wrapper's read/write conversion.
+        alpacacore::test::FakeMountServer server(
+            [wire_site, pending = std::string{}](const std::string& chunk) mutable -> std::string {
+                pending += chunk;
+                std::string response;
+                for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
+                    const auto command = pending.substr(0, end + 1);
+                    pending.erase(0, end + 1);
+                    if (command == ":GMGE#") {
+                        response += wire_site + "#";
+                    } else if (command == ":SMGE" + wire_site + "#") {
+                        response += "1#";
+                    } else {
+                        response += "0#";
+                    }
+                }
+                return response;
+            });
+        REQUIRE(server.ok());
+        alpacacore::vendor::zwo::ConnectionInfo conn;
+        conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+        conn.host = "127.0.0.1";
+        conn.tcp_port = server.port();
+        conn.response_timeout_ms = 250;
+        auto& protocol = alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance();
+        struct Disconnect {
+            ~Disconnect() { alpacacore::vendor::zwo::ZWOMountProtocolWrapper::instance().disconnect(); }
+        } disconnect;
+        REQUIRE(protocol.connect(conn));
+        const auto actual = protocol.get_site_info();
+        const double latitude = 28.0 + 4.0 / 60.0 + 58.0 / 3600.0;
+        CHECK(std::abs(actual.latitude_degrees - latitude) < 1e-9);
+        CHECK(std::abs(actual.longitude_degrees - site.longitude) < 1e-9);
+        CHECK_NOTHROW(protocol.set_site_info({latitude, site.longitude}));
+    }
+}
+
 #endif  // _WIN32
 
 #ifndef _WIN32
@@ -556,5 +607,261 @@ TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under 
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
+}
+#endif
+
+#ifndef _WIN32
+namespace {
+
+// A mount that answers ":GVP" (mount info), ":SMGE" (site write) and ":GMGE" (site read) only after kHoldOpen,
+// once armed, and reports when such a request is in flight. ":GMGE" is unreadable ("0#") until hold_site_read
+// arms it, then reports the Sydney landmark; the last ":SMGE" payload is recorded. ":SMTI" and ":GAT" get "1"
+// and "1#". Every other request gets the dumb "0#" reply.
+struct SlowMount {
+    std::mutex write_mutex;
+    std::string last_site_write;  // guarded by write_mutex
+
+    std::string site_write() {
+        std::lock_guard<std::mutex> lock(write_mutex);
+        return last_site_write;
+    }
+
+    std::atomic<bool> hold_info{false};
+    std::atomic<bool> hold_site{false};
+    std::atomic<bool> hold_site_read{false};
+    std::atomic<bool> fail_guide_read{false};  // ":Ggr" replies with a non-number, so the connect falls back to 1.00x
+    std::atomic<bool> guide_read_entered{false};
+    std::atomic<bool> info_entered{false};
+    std::atomic<bool> site_entered{false};
+    std::atomic<bool> site_read_entered{false};
+
+    alpacacore::test::FakeMountServer::Responder responder() {
+        return [this](const std::string& chunk) -> std::string {
+            if (chunk.find(":GVP") != std::string::npos) {
+                if (hold_info.load()) {
+                    info_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                return "AM5#";
+            }
+            if (chunk.find(":Ggr") != std::string::npos) {
+                if (fail_guide_read.load()) {
+                    guide_read_entered = true;
+                    return "x#";
+                }
+                return "0.30#";
+            }
+            if (chunk.find(":GMGE") != std::string::npos) {
+                if (hold_site_read.load()) {
+                    site_read_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                // Unreadable until armed, so the connect leaves the site unset and the refresh must read it back.
+                // Armed: -33.856784 / 151.215297 as the mount's degrees*minutes:seconds pair.
+                return hold_site_read.load() ? "-33*51:24&+151*12:55#" : "0#";
+            }
+            if (chunk.find(":SMGE") != std::string::npos) {
+                {
+                    std::lock_guard<std::mutex> lock(write_mutex);
+                    last_site_write = chunk;
+                }
+                if (hold_site.load()) {
+                    site_entered = true;
+                    std::this_thread::sleep_for(alpacacore::test::kHoldOpen);
+                }
+                return "1";
+            }
+            if (chunk.find(":SMTI") != std::string::npos) {
+                return "1";
+            }
+            if (chunk.find(":GAT") != std::string::npos) {
+                return "1#";
+            }
+            return "0#";
+        };
+    }
+};
+
+alpacacore::vendor::zwo::ConnectionInfo slow_mount_connection(const alpacacore::test::FakeMountServer& server) {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 2000;
+    return conn;
+}
+
+}  // namespace
+
+// Decision 0016: Name and UniqueID need no device access, so a connect that is mid-handshake must not park them.
+// Falsified by: zwo_telescope_driver.cpp set_connected(true) holding mutex_ across protocol.get_mount_info()
+// (get_name() then waits the whole 300 ms reply).
+TEST_CASE("ZWO Mount Telescope Driver - Name and UniqueID answer while a connect is mid-handshake",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.hold_info = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.info_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(driver->get_connecting());  // the reply is still pending, so the timings above are not vacuous
+
+    REQUIRE(wait_until_connected(*driver));
+    CHECK(driver->get_name().rfind("ZWO AM5", 0) == 0);
+    CHECK(driver->get_unique_id().rfind("ZWO_MOUNT_AM5", 0) == 0);
+    driver->set_connected(false);
+}
+
+// A getter that is not connected yet must not run a live exchange in the middle of the handshake.
+// Falsified by: zwo_telescope_driver.cpp check_connected() reading connected_ alone (RightAscension then passes
+// the check mid-handshake and issues its own serial exchange before Connected reports true).
+TEST_CASE("ZWO Mount Telescope Driver - A getter mid-handshake reports NotConnected like Connected does",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.hold_info = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.info_entered));
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_declination(); }, alpacacore::AlpacaError::NotConnected);
+
+    REQUIRE(wait_until_connected(*driver));
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_telescope_driver.cpp set_site_latitude()/set_site_longitude() holding mutex_ across
+// protocol.set_site_info() (get_name() then waits the 300 ms reply).
+TEST_CASE("ZWO Mount Telescope Driver - Name answers while a site write is in flight",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+
+    mount.hold_site = true;
+    std::thread writer([&] {
+        try {
+            driver->set_site_longitude(151.215297);
+            driver->set_site_latitude(-33.856784);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.site_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_aperture_diameter(); }) < kGetterBudget);
+
+    writer.join();
+    driver->set_connected(false);
+}
+
+// A site write that lands while the connect refresh is reading the site back must survive that read-back.
+// Falsified by: zwo_telescope_driver.cpp apply_or_load_site_info() running without site_write_mutex_ (the
+// :GMGE reply then overwrites the latitude the setter just published, and SiteLatitude reads -33.9).
+// MUTATION: not claimed for dropping only the lock in sync_mount_time_if_configured(): whether its re-send lands
+// after the setter's write is a race, so no test here kills that mutant reliably.
+TEST_CASE("ZWO Mount Telescope Driver - A site write during the connect site read-back is kept",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+    driver->set_site_longitude(151.215297);
+
+    mount.hold_site_read = true;
+    std::thread refresh([&] {
+        try {
+            driver->set_connected(true);  // already connected: the refresh path reads the site back
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.site_read_entered));
+    std::thread writer([&] {
+        try {
+            driver->set_site_latitude(51.477833);
+        } catch (const std::exception&) {
+        }
+    });
+    refresh.join();
+    writer.join();
+    mount.hold_site_read = false;
+
+    CHECK(driver->get_site_latitude() == 51.477833);
+    // The mount keeps the write too: the last site payload on the wire is the Greenwich latitude, not a stale re-send.
+    CHECK(mount.site_write().find("+51*28:40") != std::string::npos);
+    driver->set_connected(false);
+}
+
+// A GuideRate write that lands while the connect retries its unreadable guide-rate read (150 ms pause, no lock held)
+// is newer than the 1.00x the connect then assumes.
+// Falsified by: zwo_telescope_driver.cpp set_connected(true) publishing guide_rate_ without the guide_rate_writes_
+// check (the connect stores the assumed 1.00x over the 0.30x the client wrote during the retry pause).
+TEST_CASE("ZWO Mount Telescope Driver - A guide rate write during the connect read-back is kept",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    mount.fail_guide_read = true;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_for_flag(mount.guide_read_entered));
+    std::thread writer([&] {
+        try {
+            const double deg_per_sec = 0.30 * 360.0 / 86164.0905;
+            driver->set_guide_rate({deg_per_sec, deg_per_sec});
+        } catch (const std::exception&) {
+        }
+    });
+    writer.join();
+    REQUIRE(wait_until_connected(*driver));
+    mount.fail_guide_read = false;
+
+    const double sidereal_deg_per_sec = 360.0 / 86164.0905;
+    CHECK(driver->get_guide_rate().ra / sidereal_deg_per_sec == Catch::Approx(0.30).margin(0.02));
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_telescope_driver.cpp set_connected(false) joining disconnect_thread_ inline (the teardown waits
+// for the wire behind the 300 ms exchange in flight, so the call no longer returns at once).
+TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange is in flight",
+          "[zwo][telescope][unit][getter-stall]") {
+    using namespace alpacacore::test;
+    SlowMount mount;
+    FakeMountServer server(mount.responder());
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, slow_mount_connection(server));
+    driver->connect();
+    REQUIRE(wait_until_connected(*driver));
+
+    mount.hold_info = true;
+    std::thread worker([&] {
+        try {
+            (void)driver->command_string(":GVP", false);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(mount.info_entered));
+
+    CHECK(time_call([&] { driver->set_connected(false); }) < kHoldOpen / 3);  // well under the hold, inside 5 s
+    worker.join();
+    CHECK_FALSE(driver->get_connected());
 }
 #endif

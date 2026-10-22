@@ -74,7 +74,7 @@ public:
         return DeviceType::FilterWheel;
     }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!serial_number_.empty()) {
             return "ZWO_EFW_SN_" + serial_number_;
@@ -216,7 +216,7 @@ public:
 
     void set_position(int position) override {
         // Range validation precedes the connection check (ASCOM precedence, per
-        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // driver-lifecycle.instructions.md): a negative position is unconditionally invalid, so it is
         // InvalidValue even while disconnected. The upper bound depends on the
         // slot count (unknown until connect), so it is checked below under the lock.
         if (position < 0) {

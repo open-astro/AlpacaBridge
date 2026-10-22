@@ -1,2 +1,0 @@
-### Fixed
-- **Discovery no longer advertises a closed HTTP port during a management restart with `http_port: 0`** (AlpacaHTTP example server, issue #889): the poll loop in `simple_server` now clears the advertised port when `bound_port()` reads 0, so discovery stays silent while the listener is closed and advertises the new port once it binds. No unit test: the logic lives in the example's `main()` poll loop, and a helper would widen the change past its size cap.

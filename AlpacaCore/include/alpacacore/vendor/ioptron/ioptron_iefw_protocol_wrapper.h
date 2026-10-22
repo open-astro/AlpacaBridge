@@ -69,6 +69,13 @@ struct IefwPortInfo {
 std::vector<IefwPortInfo> enumerate_iefw_ports();
 
 /**
+ * @brief The auto-detect probe of one port: :DeviceInfo# handshake under a
+ *        serial-port probe claim (waits out another scan's probe of the same
+ *        port). True, with @p info filled, only for an iEFW model code.
+ */
+bool probe_iefw_port(const std::string& port_path, IefwDeviceInfo& info);
+
+/**
  * @brief Protocol wrapper for the iOptron iEFW filter wheel.
  *
  * Serial protocol at 115200 8N1 (INDI drivers/filter_wheel/ioptron_wheel.cpp):

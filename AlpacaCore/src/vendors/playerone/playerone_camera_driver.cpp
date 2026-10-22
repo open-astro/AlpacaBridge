@@ -193,7 +193,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (camera_info_valid_ && !camera_info_.serial_number.empty()) {
             return "PLAYERONE_SN_" + camera_info_.serial_number;
@@ -429,7 +429,7 @@ public:
         // the SDK close so a racing operational call fails fast at its
         // connection check instead of hitting a just-closed camera, and a
         // throwing close can't trap the driver half-connected — same order as
-        // the switch/EFW siblings, per the AGENTS.md disconnect rule (#116).
+        // the switch/EFW siblings, per the driver-lifecycle.instructions.md disconnect rule (#116).
         // The exposure worker is already joined (lifecycle lock above).
         exposure_active_.store(false);
         const int close_id = (camera_info_valid_ && camera_info_.camera_id >= 0) ? camera_info_.camera_id : -1;
@@ -570,30 +570,28 @@ public:
 
     bool get_cooler_on() const override {
         ensure_connected();
-        if (!cooler_available_copy()) return false;
+        if (!cooler_available_copy()) {
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
+        }
         return with_camera([this](int id) { return sdk_.get_cooler_on(id); });
     }
     void set_cooler_on(bool cooler_on) override {
         ensure_connected();
         if (!cooler_available_copy()) {
-            if (cooler_on) {
-                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-            }
-            return;
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         with_camera([&](int id) { sdk_.set_cooler_on(id, cooler_on); });
     }
     double get_cooler_power() const override {
         ensure_connected();
-        if (!cooler_available_copy()) return 0.0;
-        try {
-            int pct = with_camera([this](int id) { return sdk_.get_cooler_power_percent(id); });
-            if (pct < 0) pct = 0;
-            if (pct > 100) pct = 100;
-            return static_cast<double>(pct);
-        } catch (const std::exception&) {
-            return 0.0;
+        if (!cooler_available_copy()) {
+            throw AlpacaException("This Player One camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
+        // An SDK failure propagates like get_cooler_on() does; it is never reported as 0 % power.
+        int pct = with_camera([this](int id) { return sdk_.get_cooler_power_percent(id); });
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        return static_cast<double>(pct);
     }
 
     double get_electrons_per_adu() const override {
@@ -1490,7 +1488,7 @@ private:
     // integrating: the exposure worker polls/downloads holding no lock, so a
     // mid-exposure write would race the live integration. Requires mutex_
     // held — the same lock start_exposure publishes exposure_active_=true
-    // under, closing the check/publish TOCTOU (M15; AGENTS.md rule, matching
+    // under, closing the check/publish TOCTOU (M15; driver-lifecycle.instructions.md rule, matching
     // the ToupTek driver's ensure_not_exposing).
     void ensure_not_exposing_locked() const {
         if (exposure_active_.load()) {
@@ -1529,7 +1527,7 @@ private:
     }
 
     // Runs fn(camera_id) while holding mutex_, so a concurrent disconnect
-    // cannot close the camera underneath the SDK call (AGENTS.md shape (a)).
+    // cannot close the camera underneath the SDK call (driver-lifecycle.instructions.md shape (a)).
     // Fast register/control calls only — the exposure worker keeps its bare
     // id snapshot because it must not hold mutex_ across the blocking image
     // wait. Must NOT be called with mutex_ already held (non-recursive).

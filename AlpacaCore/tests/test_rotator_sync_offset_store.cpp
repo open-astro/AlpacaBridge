@@ -12,6 +12,7 @@
 
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 
 #include <cmath>
 #include <fstream>
@@ -89,4 +90,41 @@ TEST_CASE("Rotator sync offset store - unreadable file logs a warning", "[rotato
     REQUIRE(warnings.size() == 2);
     CHECK(warnings[0].find(dir.file().string()) != std::string::npos);
     CHECK(warnings[1].find("non-finite") != std::string::npos);
+}
+
+TEST_CASE("Rotator sync offset store - load_or_adopt moves a legacy entry to the new key once",
+          "[rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 12.5));
+    // Decision 0018: the first connect after the upgrade moves the offset to the GUID.
+    CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-a", "WANDERERASTRO_ROTATOR_0") == 12.5);
+    CHECK(RotatorSyncOffsetStore::load("guid-a") == 12.5);
+    CHECK(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 0.0);
+    CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-a", "WANDERERASTRO_ROTATOR_0") == 12.5);
+
+    // An entry already under the new key wins and the legacy one is left alone.
+    REQUIRE(RotatorSyncOffsetStore::save("legacy-b", 1.0));
+    REQUIRE(RotatorSyncOffsetStore::save("guid-b", 2.0));
+    CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-b", "legacy-b") == 2.0);
+    CHECK(RotatorSyncOffsetStore::load("legacy-b") == 1.0);
+
+    // Neither key: 0. Same key twice: a plain load.
+    CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-c", "legacy-c") == 0.0);
+    CHECK(RotatorSyncOffsetStore::load_or_adopt("guid-b", "guid-b") == 2.0);
+}
+
+TEST_CASE("Rotator sync offset store - prune drops GUID keys no device holds and keeps the rest",
+          "[rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    const std::string live = alpacacore::util::generate_unique_id();
+    const std::string removed = alpacacore::util::generate_unique_id();
+    REQUIRE(RotatorSyncOffsetStore::save(live, 1.0));
+    REQUIRE(RotatorSyncOffsetStore::save(removed, 2.0));
+    REQUIRE(RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_3", 3.0));
+    CHECK(RotatorSyncOffsetStore::prune_unknown_unique_ids({live}) == 1);
+    CHECK(RotatorSyncOffsetStore::load(live) == 1.0);
+    CHECK(RotatorSyncOffsetStore::load(removed) == 0.0);
+    // Prune removes only GUID keys; a driver-built legacy key is left as it is.
+    CHECK(RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_3") == 3.0);
+    CHECK(RotatorSyncOffsetStore::prune_unknown_unique_ids({live}) == 0);
 }

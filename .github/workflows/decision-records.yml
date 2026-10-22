@@ -1,12 +1,14 @@
 # Decision-record authorization (docs/decisions/README.md, "Changing a record").
 #
 # A PR that changes a file under docs/decisions/ needs a repository
-# collaborator (write, maintain or admin) to comment `ADR authorized <head sha>`.
+# collaborator (write, maintain or admin) to comment `ADR authorized <sha>`,
+# naming a commit (normally the head) at which the PR's record files had their current content.
 # scripts/check_adr_authorization.py decides and posts the result as the
 # commit status `adr-authorization` on the PR head, which the ruleset requires.
 #
 # Two triggers, one result. pull_request_target re-evaluates on every push (a
-# new head needs a new authorization); issue_comment re-evaluates when someone
+# push that changes a record file needs a new authorization; one that leaves
+# them alone keeps it); issue_comment re-evaluates when someone
 # comments. Both run the definition and the script from the default branch, so
 # a PR cannot edit the gate that judges it, and neither checks out or runs any
 # PR code: the job reads the PR through the API only.

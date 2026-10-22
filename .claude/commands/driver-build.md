@@ -782,7 +782,7 @@ cd "$(git rev-parse --show-toplevel)" && python3 scripts/check_stress_registrati
 
 (The `cd` matters: the build block above leaves the shell in `AlpacaCore/`, and from there the script's `git ls-files` sees no driver and reports every ALLOWLIST entry as stale.)
 
-It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` does NOT build a TSan binary (TSan is still an opt-in — unlike the ASan+UBSan pass, which runs by default since #588 and is skipped with `RUN_SANITIZERS=0`), so the `[stress]` cases would only have run in the ordinary test build.
+It must print `Stress-test registration OK` and the new (vendor, device type) pair must not be on the `ALLOWLIST` (Step 7b). Run the storm itself under ThreadSanitizer before opening the PR: `RUN_TSAN=1 ./scripts/ci_preflight.sh`. A bare `./scripts/ci_preflight.sh` builds nothing (the quick run), and even `PREFLIGHT_FULL=1` does NOT build a TSan binary (TSan is still an opt-in — unlike the ASan+UBSan pass, which runs by default inside a full run since #588 and is skipped with `RUN_SANITIZERS=0`), so without `RUN_TSAN=1` the `[stress]` cases would only run in CI.
 
 ## Step 9 — Vendor-specific notes
 

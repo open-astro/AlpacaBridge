@@ -11,7 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // The iOptron factories (telescope, iMate PowerBox switch, iEAF focuser, iEFW
-// filter wheel), doing what the router arms they replace did. Every auto-detect
+// filter wheel, and the iGuider guide camera under its own "iguider" key),
+// doing what the router arms they replace did. Every auto-detect
 // path goes through a create_*_auto / create_*_by_index factory, which is
 // hardware-free (the scan runs at connect, #659) -- never a resolve_* scan
 // function, which would move the scan here, onto the registration path. Compiled
@@ -23,6 +24,7 @@
 
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
+#include <alpacacore/vendor/ioptron/ioptron_iguider_camera_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #ifdef ALPACACORE_IOPTRON_POWERBOX
 #include <alpacacore/vendor/ioptron/ioptron_switch_driver.h>
@@ -150,6 +152,15 @@ std::unique_ptr<AlpacaDriver> create_filterwheel(const DeviceConfig& config, int
     return wheel;
 }
 
+std::unique_ptr<AlpacaDriver> create_iguider(const DeviceConfig& config, int device_number) {
+    // Refused here as well as in normalize, as for the filter wheel.
+    if (const auto refusal = iguider_camera_refusal(config)) {
+        throw AlpacaException(*refusal, AlpacaError::InvalidValue);
+    }
+    // Hardware-free: an empty path is resolved by a V4L2 scan at connect.
+    return vendor::ioptron::create_iguider_camera(device_number, config.get(kIguiderDevicePath));
+}
+
 }  // namespace
 
 void register_ioptron_factory(DeviceCatalog& catalog) {
@@ -166,6 +177,10 @@ void register_ioptron_factory(DeviceCatalog& catalog) {
         factory.create = entry.create;
         catalog.add(std::move(factory));
     }
+    Factory iguider;
+    iguider.key = DeviceKey{"iguider", DeviceType::Camera};
+    iguider.create = create_iguider;
+    catalog.add(std::move(iguider));
 }
 
 }  // namespace alpacacore::catalog

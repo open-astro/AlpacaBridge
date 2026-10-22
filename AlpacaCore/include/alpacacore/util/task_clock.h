@@ -58,7 +58,7 @@ public:
     virtual void sleep_for(std::chrono::nanoseconds duration) = 0;
 
 protected:
-    // Protected and non-virtual (AGENTS.md, "Prefer the QHY form for a new
+    // Protected and non-virtual (testing.instructions.md, "Prefer the QHY form for a new
     // seam"): nothing owns a clock through the interface, so `delete` through
     // a TaskClock* must not compile.
     TaskClock() = default;

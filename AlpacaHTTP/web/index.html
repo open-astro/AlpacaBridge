@@ -80,6 +80,7 @@
                         <option value="gemini">Gemini</option>
                         <option value="gphoto">DSLR / Mirrorless</option>
                         <option value="ioptron">iOptron</option>
+                        <option value="iguider">iOptron iGuider</option>
                         <option value="playerone">Player One</option>
                         <option value="onstep">OnStep</option>
                         <option value="qhy">QHY</option>
@@ -220,7 +221,7 @@
 
                   <div id="ioptron-camera-config" style="display: none;">
                     <h3>iOptron iCAM Camera Configuration</h3>
-                    <small style="color: #666;">iCAM cameras (e.g. iCAM178M) are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system.</small>
+                    <small style="color: #666;">For iCAM imaging cameras (e.g. iCAM178M), which are Player One cameras under the hood and use the Player One camera SDK. The camera index is shared with any Player One cameras on this system. For the iGuider guide camera, choose the vendor "iOptron iGuider" instead.</small>
                     <div class="form-group">
                         <label for="ioptron-camera-index">Camera Index:</label>
                         <input type="number" id="ioptron-camera-index" name="ioptronCameraIndex" value="0" min="0">
@@ -580,7 +581,7 @@
                     <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you run the driver's Calibrate action (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
-                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/ttyUSB0">
+                        <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
                         <small>Required. A /dev/serial/by-id/ path keeps working when other USB devices are plugged in.</small>
                     </div>
                   </div>
@@ -913,7 +914,6 @@
                              which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
                         <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial">
                         <input type="hidden" id="zwo-camera-name" name="zwoCameraName">
-                        <input type="hidden" id="zwo-camera-unique-id" name="zwoCameraUniqueId">
                         <input type="hidden" id="zwo-camera-loaded-index">
                         <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
@@ -1229,6 +1229,19 @@
                         <input type="number" id="altair-camera-index" name="altairCameraIndex" value="0" min="0">
                         <small>0-based index from the Altair SDK enumeration. Configure an Altair
                         camera here, not under ToupTek: each camera belongs to one vendor.</small>
+                    </div>
+
+                </div>
+
+                <!-- iOptron iGuider Guide Camera Configuration -->
+                <div id="iguider-config" class="vendor-config" style="display: none;">
+                    <h3>iOptron iGuider Guide Camera Configuration</h3>
+                    <small style="color: #666;">The iGuider is a 1280x960 mono guide camera for PHD2 and other guiding software. It has no ST-4 port, so guide pulses go to the mount. Exposures run from 0.01 to 3.5 seconds in the camera's fixed steps.</small>
+
+                    <div class="form-group">
+                        <label for="iguider-device-path">Device Path (optional):</label>
+                        <input type="text" id="iguider-device-path" name="iguiderDevicePath" placeholder="Leave blank to auto-detect" maxlength="256">
+                        <small>Leave blank to use the first iGuider found. To pin one, enter its /dev/v4l/by-id/... link (survives a replug) or /dev/videoN.</small>
                     </div>
 
                 </div>

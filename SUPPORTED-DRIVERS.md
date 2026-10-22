@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-20
+## Updated 2026-10-21
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -89,6 +89,7 @@ This document lists all hardware vendors and device types that are verified to w
 | iCAM178M | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM178M/) |
 | iCAM462C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM462C/) |
 | iCAM464C | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iCAM464C/) |
+| iGuider (guide camera) | USB | ✓ | [ConformU Validation](AlpacaCore/conformu/iOptron/iGuider/) |
 
 <details>
 <summary><strong>iOptron Camera Driver Notes</strong></summary>
@@ -98,6 +99,8 @@ This document lists all hardware vendors and device types that are verified to w
 - **Behavior**: identical to the Player One camera driver (see Player One Driver Notes below), including dew heater and fan Actions on cooled models.
 - **Validated**: ConformU 4.5.0 on iCAM178M (mono), iCAM462C (color, RGGB) and iCAM464C (color) hardware (Raspberry Pi, Linux arm64, 2026-08-26): 0 errors, 0 issues, all members within timing targets on all three.
 - **USB link health matters**: a marginal cable/port shows up as `libusb: error [op_set_configuration] failed, error -1 errno 71` in the server log, and the camera then answers with a -300 CCDTemperature, fails PulseGuide (`POASetConfig(bool): operation failed`) and never delivers a frame before dropping off the bus. Re-seat the camera on a direct USB 3 port with a known-good cable; the driver is not at fault. Cold ConformU processes on the Pi show ~0.1-0.16 s first-use marks on enum-typed members (CameraState, SensorType); these are ConformU-side JIT, not the driver, and a warm re-run in the same session is clean.
+- **iGuider guide camera**: a separate driver, chosen as vendor **iOptron iGuider** (not iOptron) in the web UI. The iGuider 1 (USB `0130:1466`, 1280x960 mono, 3.75 um) is a UVC camera driven over Linux V4L2 with no vendor SDK; the service user needs the `video` group, which the `.deb` grants. Exposures run 0.01 to 3.5 s in the camera's 12 fixed steps (StartExposure rounds to the nearest; LastExposureDuration reports the step), Gain 0 to 13, software subframes, no binning or cooling, and no ST-4 port, so guide pulses go to the mount. The camera streams from connect to disconnect, so the first exposure after an exposure change waits out up to three frames at the old setting (from 3.5 s down to 0.01 s, about 10 s once). An optional device path (`/dev/v4l/by-id/...` survives a replug) pins one camera; blank finds the first iGuider.
+- **iGuider validated**: ConformU 4.5.2 on an iGuider 1 (`bcdDevice` 1.00) on a Raspberry Pi CM4 rig (Debian 13 arm64, kernel uvcvideo, camera behind a USB 2.0 hub), 2026-10-21: 0 errors, 0 issues, all members within timing targets (slowest DeviceState, 0.021 s). A VMware arm64 VM could not stream it (its virtual EHCI controller drops the isochronous video), so test on real USB.
 - **Verified OS/Architecture**: Linux arm64 (Raspberry Pi).
 
 </details>
@@ -116,7 +119,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **SDK**: Player One Camera SDK v3.10.1 (build target)
 - **Connection**: USB (requires udev rules `99-player_one_astronomy.rules`)
 - **Tested models**: Ceres 462M (uncooled), Mars-C II (uncooled guide camera, IMX290), and Uranus-C PRO (cooled, IMX585) on Linux arm64.
-- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
+- **Cooling (TEC)**: Capability-gated on the SDK's `POA_COOLER` / `POA_TARGET_TEMP` config attributes. Uncooled cameras report `CanSetCCDTemperature = false` and `CanGetCoolerPower = false`, and `CoolerOn` / `CoolerPower` raise `PropertyNotImplemented`. Cooler control (`CoolerOn`, `SetCCDTemperature`, `CoolerPower`) validated on Uranus-C PRO hardware: reaches and holds the target temperature with closed-loop power regulation.
 - **Dew Heater / Fan**: Cooled models expose the lens heater and radiator fan two ways — camera custom Actions (`GetHeaterPower`/`SetHeaterPower`/`GetFanPower`/`SetFanPower`, percent) and the **Player One Thermal Switch** device (see Switch Drivers below) for slider control in clients like NINA. Both are runtime-only by design; no setting persists across connects. Note the fan does not auto-vary with temperature — `CoolerOn` turns cooler + fan on and the fan runs at its set power.
 - **Pulse guiding**: Capability-gated on `isHasST4Port`. Driver times the pulse duration via `POA_GUIDE_NORTH/SOUTH/EAST/WEST` bool toggles.
 - **StopExposure**: not supported (`CanStopExposure = false`); use `AbortExposure`. `POAStopExposure` discards the frame on the camera (checked on the Ceres 462M, issue #1023), so there is no partial image to return. Ceres 462M re-validated with ConformU 4.5.1 on 2026-10-15 with this change: 0 errors, 0 issues, all members within timing targets.
@@ -223,7 +226,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB (requires libusb-1.0)
 - **ASI533MC Pro and ASI120MM Mini validation**: both re-validated with ConformU 4.5.1 on Linux arm64 with ASI Camera SDK 1.41, 2026-10-15: 0 errors, 0 issues, all members within timing targets.
 - **ASI178MC validation**: ConformU 4.5.2 on a user's Raspberry Pi 5 (Debian 13, AlpacaBridge 5.1.0 nightly `g7f037d8`, 2026-10-18, issue #1299): 0 errors, 0 issues, all members within timing targets.
-- **Camera identity**: a saved camera binds by its serial number, not by the SDK's enumeration order, which can change across a reboot. The first start records `serialNumber` and `cameraName` in the entry (`cameraIndex` and `cameraId` stay as hints), so the device number keeps following the same camera. A body whose serial cannot be read binds by `cameraName` and reports a stored `ZWO_UID_...` UniqueID; two serial-less bodies of one model are told apart by `cameraIndex` only. An entry with no `cameraName` (a new entry, or the first start after the upgrade) opens each connected ZWO camera once to read its serial; while another program holds a camera (for example a guiding app on the same host) that open fails, so the entry binds by model name plus `cameraIndex` like a serial-less body and reports a stored `ZWO_UID_...` UniqueID; once the serial can be read at a later start (or when the entry is saved again), it binds by serial and the UniqueID changes to `ZWO_SN_<serial>`; until then the UniqueID reads `ZWO_SN_<serial>` while the camera is connected and the stored `ZWO_UID_...` while it is not. Behaviour with a guider running is not checked on hardware.
+- **Camera identity**: a saved camera binds by its serial number, not by the SDK's enumeration order, which can change across a reboot. The first start records `serialNumber` and `cameraName` in the entry (`cameraIndex` and `cameraId` stay as hints), so the device number keeps following the same camera. A body whose serial cannot be read binds by `cameraName`; two serial-less bodies of one model are told apart by `cameraIndex` only. An entry with no `cameraName` (a new entry, or the first start after the upgrade) opens each connected ZWO camera once to read its serial; while another program holds a camera (for example a guiding app on the same host) that open fails, so the entry binds by model name plus `cameraIndex` like a serial-less body, and binds by serial once the serial can be read at a later start (or when the entry is saved again). The UniqueID does not follow the serial: like every configured device, the camera reports the GUID stored in its entry (decision 0018), connected or not. Behaviour with a guider running is not checked on hardware.
 - **Dew Heater**: Exposed as a Switch device (`switchType: dewheater`) when the camera reports the SDK control `ASI_ANTI_DEW_HEATER`. Use `cameraId` or `cameraIndex` to bind to the target camera.
 - **Validated models**: the table above is the list; every validated row links to its own ConformU report, which carries the ConformU version and the pass counts for that camera (the run date is readable from the `LastExposureStartTime` lines in the report).
 
@@ -441,13 +444,14 @@ This document lists all hardware vendors and device types that are verified to w
 
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
-| Focus Motor 94155 for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor%2094155/) |
+| Focus Motor 94155-A for SCT and EdgeHD | USB/Serial (motor's own port) | ✓ | [ConformU Validation](AlpacaCore/conformu/Celestron/Focus%20Motor%2094155-A/) |
 
 <details>
 <summary><strong>Celestron Focuser Driver Notes</strong></summary>
 
 - **Protocol**: Celestron AUX frames to device 0x12 at 9600 baud, on the motor's own USB port (no SDK). The AUX path through a Celestron mount is not supported.
-- **Configuration**: `portPath` (required; no auto-detect).
+- **Tested model**: 94155-A, the reissue with a notch in the body for the EdgeHD focal reducer, firmware 7.16.9300. The earlier 94155 without the notch has not been tested.
+- **Configuration**: `portPath` (required; no auto-detect). The motor appears as `/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00`; use that path, since a `/dev/ttyUSB*` number can change when other USB devices are plugged in.
 - **Calibration**: run the `Calibrate` action (about 5 minutes; `CalibrationStatus` answers `Calibrating`, `Calibrated` or `NotCalibrated`, `AbortCalibration` or Halt stops it). An uncalibrated motor connects but refuses `Position`, `MaxStep` and Move. The Celestron Focuser Utility can erase the calibration when it closes. `Position` is `high limit - encoder`, so 0 is one end of the calibrated travel and `MaxStep` is the calibrated range.
 - **Capabilities**: absolute Move (clamped to 0..MaxStep), Halt. No temperature sensor, temperature compensation or `StepSize`.
 - **ConformU**: 4.5.2 (build 56139), 0 errors, 0 issues, 0 timing issues (2026-10-19, user-run on issue #896, PR head `d8f2020df2`, motor calibrated). AlpacaBridge ran on Linux arm64 (the OpenAstro Raspberry Pi image); ConformU itself ran on a Windows 11 x64 client over the LAN. ConformU cannot test `Action`: the same user checked `Calibrate`, `CalibrationStatus` and `AbortCalibration` by hand, and that a calibration made by INDI reads back the same `Position` and `MaxStep`.
@@ -763,7 +767,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Connection**: USB/Serial or Wi-Fi (TCP). Auto-detection supported for both — `connectionType: "auto"` scans serial ports first, then falls back to network discovery if no serial mount is found.
 - **Serial auto-detection**: Scans `/dev/serial/by-id/` for Prolific, FTDI, CP210x, Silicon Labs, and generic USB-serial devices and probes each with an iOptron `:MountInfo#` query at 115200 baud. Falls back to `/dev/ttyUSB0`–`/dev/ttyUSB9`. The 4-byte model code response (no `#` terminator) is mapped to a human-readable mount name (e.g., `0025` → HEM27) using the current INDI v3 model table.
 - **Network auto-detection**: When the connection type is set to Network/Auto, the driver runs a multi-phase discovery: (1) probes well-known iOptron Wi-Fi module addresses (`10.10.100.254`, `10.10.100.1`, `192.168.100.1`) on ports 8899 and 4030; (2) if no mount found, queries the default gateway on each local interface (iOptron mounts act as the AP gateway); (3) if still not found, scans all hosts on each local subnet (up to /24) with parallel non-blocking TCP connect probes. Each candidate is verified with a `:MountInfo#` query before being accepted.
-- **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27"), `UniqueID`, and server logs. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
+- **Mount identification**: On connect, the driver queries `:MountInfo#` and maps the model code to a name displayed in `Name` (e.g., "iOptron HEM27") and server logs. The `UniqueID` is the GUID stored with the configured device (decision 0018), not the model. 60+ models supported including CEM, GEM, HEM, HAE, HAZ, and SkyHunter series.
 - **Wi-Fi reliability**: Network (TCP) connections drain stale acknowledgment bytes from blind commands to prevent buffer accumulation on the mount's Wi-Fi module. `IsPulseGuiding` uses lock-free atomics to meet the ConformU fast response target over high-latency links.
 - **Tested firmware**: Driver tested on **HEM27** with main board firmware **V240121** and hand controller firmware **V241201**, on **HAE29C EQ** (model code 0036, current firmware as of 2026-07-14), and on **HAE16 EQ** (model code 0012, main/RA/Dec firmware 241201, the latest HAE package as of 2026-08-26). Other firmware versions and models may work but have not been individually verified.
 - **HAE29C firmware quirks**: The driver carries three hardware-verified workarounds gated strictly to model code 0036 (other models are unaffected): (1) `:MP1#` park slews complete physically but never report status 6 — the driver sends `:ST0#` to finalize once the mount is stationary at the park target; (2) a park issued while already at the park position wedges the same way and gets the same finalizer; (3) GOTO stops compensating sidereal motion during its final ~1 s approach, settling ~11–16 arcsec east in RA — the driver closes the residual with a duration-computed pulse-guide trim (up to 3 iterations). The GOTO trim (3) is also enabled for the **HAE16 EQ** (model code 0012), which shows the identical settle signature on firmware 241201; its park is clean, so the park finalizers (1)-(2) stay HAE29C-only.
@@ -844,7 +848,7 @@ This document lists all hardware vendors and device types that are verified to w
 | Model Series | Connection | Linux<br>(arm64) | Status |
 |--------------|------------|------------------|--------|
 | AM3 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM3/) |
-| AM5 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
+| AM5 | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM5/) |
 | AM5N | USB/Serial, Wi-Fi | ✓ | [ConformU Validation](AlpacaCore/conformu/ZWO/AM5N/) |
 | AM7 | USB/Serial, Wi-Fi |  | pending arm64 re-validation |
 
@@ -854,6 +858,7 @@ This document lists all hardware vendors and device types that are verified to w
 - **Protocol**: ZWO Mount Serial Communication Protocol (see `AlpacaCore/external/ZWO/AM/ZWO_Mount_Protocol.md`)
 - **Connection**: Serial over USB, network (TCP), or **auto-detect**. **Tested and working with USB and WiFi**. PulseGuide and slew behavior validated over both USB and WiFi; timing tuned for high-latency (WiFi) connections. `connectionType: auto` probes USB serial ports and the mount's WiFi AP (`192.168.4.1:4030`) at connect time and connects to whichever ZWO mount answers (AM3/AM5/AM5N/AM7).
 - **Tested firmware**: Driver tested on ZWO **firmware 1.8.8\***. Other firmware versions and models (e.g., AM3, AM5, AM7) may work but have not been verified.
+- **AM5 validated** (ConformU 4.5.2, firmware 1.8.6, Linux arm64, USB, 2026-10-20 on a `stable/5.0` build before the serial port ownership change #1202): 0 errors, 0 warnings, 0 issues, 0 timing issues. The run covers the east-positive longitude conversion, the arrival publication with final coordinates, and the removal of the mirrored-longitude retry.
 - **AM5N validated** (ConformU 4.4.0, Linux arm64, USB): 0 errors, 0 issues, 0 timing issues. Park requires the mount to have been homed; the driver infers park completion from a stationary mount when :hP does not physically move it. Setting Tracking=true while parked throws `InvalidWhileParked`. The park-state cache in the poll thread is left un-pinned during active parks so the completion inference is not defeated.
 - **WiFi characteristics**: the same driver connects and operates over the mount's WiFi AP (`192.168.4.1:4030`) with auto-detect. ConformU over WiFi reports 0 errors but a few STANDARD (1.0 s) members (Park, FindHome, guide-rate writes) land at ~1.03–1.09 s because each operation costs several serial round-trips at WiFi latency — a link-speed characteristic, not a driver defect. USB is the ConformU-validated transport; WiFi is verified functional for normal use.
 

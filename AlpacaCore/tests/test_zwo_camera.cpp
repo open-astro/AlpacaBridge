@@ -14,12 +14,17 @@
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
 #include <limits>
 #include <set>
 #include <string>
+#include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
+#include "fake_zwo_sdk.h"
 
 namespace {
 
@@ -184,4 +189,61 @@ TEST_CASE("ZWO Camera Driver - A name query keeps the configured camera id", "[z
 
     CHECK(actual != "Camera ID not specified");
     CHECK(actual == expected);
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; the cooler members raise
+// PropertyNotImplemented on a camera without a cooler.
+TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    // The retry window is measured from the epoch before the first retry.
+    clock.advance(std::chrono::seconds(1));
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*camera); }
+    SECTION("idle after a completed exposure") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+    SECTION("after a failed exposure") {
+        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them);
+        // the old value here was 100 because the failed frame still counted as an image.
+        camera->start_exposure(0.001, true);
+        sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
+                                             alpacacore::AlpacaError::DriverException);
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+    SECTION("while exposing") {
+        sdk.auto_complete_exposure = false;
+        camera->start_exposure(30.0, true);
+        alpacacore::test::require_percent_completed_available(*camera);
+    }
+}
+
+TEST_CASE("ZWO Camera Driver - cooler members need the cooler capability", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    sdk.report_cooler_controls = false;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK_FALSE(camera->get_can_get_cooler_power());
+    alpacacore::test::require_no_cooler_members(*camera);
+}
+
+TEST_CASE("ZWO Camera Driver - cooler members work with the cooler capability", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    REQUIRE(camera->get_can_get_cooler_power());
+    camera->set_cooler_on(true);
+    CHECK(camera->get_cooler_on());
+    CHECK(camera->get_cooler_power() >= 0.0);
 }

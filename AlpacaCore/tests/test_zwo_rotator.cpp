@@ -11,19 +11,25 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/zwo/zwo_caa_sdk.h>
 #include <alpacacore/vendor/zwo/zwo_rotator_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <stdexcept>
 #include <thread>
 #include <variant>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_zwo_caa_sdk.h"
+#include "getter_stall_probe.h"
 #include "rotator_sync_offset_test_dir.h"
 
 namespace {
@@ -152,7 +158,7 @@ TEST_CASE("ZWO CAA Rotator Driver - Sync offset survives reconnect and a new ins
     CHECK(second->get_mechanical_position() == 10.0);
 }
 
-// Falsified by: zwo_rotator_driver.cpp unique_id_locked() skipping its serial
+// Falsified by: zwo_rotator_driver.cpp unique_id_for() skipping its serial
 // branch (a second rotator with another serial inherits the stored 30).
 TEST_CASE("ZWO CAA Rotator Driver - Sync offset is keyed by serial number", "[zwo][rotator][unit][fake-sdk]") {
     alpacacore::test::TempSyncOffsetDir dir;
@@ -167,6 +173,108 @@ TEST_CASE("ZWO CAA Rotator Driver - Sync offset is keyed by serial number", "[zw
     auto other = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
     other->set_connected(true);
     CHECK(other->get_position() == 10.0);
+}
+
+// Decision 0008 (#1473): a Sync that cannot store its offset fails and keeps the old one.
+TEST_CASE("ZWO CAA Rotator Driver - Sync that cannot save throws and keeps the offset",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->sync(30.0);
+    REQUIRE(driver->get_position() == 30.0);
+
+    const auto blocker = dir.file().parent_path().parent_path() / "blocker";
+    { std::ofstream(blocker) << "x"; }
+    alpacacore::util::RotatorSyncOffsetStore::set_default_path((blocker / "offsets.json").string());
+    require_alpaca_error([&] { driver->sync(50.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_position() == 30.0);
+}
+
+// Decision 0018 (#1471): the serial-keyed offset moves to the assigned GUID at connect,
+// which is the first moment the serial (and so the old key) is known.
+TEST_CASE("ZWO CAA Rotator Driver - Connect adopts the offset saved under the serial-based ID",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    std::string legacy;
+    {
+        auto before_upgrade = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+        before_upgrade->set_connected(true);
+        legacy = before_upgrade->get_unique_id();  // serial-based once connected
+        before_upgrade->sync(30.0);
+        before_upgrade->set_connected(false);
+    }
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 20.0);  // offset = 30 - mechanical 10
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 20.0);
+    // Sync now saves under the GUID.
+    driver->sync(45.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 35.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
+}
+
+// A CAA without a serial saved its offset under an SDK-ID key, which names a
+// slot, not a body. Only the router's call at the start that gives the stored
+// entry its first GUID moves it; a connect never does, so a rotator added later
+// cannot inherit it (decision 0018).
+TEST_CASE("ZWO CAA Rotator Driver - Connect does not adopt an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 20.0);
+}
+
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state moves an offset saved under an ID-based key",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    const std::string legacy = "ZWO_CAA_ID_" + std::to_string(sdk.id);
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save(legacy, 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 20.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(legacy) == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+}
+
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("ZWO CAA Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[zwo][rotator][unit][fake-sdk]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    sdk.serial.clear();
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("ZWO_CAA_ID_" + std::to_string(sdk.id), 20.0));
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 10.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
 }
 
 // Falsified by: zwo_rotator_driver.cpp get_mechanical_position() dropping the
@@ -404,4 +512,185 @@ TEST_CASE("ZWO CAA Rotator Driver - A mechanical move drops the cached frame", "
     CHECK(driver->get_position() == 10.0);
     driver->move_mechanical(120.0);
     CHECK(driver->get_position() == 120.0);
+}
+
+// Decision 0016: Name and UniqueID need no device access, so a connect that holds the SDK open must not park them.
+// Falsified by: zwo_rotator_driver.cpp set_connected(true) holding mutex_ across open_rotator() (get_name() then
+// waits the whole 300 ms open).
+TEST_CASE("ZWO CAA Rotator Driver - Name and UniqueID answer while a connect holds the SDK open",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.open_delay = kHoldOpen;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+
+    driver->connect();
+    REQUIRE(wait_for_flag(sdk.open_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(driver->get_connecting());  // the open is still in flight, so the timings above are not vacuous
+
+    REQUIRE(wait_until_connected(*driver));
+    CHECK(driver->get_name() == "CAA");
+    CHECK(driver->get_unique_id() == "ZWO_CAA_SN_CAA-SN-1");
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_rotator_driver.cpp get_name() or get_unique_id() taking io_mutex_ (the identity read then waits
+// the 300 ms status refill).
+TEST_CASE("ZWO CAA Rotator Driver - Identity answers while a status read is in flight",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.read_delay = kHoldOpen;
+
+    std::thread reader([&] {
+        try {
+            (void)driver->get_is_moving();
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.read_entered));
+
+    CHECK(time_call([&] { (void)driver->get_name(); }) < kGetterBudget);
+    CHECK(time_call([&] { (void)driver->get_unique_id(); }) < kGetterBudget);
+    CHECK(time_call([&] { CHECK(driver->get_can_reverse()); }) < kGetterBudget);
+    CHECK(sdk.busy.load() > 0);  // the refill is still in flight
+
+    reader.join();
+    driver->set_connected(false);
+}
+
+// A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
+// Falsified by: zwo_rotator_driver.cpp set_connected(false) calling close_rotator() without io_mutex_, or
+// move_absolute()/move()/move_mechanical()/set_reverse()/halt() reading the id and then calling the SDK without
+// it (closed_while_busy is set; one section per write).
+TEST_CASE("ZWO CAA Rotator Driver - A disconnect waits for the exchange in flight instead of closing under it",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    std::thread worker;
+    SECTION("a status read") {
+        sdk.read_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                (void)driver->get_is_moving();
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.read_entered));
+    }
+    SECTION("a move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move_absolute(90.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a mechanical move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move_mechanical(90.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a relative move") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->move(45.0);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a reverse write") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->set_reverse(true);
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+    SECTION("a halt") {
+        sdk.move_delay = kHoldOpen;
+        worker = std::thread([&] {
+            try {
+                driver->halt();
+            } catch (const std::exception&) {
+            }
+        });
+        REQUIRE(wait_for_flag(sdk.move_entered));
+    }
+
+    CHECK(time_call([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    worker.join();
+    CHECK_FALSE(sdk.closed_while_busy.load());
+    CHECK_FALSE(driver->get_connected());
+    CHECK(sdk.close_calls == 1);
+}
+
+// A disconnect that wins the I/O lock while status reads queue behind a write is not a link failure: every reader
+// gets NotConnected, none the "communications compromised" fault that three counted failures would latch.
+// Falsified by: zwo_rotator_driver.cpp read_status() throwing NotConnected inside the cache refill instead of returning
+// the closed frame (the third queued reader then gets DriverException "communications compromised").
+TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is not a link failure",
+          "[zwo][rotator][unit][fake-sdk][getter-stall]") {
+    using namespace alpacacore::test;
+    TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.move_delay = kHoldOpen;
+    std::thread mover([&] {
+        try {
+            driver->move_absolute(90.0);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(wait_for_flag(sdk.move_entered));
+
+    constexpr int kReaders = 8;
+    std::atomic<int> not_connected{0};
+    std::atomic<int> other{0};
+    std::vector<std::thread> readers;
+    for (int i = 0; i < kReaders; ++i) {
+        readers.emplace_back([&] {
+            try {
+                (void)driver->get_is_moving();
+                ++other;
+            } catch (const alpacacore::AlpacaException& e) {
+                (e.error_code() == alpacacore::AlpacaError::NotConnected ? not_connected : other)++;
+            } catch (const std::exception&) {
+                ++other;
+            }
+        });
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // every reader is parked on the write
+    driver->set_connected(false);
+    mover.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+
+    CHECK(other.load() == 0);
+    CHECK(not_connected.load() == kReaders);
 }

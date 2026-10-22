@@ -416,7 +416,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Camera; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         // Review PR #485 round 4: camera_info_.port (the libgphoto2 USB bus
         // path, e.g. "usb:001,005") is not a stable identity -- it changes
         // across an unplug/replug (the bus device number increments) and
@@ -606,7 +606,7 @@ public:
 
         // Disconnecting: publish disconnected before closing the SDK handle
         // so a racing operational call fails fast at its connection check
-        // instead of hitting a just-closed camera (AGENTS.md disconnect
+        // instead of hitting a just-closed camera (driver-lifecycle.instructions.md disconnect
         // rule). Exposure worker is already joined (lifecycle lock above).
         const int close_handle = handle_;
         handle_ = -1;
@@ -717,20 +717,20 @@ public:
         return *sensor_temperature_;
     }
 
+    // No gphoto2 camera has a cooler: CanGetCoolerPower and CanSetCCDTemperature are false, so the cooler
+    // members raise PropertyNotImplemented (ICameraV4: "if not supported").
     bool get_cooler_on() const override {
         ensure_connected();
-        return false;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
-    void set_cooler_on(bool cooler_on) override {
+    void set_cooler_on(bool /*cooler_on*/) override {
         ensure_connected();
-        if (cooler_on) {
-            throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-        }
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_cooler_power() const override {
         ensure_connected();
-        return 0.0;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
     double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 

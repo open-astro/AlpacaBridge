@@ -11,6 +11,8 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/rotator_sync_offset_store.h>
+#include <alpacacore/util/unique_id.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_driver.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -20,6 +22,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
@@ -51,6 +54,11 @@ public:
         th_.join();
     }
     std::string slave_path() const { return pty_.slave_path(); }
+    int keepalive_fd() const { return pty_.keepalive_fd(); }
+    /// Write raw bytes to the driver (a test that must unpark a reader).
+    void send(const std::string& bytes) {
+        alpacacore::test::pty_write_bounded(pty_.master_fd(), bytes.data(), bytes.size(), stop_);
+    }
 
 private:
     void run() {
@@ -199,8 +207,7 @@ TEST_CASE("WandererAstro Rotator Protocol Wrapper - Disconnected behavior", "[wa
     require_alpaca_error([&]() { wrapper.set_zero(); }, alpacacore::AlpacaError::NotConnected);
 
     // Connecting to a missing port must fail with NotConnected and leave the
-    // wrapper disconnected. (/dev/null is not used here: it opens fine but is
-    // not a tty, so serial configuration fails with DriverException instead.)
+    // wrapper disconnected.
     alpacacore::vendor::wandererastro::RotatorConnectionConfig config;
     config.serial_port = "/nonexistent/wanderer-rotator-test-port";
     config.serial_timeout_s = 1;
@@ -272,6 +279,114 @@ TEST_CASE("WandererAstro Rotator Driver - Sync offset persists", "[wandererastro
     restarted->set_connected(false);
 }
 
+// A client may connect before the router's upgrade-start adopt runs; the adopt
+// then refreshes Position, not only the file (review of #1493).
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state while connected refreshes Position",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->assign_unique_id(alpacacore::util::generate_unique_id());
+    driver->set_connected(true);
+    REQUIRE(driver->get_position() == 0.0);
+    driver->adopt_legacy_state();
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
+// Two Syncs at once must leave the stored offset and Position agreeing: one
+// Sync's save and in-memory write may not straddle the other's, or a restart
+// moves Position to the offset the file kept (review of #1493). The first Sync
+// is held between its save and its in-memory write while the second runs.
+TEST_CASE("WandererAstro Rotator Driver - Concurrent Syncs leave the file and Position agreeing",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    using alpacacore::util::RotatorSyncOffsetStore;
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    std::atomic<bool> first_saved{false};
+    std::atomic<bool> release{false};
+    std::atomic<int> saves{0};
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing([&] {
+        if (saves.fetch_add(1) == 0) {
+            first_saved.store(true);
+            while (!release.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+    });
+    std::thread first([&] { driver->sync(10.0); });
+    while (!first_saved.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::thread second([&] { driver->sync(20.0); });
+    // Without serialisation the second Sync saves and publishes in this window.
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    release.store(true);
+    first.join();
+    second.join();
+    RotatorSyncOffsetStore::set_after_save_hook_for_testing({});
+    CHECK(RotatorSyncOffsetStore::load(driver->get_unique_id()) == driver->get_position());
+    driver->set_connected(false);
+}
+
+// Decision 0008 (#1473): IRotatorV4 requires the offset to persist, so a Sync
+// that cannot store it fails and the previous offset stays.
+TEST_CASE("WandererAstro Rotator Driver - Sync that cannot save throws and keeps the offset",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    driver->sync(30.0);
+    REQUIRE(driver->get_position() == 30.0);
+
+    // A regular file where the store's directory should be: every save fails.
+    const auto blocker = dir.file().parent_path().parent_path() / "blocker";
+    { std::ofstream(blocker) << "x"; }
+    alpacacore::util::RotatorSyncOffsetStore::set_default_path((blocker / "offsets.json").string());
+    require_alpaca_error([&] { driver->sync(50.0); }, alpacacore::AlpacaError::DriverException);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
+// Decision 0018 (#1471): keyed by the assigned GUID. The offset saved under the
+// device-number ID moves only when the router asks, at the start that gives the
+// stored entry its first GUID; a connect never moves it, so a rotator added later
+// on the same device number cannot inherit it.
+TEST_CASE("WandererAstro Rotator Driver - Connect does not adopt the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 0.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 30.0);
+    driver->set_connected(false);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - adopt_legacy_state moves the offset saved under the old ID",
+          "[wandererastro][rotator][sync-offset][unit]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    REQUIRE(alpacacore::util::RotatorSyncOffsetStore::save("WANDERERASTRO_ROTATOR_0", 30.0));
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string guid = alpacacore::util::generate_unique_id();
+    driver->assign_unique_id(guid);
+    driver->adopt_legacy_state();
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load(guid) == 30.0);
+    CHECK(alpacacore::util::RotatorSyncOffsetStore::load("WANDERERASTRO_ROTATOR_0") == 0.0);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 30.0);
+    driver->set_connected(false);
+}
+
 // #508 item 1: a saved serial entry with an empty portPath is registered so it stays listed; its
 // connect refuses in words the operator can act on instead of opening "" or auto-detecting.
 TEST_CASE("WandererAstro Rotator Driver - Connect with empty serial port names portPath",
@@ -286,4 +401,71 @@ TEST_CASE("WandererAstro Rotator Driver - Connect with empty serial port names p
     }
     CHECK(message.find("portPath") != std::string::npos);
     CHECK_FALSE(driver->get_connected());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1202: the rotator opens its port through util::SerialLink, so a port
+// another device holds is refused untouched, its own claim is released on
+// disconnect, and a retuned port cannot park the move monitor in read() and
+// hang Disconnect (the WandererRotator hang reported in #1202).
+// ---------------------------------------------------------------------------
+
+#include <alpacacore/util/serial_port_registry.h>
+
+#include "wandererastro_serial_ownership_helpers.h"
+
+TEST_CASE("WandererAstro Rotator Driver - Refuses a port another device holds (issue #1202)",
+          "[wandererastro][rotator][serial][issue1202]") {
+    namespace util = alpacacore::util;
+    SilentMotorRotator rotator;
+    const speed_t before = alpacacore::test::wanderer::line_speed(rotator.keepalive_fd());
+    auto claim = util::SerialPortClaim::acquire(rotator.slave_path(), util::SerialClaimKind::Link, "Other device");
+    REQUIRE(claim);
+
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    const std::string error = alpacacore::test::wanderer::connect_error([&] { driver->set_connected(true); });
+    CHECK(error.find("Other device") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    // Refused before the open: the holder's line settings are untouched.
+    CHECK(alpacacore::test::wanderer::line_speed(rotator.keepalive_fd()) == before);
+}
+
+TEST_CASE("WandererAstro Rotator Driver - Holds its port while connected and releases it (issue #1202)",
+          "[wandererastro][rotator][serial][issue1202]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    SilentMotorRotator rotator;
+    auto driver = alpacacore::vendor::wandererastro::create_wandererastro_rotator(0, rotator.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(alpacacore::util::is_serial_port_in_use(rotator.slave_path()));
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(rotator.slave_path()));
+    // TIOCEXCL and the claim are both gone: the same port connects again.
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "WandererAstro Rotator Protocol Wrapper - Disconnect returns after the port is retuned to VMIN=1 mid-move "
+    "(issue #1202)",
+    "[wandererastro][rotator][serial][issue1202]") {
+    SilentMotorRotator rotator;
+    alpacacore::vendor::wandererastro::WandererRotatorProtocolWrapper wrapper;
+    alpacacore::vendor::wandererastro::RotatorConnectionConfig config;
+    config.serial_port = rotator.slave_path();
+    REQUIRE(wrapper.connect(config) == "WandererRotatorMini");
+
+    // 30 degrees: the monitor's own budget is about 19 s, so only its stop
+    // flag can end it inside the bound below. The fake never reports.
+    wrapper.move_relative(30.0);
+    REQUIRE(wrapper.get_state().moving);
+    alpacacore::test::wanderer::retune_to_blocking_read(rotator.keepalive_fd());
+    // Outlast one read window so the monitor's next read runs under VMIN=1.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+    // The wrapper's disconnect() is synchronous: it joins the monitor.
+    CHECK(alpacacore::test::wanderer::returns_within([&] { wrapper.disconnect(); }, std::chrono::seconds(3),
+                                                     [&] { rotator.send("A"); }));
+    CHECK_FALSE(wrapper.is_connected());
 }

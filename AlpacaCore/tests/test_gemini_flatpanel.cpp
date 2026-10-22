@@ -79,8 +79,8 @@ TEST_CASE("Gemini Flat Panel Driver - Defaults", "[gemini][flatpanel][unit]") {
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "Gemini Astro Flat Panel Cover Lite");
-    // MaxBrightness is a static capability and must be readable without a connection.
-    CHECK(driver->get_max_brightness() == 255);
+    // MaxBrightness is a property: disconnected it refuses (issue #1478), the value is read connected.
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Gemini Flat Panel Driver - Device metadata", "[gemini][flatpanel][unit]") {
@@ -109,6 +109,7 @@ TEST_CASE("Gemini Flat Panel Driver - Not connected throws", "[gemini][flatpanel
     // Every property/method that needs a live link must throw NotConnected
     // (0x407) so ConformU sees the correct Alpaca error number.
     require_alpaca_error([&]() { driver->get_brightness(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_calibrator_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_calibrator_changing(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_cover_state(); }, alpacacore::AlpacaError::NotConnected);
@@ -380,4 +381,119 @@ TEST_CASE("Gemini Flat Panel Slots - the idle CoverState cache ages on the injec
     clock.advance(milliseconds(1100));
     CHECK(driver->get_cover_state() == CoverState::Closed);
     CHECK(panel.count(">S#") == seeded + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Lite (v1) class: Brightness / CalibratorState are published state and must
+// not wait for a CalibratorOn / CalibratorOff serial exchange (decision 0016).
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::unique_ptr<alpacacore::CoverCalibratorDriver> connect_lite(const FakeGeminiFlatPanel& panel) {
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    return driver;
+}
+
+}  // namespace
+
+TEST_CASE("Gemini Flat Panel Lite - Brightness and CalibratorState do not wait for a calibrator command",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+
+    SECTION("CalibratorOn in flight") {
+        panel.set_reply_delay(">L#", milliseconds(300));
+        std::jthread caller([&] { driver->calibrator_on(40); });
+        REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)driver->get_brightness();
+        (void)driver->get_calibrator_state();
+        CHECK(std::chrono::steady_clock::now() - t0 < milliseconds(20));
+        caller.join();
+        CHECK(driver->get_brightness() == 40);
+        CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+    }
+
+    SECTION("CalibratorOff in flight") {
+        driver->calibrator_on(40);
+        panel.set_reply_delay(">D#", milliseconds(300));
+        std::jthread caller([&] { driver->calibrator_off(); });
+        REQUIRE(slot_wait_until([&] { return panel.count(">D#") == 1; }, milliseconds(1000)));
+
+        const auto t0 = std::chrono::steady_clock::now();
+        (void)driver->get_brightness();
+        (void)driver->get_calibrator_state();
+        CHECK(std::chrono::steady_clock::now() - t0 < milliseconds(20));
+        caller.join();
+        CHECK(driver->get_brightness() == 0);
+        CHECK(driver->get_calibrator_state() == CalibratorState::Off);
+    }
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a failed calibrator command restores the published state",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    driver->calibrator_on(40);
+
+    panel.set_reply_override(">B", kOverlongReply);
+    CHECK_THROWS(driver->calibrator_on(90));
+    CHECK(driver->get_brightness() == 40);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Ready);
+}
+
+TEST_CASE("Gemini Flat Panel Lite - set_connected(false) returns promptly with a command in flight",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    panel.set_reply_delay(">L#", milliseconds(300));
+    std::jthread caller([&] {
+        try {
+            driver->calibrator_on(40);
+        } catch (const std::exception&) {
+        }
+    });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+    CHECK_FALSE(driver->get_connected());
+    caller.join();
+}
+
+TEST_CASE("Gemini Flat Panel Lite - a command finishing during a disconnect does not republish its state",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    auto driver = connect_lite(panel);
+    panel.set_reply_delay(">L#", milliseconds(300));
+    std::jthread caller([&] { driver->calibrator_on(40); });
+    REQUIRE(slot_wait_until([&] { return panel.count(">L#") == 1; }, milliseconds(1000)));
+
+    driver->set_connected(false);
+    caller.join();
+
+    // A failing seed read leaves the cleared state in place on reconnect.
+    panel.set_reply_override(">S", kOverlongReply);
+    driver->set_connected(true);
+    CHECK(driver->get_brightness() == 0);
+    CHECK(driver->get_calibrator_state() == CalibratorState::Off);
+}
+
+TEST_CASE("Gemini Flat Panel Driver - connected, MaxBrightness is 255 and Brightness is 0 while the light is off",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    // The panel remembers a level while its light is off; ICoverCalibratorV2 wants Brightness 0 then (issue #1478).
+    panel.set_reply_override(">J#", "*J128#");
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_max_brightness() == 255);
+    REQUIRE(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK(driver->get_brightness() == 0);
 }

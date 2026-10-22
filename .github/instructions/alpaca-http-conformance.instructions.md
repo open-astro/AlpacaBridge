@@ -18,6 +18,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
 - **URLs are case-sensitive and lowercase.** Device type and method path segments must be lower-case; that check stays.
 - **HTTP status codes:**
   - `200` — request was interpreted and reached the driver. Driver exceptions (NotImplemented, InvalidValue, NotConnected, etc.) ride in the JSON `ErrorNumber`/`ErrorMessage` fields with a `200`. `apply_error_status` exists to keep these at 200 — never downgrade a driver error to 4xx/5xx.
+    A known method whose parameter is missing or malformed is answered the same way: HTTP 200 with `InvalidValue` (0x401), not 400. The router's parse helpers (`parse_int_value`, the per-device `parse_int`/`parse_bool`/`parse_double` lambdas in `router.cpp`) throw it as "Missing parameter: <name>" or "Invalid value for parameter: <name>" before the driver is called. The Device API schema's 400 text also mentions "insufficient information was given"; AlpacaBridge reads that as a request it cannot route, and treats a bad argument as ASCOM's `InvalidValueException`. The ConformU Alpaca protocol run in `AlpacaHTTP/conformu/` passes with this behavior. Decided 2026-10-21 on issue #1476. `test_routing.cpp` pins both, in the JSON integer case (#1476).
   - `400` — "the device could not interpret the request e.g. an invalid device number or misspelt device type." Use 400 (not 404) for unknown device type, unknown method, a known method on a verb it does not accept (after the cross-origin 403), a device number outside 0..4294967295, and unregistered device number. A genuinely unroutable URL (no device/management match) stays 404.
   - `403` — a `Host` header that is not allowed, only when `http.host_check_enabled` is true (off by default; issue #392, checked in `Router::route()` before static files and routing: IP literals, `localhost`, this machine's hostname, `*.local`/`*.home.arpa`/`*.internal` and `http.allowed_hosts`; a missing `Host` passes), or a cross-origin state-changing request. Both carry the Alpaca envelope with `InvalidValue` and echo `ClientTransactionID`; a test that sends another `Host` gets the 403 only with the check enabled (`Router::set_host_check_enabled(true)`).
   - `500` — unexpected internal error only.
@@ -298,7 +299,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   body that a HEAD client must not receive. Tests: the HEAD and chunked cases
   in `test_server_socket.cpp`, and the `Content-Length` default case in
   `test_routing.cpp` (every `Response::to_string()` emits exactly one).
-- **`Transfer-Encoding` is rejected with 501, not ignored** (same review).
+- **`Transfer-Encoding` is rejected with 501, not ignored** (same review; listed as a deliberate departure in [the LAN surface threat model](../../docs/decisions/0007-lan-surface-threat-model.md)).
   `read_request` frames bodies from `Content-Length` only, so a chunked body
   read as zero-length left its chunk framing on the wire to be parsed as the
   next request — request-smuggling-shaped behind any intermediary that does

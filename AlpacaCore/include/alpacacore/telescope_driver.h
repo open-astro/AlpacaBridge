@@ -320,7 +320,7 @@ public:
                 any_stop_succeeded = true;
             } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
                 // Swallow rather than let it escape from a background timer
-                // thread and terminate the process (AGENTS.md concurrency
+                // thread and terminate the process (driver-lifecycle.instructions.md concurrency
                 // checklist: an async tail that can throw must be caught
                 // inline).
             } catch (...) {  // NOLINT(bugprone-empty-catch)
@@ -790,7 +790,7 @@ private:
     // called from HTTP worker threads on the hot path, and
     // stop_motion_if_client_silent() from the server's timer thread; a new
     // lock here would sit outside the documented driver-mutex_ order
-    // (AGENTS.md concurrency checklist). The three watchdog atomics use the
+    // (driver-lifecycle.instructions.md concurrency checklist). The three watchdog atomics use the
     // default sequentially consistent ordering, not relaxed: the timer
     // thread's clear-then-recheck of silence_check_pending_ relies on
     // seeing a request thread's timestamp store no later than its flag

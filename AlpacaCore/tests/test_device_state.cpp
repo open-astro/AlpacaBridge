@@ -37,7 +37,7 @@
 //
 // These doubles are never connected: get_connected() is always false and
 // every operational getter throws NotConnected, matching a real driver's
-// disconnected behavior (AGENTS.md: "Every property otherwise throws
+// disconnected behavior (driver-lifecycle.instructions.md: "Every property otherwise throws
 // NotConnected when disconnected").
 
 namespace {
@@ -58,7 +58,7 @@ class DisconnectedDriverBase : public Base {
 public:
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "Disconnected Driver"; }
-    std::string get_unique_id() const override { return "disconnected-driver"; }
+    std::string fallback_unique_id() const override { return "disconnected-driver"; }
     std::string get_description() const override { return "test double"; }
     std::string get_driver_info() const override { return "test double"; }
     std::string get_driver_version() const override { return "0.0.0"; }
@@ -164,6 +164,23 @@ class LeakyDisconnectedCamera final : public DisconnectedCamera {
 public:
     alpacacore::CameraState get_camera_state() const override { return alpacacore::CameraState::Idle; }
     double get_percent_completed() const override { return 0.0; }
+};
+
+// Issue #1477: the ICameraV4 PercentCompleted rule lives in CameraDriver, so one double with a scripted
+// CameraState and raw value covers every camera driver.
+class ScriptedProgressCamera final : public DisconnectedCamera {
+public:
+    alpacacore::CameraState state = alpacacore::CameraState::Idle;
+    double raw_percent = 0.0;
+    bool link_fault = false;
+
+    alpacacore::CameraState get_camera_state() const override { return state; }
+    double get_percent_completed() const override {
+        if (link_fault) {
+            throw alpacacore::AlpacaException("link fault", alpacacore::AlpacaError::DriverException);
+        }
+        return raw_percent;
+    }
 };
 
 class DisconnectedCoverCalibrator final : public DisconnectedDriverBase<alpacacore::CoverCalibratorDriver> {
@@ -584,4 +601,70 @@ TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads",
     const auto stamp = std::get<std::string>(state.back().value);
     CHECK(stamp >= alpacacore::device_state_timestamp(before));
     CHECK(stamp <= alpacacore::device_state_timestamp(after));
+}
+
+TEST_CASE("Camera PercentCompleted raises InvalidOperation unless Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    for (const auto state :
+         {alpacacore::CameraState::Idle, alpacacore::CameraState::Error, alpacacore::CameraState::Waiting,
+          alpacacore::CameraState::Reading, alpacacore::CameraState::Download}) {
+        camera.state = state;
+        camera.raw_percent = 100.0;  // a driver's raw value after a frame, or after a failed one
+        try {
+            (void)camera.get_percent_completed_checked();
+            FAIL("Expected InvalidOperation for CameraState " << static_cast<int>(state));
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+    }
+}
+
+TEST_CASE("Camera PercentCompleted is the clamped raw value while Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.state = alpacacore::CameraState::Exposing;
+    camera.raw_percent = 42.5;
+    CHECK(camera.get_percent_completed_checked() == 42.5);
+    camera.raw_percent = 250.0;
+    CHECK(camera.get_percent_completed_checked() == 100.0);
+    camera.raw_percent = -3.0;
+    CHECK(camera.get_percent_completed_checked() == 0.0);
+}
+
+TEST_CASE("Camera PercentCompleted raises the driver's fault before InvalidOperation", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.state = alpacacore::CameraState::Error;
+    camera.link_fault = true;
+    try {
+        (void)camera.get_percent_completed_checked();
+        FAIL("Expected the link fault");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+}
+
+TEST_CASE("Camera DeviceState carries PercentCompleted as an integer only while Exposing", "[driver][camera]") {
+    ScriptedProgressCamera camera;
+    camera.set_connected(true);
+    const auto percent_entry = [&]() -> const alpacacore::DeviceState* {
+        static std::vector<alpacacore::DeviceState> state;
+        state = camera.get_device_state();
+        for (const auto& entry : state) {
+            if (entry.name == "PercentCompleted") return &entry;
+        }
+        return nullptr;
+    };
+
+    camera.raw_percent = 100.0;
+    CHECK(percent_entry() == nullptr);  // Idle: omitted on purpose
+
+    camera.state = alpacacore::CameraState::Exposing;
+    camera.raw_percent = 37.9;
+    const auto* entry = percent_entry();
+    REQUIRE(entry != nullptr);
+    const auto* value = std::get_if<std::int32_t>(&entry->value);
+    REQUIRE(value != nullptr);  // a short, never a double
+    CHECK(*value == 37);
+
+    camera.state = alpacacore::CameraState::Error;
+    CHECK(percent_entry() == nullptr);
 }

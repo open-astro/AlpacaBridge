@@ -16,6 +16,7 @@
 
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
 #include <alpacacore/version.h>
 
@@ -189,6 +190,24 @@ TEST_CASE("Celestron Focuser Driver - the motor's USB port runs at 9600 baud", "
     CHECK(::cfgetispeed(&settings) == B9600);
     driver->set_connected(false);
     ::close(observer);
+}
+
+TEST_CASE("Celestron Focuser Driver - holds its port under its own name", "[celestron][focuser][unit][fake]") {
+    // The focuser shares the CGX AUX transport; the registry holder is what a
+    // refused operator reads (#1202, decision 0017), so it must name the focuser.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.set_limits(1000, 61000);
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+
+    const auto holder = alpacacore::util::serial_port_holder(fake.slave_path());
+    REQUIRE(holder.has_value());
+    CHECK(holder->owner == "Celestron focuser");
+    driver->set_connected(false);
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 }
 
 TEST_CASE("Celestron Focuser Driver - Move sends the raw target and IsMoving follows the motor",
@@ -590,12 +609,12 @@ TEST_CASE("Celestron Focuser Driver - unsupported members report not implemented
     driver->set_connected(false);
 }
 
-TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first poll was lost measures the motor",
+TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first poll was lost has an answer",
           "[celestron][focuser][unit][fake]") {
-    // The connect's first poll can publish nothing: its reply is lost, or a
-    // racing Move/Halt write-through drops the frame (the [stress] case found
-    // this). Connected is true by then, so a getter must not answer "state
-    // not available yet"; it measures the motor itself.
+    // The connect's first poll can publish nothing: its reply is lost. Connect
+    // may do I/O, so it retries once before Connected reads true; the getters
+    // then answer from that frame and run no exchange of their own (decisions
+    // 0010 and 0016).
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
     fake.drop_next_reply(0x13);
@@ -603,9 +622,49 @@ TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
+    const int before = fake.count(0x01);
 
     CHECK(driver->get_position() == 31000);
     CHECK(driver->get_is_moving() == false);
+    CHECK(fake.count(0x01) == before);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron Focuser Driver - getters on a stalled link add no AUX exchanges and never trip the latch",
+          "[celestron][focuser][unit][fake]") {
+    // Getters read the snapshot and never wait on the wire (decisions 0010 and
+    // 0016). Every connect poll is lost, so no frame is held; getters must
+    // answer "not available yet" without an exchange of their own, so the
+    // 250 ms poll cadence alone decides when the latch (threshold 3) trips.
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    fake.drop_next_reply(0x13, 2);  // the connect poll and its retry
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    const int before = fake.count(0x01);
+
+    fake.set_muted(true);
+    std::string last;
+    for (int i = 0; i < 4; ++i) {
+        try {
+            (void)driver->get_position();
+            FAIL("expected the getter to throw while the motor is silent");
+        } catch (const alpacacore::AlpacaException& ex) {
+            REQUIRE(ex.error_code() == AlpacaError::DriverException);
+            last = ex.what();
+        }
+    }
+    INFO(last);
+    CHECK(fake.count(0x01) == before);
+    CHECK(last.find("not available yet") != std::string::npos);
+    CHECK(last.find("compromised") == std::string::npos);
+
+    // The poll alone recovers the link and publishes the first frame.
+    fake.set_muted(false);
+    tick(clock);
+    CHECK(driver->get_position() == 31000);
     driver->set_connected(false);
 }
 

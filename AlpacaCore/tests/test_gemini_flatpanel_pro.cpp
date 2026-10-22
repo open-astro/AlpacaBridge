@@ -43,9 +43,8 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Defaults", "[gemini][flatpanel][unit]"
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "Gemini Motorized Flat Panel V3");
-    // MaxBrightness is a static capability and must be readable without a connection.
-    // 255 matches INDI's Rev2 adapter (setBrightness clamps to 0-255, same as the Lite model).
-    CHECK(driver->get_max_brightness() == 255);
+    // MaxBrightness is a property: disconnected it refuses (issue #1478), the value is read connected.
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Gemini Flat Panel Pro Driver - Device metadata", "[gemini][flatpanel][unit]") {
@@ -201,7 +200,7 @@ TEST_CASE("Gemini Flat Panel Pro Driver - Unsupported methods", "[gemini][flatpa
     require_alpaca_error([&]() { driver->halt_cover(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->open_cover(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->close_cover(); }, alpacacore::AlpacaError::NotConnected);
-    CHECK(driver->get_max_brightness() == 255);
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,4 +385,16 @@ TEST_CASE("Gemini flat panel wrapper - a late reply to the previous command is d
     panel.push_unsolicited("*J5#");
     CHECK(wrapper.get_brightness() == 77);
     wrapper.disconnect();
+}
+
+TEST_CASE("Gemini Flat Panel Pro Driver - connected, MaxBrightness is 255 and Brightness is 0 while the light is off",
+          "[gemini][flatpanel][unit][fake]") {
+    FakeGeminiFlatPanel panel;
+    // The panel remembers a level while its light is off; ICoverCalibratorV2 wants Brightness 0 then (issue #1478).
+    panel.set_reply_override(">J#", "*J128#");
+    auto driver = connect_fake_pro(panel);
+
+    CHECK(driver->get_max_brightness() == 255);
+    REQUIRE(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK(driver->get_brightness() == 0);
 }

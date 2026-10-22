@@ -76,7 +76,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         return "WANDERERASTRO_COVERCALIBRATOR_" + std::to_string(device_number_);
     }
 
@@ -228,7 +228,10 @@ public:
 
     // --- CoverCalibrator interface: calibrator ---
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();
@@ -351,7 +354,7 @@ public:
         return cover_state_locked(s) == CoverState::Moving;
     }
 
-    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // Deliberately NO per-vendor get_device_state() override: per ascom-contract.instructions.md the
     // CoverCalibratorDriver base builds the DeviceState bag from these same
     // getters, DeviceState is intentionally non-atomic, and a single-lock vendor
     // override is explicitly disallowed (ASCOM doesn't require cross-property

@@ -270,6 +270,237 @@ TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused f
     driver->set_connected(false);
 }
 
+TEST_CASE("ZWO slew completion waits for the final coordinate pair", "[zwo][telescope][async][arrival]") {
+    const bool reject_final = GENERATE(false, true);
+    CAPTURE(reject_final);
+    for (const bool delay_ra : {true, false}) {
+        CAPTURE(delay_ra);
+        struct State {
+            std::atomic<bool> arrived{false};
+            std::atomic<bool> stopped_status_sent{false};
+            std::atomic<bool> coordinate_read_started{false};
+            std::atomic<bool> reject_coordinate{false};
+            std::atomic<int> stopped_status_count{0};
+        };
+        auto state = std::make_shared<State>();
+        const auto fallback = zwo_responder(std::make_shared<FakeZwoState>());
+        alpacacore::test::FakeMountServer server([state, delay_ra, fallback](const std::string& command) {
+            if (command.find(":GU") != std::string::npos) {
+                const bool arrived = state->arrived.load();
+                if (arrived) {
+                    state->stopped_status_sent.store(true);
+                    state->stopped_status_count.fetch_add(1);
+                }
+                return std::string(arrived ? "NG#" : "G#");
+            }
+            const bool ra = command.find(":GR") != std::string::npos;
+            const bool dec = command.find(":GD") != std::string::npos;
+            if (ra || dec) {
+                const bool arrived = state->arrived.load();
+                if (arrived && state->stopped_status_sent.load() && ra == delay_ra) {
+                    state->coordinate_read_started.store(true);
+                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    if (state->reject_coordinate.load()) return std::string("bad#");
+                }
+                return std::string(ra ? (arrived ? "20:47:56#" : "20:47:00#")
+                                      : (arrived ? "+65*00:00#" : "+64*59:00#"));
+            }
+            return fallback(command);
+        });
+        REQUIRE(server.ok());
+        auto conn = endpoint(server.port());
+        conn.response_timeout_ms = 2000;
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE(driver->get_slewing());
+        state->reject_coordinate.store(reject_final);
+        state->arrived.store(true);
+        REQUIRE(wait_until([&] { return state->coordinate_read_started.load(); }, 5000));
+        // GU says stopped, but GR/GD are still in flight: completion must stay hidden.
+        CHECK(driver->get_slewing());
+        if (reject_final) {
+            // The next GU proves the previous coordinate read failed and the poll retried.
+            REQUIRE(wait_until([&] { return state->stopped_status_count.load() >= 2; }, 5000));
+            CHECK(driver->get_slewing());
+            state->reject_coordinate.store(false);
+        }
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 5000));
+        CHECK(std::abs(driver->get_right_ascension() - (20.0 + 47.0 / 60.0 + 56.0 / 3600.0)) < 1e-9);
+        CHECK(std::abs(driver->get_declination() - 65.0) < 1e-9);
+        CHECK(alpacacore::test::settle_connected(*driver, false));
+    }
+}
+
+TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless Tracking is commanded off",
+          "[zwo][telescope][async][arrival][goto-ownership]") {
+    const bool reject_ra = GENERATE(false, true);
+    const bool command_tracking_off = GENERATE(false, true);
+    CAPTURE(reject_ra, command_tracking_off);
+    struct State {
+        std::atomic<bool> moving{false};
+        std::atomic<bool> stopped{false};
+        std::atomic<bool> reject_coordinate{true};
+        std::atomic<int> moving_pairs{0};
+        std::atomic<int> stopped_polls{0};
+    };
+    auto state = std::make_shared<State>();
+    auto counts = std::make_shared<FakeZwoState>();
+    const auto fallback = zwo_responder(counts);
+    alpacacore::test::FakeMountServer server([state, reject_ra, fallback,
+                                              pending = std::string{}](const std::string& chunk) mutable {
+        pending += chunk;
+        std::string response;
+        for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
+            const auto command = pending.substr(0, end + 1);
+            pending.erase(0, end + 1);
+            const bool stopped = state->stopped.load();
+            if (command == ":GU#") {
+                if (stopped) state->stopped_polls.fetch_add(1);
+                response += stopped ? "nN#" : (state->moving.load() ? "n#" : "N#");
+            } else if (command == ":GAT#") {
+                response += state->moving.load() ? "0#" : "1#";
+            } else if (command == ":GR#" || command == ":GD#") {
+                const bool ra = command == ":GR#";
+                if (stopped && state->reject_coordinate.load() && ra == reject_ra) {
+                    response += "bad#";
+                } else {
+                    if (!ra && state->moving.load() && !stopped) state->moving_pairs.fetch_add(1);
+                    response += ra ? (stopped ? "13:00:00#" : "12:00:00#") : (stopped ? "+46*00:00#" : "+45*00:00#");
+                }
+            } else {
+                response += fallback(command);
+            }
+        }
+        return response;
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_tracking());
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    REQUIRE(wait_until([&] { return counts->goto_count.load() == 1; }, 5000));
+    state->moving.store(true);
+    REQUIRE(wait_until([&] { return state->moving_pairs.load() > 0; }, 5000));
+    state->stopped.store(true);
+
+    // The force window alone would permit a retarget even if GU cleared ownership too early.
+    std::this_thread::sleep_for(std::chrono::milliseconds(5500));
+    const int polls = state->stopped_polls.load();
+    REQUIRE(wait_until([&] { return state->stopped_polls.load() >= polls + 2; }, 5000));
+    REQUIRE_FALSE(driver->get_tracking());
+    REQUIRE(driver->get_slewing());
+
+    const auto require_refused_without_writes = [&] {
+        const int gotos = counts->goto_count.load();
+        const int targets = counts->sr_count.load() + counts->sd_count.load();
+        try {
+            driver->slew_to_coordinates_async(6.5, 25.0);
+            FAIL("Expected Tracking-off retarget to be refused");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
+        }
+        CHECK_FALSE(wait_until(
+            [&] {
+                return counts->goto_count.load() != gotos ||
+                       counts->sr_count.load() + counts->sd_count.load() != targets;
+            },
+            500));
+    };
+
+    if (command_tracking_off) {
+        // Explicit Tracking=false revokes the exception even when the mount already reports it off.
+        REQUIRE_NOTHROW(driver->set_tracking(false));
+        require_refused_without_writes();
+    } else {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
+        REQUIRE(wait_until([&] { return counts->goto_count.load() == 2; }, 5000));
+        const int retarget_polls = state->stopped_polls.load();
+        REQUIRE(wait_until([&] { return state->stopped_polls.load() >= retarget_polls + 2; }, 5000));
+        CHECK(driver->get_slewing());
+        state->reject_coordinate.store(false);
+        REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
+        CHECK(std::abs(driver->get_right_ascension() - 13.0) < 1e-9);
+        CHECK(std::abs(driver->get_declination() - 46.0) < 1e-9);
+        REQUIRE_FALSE(driver->get_tracking());
+        require_refused_without_writes();
+    }
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
+TEST_CASE("ZWO moving status remains visible when coordinate reads fail", "[zwo][telescope][async][arrival]") {
+    auto moving = std::make_shared<std::atomic<bool>>(false);
+    auto state = std::make_shared<FakeZwoState>();
+    state->serve_position.store(true);
+    const auto fallback = zwo_responder(state);
+    alpacacore::test::FakeMountServer server([moving, fallback](const std::string& command) {
+        if (moving->load()) {
+            if (command.find(":GU") != std::string::npos) return std::string("G#");
+            if (command.find(":GR") != std::string::npos) return std::string("bad#");
+        }
+        return fallback(command);
+    });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE_FALSE(driver->get_slewing());
+    moving->store(true);
+    CHECK(wait_until([&] { return driver->get_slewing(); }, 2000));
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
+TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][telescope][async][longitude]") {
+    const bool west = GENERATE(false, true);
+    CAPTURE(west);
+    const double longitude = west ? -100.5 : 100.5;
+    const std::string wire_site = west ? "+30*00:00&+100*30:00" : "+30*00:00&-100*30:00";
+    struct Counts {
+        std::atomic<int> attempts{0};
+        std::atomic<int> site_writes{0};
+        std::atomic<int> wrong_site_writes{0};
+    };
+    auto counts = std::make_shared<Counts>();
+    auto state = std::make_shared<FakeZwoState>();
+    state->serve_position.store(true);
+    const auto fallback = zwo_responder(state);
+    alpacacore::test::FakeMountServer server(
+        [counts, wire_site, fallback, pending = std::string{}](const std::string& chunk) mutable {
+            pending += chunk;
+            std::string response;
+            for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
+                const auto command = pending.substr(0, end + 1);
+                pending.erase(0, end + 1);
+                if (command == ":MS#") {
+                    counts->attempts.fetch_add(1);
+                    response += "e5#";
+                } else if (command == ":GMGE#") {
+                    response += wire_site + "#";
+                } else if (command.starts_with(":SMGE")) {
+                    counts->site_writes.fetch_add(1);
+                    if (command != ":SMGE" + wire_site + "#") counts->wrong_site_writes.fetch_add(1);
+                    response += "1#";
+                } else if (command.starts_with(":SMTI")) {
+                    response += "1#";
+                } else {
+                    response += fallback(command);
+                }
+            }
+            return response;
+        });
+    REQUIRE(server.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    const int writes_before = counts->site_writes.load();
+    REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
+    std::string error;
+    REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10000));
+    CHECK(error.find("e5") != std::string::npos);
+    CHECK(counts->attempts.load() == 2);
+    CHECK(counts->site_writes.load() >= writes_before + 2);
+    CHECK(counts->wrong_site_writes.load() == 0);
+    CHECK(std::abs(driver->get_site_longitude() - longitude) < 1e-9);
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
 TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)",
           "[zwo][telescope][async][slewfailure]") {
     auto st = std::make_shared<FakeZwoState>();

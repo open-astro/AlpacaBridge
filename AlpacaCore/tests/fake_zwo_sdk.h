@@ -58,6 +58,8 @@ public:
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
     bool fail_exposure_start{false};
+    // false models a camera without a cooler: get_control_caps omits CoolerOn and CoolerPower.
+    bool report_cooler_controls{true};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
     int zero_temperature_reads_after_open{0};
     // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
@@ -212,15 +214,22 @@ public:
         hit("get_control_caps");
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
-        return {{ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
-                {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
-                {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
-                {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
-                {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
-                {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
-                {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
-                {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
-                {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
+        std::vector<ControlCaps> caps = {
+            {ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
+            {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
+            {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
+            {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
+            {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
+            {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
+            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
+            {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
+            {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
+        if (!report_cooler_controls) {
+            std::erase_if(caps, [](const ControlCaps& c) {
+                return c.type == ControlType::CoolerOn || c.type == ControlType::CoolerPower;
+            });
+        }
+        return caps;
     }
 
     bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {
@@ -426,7 +435,11 @@ private:
 // calls the SDK without its own lock, so the stress registration reaches this
 // fake from several threads. Setup fields (cameras, heater_by_id,
 // serial_by_id) are written before the driver exists and only read after; the
-// rest is atomic or behind call_mutex_. No method blocks.
+// rest is atomic or behind call_mutex_. No method blocks except the explicit delays:
+// open_delay_ms holds open_camera(), read_delay_ms a get_control_value() and write_delay_ms
+// a set_control_value() in flight (getters-never-wait tests). The *_entered flags and `busy`
+// are polled from another thread; close_camera() sets closed_while_busy when a delayed call is
+// still in flight.
 class FakeDewHeaterSdk final : public vendor::zwo::ZWODewHeaterSdk {
 public:
     std::atomic<int> reads{0};
@@ -435,6 +448,14 @@ public:
     std::atomic<int> enumerations{0};
     std::atomic<int> serial_reads{0};
     std::atomic<long> heater{40};
+    std::atomic<int> open_delay_ms{0};
+    std::atomic<int> read_delay_ms{0};
+    std::atomic<int> write_delay_ms{0};
+    std::atomic<bool> open_entered{false};
+    std::atomic<bool> read_entered{false};
+    std::atomic<bool> write_entered{false};
+    std::atomic<int> busy{0};
+    std::atomic<bool> closed_while_busy{false};
 
     std::vector<vendor::zwo::ZWOCameraInfo> cameras;
     // Per SDK id; an id absent from a non-empty map has no heater / reads "FAKE1".
@@ -456,9 +477,15 @@ public:
         touch(id);
         return false;
     }
-    void open_camera(int id) override { touch(id); }
+    void open_camera(int id) override {
+        const InFlight in_flight(*this, open_delay_ms, open_entered);
+        touch(id);
+    }
     void init_camera(int id) override { touch(id); }
-    void close_camera(int id) override { touch(id); }
+    void close_camera(int id) override {
+        if (busy.load() > 0) closed_while_busy = true;
+        touch(id);
+    }
     std::vector<vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
         touch(id);
         if (!heater_by_id.empty()) {
@@ -474,6 +501,7 @@ public:
         return {cap};
     }
     bool get_control_value(int id, vendor::zwo::ZWOControlType, long& value, bool& is_auto) override {
+        const InFlight in_flight(*this, read_delay_ms, read_entered);
         touch(id);
         ++reads;
         last_read_id = id;
@@ -485,6 +513,7 @@ public:
         return true;
     }
     void set_control_value(int id, vendor::zwo::ZWOControlType, long value, bool) override {
+        const InFlight in_flight(*this, write_delay_ms, write_entered);
         touch(id);
         heater = value;
     }
@@ -496,6 +525,19 @@ public:
     }
 
 private:
+    // Marks a call in flight for its whole duration, sleeping `delay_ms` first.
+    struct InFlight {
+        InFlight(FakeDewHeaterSdk& fake, const std::atomic<int>& delay_ms, std::atomic<bool>& entered) : fake_(fake) {
+            ++fake_.busy;
+            entered = true;
+            if (delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms.load()));
+        }
+        ~InFlight() { --fake_.busy; }
+        InFlight(const InFlight&) = delete;
+        InFlight& operator=(const InFlight&) = delete;
+        FakeDewHeaterSdk& fake_;
+    };
+
     void touch(int id) {
         std::lock_guard<std::mutex> lock(call_mutex_);
         touched_.insert(id);

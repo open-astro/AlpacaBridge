@@ -73,7 +73,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override { return "GEMINI_FLATPANEL_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "GEMINI_FLATPANEL_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "Gemini Astro Flat Panel Cover Lite Driver"; }
 
@@ -150,6 +150,9 @@ public:
                 effective.serial_port = port.port_path;
             }
 
+            // I/O lock across the whole handshake + state seed (order:
+            // transition_mutex_ -> io_mutex_ -> state_mutex_).
+            std::lock_guard<std::mutex> io(io_mutex_);
             std::string firmware = protocol_.connect(effective);
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -165,7 +168,9 @@ public:
                 const int bri = protocol_.get_brightness();
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 calibrator_engaged_ = on;
-                commanded_brightness_ = bri;
+                // The panel remembers its level while the light is off; Brightness is 0 while CalibratorState is
+                // Off (ICoverCalibratorV2).
+                commanded_brightness_ = on ? bri : 0;
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("Gemini", "Flat panel state seed failed: " + std::string(e.what()));
             }
@@ -173,7 +178,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -184,7 +189,18 @@ public:
                 firmware_.clear();
             }
             connected_.store(false);
-            protocol_.disconnect();
+            {
+                // Published state is cleared first, under the short state
+                // lock; the I/O lock then covers the close, so it waits only
+                // for an exchange already on the wire.
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                commanded_brightness_ = 0;
+                calibrator_engaged_ = false;
+            }
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                protocol_.disconnect();
+            }
             ALPACA_LOG_INFO("Gemini", "Flat panel disconnected");
         }
     }
@@ -211,7 +227,10 @@ public:
 
     // --- CoverCalibrator interface: calibrator ---
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();
@@ -242,48 +261,38 @@ public:
         // ASCOM ICoverCalibratorV2 requires CalibratorOn(0) to leave
         // CalibratorState == Ready. Validate the range first so an
         // out-of-range request is rejected with InvalidValue regardless of
-        // connection state (ASCOM precedence, per AGENTS.md).
+        // connection state (ASCOM precedence, per driver-lifecycle.instructions.md).
         if (brightness < 0 || brightness > kMaxBrightness) {
             throw AlpacaException("Brightness " + std::to_string(brightness) + " out of range [0, " +
                                       std::to_string(kMaxBrightness) + "]",
                                   AlpacaError::InvalidValue);
         }
         ensure_connected();
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        const int prev_brightness = commanded_brightness_;
-        const bool prev_engaged = calibrator_engaged_;
-        commanded_brightness_ = brightness;
-        calibrator_engaged_ = true;
-        try {
-            // Matches the vendor app's own ON sequence (button_toggle_Click):
-            // light on, then set the level -- sent back-to-back with no
-            // inter-command delay (confirmed from the decompiled IL).
-            protocol_.light_on();
-            protocol_.set_brightness(brightness);
-        } catch (...) {
-            commanded_brightness_ = prev_brightness;
-            calibrator_engaged_ = prev_engaged;
-            throw;
-        }
+        // io_mutex_ (not just the wrapper's per-command lock) keeps the
+        // light_on + set_brightness pair atomic against a concurrent
+        // CalibratorOff. state_mutex_ is taken only to publish the result, so
+        // Brightness / CalibratorState never wait for the serial reply
+        // (decision 0016). The state is published after the commands succeed,
+        // so a throwing command leaves the previous state untouched.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // Matches the vendor app's own ON sequence (button_toggle_Click):
+        // light on, then set the level -- sent back-to-back with no
+        // inter-command delay (confirmed from the decompiled IL).
+        protocol_.light_on();
+        protocol_.set_brightness(brightness);
+        publish_calibrator(brightness, true);
     }
 
     void calibrator_off() override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        const int prev_brightness = commanded_brightness_;
-        const bool prev_engaged = calibrator_engaged_;
-        commanded_brightness_ = 0;
-        calibrator_engaged_ = false;
-        try {
-            // Matches the vendor app's OFF sequence: light off, then zero the
-            // level.
-            protocol_.light_off();
-            protocol_.set_brightness(0);
-        } catch (...) {
-            commanded_brightness_ = prev_brightness;
-            calibrator_engaged_ = prev_engaged;
-            throw;
-        }
+        // Same locking as calibrator_on(): I/O lock across the pair, state
+        // published after success.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // Matches the vendor app's OFF sequence: light off, then zero the
+        // level.
+        protocol_.light_off();
+        protocol_.set_brightness(0);
+        publish_calibrator(0, false);
     }
 
     void set_brightness(int brightness) override {
@@ -320,7 +329,7 @@ public:
         throw AlpacaException("This Gemini Flat Panel has no motorized cover", AlpacaError::MethodNotImplemented);
     }
 
-    // Deliberately NO per-vendor get_device_state() override: per AGENTS.md the
+    // Deliberately NO per-vendor get_device_state() override: per ascom-contract.instructions.md the
     // CoverCalibratorDriver base builds the DeviceState bag from these same
     // getters, and a single-lock vendor override is explicitly disallowed.
 
@@ -331,12 +340,25 @@ private:
         }
     }
 
+    void publish_calibrator(int brightness, bool engaged) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        // set_connected(false) stores false and then clears this state under
+        // the same lock, so a command that finished during a disconnect must
+        // not write over the cleared state.
+        if (!connected_.load()) {
+            return;
+        }
+        commanded_brightness_ = brightness;
+        calibrator_engaged_ = engaged;
+    }
+
     int device_number_;
     FlatPanelConnectionConfig config_;
     std::atomic<bool> connected_;
     GeminiFlatPanelProtocolWrapper protocol_;
 
-    mutable std::mutex state_mutex_;
+    std::mutex io_mutex_;             // serialises multi-command wire sequences; never taken by a getter
+    mutable std::mutex state_mutex_;  // leaf: published brightness/state only, never held across protocol_ calls
     int commanded_brightness_ = 0;
     bool calibrator_engaged_ = false;
 
@@ -416,7 +438,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::CoverCalibrator; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         return (is_pro() ? "GEMINI_FLATPANEL_PRO_" : "GEMINI_FLATPANEL_V2_") + std::to_string(device_number_);
     }
 
@@ -510,7 +532,9 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(state_mutex_);
                     calibrator_engaged_ = status.light_on;
-                    commanded_brightness_ = bri;
+                    // The panel remembers its level while the light is off; Brightness is 0 while CalibratorState
+                    // is Off (ICoverCalibratorV2).
+                    commanded_brightness_ = status.light_on ? bri : 0;
                 }
                 // Seed the idle cover-status cache from this same read: ConformU
                 // reads DeviceState ~0.2 s and CoverState ~0.4 s after Connect(),
@@ -527,7 +551,7 @@ public:
             connected_.store(true);
             ALPACA_LOG_INFO("Gemini", "Flat panel v2 connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -574,7 +598,10 @@ public:
     // see GeminiFlatPanelDriver::calibrator_on()/calibrator_off() for the
     // vendor-app-derived ON/OFF command ordering this mirrors.
 
-    int get_max_brightness() const override { return kMaxBrightness; }
+    int get_max_brightness() const override {
+        ensure_connected();
+        return kMaxBrightness;
+    }
 
     int get_brightness() const override {
         ensure_connected();
@@ -697,10 +724,10 @@ public:
         return CoverState::Unknown;
     }
 
-    bool get_cover_moving() const override {
-        ensure_connected();
-        return cover_in_flight_.load() && !cover_halted_.load();
-    }
+    // True exactly when CoverState is Moving (ICoverCalibratorV2), including a move the panel reports with no
+    // command in flight. It asks get_cover_state(), so it takes the same short TTL-cached status read under the
+    // cache lock (decision 0016: a getter that must reach the device takes the I/O lock) and never disagrees.
+    bool get_cover_moving() const override { return get_cover_state() == CoverState::Moving; }
 
     void open_cover() override {
         ensure_connected();
@@ -762,7 +789,7 @@ public:
     }
 
     // Deliberately NO per-vendor get_device_state() override -- see
-    // GeminiFlatPanelDriver's identical comment; the same AGENTS.md rule
+    // GeminiFlatPanelDriver's identical comment; the same ascom-contract.instructions.md rule
     // applies here.
 
 private:

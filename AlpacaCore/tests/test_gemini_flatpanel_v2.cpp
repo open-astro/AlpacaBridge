@@ -19,6 +19,7 @@
 #include <optional>
 
 #include "catch2_compat.h"
+#include "fake_gemini_flatpanel.h"
 
 namespace {
 
@@ -40,9 +41,8 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Defaults", "[gemini][flatpanel][unit]")
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "Gemini Astro Automatic FlatPanel v2");
-    // MaxBrightness is a static capability and must be readable without a connection.
-    // 255 matches INDI's Rev2 adapter (setBrightness clamps to 0-255, same as the Lite model).
-    CHECK(driver->get_max_brightness() == 255);
+    // MaxBrightness is a property: disconnected it refuses (issue #1478), the value is read connected.
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
 }
 
 TEST_CASE("Gemini Flat Panel v2 Driver - Device metadata", "[gemini][flatpanel][unit]") {
@@ -69,6 +69,7 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Not connected throws", "[gemini][flatpa
     // Every property/method that needs a live link must throw NotConnected
     // (0x407) so ConformU sees the correct Alpaca error number.
     require_alpaca_error([&]() { driver->get_brightness(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_max_brightness(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_calibrator_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_calibrator_changing(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { (void)driver->get_cover_state(); }, alpacacore::AlpacaError::NotConnected);
@@ -175,4 +176,32 @@ TEST_CASE("Gemini Flat Panel v2 Driver - Create by index for auto-detect", "[gem
     REQUIRE(driver->get_device_number() == 1);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_unique_id() == "GEMINI_FLATPANEL_V2_1");
+}
+
+TEST_CASE("Gemini Flat Panel v2 Driver - connected, MaxBrightness is 255 and Brightness is 0 while the light is off",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    // The panel remembers a level while its light is off; ICoverCalibratorV2 wants Brightness 0 then (issue #1478).
+    panel.set_reply_override(">J#", "*J128#");
+    panel.set_reply_override(">S#", "*S19001#");
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_max_brightness() == 255);
+    REQUIRE(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
+    CHECK(driver->get_brightness() == 0);
+}
+
+TEST_CASE("Gemini Flat Panel v2 Driver - CoverMoving is true exactly when CoverState is Moving",
+          "[gemini][flatpanel][unit][fake]") {
+    alpacacore::test::FakeGeminiFlatPanel panel;
+    // Rev2 frame: id 19, motor 0, light 0, cover 0 = Moving, with no OpenCover/CloseCover in flight (issue #1478).
+    panel.set_reply_override(">S#", "*S19000#");
+    auto driver = alpacacore::vendor::gemini::create_gemini_flatpanel_v2(0, panel.slave_path(), 9600);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    REQUIRE(driver->get_cover_state() == alpacacore::CoverState::Moving);
+    CHECK(driver->get_cover_moving());
 }

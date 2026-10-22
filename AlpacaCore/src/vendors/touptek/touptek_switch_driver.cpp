@@ -99,7 +99,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Switch; }
 
-    std::string get_unique_id() const override { return "ToupTek_StellaVita_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "ToupTek_StellaVita_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "ToupTek " + config_.model_name + " DC power switch (" + config_.gpio_chip_path + ")";

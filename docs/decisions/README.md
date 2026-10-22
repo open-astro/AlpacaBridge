@@ -40,8 +40,11 @@ does not count.
 included, needs two things before it can merge:
 
 - A repository collaborator with write, maintain or admin permission comments
-  `ADR authorized <head sha>` on the PR, on a line of its own, naming the
-  current head commit. A new push needs a new authorization. The author may
+  `ADR authorized <sha>` on the PR, on a line of its own, naming a commit,
+  normally the current head. The authorization holds for later pushes while
+  every record file the PR changes keeps the content it had at that commit; a
+  push that edits one, adds one or deletes one needs a new authorization,
+  and a push that changes only code or tests does not. The author may
   authorize their own PR. `scripts/check_adr_authorization.py` posts the result
   as the `adr-authorization` commit status (`.github/workflows/decision-records.yml`).
 - An approving review from a code owner other than the author
@@ -77,3 +80,7 @@ A record is referred to by its slug until it is written, and numbered then.
 - [Designs to avoid](0013-designs-to-avoid.md)
 - [Mount UTC offset](0014-utc-offset.md)
 - [SDK seams](0015-sdk-seams.md)
+- [Getters never wait on device I/O](0016-getters-never-wait-on-device-io.md)
+- [Serial port ownership](0017-serial-port-ownership.md)
+- [Persisted UniqueID per configured device](0018-persisted-unique-id.md)
+- [Connect without a site, refuse what needs one](0019-connect-without-site.md)

@@ -1,2 +1,0 @@
-### Fixed
-- **Devices tab no longer stalls while a mount connects** (AlpacaHTTP, issue #910): `GET /management/v1/configureddevices` reports `Connected: false` for a device whose connect is in progress without calling its `get_connected()`, which several mount drivers block on until the connect finishes (`AlpacaHTTP/tests/test_routing.cpp`, case "configureddevices skips get_connected while connecting").

@@ -42,7 +42,7 @@ public:
     int get_device_number() const override { return number_; }
     std::string get_name() const override { return "stub"; }
     DeviceType get_device_type() const override { return DeviceType::Switch; }
-    std::string get_unique_id() const override { return "stub-id"; }
+    std::string fallback_unique_id() const override { return "stub-id"; }
     std::string get_description() const override { return "stub device"; }
     std::string get_driver_info() const override { return "stub driver"; }
     std::string get_driver_version() const override { return "0.0.1"; }

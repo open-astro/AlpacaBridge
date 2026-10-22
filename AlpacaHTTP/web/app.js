@@ -252,7 +252,7 @@ function resetDeviceForm() {
     // self-contained and doesn't silently rely on that listener existing.
     setEditMode(false);
     // Hidden inputs keep script-set values through form.reset().
-    for (const id of ['zwo-camera-serial', 'zwo-camera-name', 'zwo-camera-unique-id',
+    for (const id of ['zwo-camera-serial', 'zwo-camera-name',
         'zwo-camera-loaded-index', 'zwo-camera-loaded-id']) {
         setFormValue(id, '');
     }
@@ -845,6 +845,7 @@ function setEditMode(isEditing) {
             delete form.dataset.originalDeviceType;
             delete form.dataset.originalDeviceNumber;
             delete form.dataset.originalVendor;
+            delete form.dataset.originalUniqueId;
             const deviceNumberInput = document.getElementById('device-number');
             if (deviceNumberInput) {
                 delete deviceNumberInput.dataset.userModified;
@@ -863,7 +864,7 @@ function setEditMode(isEditing) {
     }
 }
 
-// The serial, model name and UniqueID the server learned for a ZWO camera
+// The serial and model name the server learned for a ZWO camera
 // (#914). An edit removes the entry and adds it again, so the form resends
 // them; only while the index and id are the ones the form loaded. A changed
 // index or id points the entry at another body, which then learns its own.
@@ -888,7 +889,6 @@ function zwoCameraIdentityFields(formData) {
     const pairs = [
         ['serialNumber', 'zwoCameraSerial'],
         ['cameraName', 'zwoCameraName'],
-        ['uniqueId', 'zwoCameraUniqueId'],
     ];
     for (const [key, name] of pairs) {
         const value = formData.get(name);
@@ -1211,6 +1211,8 @@ function startEditDevice(device) {
         setFormValue('svbony-camera-index', config.cameraIndex);
     } else if (vendor === 'altair') {
         setFormValue('altair-camera-index', config.cameraIndex);
+    } else if (vendor === 'iguider') {
+        setFormValue('iguider-device-path', config.devicePath);
     } else if (vendor === 'gphoto') {
         setFormValue('gphoto-camera-index', config.cameraIndex);
         setFormValue('gphoto-mirror-lockup-settle-ms', config.mirrorLockupSettleMs !== undefined ? config.mirrorLockupSettleMs : 2000);
@@ -1420,7 +1422,6 @@ function startEditDevice(device) {
     const keepZwoIdentity = vendor === 'zwo' && deviceType === 'camera';
     setFormValue('zwo-camera-serial', keepZwoIdentity ? config.serialNumber : '');
     setFormValue('zwo-camera-name', keepZwoIdentity ? config.cameraName : '');
-    setFormValue('zwo-camera-unique-id', keepZwoIdentity ? config.uniqueId : '');
     setFormValue('zwo-camera-loaded-index', keepZwoIdentity ? config.cameraIndex : '');
     setFormValue('zwo-camera-loaded-id', keepZwoIdentity ? config.cameraId : '');
     setFormValue('filterwheel-index', config.filterwheelIndex);
@@ -1523,6 +1524,9 @@ function startEditDevice(device) {
         form.dataset.originalDeviceType = deviceType;
         form.dataset.originalDeviceNumber = String(device.DeviceNumber);
         form.dataset.originalVendor = vendor;
+        // Decision 0018: an edit removes the entry and adds it again, so it sends
+        // the device's GUID back to keep its UniqueID (and a rotator's offset).
+        form.dataset.originalUniqueId = typeof config.uniqueId === 'string' ? config.uniqueId : '';
     }
 
     // Switch to the Configure tab without resetting the form we just populated.
@@ -3045,6 +3049,11 @@ function updateVendorOptions() {
         altairOption.disabled = !isCamera;
         altairOption.hidden = !isCamera;
     }
+    const iguiderOption = vendorSelect.querySelector('option[value="iguider"]');
+    if (iguiderOption) {
+        iguiderOption.disabled = !isCamera;
+        iguiderOption.hidden = !isCamera;
+    }
     const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
     if (gphotoOption) {
         gphotoOption.disabled = !isCamera;
@@ -3124,6 +3133,9 @@ function updateVendorOptions() {
     if (!isCamera && vendorSelect.value === 'altair') {
         vendorSelect.value = '';
     }
+    if (!isCamera && vendorSelect.value === 'iguider') {
+        vendorSelect.value = '';
+    }
     if (!isCamera && vendorSelect.value === 'gphoto') {
         vendorSelect.value = '';
     }
@@ -3178,6 +3190,8 @@ document.getElementById('vendor').addEventListener('change', function() {
         document.getElementById('svbony-config').style.display = 'block';
     } else if (vendor === 'altair') {
         document.getElementById('altair-config').style.display = 'block';
+    } else if (vendor === 'iguider') {
+        document.getElementById('iguider-config').style.display = 'block';
     } else if (vendor === 'gphoto') {
         document.getElementById('gphoto-config').style.display = 'block';
     } else if (vendor === 'touptek') {
@@ -3574,7 +3588,7 @@ INDEX_FIELDS.forEach(field => {
 });
 
 // Slot-count + per-slot filter name pickers. Every filterwheel vendor config
-// gets an instance (see AGENTS.md "FilterWheel web UI" note); the factory
+// gets an instance (see http-integration.instructions.md "FilterWheel vendors — required web UI"); the factory
 // wires all events and keeps the slot rows and names textarea in sync.
 const zwoFilterwheelSlotUI = createFilterwheelSlotUI({
     countSelectId: 'filterwheel-slot-count',
@@ -4616,6 +4630,12 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'altair') {
         const altairCameraIndex = readOptionalNumber(formData, 'altairCameraIndex');
         deviceData.cameraIndex = altairCameraIndex !== null ? altairCameraIndex : 0;
+    } else if (deviceData.vendor === 'iguider') {
+        // Blank means auto-detect: omit the key so the saved config stays clean.
+        const iguiderDevicePath = (formData.get('iguiderDevicePath') || '').trim();
+        if (iguiderDevicePath !== '') {
+            deviceData.devicePath = iguiderDevicePath;
+        }
     } else if (deviceData.vendor === 'gphoto') {
         const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
         deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;
@@ -4870,6 +4890,9 @@ document.getElementById('device-form').addEventListener('submit', async function
 
     try {
         const isEditing = this.dataset.editing === 'true';
+        if (isEditing && this.dataset.originalUniqueId) {
+            deviceData.uniqueId = this.dataset.originalUniqueId;
+        }
         if (isEditing) {
             const originalDeviceType = this.dataset.originalDeviceType || deviceData.deviceType;
             const originalDeviceNumber = Number.parseInt(this.dataset.originalDeviceNumber, 10);

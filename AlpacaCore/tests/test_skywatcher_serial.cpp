@@ -426,11 +426,14 @@ TEST_CASE("SkyWatcher serial - connect claims the port in the cross-vendor regis
     info.response_timeout_ms = 300;
 
     // Held by "another vendor": refused, nothing on the wire, still held.
-    alpacacore::util::mark_serial_port_open(key);
-    REQUIRE_FALSE(proto.connect(info));
-    REQUIRE(board.frames().empty());
-    REQUIRE(alpacacore::util::is_serial_port_in_use(key));
-    alpacacore::util::mark_serial_port_closed(key);
+    {
+        auto other =
+            alpacacore::util::SerialPortClaim::acquire(key, alpacacore::util::SerialClaimKind::Link, "Other device");
+        REQUIRE(other);
+        REQUIRE_FALSE(proto.connect(info));
+        REQUIRE(board.frames().empty());
+        REQUIRE(alpacacore::util::is_serial_port_in_use(key));
+    }
 
     // Free: claimed for the life of the connection, released on disconnect.
     REQUIRE(proto.connect(info));
@@ -472,13 +475,14 @@ TEST_CASE("SkyWatcher serial - the dual-baud probe finds a Synta EQ board at 115
     }
 
     SECTION("a port another device holds is not probed at all") {
-        // The re-check after open() (issue #230) and the echo guard's own
-        // registry look: nothing is written to a held port at either rate.
+        // The probe's registry claim (#1202; issue #230 before it) covers
+        // the echo guard and both rates: nothing is written to a held port.
         const std::string key = std::filesystem::canonical(board.slave_path()).string();
-        alpacacore::util::mark_serial_port_open(key);
+        auto other =
+            alpacacore::util::SerialPortClaim::acquire(key, alpacacore::util::SerialClaimKind::Link, "Other device");
+        REQUIRE(other);
         REQUIRE_FALSE(sw::probe_skywatcher_port_any_baud(key, info, baud));
         REQUIRE(board.frames().empty());
-        alpacacore::util::mark_serial_port_closed(key);
     }
 }
 
@@ -984,7 +988,7 @@ TEST_CASE("SkyWatcher serial - a faulted link refuses the position cache instead
 
 TEST_CASE("SkyWatcher serial - a faulted link refuses Slewing and every wire write without sending",
           "[skywatcher][serial][linkhealth]") {
-    // open-astro#882: AGENTS.md "Cache-backed reads must track link health" —
+    // open-astro#882: driver-lifecycle.instructions.md "Cache-backed reads must track link health" —
     // value reads AND writes throw the same DriverException while latched.
     FakeSkyWatcherSerialBoard board;
     auto driver = serial_driver(board.slave_path());
@@ -1653,6 +1657,53 @@ TEST_CASE("FakeSkyWatcherSerialBoard - a steady reply latency is paid by every t
     CHECK(board.transactions_served() - before == 10);
     CHECK(fast < std::chrono::milliseconds(5 * 40));
     protocol.disconnect();
+}
+
+// ── open-astro#1202: serial-port ownership ─────────────────────────────────
+
+TEST_CASE("SkyWatcher serial - a port another device holds is refused untouched, naming the holder",
+          "[skywatcher][serial][issue1202]") {
+    FakeSkyWatcherSerialBoard board;
+    struct termios tty {};
+    REQUIRE(tcgetattr(board.keepalive_fd(), &tty) == 0);
+    cfsetispeed(&tty, B19200);
+    cfsetospeed(&tty, B19200);
+    REQUIRE(tcsetattr(board.keepalive_fd(), TCSANOW, &tty) == 0);
+    auto other = alpacacore::util::SerialPortClaim::acquire(board.slave_path(), alpacacore::util::SerialClaimKind::Link,
+                                                            "Other device");
+    REQUIRE(other);
+
+    auto driver = serial_driver(board.slave_path());
+    std::string message;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        message = e.what();
+    }
+    CHECK(message.find("Other device") != std::string::npos);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(board.frames().empty());
+    struct termios after {};
+    REQUIRE(tcgetattr(board.keepalive_fd(), &after) == 0);
+    CHECK(cfgetospeed(&after) == B19200);  // the driver's 9600 never reached the line
+}
+
+TEST_CASE("SkyWatcher serial - the connected port is claimed, released on disconnect, and reconnects",
+          "[skywatcher][serial][issue1202]") {
+    FakeSkyWatcherSerialBoard board;
+    sw::SkyWatcherProtocolWrapper protocol;
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    CHECK(alpacacore::util::is_serial_port_in_use(board.slave_path()));
+
+    protocol.disconnect();
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(board.slave_path()));
+
+    // A second connect opens the port again: the claim and TIOCEXCL were both released.
+    REQUIRE(protocol.connect(serial_info(board.slave_path())));
+    CHECK(alpacacore::util::is_serial_port_in_use(board.slave_path()));
+    CHECK_FALSE(protocol.get_motor_board_version().empty());
+    protocol.disconnect();
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(board.slave_path()));
 }
 
 #endif  // _WIN32

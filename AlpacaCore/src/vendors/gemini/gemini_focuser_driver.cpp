@@ -92,9 +92,7 @@ public:
         return DeviceType::Focuser;
     }
 
-    std::string get_unique_id() const override {
-        return "GEMINI_FOCUSER_" + std::to_string(device_number_);
-    }
+    std::string fallback_unique_id() const override { return "GEMINI_FOCUSER_" + std::to_string(device_number_); }
 
     std::string get_description() const override {
         return "Gemini Automatic Astro Focuser Pro Driver";
@@ -149,7 +147,7 @@ public:
         // open-astro#333: the idempotency check below and the protocol_ call
         // that follows it must be one atomic transition. Without this, two
         // HTTP workers could both observe connected_ == false and both reach
-        // protocol_.connect(), which assigns serial_fd_ unconditionally, so
+        // protocol_.connect(), which (before #1202) assigned the fd unconditionally, so
         // the first descriptor leaks for the life of the process. (It does
         // NOT reset the MCU: the tty is still open, connect_serial() clears
         // HUPCL so DTR stays asserted, and Linux runs port activation only on
@@ -185,9 +183,9 @@ public:
                     try {
                         protocol_.connect(cfg);
                     } catch (const AlpacaException& e) {
-                        // Only a vanished node is stale; a handshake miss on a present
-                        // port must not trigger the probe, which resets every CH340 MCU.
-                        if (util::device_node_missing(cfg.serial_port))
+                        // Only a vanished node, or a port another connected device now holds (#1202), is stale; a
+                        // handshake miss on a present port must not trigger the probe, which resets every CH340 MCU.
+                        if (util::serial_endpoint_stale(cfg.serial_port))
                             throw util::StaleEndpoint(e.what(), e.error_code());
                         throw;
                     }
@@ -219,7 +217,7 @@ public:
             start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
-            // Driver state first, SDK close second (AGENTS.md, issue #387): a
+            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
             // throwing close must not leave the driver reporting connected on
             // a closed port. disconnect() cannot throw today; the order is
             // the contract, not the current wrapper's behaviour.
@@ -298,7 +296,7 @@ public:
     }
 
     bool get_temp_comp_available() const override {
-        // open-astro#309: the connection check comes first. AGENTS.md's ASCOM
+        // open-astro#309: the connection check comes first. driver-lifecycle.instructions.md's ASCOM
         // contract precedence rule is that only parameter/range validation
         // precedes it -- every other property throws NotConnected when
         // disconnected, with no early return that skips it. ensure_connected()
@@ -308,15 +306,10 @@ public:
     }
 
     bool get_temp_comp() const override {
-        // Was an early return of false while disconnected, which answered a
-        // property that should have refused. The try/catch below still covers
-        // a transport failure on a CONNECTED focuser.
+        // A failed read raises (the wrapper throws DriverException on a reply it cannot parse, NotConnected
+        // on a lost link); reporting "off" would answer a property the driver could not read (issue #1478).
         ensure_connected();
-        try {
-            return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
-        } catch (const std::exception&) {
-            return false;
-        }
+        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
     }
 
     void set_temp_comp(bool temp_comp) override {
@@ -364,7 +357,7 @@ private:
         std::optional<double> temperature;  // empty: the probe did not answer
     };
 
-    // "<device> communications compromised" (AGENTS.md, issue #237) while the
+    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
     // poll has failed kFaultThreshold times in a row; Connected stays true.
     void throw_if_faulted() const {
         std::lock_guard<std::mutex> lock(health_mutex_);
@@ -536,8 +529,13 @@ ConnectionConfig resolve_gemini_focuser_by_index(int focuser_index) {
     }
 
     const auto& port = ports[static_cast<std::size_t>(focuser_index)];
-    ALPACA_LOG_INFO("Gemini", "Auto-detected focuser at " + port.port_path +
-                    " (firmware " + std::to_string(port.firmware_version) + ")");
+    // firmware_version is 0 for a port a connected Gemini focuser already
+    // holds: the scan counts it without probing (#1202), and the connect that
+    // follows is refused with a message naming the holder.
+    ALPACA_LOG_INFO("Gemini",
+                    "Auto-detected focuser at " + port.port_path +
+                        (port.firmware_version > 0 ? " (firmware " + std::to_string(port.firmware_version) + ")"
+                                                   : std::string(" (held by a connected focuser, not probed)")));
 
     ConnectionConfig config;
     config.type = ConnectionType::Serial;

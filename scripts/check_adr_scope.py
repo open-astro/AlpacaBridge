@@ -9,8 +9,9 @@ Two modes:
 
   --list   reads changed paths from stdin, one per line, and prints one line
            per record in scope, `<record file>: rules <n>, <n>`. The review
-           bot runs it from the base branch and reads those rules against the
-           diff (.github/workflows/claude-review.yml).
+           bot runs the default branch's copy over the base branch's records
+           and reads those rules against the diff
+           (.github/workflows/claude-review.yml).
 
   default  the PR-body gate: the `## Decision records` section of the PR body
            (read from PR_BODY or --body-file, never the command line) must name,
@@ -18,8 +19,18 @@ Two modes:
            renames or deletes. It also prints the records in scope, for the
            author. The diff base is resolved as check_falsified_by.py does it.
 
+  --checklist SCOPE REVIEW
+           the review bot's gate before it posts: SCOPE holds the --list
+           output ("none" when nothing is in scope) and REVIEW the bot's
+           review-comment.md. Every listed rule needs a checklist line
+           `- <record file> rule <n>: pass|defect|n/a: <reason>`, a rule may
+           not get two verdicts, and a defect line needs the "Issues found"
+           sign-off as the last line (bold, italics or a closing period or
+           exclamation mark around it still count). Any finding exits 1, so nothing posts.
+
 Usage:
     check_adr_scope.py --list [--root DIR] < paths
+    check_adr_scope.py --checklist SCOPE_FILE REVIEW_FILE
     check_adr_scope.py [--body-file FILE] [--base REV]
     check_adr_scope.py --self-test
 """
@@ -40,6 +51,9 @@ SECTION = "decision records"
 RECORD_NUMBER_RE = re.compile(r"(?<![#\d])\b(\d{4})\b")
 HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
+CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*:\s*\S", re.I)
+ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
 
 
 def record_rules(records):
@@ -93,6 +107,42 @@ def body_findings(body, changed):
             for p in records if p.split("/")[-1][:4] not in named]
 
 
+def scope_pairs(scope):
+    """({(record file, rule number)}, [malformed line]) from --list output, where "none..." lists nothing."""
+    pairs, bad = set(), []
+    for line in scope.splitlines():
+        line = line.strip()
+        if not line or line.lower().startswith("none"):
+            continue
+        m = SCOPE_LINE_RE.match(line)
+        if not m:
+            bad.append(line)
+            continue
+        pairs.update((m.group(1), int(n)) for n in m.group(2).split(", "))
+    return pairs, bad
+
+
+def checklist_findings(scope, review):
+    """What keeps a review from posting: a listed rule with no verdict, two verdicts, or a defect signed off clean."""
+    expected, bad = scope_pairs(scope)
+    findings = ["the rule scope has a line that is not `<record file>: rules <n>`: %r" % line for line in bad]
+    verdicts = {}
+    for line in review.splitlines():
+        m = CHECKLIST_RE.match(line)
+        if m:
+            verdicts.setdefault((m.group(1), int(m.group(2))), set()).add(m.group(3).lower())
+    findings += ["the review has no checklist line for %s rule %d" % key for key in sorted(expected - set(verdicts))]
+    findings += ["the review gives %s rule %d more than one verdict: %s" % (key + (", ".join(sorted(v)),))
+                 for key, v in sorted(verdicts.items()) if len(v) > 1]
+    lines = [line.strip() for line in review.splitlines() if line.strip()]
+    last = lines[-1] if lines else ""
+    # Markdown emphasis or a closing period around the sign-off is still the sign-off.
+    bare = last.strip("*_ ").rstrip(".!").strip("*_ ")
+    findings += ["the review marks %s rule %d as a defect but its last line is %r, not the Issues-found sign-off"
+                 % (key + (last,)) for key, v in sorted(verdicts.items()) if "defect" in v and bare != ISSUES_SIGN_OFF]
+    return findings
+
+
 def read_records(root):
     directory = Path(root) / DECISION_DIR
     return {p.name: p.read_text(encoding="utf-8", errors="replace") for p in directory.glob("0*.md")}
@@ -111,6 +161,15 @@ def changed_since(base):
 def main(argv):
     if "--self-test" in argv:
         return self_test()
+    if argv[:1] == ["--checklist"]:
+        if len(argv) != 3:
+            print("usage: check_adr_scope.py --checklist SCOPE_FILE REVIEW_FILE", file=sys.stderr)
+            return 2
+        scope, review = (Path(a).read_text(encoding="utf-8", errors="replace") for a in argv[1:])
+        findings = checklist_findings(scope, review)
+        for f in findings:
+            print("adr-checklist: " + f)
+        return 1 if findings else 0
     args = iter(argv)
     root, body_file, base = ROOT, None, None
     for arg in args:
@@ -184,6 +243,36 @@ def self_test():
            "a record named beside an issue number still counts")
     expect(body_findings("## Decision records\n\n- docs/decisions/README.md\n",
                          ["docs/decisions/README.md"]) == [], "the index is not a record")
+
+    ok = "\u2705 Approved"
+    scope = "0003-docs-drift-gates.md: rules 3\n0005-task-clock.md: rules 1, 2\n"
+    full = ("## Defects\nnone\n\n## Decision records\n"
+            "- 0003-docs-drift-gates.md rule 3: pass: no gate text changed\n"
+            "- `0005-task-clock.md` rule 1: n/a: no driver file changed\n"
+            "- 0005-task-clock.md rule 2: n/a: the ZWO telescope row is planned\n\n" + ok + "\n")
+    expect(checklist_findings(scope, full) == [], "a checklist naming every listed rule passes")
+    expect(checklist_findings("none\n", "## Defects\nnone\n\n" + ok) == [], "an empty scope needs no lines")
+    expect(checklist_findings("none (the base branch has no decision records)\n", ok) == [],
+           "a 'none (...)' scope needs no lines")
+    f = checklist_findings(scope, full.replace("- 0005-task-clock.md rule 2: n/a: the ZWO telescope row is planned\n", ""))
+    expect(f == ["the review has no checklist line for 0005-task-clock.md rule 2"], "a missing rule is reported: %r" % f)
+    f = checklist_findings(scope, full.replace("rule 2: n/a: the ZWO telescope row is planned", "rule 2: n/a"))
+    expect(any("rule 2" in x for x in f), "a verdict with no reason does not count")
+    f = checklist_findings(scope, full.replace("rule 2: n/a", "rule 2: defect"))
+    expect(any("as a defect" in x for x in f), "a defect under an Approved sign-off is reported")
+    issues = full.replace("rule 2: n/a", "rule 2: defect").replace(ok, ISSUES_SIGN_OFF)
+    expect(checklist_findings(scope, issues) == [], "a defect under the Issues-found sign-off passes")
+    for decorated in ("**%s**", "%s.", "_%s_", "  %s  "):
+        f = checklist_findings(scope, issues.replace(ISSUES_SIGN_OFF, decorated % ISSUES_SIGN_OFF))
+        expect(f == [], "a decorated Issues-found sign-off %r still counts: %r" % (decorated, f))
+    f = checklist_findings(scope, issues.replace(ISSUES_SIGN_OFF, "Issues found, but " + ok))
+    expect(any("as a defect" in x for x in f), "a last line that only contains the words is not the sign-off")
+    f = checklist_findings(scope, full + "- 0003-docs-drift-gates.md rule 3: defect: x\n" + ok + "\n")
+    expect(any("more than one verdict" in x for x in f), "two verdicts for one rule are reported")
+    f = checklist_findings(scope + "rm -rf /\n", full)
+    expect(any("not `<record file>" in x for x in f), "a malformed scope line is reported")
+    expect(checklist_findings(scope, "0005-task-clock.md rule 2 passes, and so do the rest\n" + ok) != [],
+           "prose that mentions a rule is not a checklist line")
 
     for f in failures:
         print("FAIL: " + f)

@@ -18,6 +18,7 @@
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
+#include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_qfocuser_protocol_wrapper.h>
 
@@ -45,6 +46,10 @@ namespace alpacacore::vendor::qhy {
 namespace {
 
 constexpr const char* kLogTag = "QHY";
+// Operator-facing owner name for the serial-port registry (#1202), shared by
+// the probe and the connected link so the auto-detect scan can tell a
+// connected Q-Focuser from another vendor's device.
+constexpr const char* kSerialOwner = "QHY Q-Focuser";
 constexpr int kMaxReplyLen = 256;  // INDI's USB_CDC_RX_LEN is 128; the longest seen reply is ~80 bytes
 constexpr int kHandshakeRetries = 3;
 constexpr int kHandshakeTimeoutMs = 3000;  // full runtime budget for the first exchange on a fresh open
@@ -69,7 +74,6 @@ constexpr int kKickSliceMs = 200;  // fallback read window before sending anothe
 // until the transaction deadline (issue #527).
 constexpr int kEmptyReplyPauseMs = 50;
 constexpr int kProbeTimeoutMs = 1500;
-constexpr int kReadPollMs = 10;
 
 // Command ids (INDI create_cmd()).
 constexpr int kCmdVersion = 1;
@@ -119,69 +123,37 @@ bool parse_device_info(const std::map<std::string, std::string>& fields, QFocuse
 }
 
 #ifndef _WIN32
-bool configure_tty(int fd) {
-    struct termios tty {};
-    if (tcgetattr(fd, &tty) != 0) return false;
-    cfsetospeed(&tty, B9600);
-    cfsetispeed(&tty, B9600);
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_cflag |= CREAD | CLOCAL;
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY);
-    tty.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-    tty.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-    tty.c_oflag &= ~OPOST;
-    tty.c_oflag &= ~ONLCR;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 0;  // read() returns at once with whatever is buffered; read_json_object() paces with poll()
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) return false;
-    // The port is opened O_NONBLOCK so open() cannot hang on a CDC-ACM device
-    // that has not finished enumerating, but it must NOT stay that way: with
-    // O_NONBLOCK set, the real GD32 CDC-ACM port answers the first write()
-    // with EAGAIN while its USB bulk endpoint is still idle (seen on
-    // hardware 2026-09-13), which write_all() reports as a hard error. A pty
-    // fake never does this, so the unit tests cannot catch it.
-    return util::clear_nonblocking(fd);
-}
+// 9600 8N1 raw. The fd stays non-blocking (SerialLink): with O_NONBLOCK set,
+// the real GD32 CDC-ACM port answers the first write() with EAGAIN while its
+// USB bulk endpoint is still idle (seen on hardware 2026-09-13), which a bare
+// write_all() reported as a hard error. util::tty_write_all() waits that
+// EAGAIN out on poll(POLLOUT) instead, and util::tty_read() bounds every read
+// with poll(), so a retune to VMIN=1 by another program cannot park one
+// (#1202). A pty fake never returns that EAGAIN, so the unit tests cannot
+// catch a regression of the write side.
+void configure_tty(struct termios& tty) { util::make_raw_8n1(tty, B9600); }
 
 // Reads one {...} object within timeout_ms. Anything before the opening brace
 // (a stale partial reply, a reboot-notice fragment) is discarded. Sets
 // link_dead = true (and returns
-// empty at once) when the port has gone away -- POLLHUP/POLLERR/POLLNVAL, EOF,
-// or a hard errno (EIO/ENXIO/ENODEV/EBADF) -- so the caller can fail the
-// transaction immediately instead of re-kicking at 100% CPU until the deadline
-// (a bare "return {}" on those looks like an ordinary silent slice). An
-// ordinary empty/timeout leaves link_dead false.
+// empty at once) when the port has gone away -- a hangup, EOF, or a hard
+// errno (EIO/ENXIO/ENODEV/EBADF) -- so the caller can fail the transaction
+// immediately instead of re-kicking at 100% CPU until the deadline (a bare
+// "return {}" on those looks like an ordinary silent slice). An ordinary
+// empty/timeout leaves link_dead false.
 std::string read_json_object(int fd, int timeout_ms, bool& link_dead) {
     link_dead = false;
     std::string buf;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
-        struct pollfd pfd {};
-        pfd.fd = fd;
-        pfd.events = POLLIN;
-        const int r = poll(&pfd, 1, kReadPollMs);
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EBADF) link_dead = true;  // fd closed underneath us
-            return {};
-        }
-        if (r == 0) continue;
-        if ((pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0 && (pfd.revents & POLLIN) == 0) {
-            link_dead = true;  // peer hung up / node removed, with nothing left to read
-            return {};
-        }
+        const auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
         char ch = 0;
-        const ssize_t n = read(fd, &ch, 1);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        if (n == 0) {
-            link_dead = true;  // EOF: the tty/node is gone
-            return {};
-        }
+        // tty_read reports a hangup (EOF, POLLHUP with nothing to read) as
+        // -1/EIO and a closed fd (POLLNVAL) as -1/EBADF, never as a quiet 0.
+        const ssize_t n = util::tty_read(fd, &ch, 1, static_cast<int>(remaining > 0 ? remaining : 0));
+        if (n == 0) continue;  // nothing within the window; the deadline check ends the loop
         if (n < 0) {
-            if (errno == EAGAIN || errno == EINTR) continue;
             if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF) {
                 link_dead = true;
             }
@@ -263,15 +235,19 @@ std::map<std::string, std::string> parse_qfocuser_reply(std::string_view text) {
 }
 
 // Probe a serial port with the version handshake. Returns true (and fills
-// `info`) only if a reply with idx 1 and a "version" field comes back.
+// `info`) only if a reply with idx 1 and a "version" field comes back. The
+// probe claim (#1202) is held for exactly the probe: a port a connected
+// device holds is refused before it is opened (DEBUG log, "not found").
 static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
 #ifndef _WIN32
-    int fd = open(port_path.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) return false;
-    if (!configure_tty(fd)) {
-        close(fd);
+    std::string error;
+    util::SerialLink link =
+        util::SerialLink::open(port_path, util::SerialClaimKind::Probe, kSerialOwner, configure_tty, &error);
+    if (!link) {
+        ALPACA_LOG_DEBUG(kLogTag, "Not probing " + port_path + " for Q-Focuser: " + error);
         return false;
     }
+    const int fd = link.fd();
 
     for (int attempt = 0; attempt < 2; ++attempt) {
         // The GD32 CDC-ACM bridge needs no DTR settle, but give the first
@@ -279,7 +255,7 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         std::this_thread::sleep_for(std::chrono::milliseconds(attempt == 0 ? 100 : 500));
         tcflush(fd, TCIOFLUSH);
         const std::string cmd = "{\"cmd_id\":1}";
-        if (!util::write_all(fd, cmd.c_str(), cmd.size())) continue;
+        if (!util::tty_write_all(fd, cmd.c_str(), cmd.size())) continue;
         // Same one-behind handling as transact_locked(): drain the command out
         // as its own packet and kick so the reply is clocked out on this
         // attempt rather than only on the next one. Without it the probe burns
@@ -287,19 +263,17 @@ static bool probe_port(const std::string& port_path, QFocuserDeviceInfo& info) {
         // candidate port); the kick brings it back to the handshake latency.
         tcdrain(fd);
         static const char kick = '\n';
-        (void)util::write_all(fd, &kick, 1);
+        (void)util::tty_write_all(fd, &kick, sizeof(kick));
         bool link_dead = false;
         const std::string reply = read_json_object(fd, kProbeTimeoutMs, link_dead);
         if (link_dead) break;  // node vanished mid-probe; not our device
         if (reply.empty()) continue;
         QFocuserDeviceInfo parsed;
         if (parse_device_info(parse_qfocuser_reply(reply), parsed)) {
-            close(fd);
             info = parsed;
             return true;
         }
     }
-    close(fd);
 #else
     (void)port_path;
     (void)info;
@@ -330,8 +304,28 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
     struct Candidate {
         std::string path;
         std::string name;
+        bool sibling = false;  // held by a connected Q-Focuser: listed, never probed
     };
     std::vector<Candidate> candidates;
+
+    // #1202: a port another vendor's connected device holds is never opened.
+    // A port a connected Q-Focuser holds is not probed either but keeps its
+    // place in the scan order, so the auto-detect index of every other
+    // focuser stays stable; a driver that picks it is refused by its link
+    // claim, which names the holder.
+    auto add_candidate = [&candidates](const std::string& resolved, const std::string& name) {
+        switch (util::serial_candidate_use(resolved, kSerialOwner)) {
+            case util::SerialCandidateUse::HeldByOther:
+                ALPACA_LOG_DEBUG(kLogTag, "Skipping " + resolved + ": held by another connected device");
+                return;
+            case util::SerialCandidateUse::HeldBySibling:
+                candidates.push_back({resolved, name, true});
+                return;
+            case util::SerialCandidateUse::Free:
+                candidates.push_back({resolved, name, false});
+                return;
+        }
+    };
 
     const std::filesystem::path serial_by_id("/dev/serial/by-id");
     if (alpacacore::util::path_exists(serial_by_id)) {
@@ -346,9 +340,8 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
             std::error_code canon_ec;
             std::string resolved = std::filesystem::canonical(sym.path, canon_ec).string();
             if (canon_ec) continue;
-            if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
             probed.insert(resolved);
-            candidates.push_back({resolved, name});
+            add_candidate(resolved, name);
         }
     }
 
@@ -363,10 +356,9 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
         std::string resolved = std::filesystem::canonical(port, canon_ec).string();
         if (canon_ec) continue;
         if (probed.count(resolved) != 0) continue;
-        if (alpacacore::util::is_serial_port_in_use(resolved)) continue;
         if (!raw_port_looks_like_qfocuser_candidate(resolved)) continue;
         probed.insert(resolved);
-        candidates.push_back({resolved, ""});
+        add_candidate(resolved, "");
     }
 
     // Probe candidates concurrently so a silent port costs one timeout, not
@@ -377,6 +369,7 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
     workers.reserve(candidates.size());
     for (std::size_t i = 0; i < candidates.size(); ++i) {
         const auto& c = candidates[i];
+        if (c.sibling) continue;
         ALPACA_LOG_INFO(kLogTag,
                         "Probing " + c.path + (c.name.empty() ? "" : " (" + c.name + ")") + " for Q-Focuser...");
         workers.emplace_back([&, i] { found[i] = probe_port(candidates[i].path, infos[i]) ? 1 : 0; });
@@ -384,8 +377,13 @@ std::vector<QFocuserPortInfo> enumerate_qfocuser_ports() {
     for (auto& w : workers) w.join();
 
     for (std::size_t i = 0; i < candidates.size(); ++i) {
-        if (!found[i]) continue;
         const auto& c = candidates[i];
+        if (c.sibling) {
+            ALPACA_LOG_DEBUG(kLogTag, "Not probing " + c.path + ": a connected Q-Focuser holds it");
+            results.push_back({c.path, c.name, QFocuserDeviceInfo{}});
+            continue;
+        }
+        if (!found[i]) continue;
         ALPACA_LOG_INFO(kLogTag, "Found Q-Focuser on " + c.path + " (firmware " + std::to_string(infos[i].firmware) +
                                      ", board " + std::to_string(infos[i].board_version) + ")");
         results.push_back({c.path, c.name, infos[i]});
@@ -442,7 +440,7 @@ public:
 
     void disconnect() {
         std::lock_guard<std::mutex> lock(mutex_);
-        connected_ = false;
+        connected_ = false;  // state first, then the close (#1202)
         close_port_locked();
     }
 
@@ -531,47 +529,29 @@ private:
         }
     }
 
+    // Claim, open, lock and configure the port (#1202). A port another
+    // connected device holds is refused before it is opened, and the reason
+    // (naming the holder) is the connect refusal the client sees.
     void open_port_locked() {
 #ifndef _WIN32
-        std::error_code canon_ec;
-        std::string resolved = std::filesystem::canonical(config_.serial_port, canon_ec).string();
-        if (canon_ec) resolved = config_.serial_port;
-        if (!util::try_mark_serial_port_open(resolved)) {
-            throw AlpacaException("Serial port " + config_.serial_port + " is already in use by another device",
-                                  AlpacaError::NotConnected);
+        std::string error;
+        link_ = util::SerialLink::open(config_.serial_port, util::SerialClaimKind::Link, kSerialOwner, configure_tty,
+                                       &error);
+        if (!link_) {
+            throw AlpacaException(error, AlpacaError::NotConnected);
         }
-        opened_port_ = resolved;
-
-        serial_fd_ = open(config_.serial_port.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
-        if (serial_fd_ < 0) {
-            const int err = errno;
-            util::mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-            throw AlpacaException(
-                "Failed to open serial port: " + config_.serial_port + " (" + util::errno_string(err) + ")",
-                AlpacaError::NotConnected);
-        }
-        if (!configure_tty(serial_fd_)) {
-            close_port_locked();
-            throw AlpacaException("Failed to configure serial port " + config_.serial_port,
-                                  AlpacaError::DriverException);
-        }
+        serial_fd_ = link_.fd();
         tcflush(serial_fd_, TCIOFLUSH);
 #else
         throw AlpacaException("Q-Focuser driver is Linux-only", AlpacaError::DriverException);
 #endif
     }
 
+    // The alias first, then the link (TIOCNXCL, close, registry claim).
     void close_port_locked() {
 #ifndef _WIN32
-        if (serial_fd_ >= 0) {
-            close(serial_fd_);
-            serial_fd_ = -1;
-        }
-        if (!opened_port_.empty()) {
-            util::mark_serial_port_closed(opened_port_);
-            opened_port_.clear();
-        }
+        serial_fd_ = -1;
+        link_.close();
 #endif
     }
 
@@ -610,10 +590,10 @@ private:
         }
         ALPACA_LOG_TRACE(kLogTag, "Q-Focuser command: " + cmd);
         tcflush(serial_fd_, TCIOFLUSH);
-        if (!util::write_all(serial_fd_, cmd.c_str(), cmd.size())) {
+        if (!util::tty_write_all(serial_fd_, cmd.c_str(), cmd.size())) {
             const int err = errno;
             // A write is as good a witness of a removed node as a read
-            // (AGENTS.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
+            // (driver-lifecycle.instructions.md #445: EIO/ENXIO/ENODEV/EBADF from either side).
             if (err == EIO || err == ENXIO || err == ENODEV || err == EBADF) fail_link_locked();
             throw AlpacaException("Q-Focuser write failed: " + util::errno_string(err), AlpacaError::DriverException);
         }
@@ -626,7 +606,7 @@ private:
         // target on DeviceState/IsMoving.
         tcdrain(serial_fd_);
         static const char kick = '\n';
-        (void)util::write_all(serial_fd_, &kick, 1);
+        (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         while (std::chrono::steady_clock::now() < deadline) {
             bool link_dead = false;
@@ -645,7 +625,7 @@ private:
                 if (slice_elapsed < std::chrono::milliseconds(kEmptyReplyPauseMs)) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(kEmptyReplyPauseMs) - slice_elapsed);
                 }
-                (void)util::write_all(serial_fd_, &kick, 1);
+                (void)util::tty_write_all(serial_fd_, &kick, sizeof(kick));
                 continue;
             }
             ALPACA_LOG_TRACE(kLogTag, "Q-Focuser reply: " + printable(reply));
@@ -688,8 +668,8 @@ private:
     std::atomic<bool> link_lost_{false};
     bool in_connect_ = false;  // guarded by mutex_; see fail_link_locked()
 #ifndef _WIN32
-    int serial_fd_ = -1;
-    std::string opened_port_;  // canonical path registered in the serial-port registry
+    util::SerialLink link_;  // the connected port (#1202): registry claim + fd + TIOCEXCL
+    int serial_fd_ = -1;     // link_.fd() while the link is open, else -1
 #endif
 };
 

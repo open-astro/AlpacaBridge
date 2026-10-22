@@ -1,0 +1,3 @@
+### Changed (docs)
+
+- **The LAN surface threat model records where AlpacaBridge departs from the Alpaca API listings** (docs, issue #1479): decision 0007 gains a Deliberate departures section for the Device API 403s, the transport-level 408, 413, 431, 501 and header 400s, the over-long path 400, `PUT` and `POST` on `/management/v1/description` with their 400s and the 405 for other verbs, and the `configuredevice` (issue #765) and update channel (issue #1103) HTTP 400s, each with its reason, plus rule 13 that a new departure is listed there in the same change. The HTTP integration instructions now point at it. Docs only, no behaviour change.

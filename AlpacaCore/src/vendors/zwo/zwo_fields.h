@@ -114,7 +114,6 @@ inline const Field<std::int64_t> kZwoCamIndex{
 inline const Field<std::int64_t> kZwoCamId{.key = "cameraId", .default_value = -1, .role = Role::DeviceId};
 inline const Field<std::string> kZwoCamSerial{.key = "serialNumber", .default_value = ""};
 inline const Field<std::string> kZwoCamName{.key = "cameraName", .default_value = ""};
-inline const Field<std::string> kZwoCamUniqueId{.key = "uniqueId", .default_value = ""};
 
 // Switch. "dewheater" (a camera's heater through the camera SDK, the default),
 // "asiair" (Pro, Pi 4), "asiair-plus-picm4" (Plus, Pi CM4; same wiring) and
@@ -170,8 +169,9 @@ inline const std::vector<FieldRef>& zwo_telescope_fields() {
 }
 
 inline const std::vector<FieldRef>& zwo_camera_fields() {
+    // uniqueId is not a ZWO field: the router owns it for every device (decision 0018).
     static const std::vector<FieldRef> fields{kZwoCamIndex.ref(), kZwoCamId.ref(), kZwoCamSerial.ref(),
-                                              kZwoCamName.ref(), kZwoCamUniqueId.ref()};
+                                              kZwoCamName.ref()};
     return fields;
 }
 

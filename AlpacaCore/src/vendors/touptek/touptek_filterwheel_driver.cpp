@@ -80,7 +80,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::FilterWheel; }
 
-    std::string get_unique_id() const override {
+    std::string fallback_unique_id() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!info_.id.empty()) {
             return "TOUPTEK_AFW_" + info_.id;
@@ -294,7 +294,7 @@ public:
 
     void set_position(int position) override {
         // Range validation precedes the connection check (ASCOM precedence, per
-        // AGENTS.md): a negative position is unconditionally invalid, so it is
+        // driver-lifecycle.instructions.md): a negative position is unconditionally invalid, so it is
         // InvalidValue even while disconnected. The upper bound depends on
         // slot_count_ (0 until connect), so it is checked below under the lock.
         if (position < 0) {

@@ -404,7 +404,7 @@ public:
 
     DeviceType get_device_type() const override { return DeviceType::Telescope; }
 
-    std::string get_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
+    std::string fallback_unique_id() const override { return "SkyWatcher_" + std::to_string(device_number_); }
 
     std::string get_description() const override { return "Sky-Watcher Motor Controller Mount Driver"; }
 
@@ -545,8 +545,9 @@ public:
                                          ". Check the Serial Port setting."
                                    : "Could not reach the Sky-Watcher mount at " + where + ": " + reason +
                                          ". Check the Host setting and that the mount is on.";
-                        // Unanswered UDP endpoint or vanished serial node: stale, re-scan.
-                        if (!serial || util::device_node_missing(info.port_path)) {
+                        // Unanswered UDP endpoint, vanished serial node, or a port another
+                        // connected device now holds (#1202): stale, re-scan.
+                        if (!serial || util::serial_endpoint_stale(info.port_path)) {
                             throw util::StaleEndpoint(text);
                         }
                         throw AlpacaException(text);
