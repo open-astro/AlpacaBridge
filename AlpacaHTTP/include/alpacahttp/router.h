@@ -28,6 +28,7 @@
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/host_clock.h>
 #include <alpacacore/util/motion_policy.h>
+#include <alpacahttp/config.h>
 #include <alpacahttp/software_update.h>
 
 #include <atomic>
@@ -220,7 +221,7 @@ private:
     std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
-    std::atomic<std::uint16_t> discovery_port_{32227};
+    std::atomic<std::uint16_t> discovery_port_{Config::kDefaultDiscoveryPort};
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.

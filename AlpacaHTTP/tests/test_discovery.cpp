@@ -167,12 +167,13 @@ int main() {
     }
 
     // #1509: the responder binds discovery.port, not a fixed 32227. A probe
-    // to the configured port is answered; one to 32227 is not, unless another
-    // Alpaca process on this host holds it, so that half only runs when
-    // nobody else answers there.
+    // to the configured port is answered; one to 32227 is not. The 32227 half
+    // is skipped when another Alpaca process on this host already answers
+    // there before the responder under test starts.
     {
         // case: the responder binds the configured discovery port and not 32227
         constexpr std::uint16_t kConfiguredPort = 40123;
+        const bool port_32227_taken = send_probe("alpacadiscovery1", 300).has_value();
         alpacahttp::Config configured = config;
         configured.set_discovery_port(kConfiguredPort);
         alpacahttp::Discovery discovery(configured);
@@ -182,7 +183,9 @@ int main() {
             const auto reply = send_probe("alpacadiscovery1", 2000, kConfiguredPort);
             EXPECT(reply.has_value());
             EXPECT(*reply == port_reply(11111));
-            EXPECT(!send_probe("alpacadiscovery1", 500, kDiscoveryPort).has_value());
+            if (!port_32227_taken) {
+                EXPECT(!send_probe("alpacadiscovery1", 500, kDiscoveryPort).has_value());
+            }
             discovery.stop();
         }
     }
