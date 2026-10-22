@@ -3285,7 +3285,7 @@ private:
     // The axis angles {a1, a2} in degrees from home, extrapolated from the
     // cache as described in compute_ra_dec_locked().
     std::pair<double, double> dead_reckoned_axes_locked() const {
-        double dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - last_position_update_).count();
+        double dt = std::chrono::duration<double>(clock_.now() - last_position_update_).count();
         // Offsets hold the model anchor for the whole offset session; without
         // offsets the cache re-anchors within seconds, so clamp tight.
         dt = std::clamp(dt, 0.0, rate_offsets_active_locked() && tracking_ ? 3600.0 : 5.0);
@@ -3459,7 +3459,7 @@ private:
     // the reported position continuous across the rate change; a cache that
     // is invalid or stale for the current regime falls back to hardware.
     void anchor_model_locked() const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         auto age = now - last_position_update_;
         bool fresh = position_cache_valid_ &&
                      (age < kPositionCacheTtl || (rate_offsets_active_locked() && tracking_ && age < kOffsetModelHold));
@@ -3483,7 +3483,7 @@ private:
         const auto [a1, a2] = dead_reckoned_axes_locked();
         cached_ra_axis_deg_ = a1;
         cached_dec_axis_deg_ = a2;
-        last_position_update_ = std::chrono::steady_clock::now();
+        last_position_update_ = clock_.now();
     }
 
     // True while a goto/park/home/pulse/manual motion owns THIS axis.
@@ -3679,7 +3679,7 @@ private:
     // toward the link latch.
     PolledFrame sample_frame(uint32_t ra_cpr, uint32_t dec_cpr, std::chrono::steady_clock::time_point& sampled_at) {
         auto& protocol = *protocol_;
-        sampled_at = std::chrono::steady_clock::now();
+        sampled_at = clock_.now();
         const uint32_t ra_counts = protocol.inquire_position(kAxisRa);
         const uint32_t dec_counts = protocol.inquire_position(kAxisDec);
         const AxisStatus ra_status = protocol.inquire_status(kAxisRa);
@@ -3710,7 +3710,7 @@ private:
         }
         // A direct read or a model anchor made after this poll began sampling
         // is the newer measurement: the older sample must not replace it.
-        if (!force && sampled_at < last_position_update_) {
+        if (!force && sampled_at <= last_position_update_) {
             return;
         }
         const bool offset_hold = position_cache_valid_ && rate_offsets_active_locked() && tracking_ &&
@@ -3832,7 +3832,7 @@ private:
     }
 
     void refresh_position_cache_locked(bool force) const {
-        auto now = std::chrono::steady_clock::now();
+        auto now = clock_.now();
         throw_if_board_reset_locked();
         // A latched fault must not be short-circuited by a fresh-enough cache
         // or by the offset model: on a polled link these reads are the only
