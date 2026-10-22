@@ -438,6 +438,9 @@ alpacacore::vendor::zwo::ConnectionInfo zwo_endpoint(int port) {
 // round-trip too).
 alpacacore::test::FakeMountServer::Responder zwo_responder() {
     return [](const std::string& chunk) -> std::string {
+        if (chunk.find(":GU#") != std::string::npos) return "NG#";
+        if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
+        if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
         if (chunk.find(":GAT") != std::string::npos) {
             return "1#";
         }

@@ -34,6 +34,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -65,7 +66,7 @@ struct FakeZwoState {
     std::atomic<int> jog_count{0};   // ":Me#" / ":Mw#" / ":Mn#" / ":Ms#"
     // Answer ":GU" as a stopped mount and ":GR"/":GD" with a fixed position
     // (12h, +45 deg), so Slewing and RA/Dec reads reach the mount's answer.
-    std::atomic<bool> serve_position{false};
+    std::atomic<bool> serve_position{true};
     // What ":GAT" answers: tracking on (the default) or off.
     std::atomic<bool> tracking_on{true};
     // A GOTO in flight that reports no tracking: ":GU" answers "n#" (not
@@ -335,6 +336,7 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
           "[zwo][telescope][async][arrival][goto-ownership]") {
     const bool reject_ra = GENERATE(false, true);
     const bool command_tracking_off = GENERATE(false, true);
+    alpacacore::test::FakeTaskClock clock;
     CAPTURE(reject_ra, command_tracking_off);
     struct State {
         std::atomic<bool> moving{false};
@@ -374,19 +376,26 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
         return response;
     });
     REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return counts->goto_count.load() == 1; }, 5000));
+    // Drain the setup exchange before advancing the poll clock; MS receipt precedes its reply completion.
+    REQUIRE_NOTHROW(driver->command_string(":GVP", false));
     state->moving.store(true);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
     REQUIRE(wait_until([&] { return state->moving_pairs.load() > 0; }, 5000));
-    state->stopped.store(true);
-
     // The force window alone would permit a retarget even if GU cleared ownership too early.
-    std::this_thread::sleep_for(std::chrono::milliseconds(5500));
-    const int polls = state->stopped_polls.load();
-    REQUIRE(wait_until([&] { return state->stopped_polls.load() >= polls + 2; }, 5000));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(5500));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    state->stopped.store(true);
+    clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(state->stopped_polls.load() > 0);
     REQUIRE_FALSE(driver->get_tracking());
     REQUIRE(driver->get_slewing());
 
@@ -414,10 +423,12 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
     } else {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
         REQUIRE(wait_until([&] { return counts->goto_count.load() == 2; }, 5000));
-        const int retarget_polls = state->stopped_polls.load();
-        REQUIRE(wait_until([&] { return state->stopped_polls.load() >= retarget_polls + 2; }, 5000));
+        REQUIRE_NOTHROW(driver->command_string(":GVP", false));
         CHECK(driver->get_slewing());
         state->reject_coordinate.store(false);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        clock.advance(std::chrono::milliseconds(5500));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
         CHECK(std::abs(driver->get_right_ascension() - 13.0) < 1e-9);
         CHECK(std::abs(driver->get_declination() - 46.0) < 1e-9);

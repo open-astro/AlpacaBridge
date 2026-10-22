@@ -979,6 +979,7 @@ struct SnapshotAdopterRow {
 };
 
 inline constexpr SnapshotAdopterRow kSnapshotAdopterRoster[] = {
+    {"zwo_telescope", "zwo", "AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp"},
     {"skywatcher_telescope", "skywatcher", "AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp"},
     {"celestron_telescope", "celestron", "AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp"},
     {"bisque_telescope", "bisque", "AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp"},

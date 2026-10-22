@@ -91,7 +91,7 @@ Symbol: `StateSnapshot`
 | Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
-| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | planned | — | |
+| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | 250 ms after each poll; 5 s freshness threshold; mandatory GU+RA/Dec sample age is independent of partial publication; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
 
 ## Links
 

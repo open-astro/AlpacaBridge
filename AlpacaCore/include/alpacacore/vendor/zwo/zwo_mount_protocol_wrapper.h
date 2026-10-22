@@ -118,6 +118,9 @@ public:
     bool connect(const ConnectionInfo& info);
     void disconnect();
     bool is_connected() const;
+    bool link_lost() const;
+    void cancel_pending_io();
+    void try_disconnect();
     /// Why the last connect() returned false, written for the operator (a port
     /// another device holds, a failed open); empty when no reason is known.
     std::string last_connect_error() const;
@@ -129,7 +132,7 @@ public:
 
     std::string get_mount_info();
 
-    EquatorialCoordinates get_current_equatorial();
+    EquatorialCoordinates get_current_equatorial(int timeout_ms_override = 0);
     HorizontalCoordinates get_current_horizontal();
 
     EquatorialCoordinates get_target_equatorial();

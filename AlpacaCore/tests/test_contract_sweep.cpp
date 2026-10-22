@@ -1093,6 +1093,9 @@ Tier2Host tier2_host_zwo_telescope() {
     return mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
+            if (chunk.find(":GU#") != std::string::npos) return "NG#";
+            if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
+            if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
             // Tracking on, and the target setters (:Sr, :Sd) accepted; "0#" would make the driver report
             // "ZWO mount rejected target RA".
             return (chunk.find(":GAT") != std::string::npos || chunk.find(":Sr") != std::string::npos ||
@@ -2897,12 +2900,48 @@ std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ZWO
+std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
+    namespace zwo = alpacacore::vendor::zwo;
+    auto rig = std::make_unique<SnapshotRig>();
+    auto muted = std::make_shared<std::atomic<bool>>(false);
+    auto mount =
+        std::make_shared<alpacacore::test::FakeMountServer>([muted](const std::string& command) -> std::string {
+            if (command.find(":GU#") != std::string::npos) return muted->load() ? "e1#" : "NG#";
+            if (command.find(":GR#") != std::string::npos) return "12:00:00#";
+            if (command.find(":GD#") != std::string::npos) return "+45*00:00#";
+            if (command.find(":GA#") != std::string::npos) return "+45*00:00#";
+            if (command.find(":GZ#") != std::string::npos) return "180*00:00#";
+            if (command.find(":Ggr#") != std::string::npos) return "0.5#";
+            if (command.starts_with(":S")) return "1#";
+            return "0#";
+        });
+    REQUIRE(mount->ok());
+    zwo::ConnectionInfo info;
+    info.type = zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = mount->port();
+    info.response_timeout_ms = 100;
+    rig->fake = mount;
+    rig->driver = zwo::create_zwo_telescope_with_site(0, info, 30.0, -100.0, {}, false, *rig->clock);
+    rig->driver->set_connected(true);
+    rig->await_poll();
+    rig->hold_frame = [muted] { muted->store(true); };
+    return rig;
+}
+#endif
+
 // One X(id, getters) per adopter this build compiles in. `id` is the roster id in contract_sweep.h.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
 #define CS3_SKYWATCHER(X) X(skywatcher_telescope, snapshot_telescope_getters(true))
 #else
 #define CS3_SKYWATCHER(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#define CS3_ZWO(X) X(zwo_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #define CS3_CELESTRON(X) X(celestron_telescope, snapshot_telescope_getters(true)) X(celestron_focuser, snapshot_focuser_getters(false))
@@ -2935,7 +2974,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
 #define CS3_ASTROASIS(X)
 #endif
 #define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
-    CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
+    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
 // clang-format on
 
 // Every getter must answer on the live link first: a getter that throws here is a setup defect of the hook,
