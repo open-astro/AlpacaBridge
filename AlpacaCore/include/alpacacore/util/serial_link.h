@@ -114,22 +114,25 @@ inline int remaining_ms(std::chrono::steady_clock::time_point deadline) {
  * A no-op for an fd SerialLink did not open. Cheap: one tcgetattr().
  */
 inline bool restore_serial_line_settings(int fd) {
-    std::string port;
-    bool ok = false;
-    int err = 0;
+    // The registry lock is a leaf: held only to copy the record out. tcgetattr()
+    // and tcsetattr() can park on a stalled adapter, and the lock is shared by
+    // every port. The fd belongs to the caller, so it cannot be closed (and its
+    // number reused) under this call; no re-check under the lock is needed.
+    detail::SerialLineRecord record;
     {
         auto& reg = detail::serial_line_registry();
         std::lock_guard<std::mutex> lock(reg.mutex);
         auto it = reg.lines.find(fd);
         if (it == reg.lines.end()) return false;
-        struct termios now {};
-        if (tcgetattr(fd, &now) != 0) return false;
-        if (detail::same_line_settings(now, it->second.applied)) return false;
-        ok = tcsetattr(fd, TCSANOW, &it->second.applied) == 0;
-        err = errno;
-        port = it->second.port;
+        record = it->second;
     }
-    // Logged after the unlock so the line registry stays a leaf lock.
+    struct termios now {};
+    if (tcgetattr(fd, &now) != 0) return false;
+    if (detail::same_line_settings(now, record.applied)) return false;
+    const bool ok = tcsetattr(fd, TCSANOW, &record.applied) == 0;
+    const int err = errno;
+    const std::string& port = record.port;
+    // Logged with no lock held.
     ALPACA_LOG_WARN("Serial", "Line settings of " + port +
                                   " were changed by another program while this driver held it; " +
                                   (ok ? std::string("restored them") : "restoring them failed: " + errno_string(err)));
