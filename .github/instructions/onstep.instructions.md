@@ -100,7 +100,14 @@ it is never reachable through `router.cpp` or the web UI.
   repeat restarts that timer (`Guide::startAxis1`). A background task (`move_axis_resend_`, an
   `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
   `AbortSlew`, a GOTO, `Park`, `FindHome`, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
-  itself fails. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
+  itself fails, and a `MoveAxis` whose command cannot be sent leaves the other axis's re-send
+  running (both tested over a dropped TCP link, which fails the write while the wrapper still reads
+  the link as alive, #1459). If the slot refuses the new body after the move went out (no thread,
+  or replaced bodies still finishing), `MoveAxis` stops that axis (both directions) and throws
+  `DriverException` (if those stops fail too, the message says so and `Slewing` stays true; a
+  newer `MoveAxis`, or an `AbortSlew`, GOTO, `Park`, `FindHome` or disconnect that ended the move
+  meanwhile, owns the motion, so the refusal is reported as it came and nothing is stopped); the other axis keeps moving without a re-send until the next `MoveAxis`
+  (#1458). The test seam is `set_move_axis_resend_spawn_for_testing()`. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
   that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
   `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
   between ticks. A skipped tick (a failed read, `G`, or near a limit) therefore puts the next
@@ -116,7 +123,8 @@ it is never reachable through `router.cpp` or the web UI.
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
-    clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
+    clock. A change of clock forgets those stamps: one taken on another driver's clock is not timed
+    as an outage (#1460; production keeps one clock). The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
     `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
     slew, 2 s past the relink window, 60 s past a UTCDate write).
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
@@ -129,7 +137,10 @@ it is never reachable through `router.cpp` or the web UI.
     `g` since this connect, a `:GU#` read taken after the move started with no `g` (and no `G`)
     means the move ended at the mount (a hand controller or another app sent a stop, or a limit):
     the re-send ends and `Slewing` reads false. Firmware that never sends `g` gets no re-send, and
-    `Slewing` stays true until the client stops the move, as before.
+    `Slewing` stays true until the client stops the move, as before. On such firmware, or for a
+    move that lapsed before the first tick, the body ends after the first `:GU#` read that shows
+    neither `g` nor `G` while no `g` has been seen since connect, instead of reading `:GU#` every
+    7 s (#1461).
   - **Braking (HM-17, OnStepX 10.23a, 2026-10-20):** after a stop `g` stays set while the axis
     brakes (`GA_BREAK`; about 0.4 s at 0.5 deg/s), and a move command in that time restarts the
     move at full rate (`Axis::autoSlew` "resum"). A stop at the mount is therefore undone when a
@@ -203,7 +214,8 @@ it is never reachable through `router.cpp` or the web UI.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
-  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s), and the router reads `Connected` before every Connect, so the first to notice
+  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s, and on firmware
+  without `g` only once, #1461), and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
   still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that

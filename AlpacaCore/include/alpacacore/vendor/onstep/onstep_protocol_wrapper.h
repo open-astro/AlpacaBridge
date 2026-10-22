@@ -162,7 +162,9 @@ public:
      *        #1378): the driver's injected TaskClock, set at connect, so the
      *        driver times the #521 outage on the clock it runs on. Default:
      *        util::default_task_clock(). release_task_clock() puts the default
-     *        back if `clock` is still the one set (a driver going away).
+     *        back if `clock` is still the one set (a driver going away). A
+     *        change of the clock in use forgets the loss and last-alive
+     *        stamps: one taken on another clock means nothing here (#1460).
      */
     void set_task_clock(util::TaskClock& clock);
     void release_task_clock(util::TaskClock& clock);

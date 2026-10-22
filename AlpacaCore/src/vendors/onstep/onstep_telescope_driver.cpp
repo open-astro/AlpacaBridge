@@ -360,16 +360,21 @@ public:
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
+            // The two reads run without firmware_mutex_: get_device_firmware()
+            // takes only that lock and must not wait for a serial round trip
+            // (decision 0016). Only the store is under it.
             std::string firmware_version;
+            std::string firmware;
+            try {
+                std::string product = protocol.get_product_name();
+                firmware_version = protocol.get_version_number();
+                firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                firmware.clear();
+            }
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                try {
-                    std::string product = protocol.get_product_name();
-                    firmware_version = protocol.get_version_number();
-                    firmware_cache_ = product + (firmware_version.empty() ? "" : (" " + firmware_version));
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    firmware_cache_.clear();
-                }
+                firmware_cache_ = firmware;
             }
 
             // OnStepX applies refraction to the RA/Dec it reports unless it was
@@ -1084,46 +1089,26 @@ public:
         const int positive_dir = (axis == 0) ? 2 : 0;
         const int negative_dir = (axis == 0) ? 3 : 1;
 
-        // Drop this axis's earlier move from the re-send first: a stop asks
-        // for none whatever its outcome, and a new move sets it again only
-        // once its own command went out. This only withdraws the old move,
-        // under mutex_ where no body runs; decision 0006 rule 3's bump still
-        // comes before the new move's flags below.
-        manual_axis_resend_[axis] = false;
         if (!moving) {
-            // Defensive dual-stop, matching the project's convention for
-            // fixed-direction (rather than signed-rate) motion protocols.
-            // Both stops are always tried. The driver cannot tell which
-            // direction the mount needed stopped, so any failed stop may be
-            // the one that mattered: report it and keep the axis moving
-            // (#742).
-            std::string stop_error;
-            const auto try_stop = [&](int dir) {
-                try {
-                    protocol.move_axis_stop(dir);
-                } catch (const std::exception& ex) {
-                    if (stop_error.empty()) {
-                        stop_error = ex.what();
-                    }
-                } catch (...) {
-                    if (stop_error.empty()) {
-                        stop_error = "unknown exception";
-                    }
-                }
-            };
-            try_stop(positive_dir);
-            try_stop(negative_dir);
+            const std::string stop_error = stop_axis_locked(axis);
             if (!stop_error.empty()) {
                 throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
-        } else {
+        }
+        std::uint64_t generation = 0;
+        if (moving) {
+            // Drop this axis's earlier move from the re-send first: the new
+            // move sets it again only once its own command went out. This
+            // only withdraws the old move, under mutex_ where no body runs;
+            // decision 0006 rule 3's bump still comes before the new flags.
+            manual_axis_resend_[axis] = false;
             const int dir = rate > 0.0 ? positive_dir : negative_dir;
             protocol.move_axis_start(dir, std::abs(rate));
             // Decision 0006 rule 3: supersede the running re-send under mutex_
             // before this move's flags change; start() below replaces it. Only
             // once the move went out: a failed send must leave the other
             // axis's re-send running.
-            move_axis_generation_.bump();
+            generation = move_axis_generation_.bump();
             manual_axis_dir_[axis] = dir;
             manual_axis_rate_[axis] = std::abs(rate);
             manual_axis_resend_[axis] = true;
@@ -1143,7 +1128,69 @@ public:
         // found nothing to re-send may still read as running while it exits.
         // The new one supersedes it.
         lock.unlock();  // start() without mutex_: decision 0006 rule 4, async_operation.h rule 10
-        start_move_axis_resend();
+        try {
+            start_move_axis_resend();
+        } catch (const AlpacaException& ex) {
+            lock.lock();
+            stop_move_without_resend_locked(axis, generation, ex);
+        }
+    }
+
+    // Stops `axis` as MoveAxis(axis, 0) does and drops its re-send first: a
+    // stop asks for none whatever its outcome. Defensive dual-stop, matching
+    // the project's convention for fixed-direction (rather than signed-rate)
+    // motion protocols. Both stops are always tried. The driver cannot tell
+    // which direction the mount needed stopped, so any failed stop may be the
+    // one that mattered: the first error is returned, and the caller keeps
+    // the axis moving (#742). Empty when both went out.
+    std::string stop_axis_locked(int axis) {
+        manual_axis_resend_[axis] = false;
+        auto& protocol = OnStepProtocolWrapper::instance();
+        std::string stop_error;
+        // Direction codes: 0=North(Dec+), 1=South(Dec-), 2=East(RA+), 3=West(RA-).
+        for (const int dir : {axis == 0 ? 2 : 0, axis == 0 ? 3 : 1}) {
+            try {
+                protocol.move_axis_stop(dir);
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) {
+                    stop_error = ex.what();
+                }
+            } catch (...) {
+                if (stop_error.empty()) {
+                    stop_error = "unknown exception";
+                }
+            }
+        }
+        return stop_error;
+    }
+
+    // #1458: the slot refused the re-send body (no thread, or replaced bodies
+    // still finishing) after the move went out. The bump above has already
+    // superseded the running body, so the move would end at the firmware's
+    // time limit while Slewing read true: stop this axis and report it, as a
+    // MoveAxis that did not happen. Nothing is stopped when a newer MoveAxis
+    // went out meanwhile (the generation moved on), or when AbortSlew, a GOTO,
+    // Park, FindHome or a disconnect ended the move meanwhile (the axis no
+    // longer reads as moving): its stops would end that newer command. After
+    // a link drop the stops fail and the message says so. The other axis keeps
+    // moving, without a re-send until the next MoveAxis.
+    void stop_move_without_resend_locked(int axis, std::uint64_t generation, const AlpacaException& refusal) {
+        if (move_axis_generation_.current() != generation || !manual_axis_slewing_[axis]) {
+            throw refusal;
+        }
+        std::string message = std::string("MoveAxis could not keep the move going (") + refusal.what() + ")";
+        const std::string stop_error = stop_axis_locked(axis);
+        if (stop_error.empty()) {
+            manual_axis_slewing_[axis] = false;
+            message += "; the axis was stopped";
+        } else {
+            message += "; stopping the axis failed too: " + stop_error;  // Slewing stays true (#742)
+        }
+        if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
+            clear_manual_motion_locked();
+        }
+        ALPACA_LOG_WARN("OnStep", message);
+        throw AlpacaException(message, AlpacaError::DriverException);
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1252,6 +1299,10 @@ public:
     void set_park_home_before_start_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(mutex_);
         park_home_before_start_ = std::move(hook);
+    }
+
+    void set_move_axis_resend_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        move_axis_resend_.set_spawn_for_testing(std::move(spawn));
     }
 
 private:
@@ -1443,7 +1494,13 @@ private:
         // asks for a fresh command on purpose. Firmware without 'g' gets no
         // re-send, and a pulse guide ('G') skips the tick.
         if (!cached_status_.is_guide_active) {
-            return true;
+            // No 'g' since this connect and no pulse guide hiding it: firmware
+            // without the letter, or a move that lapsed before this tick. The
+            // body ends instead of reading :GU# every 7 s for nothing (#1461);
+            // Slewing stays true until the client stops.
+            // (After 'g' was seen, a read without it and without 'G' already
+            // ended the move above.)
+            return cached_status_.is_pulse_guide_active;
         }
         if (!resend_within_altitude_limits_locked(protocol)) {
             return true;  // the firmware ends the move; 'g' then ends it here
@@ -2215,6 +2272,13 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
 void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_park_home_before_start_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
+                                            std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_move_axis_resend_spawn_for_testing(std::move(spawn));
     }
 }
 

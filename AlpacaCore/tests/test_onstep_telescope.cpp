@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -31,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -894,7 +896,8 @@ TEST_CASE("OnStep Telescope Driver - the MoveAxis re-send never restarts a move 
 // #1378: a move the mount does not show ('g') is never re-sent: firmware
 // without the letter, or a move the firmware let lapse (its time limit, or
 // the 5 s cap while its soft limits are off). Slewing stays true until the
-// client stops the move, as before.
+// client stops the move, as before. #1461: the body ends after that first
+// read instead of reading :GU# every 7 s for nothing.
 TEST_CASE("OnStep Telescope Driver - a MoveAxis the mount does not show is never re-sent",
           "[onstep][telescope][unit]") {
     MoveAxisFake fake(false);
@@ -902,14 +905,305 @@ TEST_CASE("OnStep Telescope Driver - a MoveAxis the mount does not show is never
     auto driver = fake.connect();
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
+    const auto status_reads = fake.count(":GU#");
     fake.start_move(*driver, 0, -1.0);
     fake.resend_tick();
-    fake.resend_tick();
+    REQUIRE(fake.logged(":GU#", status_reads + 1));
+    fake.advance(std::chrono::seconds(21));                               // three more intervals
+    CHECK(fake.count(":GU#") == status_reads + 1);                        // no read after the first
     CHECK_FALSE(fake.logged(":Mw#", 2, std::chrono::milliseconds(300)));  // the start only
     CHECK(driver->get_slewing());
 
     driver->move_axis(0, 0.0);
     CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Counts the OnStep WARN lines that contain `needle`; restores the sink when it goes.
+class WarnCounter {
+public:
+    explicit WarnCounter(std::string needle) : needle_(std::move(needle)) {
+        alpacacore::logging::set_log_sink(
+            [this](alpacacore::logging::LogLevel level, std::string_view component, std::string_view message) {
+                if (level == alpacacore::logging::LogLevel::Warn && component == "OnStep" &&
+                    message.find(needle_) != std::string_view::npos) {
+                    ++count_;
+                }
+            });
+    }
+    ~WarnCounter() { alpacacore::logging::set_log_sink(previous_); }
+    WarnCounter(const WarnCounter&) = delete;
+    WarnCounter& operator=(const WarnCounter&) = delete;
+
+    int count() const { return count_.load(); }
+
+private:
+    alpacacore::logging::LogSink previous_ = alpacacore::logging::get_log_sink();
+    std::string needle_;
+    std::atomic<int> count_{0};
+};
+
+}  // namespace
+
+// #1458: the re-send slot can refuse its body (no thread, or replaced bodies
+// still finishing) after the move went out. The bump has then superseded the
+// running body, so nothing would keep the move going while Slewing read true:
+// MoveAxis stops the axis and fails.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis whose re-send cannot start stops the axis and fails",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto refuse = [](const std::function<void()>&) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    };
+    alpacacore::vendor::onstep::set_move_axis_resend_spawn_for_testing(*driver, refuse);
+    fake.guide_active->store(true);
+    const auto refused_move = [&](int axis) {
+        try {
+            driver->move_axis(axis, 1.0);
+            FAIL("MoveAxis returned success although nothing keeps the move going");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+            CHECK(std::string(ex.what()).find("the axis was stopped") != std::string::npos);
+        }
+    };
+
+    SECTION("axis 0") {
+        refused_move(0);
+        CHECK(fake.logged(":Me#", 1));
+        CHECK(fake.logged(":Qe#", 1));
+        CHECK(fake.logged(":Qw#", 1));
+    }
+    SECTION("axis 1") {
+        refused_move(1);
+        CHECK(fake.logged(":Mn#", 1));
+        CHECK(fake.logged(":Qn#", 1));
+        CHECK(fake.logged(":Qs#", 1));
+    }
+    fake.guide_active->store(false);  // the mount stopped
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #1458: when the stop after a refused re-send fails too, the message says
+// so and Slewing stays true (#742): the mount may still be moving.
+TEST_CASE("OnStep Telescope Driver - a refused re-send whose stop fails too leaves Slewing true",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // The link drops as the slot refuses: the stops that follow cannot be sent.
+    alpacacore::vendor::onstep::set_move_axis_resend_spawn_for_testing(
+        *driver, [&fake](const std::function<void()>&) -> std::thread {
+            (void)fake.server.drop_connections();
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+
+    fake.guide_active->store(true);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although nothing keeps the move going");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("stopping the axis failed too") != std::string::npos);
+    }
+    CHECK(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// #1458: an AbortSlew that ended the move while the refused start was still
+// in the slot owns the motion: the refused call reports the refusal as it
+// came and sends no stops of its own, which could end a newer GOTO or Park.
+TEST_CASE("OnStep Telescope Driver - a refused re-send stops nothing after an AbortSlew", "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // The slot calls the spawn hook under its own lock, which AbortSlew's
+    // cancel() needs: the AbortSlew runs on its own thread, and the hook
+    // fails the start once its stops went out. It still holds the driver
+    // lock then, so it finishes before MoveAxis looks at the axis again.
+    std::thread abort;
+    alpacacore::vendor::onstep::set_move_axis_resend_spawn_for_testing(
+        *driver, [&](const std::function<void()>&) -> std::thread {
+            abort = std::thread([&driver] { driver->abort_slew(); });
+            (void)(fake.logged(":Qe#", 1) && fake.logged(":Qw#", 1) && fake.logged(":Qn#", 1) &&
+                   fake.logged(":Qs#", 1));
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+
+    fake.guide_active->store(true);
+    try {
+        driver->move_axis(0, 1.0);
+        FAIL("MoveAxis returned success although its re-send did not start");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("MoveAxis could not keep") == std::string::npos);
+    }
+    abort.join();
+    REQUIRE(fake.logged(":Qe#", 1));
+    CHECK_FALSE(fake.logged(":Qe#", 2, std::chrono::milliseconds(200)));  // the AbortSlew's stop only
+    driver->set_connected(false);
+}
+
+// #1458: a newer MoveAxis that went out while the refused start was still
+// in the slot owns the motion: the refused call reports the refusal as it
+// came and stops nothing.
+TEST_CASE("OnStep Telescope Driver - a refused re-send stops nothing after a newer MoveAxis",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // The first start waits until the newer MoveAxis went out, then fails;
+    // the starts after it get a real thread.
+    std::mutex latch_mutex;
+    std::condition_variable latch_cv;
+    bool released = false;
+    std::atomic<int> starts{0};
+    alpacacore::vendor::onstep::set_move_axis_resend_spawn_for_testing(
+        *driver, [&](std::function<void()> body) -> std::thread {
+            if (starts.fetch_add(1) == 0) {
+                std::unique_lock<std::mutex> lock(latch_mutex);
+                latch_cv.wait(lock, [&] { return released; });
+                throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+            }
+            return std::thread(std::move(body));
+        });
+
+    fake.guide_active->store(true);
+    std::exception_ptr first_error;
+    std::exception_ptr newer_error;
+    std::thread first([&] {
+        try {
+            driver->move_axis(0, 1.0);
+        } catch (...) {
+            first_error = std::current_exception();  // Catch2 asserts only on the test thread
+        }
+    });
+    std::thread newer([&] {
+        while (starts.load() == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        try {
+            driver->move_axis(1, 1.0);
+        } catch (...) {
+            newer_error = std::current_exception();
+        }
+    });
+    CHECK(fake.logged(":Mn#", 1));  // the newer move went out (and bumped) while the first start waits
+    {
+        std::lock_guard<std::mutex> lock(latch_mutex);
+        released = true;
+    }
+    latch_cv.notify_all();
+    first.join();
+    newer.join();
+    CHECK_FALSE(newer_error);
+    REQUIRE(first_error);
+    try {
+        std::rethrow_exception(first_error);
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("could not start a background thread") != std::string::npos);
+        CHECK(std::string(ex.what()).find("could not keep the move going") == std::string::npos);
+    }
+    CHECK(fake.count(":Qe#") == 0);
+    CHECK(fake.count(":Qw#") == 0);
+    fake.resend_tick();
+    CHECK(fake.logged(":Mn#", 2));  // the newer move keeps its re-send
+    driver->move_axis(1, 0.0);
+    driver->set_connected(false);
+}
+
+// #1461: a pulse guide ('G') hides 'g', so a first tick that sees 'G' and no
+// 'g' does not end the body: the move is re-sent once the pulse is over.
+TEST_CASE("OnStep Telescope Driver - a pulse guide at the first re-send tick does not end the re-send",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    fake.guide_active->store(true);
+    fake.pulse_guide->store(true);  // 'G' and no 'g' from the start
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    fake.pulse_guide->store(false);
+    fake.resend_tick();  // the body still waits for it
+    CHECK(fake.logged(":Me#", 2));
+
+    driver->move_axis(0, 0.0);
+    driver->set_connected(false);
+}
+
+// #1459: a MoveAxis(axis, 0) whose stop cannot be sent still ends that axis's
+// re-send (the flag drops before the stop), so no tick runs for it later. A
+// dropped TCP link fails the write while the wrapper still reads the link as
+// alive, as a serial write error that is not a loss would.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis stop that cannot be sent still ends the re-send",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    WarnCounter resend_warns("MoveAxis re-send");
+
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    REQUIRE(fake.logged(":Me#", 2));
+    REQUIRE(fake.server.drop_connections());
+    CHECK_THROWS_AS(driver->move_axis(0, 0.0), alpacacore::AlpacaException);
+    fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
+    CHECK(resend_warns.count() == 0);
+    driver->set_connected(false);
+}
+
+// #1459: a MoveAxis whose command cannot be sent drops its own axis's
+// earlier move from the re-send first, so the old direction is not kept
+// going for a move the client changed.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent ends its axis's earlier re-send",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    WarnCounter resend_warns("MoveAxis re-send");
+
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    REQUIRE(fake.logged(":Me#", 2));
+    REQUIRE(fake.server.drop_connections());
+    CHECK_THROWS_AS(driver->move_axis(0, -1.0), alpacacore::AlpacaException);
+    fake.advance(std::chrono::seconds(14));  // two intervals: no tick may run
+    CHECK(resend_warns.count() == 0);
+    driver->set_connected(false);
+}
+
+// #1459: a MoveAxis whose command cannot be sent leaves the other axis's
+// re-send running: the generation moves only once the move went out. The
+// kept body's next tick shows it: its status read fails on the dropped link.
+TEST_CASE("OnStep Telescope Driver - a MoveAxis that cannot be sent leaves the other axis's re-send running",
+          "[onstep][telescope][unit]") {
+    MoveAxisFake fake(true);
+    REQUIRE(fake.server.ok());
+    auto driver = fake.connect();
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    WarnCounter skipped("MoveAxis re-send skipped");
+
+    fake.guide_active->store(true);
+    fake.start_move(*driver, 0, 1.0);
+    fake.resend_tick();
+    REQUIRE(fake.logged(":Me#", 2));
+    REQUIRE(fake.server.drop_connections());
+    CHECK_THROWS_AS(driver->move_axis(1, 1.0), alpacacore::AlpacaException);
+    fake.resend_tick();  // axis 0 is due again
+    CHECK(skipped.count() >= 1);
     driver->set_connected(false);
 }
 
@@ -2147,6 +2441,64 @@ struct RefractionFake {
 };
 
 }  // namespace
+
+// Decision 0016: get_device_firmware() takes only firmware_mutex_, which the
+// connect held across its :GVP#/:GVN# round trips, so a hook called during
+// the handshake waited for the serial reads (the contract sweep's hook bound
+// failed on a loaded CI runner). The fake holds its :GVP# reply until
+// released; the hook must return before that.
+TEST_CASE("OnStep Telescope Driver - the firmware hook does not wait for the connect's version reads",
+          "[onstep][telescope][unit]") {
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool released = false;
+    std::atomic<bool> gvp_asked{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.rfind(":GVP", 0) == 0) {
+            gvp_asked = true;
+            std::unique_lock<std::mutex> lock(gate_mutex);
+            gate_cv.wait(lock, [&] { return released; });
+            return "On-Step#";
+        }
+        if (chunk.rfind(":GVN", 0) == 0) return "10.23a#";
+        if (chunk.rfind(":GU", 0) == 0) return "nNpEo180#";
+        if (chunk.rfind(":S", 0) == 0) return "1";
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 10000;  // the held reply must not time out first
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    const auto release = [&] {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        released = true;
+        gate_cv.notify_all();
+    };
+
+    std::thread connector([&] { (void)alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(20)); });
+    const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!gvp_asked && std::chrono::steady_clock::now() < give_up) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(gvp_asked);
+    // Releases the reply after 2 s, so a hook that waits still returns.
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        release();
+    });
+    const auto t0 = std::chrono::steady_clock::now();
+    (void)driver->get_device_firmware();
+    const auto took = std::chrono::steady_clock::now() - t0;
+    release();
+    releaser.join();
+    connector.join();
+    CHECK(took < std::chrono::seconds(1));
+    CHECK(driver->get_device_firmware().value_or("") == "On-Step 10.23a");
+    driver->set_connected(false);
+}
 
 TEST_CASE("OnStep Telescope Driver - DoesRefraction follows the OnStepX coordinate mode", "[onstep][telescope][unit]") {
     auto fake = std::make_shared<RefractionFake>();
