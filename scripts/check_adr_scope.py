@@ -25,7 +25,8 @@ Two modes:
            review-comment.md. Every listed rule needs a checklist line
            `- <record file> rule <n>: pass|defect|n/a: <reason>`, a rule may
            not get two verdicts, and a defect line needs the "Issues found"
-           sign-off as the last line. Any finding exits 1, so nothing posts.
+           sign-off as the last line (bold, italics or a closing period or
+           exclamation mark around it still count). Any finding exits 1, so nothing posts.
 
 Usage:
     check_adr_scope.py --list [--root DIR] < paths
@@ -135,8 +136,10 @@ def checklist_findings(scope, review):
                  for key, v in sorted(verdicts.items()) if len(v) > 1]
     lines = [line.strip() for line in review.splitlines() if line.strip()]
     last = lines[-1] if lines else ""
+    # Markdown emphasis or a closing period around the sign-off is still the sign-off.
+    bare = last.strip("*_ ").rstrip(".!").strip("*_ ")
     findings += ["the review marks %s rule %d as a defect but its last line is %r, not the Issues-found sign-off"
-                 % (key + (last,)) for key, v in sorted(verdicts.items()) if "defect" in v and last != ISSUES_SIGN_OFF]
+                 % (key + (last,)) for key, v in sorted(verdicts.items()) if "defect" in v and bare != ISSUES_SIGN_OFF]
     return findings
 
 
@@ -259,6 +262,11 @@ def self_test():
     expect(any("as a defect" in x for x in f), "a defect under an Approved sign-off is reported")
     issues = full.replace("rule 2: n/a", "rule 2: defect").replace(ok, ISSUES_SIGN_OFF)
     expect(checklist_findings(scope, issues) == [], "a defect under the Issues-found sign-off passes")
+    for decorated in ("**%s**", "%s.", "_%s_", "  %s  "):
+        f = checklist_findings(scope, issues.replace(ISSUES_SIGN_OFF, decorated % ISSUES_SIGN_OFF))
+        expect(f == [], "a decorated Issues-found sign-off %r still counts: %r" % (decorated, f))
+    f = checklist_findings(scope, issues.replace(ISSUES_SIGN_OFF, "Issues found, but " + ok))
+    expect(any("as a defect" in x for x in f), "a last line that only contains the words is not the sign-off")
     f = checklist_findings(scope, full + "- 0003-docs-drift-gates.md rule 3: defect: x\n" + ok + "\n")
     expect(any("more than one verdict" in x for x in f), "two verdicts for one rule are reported")
     f = checklist_findings(scope + "rm -rf /\n", full)

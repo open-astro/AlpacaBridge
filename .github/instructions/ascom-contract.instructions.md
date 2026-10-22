@@ -141,6 +141,21 @@ after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
+### Camera PercentCompleted and cooler members (all camera vendors)
+
+- **`PercentCompleted` is valid only while `CameraState` is `Exposing`** (ICameraV4: "in all other states an
+  InvalidOperationException must be raised"). The rule lives once, in `CameraDriver::get_percent_completed_checked()`;
+  the GET route and the DeviceState builder both call it, never the virtual `get_percent_completed()` (the raw
+  driver value, 0..100). It reads `CameraState` and the raw value first, so a link fault or `NotConnected` still
+  surfaces before the `InvalidOperation` (ADR 0006, 0009). DeviceState therefore omits `PercentCompleted` while the
+  camera is not Exposing, on purpose, and carries it as an integer while Exposing. A new camera driver adds
+  nothing for this; it only keeps `get_percent_completed()` honest while Exposing.
+- **`CoolerOn` (get and set) and `CoolerPower` raise `PropertyNotImplemented` on a camera without a cooler**
+  (ICameraV4: "if not supported"), gated on the capability the driver already uses (ZWO and SVBONY: the SDK
+  control, Player One and QHY: the camera's cooler flag, GPhoto: none). Never answer `false` or `0.0` for a
+  member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
+- **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
+
 ### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
 
 A Switch that drives a camera's dew heater or fan (ZWO Dew Heater, ToupTek thermal,

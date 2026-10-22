@@ -499,7 +499,7 @@ public:
         if (!can_get_control(SVBControlType::CoolerEnable)) {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
-            return false;
+            throw AlpacaException("This SVBONY camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         long value = get_control_value_or_throw(SVBControlType::CoolerEnable);
         return value != 0;
@@ -510,10 +510,7 @@ public:
         if (!can_get_control(SVBControlType::CoolerEnable)) {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
-            if (cooler_on) {
-                throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-            }
-            return;
+            throw AlpacaException("This SVBONY camera has no cooler", AlpacaError::PropertyNotImplemented);
         }
         set_control_value_or_throw(SVBControlType::CoolerEnable, cooler_on ? 1 : 0);
     }
@@ -523,7 +520,7 @@ public:
         if (!can_get_control(SVBControlType::CoolerPower)) {
             std::lock_guard<std::mutex> lock(mutex_);
             ensure_connected_locked();
-            return 0.0;
+            throw AlpacaException("This SVBONY camera cannot report cooler power", AlpacaError::PropertyNotImplemented);
         }
         long value = get_control_value_or_throw(SVBControlType::CoolerPower);
         return static_cast<double>(value);

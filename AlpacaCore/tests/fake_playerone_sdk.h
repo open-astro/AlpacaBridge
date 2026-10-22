@@ -319,6 +319,11 @@ public:
     int get_cooler_power_percent(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_cooler_power_percent");
+        if (cooler_power_failure_) {
+            // The real wrapper throws an AlpacaException from throw_on_error().
+            throw alpacacore::AlpacaException("scripted cooler-power read failure",
+                                              alpacacore::AlpacaError::DriverException);
+        }
         return 0;
     }
     double get_egain(int) override {
@@ -428,6 +433,10 @@ public:
     }
     void set_pulse_off_failure(bool fail) { pulse_off_failure_ = fail; }
     void set_stop_failure(bool fail) { stop_failure_ = fail; }
+    void set_cooler_power_failure(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cooler_power_failure_ = fail;
+    }
     void set_ready_on_stop_failure(bool ready) { ready_on_stop_failure_ = ready; }
     void set_image_ready(bool ready) {
         ready_on_start_ = ready;
@@ -495,6 +504,7 @@ private:
     std::vector<ListedCamera> listed_;
     bool init_failure_{false};
     bool download_failure_{false};
+    bool cooler_power_failure_{false};
     bool hold_image_data_{false};
     bool ignore_download_timeout_{false};
     bool hold_start_readback_{false};
