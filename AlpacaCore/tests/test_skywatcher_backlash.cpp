@@ -411,6 +411,51 @@ TEST_CASE("SkyWatcher backlash - a goto against the approach side ends with a sl
     CHECK(final_legs == 4);  // one per axis per hemisphere
 }
 
+TEST_CASE("SkyWatcher backlash - without a site the RA axis is not compensated (#1474)",
+          "[skywatcher][telescope][backlash]") {
+    // Decision 0019: Park and the no-indexer FindHome work without a site. The
+    // RA approach side is the tracking direction of the site's hemisphere, and
+    // an unset latitude would read as north: a southern rig would load the
+    // gears the wrong way. So until both coordinates are known the RA axis
+    // sends the plain goto (no overshoot, no final leg); Dec, whose approach
+    // side does not depend on the site, is still compensated.
+    const auto profile = FakeMountProfile::eqm35_pro();
+    sw::BacklashSettings both = dec_backlash(kBacklash);
+    both.ra = {kBacklash, true};
+    const auto no_site_run = [&](const sw::BacklashSettings& backlash) {
+        FakeTaskClock clock;
+        FakeSkyWatcherMount mount(profile, clock);
+        REQUIRE(mount.ok());
+        auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, std::nullopt, std::nullopt, {},
+                                                      {}, alpacacore::util::default_task_clock(),
+                                                      sw::DecAxisSenseSetting::Auto, backlash);
+        driver->set_connected(true);
+        // Both axes start at +4 degrees: the goto home moves against the north
+        // approach side (counts up) that an unset latitude would pick for RA.
+        mount.jump_axis_degrees(1, 4.0);
+        mount.jump_axis_degrees(2, 4.0);
+        mount.clear_motion_log();
+        driver->find_home();
+        pump_until_landed(clock, *driver, mount);
+        HomeRun r;
+        for (int axis = 1; axis <= 2; ++axis) {
+            r.frames[axis - 1] = axis_frames(mount.motion_log(), axis);
+            r.register_deg[axis - 1] = mount.axis_degrees(axis);
+        }
+        driver->set_connected(false);
+        return r;
+    };
+    const HomeRun plain = no_site_run({});
+    const HomeRun comp = no_site_run(both);
+    CHECK_FALSE(has_final_leg(comp.frames[0]));
+    CHECK(comp.frames[0] == plain.frames[0]);  // RA: today's commands
+    CHECK(comp.register_deg[0] == plain.register_deg[0]);
+    // Dec +4 down to the origin runs against its approach side: still compensated.
+    CHECK(has_final_leg(comp.frames[1]));
+    CHECK(comp.frames[1].size() == plain.frames[1].size() + 5);
+    CHECK(comp.register_deg[1] == plain.register_deg[1]);
+}
+
 TEST_CASE("SkyWatcher backlash - the final leg's speed follows the board's worm count",
           "[skywatcher][telescope][backlash]") {
     auto half = FakeMountProfile::eqm35_pro();

@@ -110,10 +110,8 @@ public:
     void set_handshake_delay(std::chrono::milliseconds delay) { handshake_delay_ms_.store(delay.count()); }
 
     /// What ":24#" reports for temperature compensation ("11#" on, "10#"
-    /// off). Settable so a test can pin the TRUE branch: the driver's
-    /// get_temp_comp() catches every std::exception and returns false, so an
-    /// assertion that only ever sees "off" passes whether the round trip
-    /// worked or threw.
+    /// off). Settable so a test can pin the TRUE branch: an assertion that
+    /// only ever sees "off" would not show that the round trip worked.
     void set_temp_comp_reply(bool on) { temp_comp_on_.store(on); }
 
     /// What ":01#" and ":06#" report; the position is set by a move or here.
@@ -124,6 +122,8 @@ public:
     /// ":06#" answers garbage while the other state queries stay good (a
     /// focuser without a temperature probe).
     void set_garbage_temperature(bool on) { garbage_temperature_.store(on); }
+    /// ":24#" answers a frame the temperature compensation parser rejects ("Qx#"), the other queries stay good.
+    void set_garbage_temp_comp(bool on) { garbage_temp_comp_.store(on); }
     void set_moving(bool moving) { moving_.store(moving); }
     void set_temperature(double celsius) { temperature_.store(celsius); }
     void set_position(int position) { position_.store(position); }
@@ -191,6 +191,8 @@ private:
             reply = "O1#";
         } else if (cmd == ":13#") {
             reply = "R0#";
+        } else if (cmd == ":24#" && garbage_temp_comp_.load()) {
+            reply = "Qx#";
         } else if (cmd == ":24#") {
             reply = temp_comp_on_.load() ? "11#" : "10#";
         } else if (cmd == ":26#") {
@@ -224,6 +226,7 @@ private:
 
     std::atomic<bool> garbage_state_{false};
     std::atomic<bool> garbage_temperature_{false};
+    std::atomic<bool> garbage_temp_comp_{false};
     std::atomic<bool> moving_{false};
     std::atomic<double> temperature_{12.5};
     std::atomic<int> position_{1000};

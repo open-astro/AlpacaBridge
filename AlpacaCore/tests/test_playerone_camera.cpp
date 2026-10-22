@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "fake_playerone_sdk.h"
 #include "fake_task_clock.h"
@@ -1324,4 +1325,71 @@ TEST_CASE("Player One Camera Driver - FakePlayerOneSDK exposure behind LockedPla
     CHECK(fake.exposure_start_count() == 1);
     driver->set_connected(false);
     CHECK(fake.close_count() == 1);
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; the cooler members raise
+// PropertyNotImplemented on a camera without a cooler; an SDK failure reading CoolerPower is never reported as 0.
+TEST_CASE("Player One Camera Driver - PercentCompleted only while Exposing", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*driver); }
+    SECTION("idle after a completed exposure") {
+        driver->start_exposure(0.001, true);
+        REQUIRE(eventually([&] {
+            try {
+                return driver->get_image_ready();
+            } catch (...) {
+                return false;
+            }
+        }));
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("idle after a failed download") {
+        sdk.set_download_failure(true);
+        driver->start_exposure(0.001, true);
+        REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+        REQUIRE(eventually([&] {
+            try {
+                (void)driver->get_image_ready();
+                return false;
+            } catch (const alpacacore::AlpacaException&) {
+                return true;
+            }
+        }));
+        alpacacore::test::require_percent_completed_unavailable(*driver);
+    }
+    SECTION("while exposing") {
+        sdk.set_image_ready(false);
+        driver->start_exposure(10.0, true);
+        REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+        alpacacore::test::require_percent_completed_available(*driver);
+        driver->abort_exposure();
+    }
+}
+
+TEST_CASE("Player One Camera Driver - cooler members need the cooler capability", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_temperature_control_available(false);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    CHECK_FALSE(driver->get_can_get_cooler_power());
+    alpacacore::test::require_no_cooler_members(*driver);
+}
+
+TEST_CASE("Player One Camera Driver - an SDK failure reading CoolerPower is not reported as 0",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_temperature_control_available(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_get_cooler_power());
+    CHECK(driver->get_cooler_power() == 0.0);
+
+    sdk.set_cooler_power_failure(true);
+    require_alpaca_error([&] { (void)driver->get_cooler_power(); }, alpacacore::AlpacaError::DriverException);
+    for (const auto& entry : driver->get_device_state()) {
+        CHECK(entry.name != "CoolerPower");
+    }
 }

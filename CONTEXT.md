@@ -36,7 +36,8 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   `MoveAxis(axis, 0)`, disconnect). The operation brings the device to a safe stop and
   publishes that state.
 - **Superseded**: a newer operation now owns the same axes or device. The old body
-  touches neither hardware nor driver state; the newer one is responsible for both.
+  touches neither hardware nor driver state, except to stop a move it started in a
+  wire turn it still holds; the newer one is responsible for both.
   SkyWatcher tells the two apart by hand today through its driver-wide motion
   generation counter.
 - Avoid: "aborted" or "stopped" for both. Treating a superseded body as cancelled

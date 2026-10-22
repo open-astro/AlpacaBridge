@@ -25,8 +25,10 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -379,13 +381,14 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     GPhotoCameraDriver(int device_number, int camera_index, GPhotoSDK& sdk, RawDecoder& decoder,
-                       util::TaskClock& clock = util::default_task_clock())
+                       util::TaskClock& clock = util::default_task_clock(), const GPhotoOptions& options = {})
         : AsyncConnectable("GPhoto"),
           device_number_(device_number),
           camera_index_(camera_index),
           sdk_(sdk),
           decoder_(decoder),
-          clock_(clock) {
+          clock_(clock),
+          options_(options) {
         preload_camera_info_locked();
     }
 
@@ -546,6 +549,24 @@ public:
                 return;
             }
 
+            // The priming capture is a gp_camera_capture, which a body with mirror lock-up on
+            // answers only after a 60 s timeout. Skip it: geometry is then learned from the first
+            // real exposure, exactly as when priming fails. A failed MLU read skips too, since
+            // priming is best-effort and the read says nothing about whether a capture would stall.
+            bool skip_priming = true;
+            try {
+                skip_priming = mirror_lockup_on_locked(opened_handle);
+            } catch (const std::exception& e) {
+                ALPACA_LOG_DEBUG(kLogTag, "Mirror lock-up state unreadable at connect, skipping the priming capture: " +
+                                              std::string(e.what()));
+            }
+            if (skip_priming) {
+                ALPACA_LOG_DEBUG(kLogTag,
+                                 "Skipping the sensor geometry priming capture (mirror lock-up on or unknown)");
+                connected_.store(true);
+                return;
+            }
+
             // First time this model has ever connected on this rig: prime it
             // now, off mutex_ (it takes a real capture+download), so ASCOM
             // geometry properties are valid the moment Connected becomes
@@ -697,20 +718,20 @@ public:
         return *sensor_temperature_;
     }
 
+    // No gphoto2 camera has a cooler: CanGetCoolerPower and CanSetCCDTemperature are false, so the cooler
+    // members raise PropertyNotImplemented (ICameraV4: "if not supported").
     bool get_cooler_on() const override {
         ensure_connected();
-        return false;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
-    void set_cooler_on(bool cooler_on) override {
+    void set_cooler_on(bool /*cooler_on*/) override {
         ensure_connected();
-        if (cooler_on) {
-            throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-        }
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_cooler_power() const override {
         ensure_connected();
-        return 0.0;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
     double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 
@@ -972,6 +993,7 @@ public:
         std::string shutter_choice;
         std::string shutter_widget_name;
         bool use_bulb;
+        bool use_mlu;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (handle_ < 0) {
@@ -992,6 +1014,25 @@ public:
                 }
             }
             active_handle = handle_;
+            // Follow the camera's own mirror lock-up menu setting; the driver never writes it. With it on, the
+            // body answers gp_camera_capture only after a 60 s timeout, so the shutter is fired with two
+            // eosremoterelease press/release pairs (mlu_capture_with_abort). A body that cannot do that must
+            // fail here, before the worker starts, rather than stall.
+            try {
+                use_mlu = mirror_lockup_on_locked(active_handle);
+            } catch (const GPhotoDeviceGoneException& e) {
+                // Same teardown as a worker that finds the camera gone (#1064): report disconnected so the
+                // client reconnects, instead of leaving Connected true on a dead handle.
+                mark_device_gone_locked(active_handle);
+                throw AlpacaException(std::string("Camera is no longer connected: ") + e.what(),
+                                      AlpacaError::NotConnected);
+            }
+            if (use_mlu && !remote_release_pair_.has_value()) {
+                throw AlpacaException(
+                    "Mirror lock-up is on in the camera, but this camera has no eosremoterelease press/release "
+                    "control, so an exposure cannot be fired. Turn mirror lock-up off in the camera menu.",
+                    AlpacaError::InvalidOperation);
+            }
             // A body in B mode lists only "bulb" for its shutter speed, so there is no native
             // speed to fall back on: every duration takes the bulb path.
             use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
@@ -1017,12 +1058,18 @@ public:
             // bulb capture also gets the whole window bulb_capture_with_abort
             // may spend waiting for the frame after the shutter closes, so
             // the watchdog never declares Idle while that wait is still
-            // legitimately running.
+            // legitimately running. A mirror lock-up exposure waits for its
+            // frame the same way (it has no gp_camera_capture to return it) and
+            // also spends the settle between its two presses.
             auto duration_margin = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
                                        std::chrono::duration<double>(duration)) +
                                    std::chrono::seconds(60);
-            if (use_bulb) {
+            if (use_bulb || use_mlu) {
                 duration_margin += bulb_file_wait_for(duration);
+            }
+            if (use_mlu) {
+                duration_margin +=
+                    std::chrono::duration_cast<std::chrono::steady_clock::duration>(options_.mirror_lockup_settle);
             }
             exposure_deadline_ = clock_.now() + duration_margin;
             exposure_deadline_valid_ = true;
@@ -1030,8 +1077,8 @@ public:
         }
 
         exposure_thread_ =
-            std::thread([this, active_handle, shutter_choice, shutter_widget_name, use_bulb, duration]() {
-                run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, duration);
+            std::thread([this, active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration]() {
+                run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration);
             });
     }
 
@@ -1043,7 +1090,10 @@ public:
         // capture, libgphoto2 has no capture-cancel primitive: gp_camera_
         // capture() is a single blocking call, so "abort" here can only wait
         // for it to finish naturally (bounded by the longest native shutter
-        // choice, typically <=30s) rather than truly interrupt it.
+        // choice, typically <=30s) rather than truly interrupt it. A mirror
+        // lock-up exposure has no such call: an abort cuts the settle short and
+        // still fires the second press/release pair (the mirror is up), then
+        // run_exposure discards the frame.
         abort_requested_.store(true);
         exposure_active_.store(false);
         if (exposure_thread_.joinable()) {
@@ -1064,6 +1114,7 @@ private:
     GPhotoSDK& sdk_;
     RawDecoder& decoder_;
     util::TaskClock& clock_;
+    const GPhotoOptions options_;
 
     mutable std::mutex mutex_;
     std::atomic<bool> connected_{false};
@@ -1087,6 +1138,9 @@ private:
     // eosremoterelease (issue #640). Both are picked by name at connect, never by index; empty without the pair.
     std::string remote_press_choice_;
     std::string remote_release_choice_;
+    // The eosremoterelease (press, release) pair, found whenever the widget has one, whatever the mode dial says.
+    // Mirror lock-up fires the shutter with it. Unlike remote_press_choice_ it does not mean bulb is available.
+    std::optional<std::pair<std::string, std::string>> remote_release_pair_;
     std::string bulb_choice_;  // shutter-speed choice string selecting bulb mode
     std::vector<std::pair<std::string, double>> native_shutter_choices_;  // sorted ascending by seconds
     std::string shutter_widget_name_{"shutterspeed2"};  // whichever of the fallback names was found at connect
@@ -1287,11 +1341,16 @@ private:
         // standalone "bulb" toggle (Nikon), or on Canon bodies, which have no
         // such widget, the eosremoterelease press/release pair together with
         // the shutter-speed "bulb" choice. Without either, ExposureMax stays
-        // capped at the longest native shutter speed.
+        // capped at the longest native shutter speed. The pair is also kept in
+        // remote_release_pair_ whatever the mode dial says, because mirror
+        // lock-up fires the shutter with it (mlu_capture_with_abort).
         remote_press_choice_.clear();
         remote_release_choice_.clear();
+        remote_release_pair_.reset();
         has_bulb_ = sdk.has_widget(handle, "bulb");
-        if (!has_bulb_ && to_lower(bulb_choice_) == "bulb" && sdk.has_widget(handle, "eosremoterelease")) {
+        // The pair is looked up whenever the widget exists, even beside a "bulb" toggle: mirror lock-up needs it
+        // to fire the shutter whatever the bulb path is.
+        if (sdk.has_widget(handle, "eosremoterelease")) {
             const auto remote_choices = sdk.get_choices(handle, "eosremoterelease");
             const auto has = [&](const char* choice) {
                 return std::find(remote_choices.begin(), remote_choices.end(), choice) != remote_choices.end();
@@ -1305,11 +1364,15 @@ private:
             };
             for (const auto& [press, release] : kRemoteReleasePairs) {
                 if (has(press) && has(release)) {
-                    remote_press_choice_ = press;
-                    remote_release_choice_ = release;
-                    has_bulb_ = true;
+                    remote_release_pair_ = std::make_pair(std::string(press), std::string(release));
                     break;
                 }
+            }
+            // Bulb on a Canon body is the shutter-speed "bulb" choice held open by that pair.
+            if (!has_bulb_ && remote_release_pair_.has_value() && to_lower(bulb_choice_) == "bulb") {
+                remote_press_choice_ = remote_release_pair_->first;
+                remote_release_choice_ = remote_release_pair_->second;
+                has_bulb_ = true;
             }
         }
         if (!has_bulb_) {
@@ -1341,6 +1404,8 @@ private:
                             "No RAW image-quality choice found on this camera; captures will fail to "
                             "decode unless the camera's current format is already RAW.");
         }
+
+        apply_long_exposure_nr_locked(sdk, handle);
 
         // Geometry (sensor size, Bayer phase, max ADU) is not knowable until
         // a frame has actually been decoded -- reset here so a reconnect
@@ -1408,24 +1473,32 @@ private:
     // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
     // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
     // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
-    // close handle_, so handle_ only changes here under mutex_. A stop in progress is not a failure.
+    // close handle_, so handle_ only changes under mutex_ (here and in mark_device_gone_locked, which
+    // start_exposure also calls from the caller's thread). A stop in progress is not a failure.
     void record_exposure_failure(int handle, const char* what, bool device_gone) {
         if (abort_requested_.load()) return;
         std::lock_guard<std::mutex> lock(mutex_);
         exposure_error_ = what;
         exposure_failed_ = true;
-        if (!device_gone || handle_ != handle) return;
+        if (!device_gone) return;
+        mark_device_gone_locked(handle);
+    }
+
+    // Requires mutex_ held. The camera behind `handle` left the USB bus: forget the handle, report
+    // disconnected and close it. A handle that is no longer current is left alone.
+    void mark_device_gone_locked(int handle) {
+        if (handle_ != handle) return;
         handle_ = -1;
         connected_.store(false);
         try {
             sdk_.close_camera(handle);
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // The handle belongs to a device that is gone; the failure is already latched and logged.
+            // The handle belongs to a device that is gone; a close failure adds nothing the caller can act on.
         }
     }
 
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
-                      bool use_bulb, double duration) {
+                      bool use_bulb, bool use_mlu, double duration) {
         auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
@@ -1433,7 +1506,9 @@ private:
             }
 
             GPhotoCaptureResult capture;
-            if (use_bulb) {
+            if (use_mlu) {
+                capture = mlu_capture_with_abort(handle, duration, use_bulb);
+            } else if (use_bulb) {
                 capture = bulb_capture_with_abort(handle, duration);
             } else {
                 capture = sdk.capture_and_download(handle);
@@ -1458,7 +1533,7 @@ private:
         exposure_active_.store(false);
     }
 
-    // How long to keep polling for the frame after a bulb shutter closes. A
+    // How long to keep polling for the frame after a bulb (or mirror lock-up) shutter closes. A
     // body with long-exposure noise reduction on holds the file for a second
     // exposure-length (the dark frame) before posting it, so the window
     // scales with the exposure rather than being a fixed few seconds; the
@@ -1475,60 +1550,41 @@ private:
     // after the close). run_exposure() discards whatever arrives.
     static constexpr auto kAbortedBulbFileWait = std::chrono::seconds(15);
 
-    // Bulb capture with early-abort support. The hold loop pumps the camera's
-    // event queue in short slices instead of sleeping, so a Nikon body sees
-    // the host polling for the whole exposure the way the gphoto2 CLI's
-    // --wait-event does between bulb=1 and bulb=0 (issue #569), and so
-    // stop_exposure()/abort_exposure() can close the shutter well before the
-    // full requested duration elapses. After the close, the frame is polled
-    // for in slices up to bulb_file_wait_for(duration), checking the abort
-    // flag between slices.
-    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
-        auto& sdk = sdk_;
-        using clock = util::TaskClock::clock;
+    // Pumps the camera's event queue in short slices for `duration_s` on the TaskClock, or until an abort. The
+    // slices (instead of a sleep) keep a Nikon body seeing the host poll for the whole bulb exposure the way the
+    // gphoto2 CLI's --wait-event does between bulb=1 and bulb=0 (issue #569), and let stop_exposure()/
+    // abort_exposure() end the hold well before the requested time. The hold calls into the SDK, so unlike the
+    // sleep it replaced it can throw. A throw that skipped the close would leave the shutter open, the exact
+    // wedge issue #569 is about, so `close` runs on every way out of the hold and the original failure is
+    // rethrown afterwards.
+    void hold_with_events(int handle, std::chrono::steady_clock::duration duration,
+                          const std::function<void()>& close) {
         constexpr auto kHoldSlice = std::chrono::milliseconds(100);
-        constexpr auto kFilePollSlice = std::chrono::seconds(1);
-
-        // Nikon: the "bulb" toggle. Canon: eosremoterelease Press Full / Release Full.
-        const bool use_remote_release = !remote_press_choice_.empty();
-        const auto shutter_open = [&] {
-            if (use_remote_release) {
-                sdk.set_choice_value(handle, "eosremoterelease", remote_press_choice_);
-            } else {
-                sdk.set_toggle_value(handle, "bulb", true);
-            }
-        };
-        const auto shutter_close = [&] {
-            if (use_remote_release) {
-                sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
-            } else {
-                sdk.set_toggle_value(handle, "bulb", false);
-            }
-        };
-
-        shutter_open();
-        const auto hold_deadline =
-            clock_.now() + std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s));
-        // The hold calls into the SDK, so unlike the sleep it replaced it can
-        // throw. A throw that skipped the close would leave the shutter open,
-        // the exact wedge issue #569 is about, so bulb=0 is sent on every way
-        // out of the hold and the original failure is rethrown afterwards.
+        const auto hold_deadline = clock_.now() + duration;
         try {
             while (!abort_requested_.load()) {
                 const auto now = clock_.now();
                 if (now >= hold_deadline) break;
                 const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(hold_deadline - now);
-                sdk.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
+                sdk_.drain_events(handle, std::min(remaining, std::chrono::milliseconds(kHoldSlice)));
             }
         } catch (...) {
             try {
-                shutter_close();
+                close();
             } catch (const std::exception& e) {
-                ALPACA_LOG_WARN(kLogTag, "Bulb close after a failed hold also failed: " + std::string(e.what()));
+                ALPACA_LOG_WARN(kLogTag, "Shutter close after a failed hold also failed: " + std::string(e.what()));
             }
             throw;
         }
-        shutter_close();
+        close();
+    }
+
+    // After the shutter closes, polls for the frame in slices up to bulb_file_wait_for(duration_s), checking the
+    // abort flag between slices.
+    GPhotoCaptureResult wait_for_bulb_file(int handle, double duration_s, const char* what = "Bulb capture") {
+        auto& sdk = sdk_;
+        using clock = util::TaskClock::clock;
+        constexpr auto kFilePollSlice = std::chrono::seconds(1);
 
         bool aborted = abort_requested_.load();
         auto file_deadline =
@@ -1548,12 +1604,115 @@ private:
             }
         }
         throw AlpacaException(
-            "Bulb capture: no file-added event from camera within " +
+            std::string(what) + ": no file-added event from camera within " +
                 std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
                                    aborted ? clock::duration(kAbortedBulbFileWait) : bulb_file_wait_for(duration_s))
                                    .count()) +
                 " s of closing the shutter (is long-exposure noise reduction on?)",
             AlpacaError::DriverException);
+    }
+
+    // Bulb capture with early-abort support: open the shutter, hold_with_events() for the exposure, close it,
+    // then wait_for_bulb_file().
+    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
+        auto& sdk = sdk_;
+        using clock = util::TaskClock::clock;
+
+        // Nikon: the "bulb" toggle. Canon: eosremoterelease Press Full / Release Full.
+        const bool use_remote_release = !remote_press_choice_.empty();
+        const auto shutter_open = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_press_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", true);
+            }
+        };
+        const auto shutter_close = [&] {
+            if (use_remote_release) {
+                sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
+            } else {
+                sdk.set_toggle_value(handle, "bulb", false);
+            }
+        };
+
+        shutter_open();
+        hold_with_events(handle, std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s)),
+                         shutter_close);
+        return wait_for_bulb_file(handle, duration_s);
+    }
+
+    // The eosremoterelease sequence for a body with mirror lock-up on (never gp_camera_capture, which times out
+    // after 60 s): press and release to raise the mirror, settle, then press and release again to take the frame
+    // (`hold` keeps the second press down for the exposure, the bulb case). The frame arrives as a file-added
+    // event, so it is waited for like a bulb frame.
+    //
+    // The settle runs on the TaskClock and pumps events like the hold. An abort cuts it short but does not skip
+    // the second pair: the mirror is up, and a body left there would fire on the NEXT exposure's first press.
+    // The frame it takes is discarded by run_exposure().
+    GPhotoCaptureResult mlu_capture_with_abort(int handle, double duration_s, bool hold) {
+        using clock = util::TaskClock::clock;
+        auto& sdk = sdk_;
+        const auto press = [&] { sdk.set_choice_value(handle, "eosremoterelease", remote_release_pair_->first); };
+        const auto release = [&] { sdk.set_choice_value(handle, "eosremoterelease", remote_release_pair_->second); };
+
+        press();
+        release();  // the mirror is up
+        hold_with_events(handle, options_.mirror_lockup_settle, [] {});
+        press();
+        if (hold) {
+            hold_with_events(handle,
+                             std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s)),
+                             release);
+        } else {
+            release();
+        }
+        return wait_for_bulb_file(handle, duration_s, "Mirror lock-up capture");
+    }
+
+    // Requires mutex_ held. True when the camera's own mirror lock-up (MLU) menu item is on. Single-widget
+    // lookups only (docs/failures/0009): Canon 70D `mirrorlock` (0/1, writable but never written here), else
+    // Canon 250D `mirrorlockstatus` (read-only, 0 off, 1 on, 2 after the first press). Any non-zero number is
+    // on, so a leftover 2 never reads as off and sends the body to a stalling gp_camera_capture. A body with
+    // neither widget is MLU off, which keeps the single-capture path.
+    bool mirror_lockup_on_locked(int handle) {
+        for (const char* name : {"mirrorlock", "mirrorlockstatus"}) {
+            if (!sdk_.has_widget(handle, name)) continue;
+            const std::string value = to_lower(sdk_.get_text_value(handle, name));
+            char* end = nullptr;
+            const double number = std::strtod(value.c_str(), &end);
+            if (end != value.c_str()) return number != 0.0;
+            return value == "on" || value == "true" || value == "yes";
+        }
+        return false;
+    }
+
+    // Requires mutex_ held, camera idle (connect). Writes the Nikon longexpnr widget once when the config asks
+    // for "on" or "off"; "camera" writes nothing. Never fails the connect: a body without the widget (every
+    // Canon tested) or a refused write logs a WARN and the connect carries on. The choice text is matched
+    // without regard to case against the camera's own list, because libgphoto2 translates On/Off.
+    void apply_long_exposure_nr_locked(GPhotoSDK& sdk, int handle) {
+        const std::string& mode = options_.long_exposure_nr;
+        if (mode != "on" && mode != "off") return;
+        try {
+            if (!sdk.has_widget(handle, "longexpnr")) {
+                ALPACA_LOG_WARN(kLogTag, "long-exposure NR is not settable on this camera; set it in the camera menu");
+                return;
+            }
+            const auto choices = sdk.get_choices(handle, "longexpnr");
+            const auto match = std::find_if(choices.begin(), choices.end(),
+                                            [&](const std::string& choice) { return to_lower(choice) == mode; });
+            if (match == choices.end()) {
+                ALPACA_LOG_WARN(kLogTag, "long-exposure NR has no \"" + mode +
+                                             "\" choice on this camera; set it in the camera menu");
+                return;
+            }
+            sdk.set_choice_value(handle, "longexpnr", *match);
+        } catch (const GPhotoDeviceGoneException&) {
+            throw;
+        } catch (const std::exception& e) {
+            ALPACA_LOG_WARN(kLogTag, "long-exposure NR could not be set (" + std::string(e.what()) +
+                                         "); set it in the camera menu");
+        }
     }
 
     // Requires mutex_ held. Populates the geometry properties (CameraXSize/
@@ -1666,14 +1825,16 @@ DecodedFrame LibRawDecoder::decode(const std::vector<std::uint8_t>& raw_bytes) {
     return frame;
 }
 
-std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index) {
+std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, const GPhotoOptions& options) {
     static LibRawDecoder decoder;
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder);
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, GPhotoSDKWrapper::instance(), decoder,
+                                                util::default_task_clock(), options);
 }
 
 std::unique_ptr<CameraDriver> create_gphoto_camera(int device_number, int camera_index, GPhotoSDK& sdk,
-                                                   RawDecoder& decoder, util::TaskClock& clock) {
-    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder, clock);
+                                                   RawDecoder& decoder, util::TaskClock& clock,
+                                                   const GPhotoOptions& options) {
+    return std::make_unique<GPhotoCameraDriver>(device_number, camera_index, sdk, decoder, clock, options);
 }
 
 }  // namespace alpacacore::vendor::gphoto

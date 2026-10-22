@@ -125,7 +125,7 @@ AlpacaBridge is a workspace that combines [AlpacaCore](AlpacaCore/README.md) and
 - **Beta `.deb`s carry build provenance** (CI, `.github/workflows/release.yml`): each beta `.deb` attached to a pre-release now gets a Sigstore-signed SLSA build provenance attestation, so `gh attestation verify <file> --repo open-astro/AlpacaBridge` proves which workflow and commit built it. A release dry run attests nothing. Stable `.deb`s ship through apt.openastro.net and are not covered.
 
 ### Changed (validation)
-- **ZWO AM5 firmware 1.8.6 validated on Linux arm64**: ConformU 4.5.2 completed with no errors, warnings, issues or timing violations on the stable/5.0-based build, including removal of the inverted-longitude retry; the redacted report is saved under `AlpacaCore/conformu/ZWO/AM5/Linux-arm64.txt`. The repeated-horizon-rejection path also has separate fake-mount regression coverage.
+- **ZWO AM5 firmware 1.8.6 validated on Linux arm64**: ConformU 4.5.2 completed with no errors, warnings, issues or timing violations on the stable/5.0-based build, including removal of the inverted-longitude retry; the [redacted report is archived at its original validation revision](https://github.com/open-astro/AlpacaBridge/blob/924260b0184dbe026caea8c84f7805a3d9990543/AlpacaCore/conformu/ZWO/AM5/Linux-arm64.txt). The repeated-horizon-rejection path also has separate fake-mount regression coverage.
 - **ZWO ASI533MC Pro, ASI120MM Mini and EAF re-validated on 5.0.0-beta.1** (AlpacaCore): ConformU 4.5.1 (build 54507), Raspberry Pi 5, Debian 13 arm64, the released `alpacabridge_5.0.0-beta.1_arm64.deb`: 0 errors, 0 issues, 0 warnings and no timing marks on all three. The EAF report replaces one made with ConformU 4.2.1.
 
 ### Fixed

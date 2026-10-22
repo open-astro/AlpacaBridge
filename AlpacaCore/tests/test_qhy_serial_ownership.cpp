@@ -20,6 +20,8 @@
 
 #ifndef _WIN32
 
+#include <alpacacore/catalog/builtin_catalog.h>
+#include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_filterwheel_driver.h>
@@ -28,6 +30,7 @@
 #include <termios.h>
 
 #include <chrono>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <string>
@@ -191,6 +194,34 @@ TEST_CASE("QHY Q-Focuser serial - the connected port is claimed, released on dis
     CHECK(fake.connects() == 2);
     driver->set_connected(false);
     CHECK_FALSE(is_serial_port_in_use(fake.slave_path()));
+}
+
+TEST_CASE("QHY Q-Focuser catalog - the configured maxStep reaches the connected driver and bounds Move",
+          "[qhy][serial][catalog]") {
+    FakeQhyQFocuser fake;
+    alpacacore::catalog::DeviceCatalog catalog;
+    alpacacore::catalog::register_builtin_schemas(catalog);
+    alpacacore::catalog::register_builtin_factories(catalog);
+
+    alpacacore::catalog::DeviceConfig config;
+    config.set("connectionType", std::string{"serial"});
+    config.set("portPath", fake.slave_path());
+    config.set("maxStep", std::int64_t{30000});
+    auto driver = catalog.create(alpacacore::catalog::DeviceKey{"qhy", alpacacore::DeviceType::Focuser}, config, 0);
+    REQUIRE(driver != nullptr);
+    auto& focuser = dynamic_cast<alpacacore::FocuserDriver&>(*driver);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(focuser.get_max_step() == 30000);
+    CHECK(focuser.get_max_increment() == 30000);
+    try {
+        focuser.move(30001);
+        FAIL("Move beyond the configured maxStep must be refused");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidValue);
+    }
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32

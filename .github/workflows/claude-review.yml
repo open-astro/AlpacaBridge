@@ -110,6 +110,62 @@ jobs:
             sleep 30
           done
 
+      # Claude Code CLI, cached so a review does not depend on claude.ai/install.sh
+      # answering (it returned 429 on some runs). These four steps run before the
+      # checkout below, so no PR-head code exists on the runner yet and nothing
+      # from a PR can write into the cached files before the save. Under
+      # pull_request_target the cache is scoped to the default branch. Keep
+      # the version in the key, the install and the check equal to the action's pinned
+      # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA below
+      # is bumped. The version check is the only integrity check.
+      - name: Restore the Claude Code CLI cache
+        id: claude_cli_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.local/share/claude
+            ~/.local/bin/claude
+          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install the Claude Code CLI on a cache miss
+        if: steps.claude_cli_cache.outputs.cache-hit != 'true'
+        run: |
+          # Without pipefail a failed curl (429) leaves bash reading an empty
+          # script, which exits 0, and the pipeline would pass.
+          set -o pipefail
+          # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
+          for wait in 15 30 60 120 stop; do
+            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
+              exit 0
+            fi
+            if [ "${wait}" = stop ]; then
+              echo "::error::The Claude Code CLI install failed after 5 attempts."
+              exit 1
+            fi
+            echo "Install failed; retrying in ${wait} s."
+            sleep "${wait}"
+          done
+
+      - name: Check the Claude Code CLI version
+        run: |
+          reported="$("${HOME}/.local/bin/claude" --version)" || reported="(claude did not run)"
+          case "${reported}" in
+            2.1.302\ *|2.1.302) echo "Claude Code CLI ${reported}" ;;
+            *)
+              echo "::error::Expected Claude Code CLI 2.1.302, got: ${reported}"
+              exit 1
+              ;;
+          esac
+
+      - name: Save the Claude Code CLI cache
+        if: steps.claude_cli_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.local/share/claude
+            ~/.local/bin/claude
+          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Review the head the author pushed, not the base branch or merge ref.
@@ -167,29 +223,46 @@ jobs:
           fi
           git status --short
 
-      # Which decision-record rules the diff falls under, computed by the base
-      # branch's scripts over the base branch's records (restored above), so a
-      # PR cannot change what it is checked against. Only lines of the form
-      # `NNNN-slug.md: rules 1, 2` reach the prompt.
+      # Which decision-record rules the diff falls under: the default branch's
+      # scripts run over the base branch's records (restored above), so a PR
+      # cannot change what it is checked against, and a stable/* base without
+      # the script still gets the list. Only lines of the form
+      # `NNNN-slug.md: rules 1, 2` reach the prompt. A base with records whose
+      # scope cannot be computed fails the job here: a review that cannot see
+      # the rules does not run (it used to run with a "read docs/decisions/
+      # directly" fallback). The list is also kept in a file for the
+      # checklist gate before posting.
       - name: List the decision-record rules in scope
         id: adr_scope
         env:
           GH_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
         run: |
-          base_tree="${RUNNER_TEMP}/adr-base"
-          rm -rf "${base_tree}" && mkdir -p "${base_tree}"
-          records="none (the scope could not be computed; read docs/decisions/ directly)"
-          if git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null \
-              && git archive "${BASE_SHA}" scripts docs/decisions | tar -x -C "${base_tree}" \
-              && [ -f "${base_tree}/scripts/check_adr_scope.py" ]; then
-            listed="$(gh pr diff "${PR_NUMBER}" --repo "${REPO}" --name-only \
-              | python3 -I "${base_tree}/scripts/check_adr_scope.py" --list --root "${base_tree}" \
-              | grep -E '^[0-9]{4}-[a-z0-9-]+\.md: rules [0-9, ]+$' || true)"
+          fail() { printf '::error::Decision-record scope: %s, so the review does not run.\n' "$1"; exit 1; }
+          tools="${RUNNER_TEMP}/adr-tools"
+          records_tree="${RUNNER_TEMP}/adr-base"
+          rm -rf "${tools}" "${records_tree}" && mkdir -p "${tools}" "${records_tree}"
+          git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null || fail "the base commit ${BASE_SHA} could not be fetched"
+          git fetch --depth=1 origin "refs/heads/${DEFAULT_BRANCH}" || fail "the default branch could not be fetched"
+          git archive FETCH_HEAD scripts | tar -x -C "${tools}" || fail "the default branch's scripts could not be extracted"
+          [ -f "${tools}/scripts/check_adr_scope.py" ] || fail "the default branch has no scripts/check_adr_scope.py"
+          if [ -z "$(git ls-tree -d "${BASE_SHA}" docs/decisions)" ]; then
+            records="none (the base branch has no decision records)"
+          else
+            git archive "${BASE_SHA}" docs/decisions | tar -x -C "${records_tree}" || fail "the base branch's records could not be extracted"
+            changed="$(gh pr diff "${PR_NUMBER}" --repo "${REPO}" --name-only)" || fail "the PR's changed files could not be listed"
+            listed="$(printf '%s\n' "${changed}" \
+              | python3 -I "${tools}/scripts/check_adr_scope.py" --list --root "${records_tree}")" \
+              || fail "check_adr_scope.py --list exited non-zero"
+            if printf '%s\n' "${listed}" | grep -vE '^([0-9]{4}-[a-z0-9-]+\.md: rules [0-9, ]+)?$' >/dev/null; then
+              fail "check_adr_scope.py --list printed a line that is not a rule list"
+            fi
             records="${listed:-none}"
           fi
+          printf '%s\n' "${records}" > "${RUNNER_TEMP}/adr-scope.txt"
           {
             echo "records<<ADR_SCOPE_EOF"
             echo "${records}"
@@ -214,6 +287,9 @@ jobs:
           # API error body by default. Print it once, then revert this line: it
           # also prints the whole review session into the public job log.
           show_full_output: true
+          # The cached CLI above; its version must match the action's pinned
+          # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA is bumped.
+          path_to_claude_code_executable: /home/runner/.local/bin/claude
           # Explicit token: the action's OIDC exchange 401s pull_request_target
           # runs. The comment then posts as github-actions[bot].
           github_token: ${{ github.token }}
@@ -278,6 +354,19 @@ jobs:
             DECISION RECORDS IN SCOPE:
             ${{ steps.adr_scope.outputs.records }}
 
+            Account for every rule listed above, one line each, in a
+            "Decision records" section, exactly in this form:
+              - NNNN-slug.md rule N: VERDICT: reason
+            VERDICT is pass, defect or n/a. The reason names the file and
+            line you checked. Use n/a only when the rule's own wording does
+            not reach the changed lines, and name the wording or Adoption row
+            that exempts them (for example a rule for adopted drivers when the
+            driver's row is planned). Every defect line is also listed under
+            Defects. When nothing is listed, write "none in scope". A workflow
+            step checks this section before posting: a listed rule with no
+            line, two verdicts for one rule, or a defect under the approving
+            sign-off fails the review and nothing is posted.
+
             Review the lines this PR changes, what they directly call, the
             call sites of anything whose signature or contract this PR
             changed, and any doc or skill text that describes the changed
@@ -285,8 +374,9 @@ jobs:
             Ignore files under AlpacaCore/conformu/ (validation logs).
             Be concise. Use short bullet points.
 
-            Write the review as two sections, "Defects" and "Notes" (either
-            may say "none"), then the sign-off as the LAST line of the file:
+            Write the review as three sections, "Defects", "Notes" (either
+            may say "none") and "Decision records" (the checklist above),
+            then the sign-off as the LAST line of the file:
               "⚠️ Issues found" if Defects is non-empty, otherwise
               "✅ Approved". A note is never a reason to withhold approval.
             Do not quote either sign-off string anywhere else in the review.
@@ -298,6 +388,25 @@ jobs:
           claude_args: |
             --model opus
             --allowedTools "Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob,Write,Bash(git log:*),Bash(git diff:*),Bash(git show:*)"
+
+      # Every in-scope rule needs a checklist line before anything posts. The
+      # checker is the default branch's copy extracted by the scope step,
+      # never the PR's. A failure here skips the post and assert steps, so
+      # an incomplete review never reaches the PR as an approval. A missing
+      # file passes: the post step reports it, and a PR that edits this
+      # workflow may get no review at all (see the assert step).
+      - name: Check the decision-record checklist
+        run: |
+          if [ ! -s review-comment.md ]; then
+            exit 0
+          fi
+          if ! python3 -I "${RUNNER_TEMP}/adr-tools/scripts/check_adr_scope.py" \
+              --checklist "${RUNNER_TEMP}/adr-scope.txt" review-comment.md; then
+            echo "::error::The review does not account for every decision-record rule in scope; it was not posted."
+            echo "----- review-comment.md -----"
+            cat review-comment.md
+            exit 1
+          fi
 
       # Posting is a deterministic step: the agent only writes the file.
       - name: Post the review comment

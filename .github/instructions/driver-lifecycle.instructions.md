@@ -20,8 +20,8 @@ Rate setters must re-anchor the dead-reckoning model in place (`anchor_model_loc
 hardware. Also: ConformU runs ON the SBC over localhost — the dev VM's LAN path has 2-90 ms spikes
 that stamp constant `Can*` getters with 0.10x s FAST marks — and a Bash tool timeout kills a child
 ConformU mid-slew, so launch it detached (`setsid nohup`) and poll a done marker. Motor-controller
-mounts store no site: set SiteLatitude/Longitude in the device config first, or the driver
-refuses the connect (#274) and ConformU never reaches CheckMethods.
+mounts store no site: set SiteLatitude/Longitude in the device config first, or every pointing
+member throws `InvalidOperation` (decision 0019, #1474) and ConformU's CheckMethods fail.
 
 **Apply this checklist up front.** ConformU is single-threaded and catches *none*
 of the races below — code review plus the TSan concurrency stress suite do
@@ -68,7 +68,7 @@ vendor-agnostic; do them in the driver from the start.
   an uncaught throw would leave those flags set. Bounding a body stuck in a no-timeout SDK
   call stays the caller's job (see the handle-reference-counting item below).
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
-  ZWO telescope (`goto_thread_`, `pulse_thread_`, `poll_thread_`, `disconnect_thread_`),
+  ZWO telescope (`goto_thread_`, `pulse_thread_`, `disconnect_thread_`),
   the QHYCFW3 move thread,
   the camera exposure workers, the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.

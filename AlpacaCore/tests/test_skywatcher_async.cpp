@@ -152,13 +152,13 @@ sw::ConnectionInfo endpoint(FakeSkyWatcherSerialBoard& board) {
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board) {
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(board), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     return driver;
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount) {
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     return driver;
 }
@@ -198,9 +198,9 @@ constexpr std::size_t kPollerWaiter = 1;
 constexpr auto kClockStep = std::chrono::milliseconds(50);
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatcherMount& mount, FakeTaskClock& clock,
-                                                              double site_latitude_deg = 39.7392,
-                                                              double site_longitude_deg = -104.9903,
-                                                              double site_elevation_m = 1609.0) {
+                                                              double site_latitude_deg = 51.477833,
+                                                              double site_longitude_deg = -0.0015,
+                                                              double site_elevation_m = 42.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), site_latitude_deg, site_longitude_deg,
                                                   site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
@@ -208,9 +208,9 @@ std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(const FakeSkyWatch
 }
 
 std::unique_ptr<alpacacore::TelescopeDriver> connected_driver(FakeSkyWatcherSerialBoard& board, FakeTaskClock& clock,
-                                                              double site_latitude_deg = 39.7392,
-                                                              double site_longitude_deg = -104.9903,
-                                                              double site_elevation_m = 1609.0) {
+                                                              double site_latitude_deg = 51.477833,
+                                                              double site_longitude_deg = -0.0015,
+                                                              double site_elevation_m = 42.0) {
     auto driver = sw::create_skywatcher_telescope(0, endpoint(board), site_latitude_deg, site_longitude_deg,
                                                   site_elevation_m, {}, {}, clock);
     driver->set_connected(true);
@@ -404,7 +404,7 @@ static void check_ahead_landing_held(double site_latitude, double site_longitude
 
 TEST_CASE("SkyWatcher async - an ahead landing is held for the sky, not re-goto'd or left ahead (#1019)",
           "[skywatcher][async]") {
-    check_ahead_landing_held(39.7392, -104.9903, 1609.0);
+    check_ahead_landing_held(51.477833, -0.0015, 42.0);
 }
 
 TEST_CASE("SkyWatcher async - an ahead landing is held for the sky south of the equator too (#1019)",
@@ -2459,7 +2459,7 @@ TEST_CASE("SkyWatcher northern hemisphere - tracking direction unchanged", "[sky
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0, {}, {}, clock);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0, {}, {}, clock);
     driver->set_connected(true);
 
     const double before = mount.axis_degrees(1);
@@ -2486,7 +2486,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the R
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, 150.0000, 80.0, {}, {}, clock);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, 150.0000, 80.0, {}, {}, clock);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -2505,7 +2505,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write across the equator re-applies the R
     CHECK(south_after < south_before);
 
     // A write that stays in the same hemisphere must not disturb the drive.
-    driver->set_site_latitude(-37.2);
+    driver->set_site_latitude(-33.856784);
     const double same_before = mount.axis_degrees(1);
     elapse(clock, std::chrono::milliseconds(800));
     const double same_after = mount.axis_degrees(1);
@@ -2561,7 +2561,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2577,7 +2577,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during an RA pulse restores the NEW
     // it is in flight, so the setter takes its busy-axis skip.
     driver->pulse_guide(2, 1200);                                     // East, 1.2 s
     REQUIRE(advance_through(clock, std::chrono::milliseconds(200)));  // the hold is parked on the clock
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     // Once the pulse has restored tracking, the axis must be running the way
     // the NEW hemisphere wants. With the dispatch-time capture it keeps the
@@ -2605,7 +2605,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2621,7 +2621,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC pulse still re-applies
     // still tracking, so the setter must re-apply it rather than skip.
     driver->pulse_guide(0, 1200);                                     // North, 1.2 s
     REQUIRE(advance_through(clock, std::chrono::milliseconds(200)));  // the hold is parked on the clock
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     // RA reverses immediately -- it is not the pulse's axis, so there is
     // nothing to wait for. Checked again after the pulse ends to prove the
@@ -2661,7 +2661,7 @@ TEST_CASE("SkyWatcher - a RightAscensionRate write during a long East pulse surv
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2704,7 +2704,7 @@ TEST_CASE("SkyWatcher async - a sub-floor RA offset written during a pulse resum
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2745,7 +2745,7 @@ TEST_CASE("SkyWatcher - a DeclinationRate write during an RA pulse is applied, n
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
     REQUIRE_FALSE(mount.axis_running(2));
@@ -2785,7 +2785,7 @@ TEST_CASE("SkyWatcher - a RightAscensionRate write during a DEC pulse is applied
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2824,7 +2824,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
     FakeTaskClock clock;
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::eqm35_pro(), clock);
     REQUIRE(mount.ok());
-    auto driver = connected_driver(mount, clock, 39.7392, 150.0000, 80.0);
+    auto driver = connected_driver(mount, clock, 51.477833, 150.0000, 80.0);
     driver->set_tracking(true);
     REQUIRE(wait_until([&] { return mount.axis_running(1); }, 3000));
 
@@ -2838,7 +2838,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 
     driver->move_axis(1, 0.5);  // Dec axis nudge, degrees/sec
     REQUIRE(wait_until([&] { return mount.axis_running(2); }, 3000));
-    driver->set_site_latitude(-39.7392);
+    driver->set_site_latitude(-51.477833);
 
     const double mid_drift = ra_drift();
     REQUIRE(std::abs(mid_drift) > 0.0);
@@ -2873,7 +2873,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 //
 // The hardware-validated MoveAxis data point
 // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at
-// latitude -37.2: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
+// a southern site: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
 // axis rate on the a2 >= 0 branch increases sky Dec below the equator) is
 // the independent check that the south-of-equator direction asserted here
 // is the physically correct one, not just internally consistent.
@@ -3009,7 +3009,7 @@ TEST_CASE("SkyWatcher northern hemisphere - SideOfPier flips with hour angle and
     FakeTaskClock clock;  // the mount runs on it; the driver stays on the wall clock
     FakeSkyWatcherMount mount(alpacacore::test::FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0);
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0);
     driver->set_connected(true);
     driver->set_tracking(true);
 
@@ -3861,20 +3861,15 @@ TEST_CASE("SkyWatcher async - a Dec pulse leaves a pending RA rate check running
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime only on an undisciplined host (#287, #301)",
+TEST_CASE("SkyWatcher async - UTCDate, SiderealTime and pointing read one time source (#287, #301, #1472)",
           "[skywatcher][async]") {
-    // Before #287, get_utc_date() reported the client's offset while every LST
-    // computation used the raw host clock, so a client time-sync fixed the
-    // readback and not the pointing.
-    //
-    // Since open-astro#301 the two are deliberately split again, but only one
-    // way round: the UTCDate readback ALWAYS honours the client's write, while
-    // the pointing math honours it only on a host the kernel reports as
-    // undisciplined. On an NTP-disciplined host the host clock is the better
-    // one and the router has already refused to step it, so a client's error
-    // must not reach the mount. open-astro#395: the discipline probe is a
-    // seam, so both branches run on every build host; this case runs the body
-    // once per branch.
+    // Decision 0001: the driver has one time source at a time. On an
+    // NTP-disciplined host a UTCDate write throws PropertyNotImplemented and
+    // changes nothing, and all three read the host clock. On an undisciplined
+    // host the write is accepted and its offset moves all three. Before #1472
+    // the readback honoured every write while a disciplined host's pointing
+    // ignored it, so SiderealTime could not be explained from UTCDate. The
+    // discipline probe is a seam (#395), so both branches run on every host.
     const bool host_disciplined = GENERATE(true, false);
     const ProbeGuard probe_guard(host_disciplined);
     FakeSkyWatcherMount mount;
@@ -3886,64 +3881,62 @@ TEST_CASE("SkyWatcher async - a client UTCDate write moves SiderealTime only on 
         h = std::fmod(h, 24.0);
         return h < 0.0 ? h + 24.0 : h;
     };
+    const auto ms_from = [](std::chrono::system_clock::time_point a, std::chrono::system_clock::time_point b) {
+        return std::abs(std::chrono::duration_cast<std::chrono::milliseconds>(a - b).count());
+    };
     const double lst0 = driver->get_sidereal_time();
     const double ra0 = driver->get_right_ascension();
-    const auto host_now = std::chrono::system_clock::now();
-    driver->set_utc_date(host_now + std::chrono::hours(1));
-
-    const auto reported = driver->get_utc_date();
-    const auto readback_error = std::chrono::duration_cast<std::chrono::milliseconds>(
-        reported - (std::chrono::system_clock::now() + std::chrono::hours(1)));
-    CHECK(std::abs(readback_error.count()) < 500);
+    if (host_disciplined) {
+        expect_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1)); },
+                            alpacacore::AlpacaError::PropertyNotImplemented);
+    } else {
+        driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
+    }
+    const auto expected_utc =
+        std::chrono::system_clock::now() + (host_disciplined ? std::chrono::hours(0) : std::chrono::hours(1));
+    CHECK(ms_from(driver->get_utc_date(), expected_utc) < 500);
 
     // The axes have not moved (tracking off, counts fixed) so reported RA
-    // follows LST one-for-one: RA = LST - HA.
+    // follows LST one-for-one: RA = LST - HA. One UT hour is 1.0027379
+    // sidereal hours.
     const double d_lst = wrap24(driver->get_sidereal_time() - lst0);
     const double d_ra = wrap24(driver->get_right_ascension() - ra0);
     if (host_disciplined) {
-        // #301: the client's hour never reaches the pointing math. Both
-        // deltas are the few milliseconds the test itself took.
         CHECK((d_lst < 0.002 || d_lst > 23.998));
         CHECK((d_ra < 0.002 || d_ra > 23.998));
-    } else {
-        // One UT hour is 1.0027379 sidereal hours.
-        CHECK(d_lst > 1.0027379 - 0.002);
-        CHECK(d_lst < 1.0027379 + 0.002);
-        CHECK(d_ra > 1.0027379 - 0.002);
-        CHECK(d_ra < 1.0027379 + 0.002);
+        driver->set_connected(false);
+        return;
     }
+    CHECK(d_lst > 1.0027379 - 0.002);
+    CHECK(d_lst < 1.0027379 + 0.002);
+    CHECK(d_ra > 1.0027379 - 0.002);
+    CHECK(d_ra < 1.0027379 + 0.002);
 
-    // Setting the clock back to the host's time leaves LST where it started,
-    // on either branch.
+    // Setting the clock back to the host's time moves all three back.
     driver->set_utc_date(std::chrono::system_clock::now());
     const double d_back = wrap24(driver->get_sidereal_time() - lst0);
     CHECK((d_back < 0.002 || d_back > 23.998));
-    // ...and the readback follows the new write, again on either branch.
-    const auto reported_back = driver->get_utc_date();
-    const auto back_error =
-        std::chrono::duration_cast<std::chrono::milliseconds>(reported_back - std::chrono::system_clock::now());
-    CHECK(std::abs(back_error.count()) < 500);
+    CHECK(ms_from(driver->get_utc_date(), std::chrono::system_clock::now()) < 500);
 
     // open-astro#414: the offset is session state. Arm it again, then
-    // disconnect and reconnect: the readback is back on the host clock until
+    // disconnect and reconnect: all three are back on the host clock until
     // the client writes UTCDate once more.
     driver->set_utc_date(std::chrono::system_clock::now() + std::chrono::hours(1));
     driver->set_connected(false);
     CHECK_FALSE(driver->get_connected());
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    const auto after_reconnect = std::chrono::duration_cast<std::chrono::milliseconds>(
-        driver->get_utc_date() - std::chrono::system_clock::now());
-    CHECK(std::abs(after_reconnect.count()) < 500);
+    CHECK(ms_from(driver->get_utc_date(), std::chrono::system_clock::now()) < 500);
+    const double d_reconnect = wrap24(driver->get_sidereal_time() - lst0);
+    CHECK((d_reconnect < 0.002 || d_reconnect > 23.998));
     driver->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher - the pointing clock ignores a client offset on an NTP-disciplined host (#301)",
           "[skywatcher][unit]") {
-    // The ASCOM UTCDate readback is the client's property to set and always
-    // honours the write; this rule is only about the clock the mount is aimed
-    // by. Pure, so it is testable without an NTP daemon and without stepping
-    // the test host's clock.
+    // Since #1472 UTCDate, SiderealTime and pointing all read the clock this
+    // rule picks (decision 0001). Pure, so it is testable without an NTP
+    // daemon and without stepping the test host's clock.
     using alpacacore::vendor::skywatcher::detail::pointing_uses_client_offset;
 
     // No surviving offset: nothing to apply, whatever the host is doing. That
@@ -3964,10 +3957,11 @@ TEST_CASE("SkyWatcher - the pointing clock ignores a client offset on an NTP-dis
     CHECK_FALSE(pointing_uses_client_offset(true, true));
 }
 
-TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any host (#301)", "[skywatcher][async]") {
-    // Whatever the pointing math does, a client that writes UTCDate and reads
-    // it back must get its own value: ConformU checks exactly this, and it has
-    // to hold on an NTP-disciplined build box as much as on an off-grid Pi.
+TEST_CASE("SkyWatcher async - an accepted UTCDate write reads back on an undisciplined host (#301, #1472)",
+          "[skywatcher][async]") {
+    // ConformU writes UTCDate and reads it back. On a host without NTP the
+    // write is the time source, so the readback is the client's value.
+    const ProbeGuard probe_guard(false);
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
@@ -3982,50 +3976,122 @@ TEST_CASE("SkyWatcher async - the UTCDate readback honours the client on any hos
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - connecting without configured site coordinates is refused (#274)",
-          "[skywatcher][async]") {
-    // The mount stores no site of its own, so an unconfigured device would run
-    // on 0.0/0.0. hemisphere_south_locked() is site_latitude_ < 0.0, which
-    // silently puts a southern rig on northern pointing math and undoes #250,
-    // #253 and #261. 0.0/0.0 is a real place, so the driver tracks provenance
-    // rather than testing for the magic value.
+TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one (#1474)", "[skywatcher][async]") {
+    // Decision 0019: the mount stores no site of its own, and the sky frame,
+    // the RA tracking direction and the Dec rate and guide sign all depend on
+    // the hemisphere. A client may connect first and write its site after, so
+    // the connect succeeds and every member that would point by an unknown
+    // site throws InvalidOperation instead; site-free members keep answering.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
 
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, std::nullopt, std::nullopt);
-    try {
-        driver->set_connected(true);
-        FAIL("Expected the connect to be refused");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
-    }
-    CHECK_FALSE(driver->get_connected());
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    REQUIRE(driver->get_connected());
+    // The connect sent no motion: nothing hemisphere-dependent reached the board.
+    CHECK(mount.start_count(1) == 0);
+    CHECK(mount.start_count(2) == 0);
+
+    const int invalid_operation = alpacacore::AlpacaError::InvalidOperation;
+    expect_alpaca_error([&] { driver->get_site_latitude(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_site_longitude(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_declination(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_altitude(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_azimuth(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_sidereal_time(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_side_of_pier(); }, invalid_operation);
+    expect_alpaca_error([&] { driver->get_destination_side_of_pier(5.0, 10.0); }, invalid_operation);
+    expect_alpaca_error([&] { driver->set_tracking(true); }, invalid_operation);
+    expect_alpaca_error([&] { driver->slew_to_coordinates_async(5.0, 10.0); }, invalid_operation);
+    expect_alpaca_error([&] { driver->sync_to_coordinates(5.0, 10.0); }, invalid_operation);
+    expect_alpaca_error([&] { driver->move_axis(0, 1.0); }, invalid_operation);
+    expect_alpaca_error([&] { driver->pulse_guide(0, 100); }, invalid_operation);
+    expect_alpaca_error([&] { driver->set_right_ascension_rate(0.01); }, invalid_operation);
+    expect_alpaca_error([&] { driver->set_declination_rate(1.0); }, invalid_operation);
+    // Nothing the refusals above reached moved the board.
+    CHECK(mount.start_count(1) == 0);
+    CHECK(mount.start_count(2) == 0);
+
+    // Members that do not depend on the site keep answering.
+    CHECK_FALSE(driver->get_tracking());
+    CHECK_FALSE(driver->get_slewing());
+    CHECK_FALSE(driver->get_at_park());
+    CHECK_NOTHROW(driver->get_utc_date());
+    CHECK_NOTHROW(driver->abort_slew());
+    // DeviceState leaves out what throws and still reports the rest.
+    const auto state = driver->get_device_state();
+    const auto has = [&](const std::string& name) {
+        return std::any_of(state.begin(), state.end(), [&](const auto& item) { return item.name == name; });
+    };
+    CHECK_FALSE(has("RightAscension"));
+    CHECK_FALSE(has("SiderealTime"));
+    CHECK(has("Tracking"));
+
+    // Writing the second coordinate makes the mount usable without a reconnect.
+    driver->set_site_latitude(-33.856784);
+    expect_alpaca_error([&] { driver->get_right_ascension(); }, invalid_operation);
+    driver->set_site_longitude(151.215297);
+    CHECK_NOTHROW(driver->get_right_ascension());
+    CHECK_NOTHROW(driver->get_sidereal_time());
+    CHECK(driver->get_site_latitude() == -33.856784);
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    CHECK(driver->get_tracking());
+    // Elevation waits for its own write, not for the coordinates.
+    expect_alpaca_error([&] { driver->get_site_elevation(); }, invalid_operation);
+    driver->set_site_elevation(15.0);
+    CHECK(driver->get_site_elevation() == 15.0);
+    driver->set_tracking(false);
+    driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - one configured coordinate is not enough (#274)", "[skywatcher][async]") {
+TEST_CASE("SkyWatcher async - SiteElevation never waits behind device I/O (decision 0016)", "[skywatcher][async]") {
+    // Falsified by: taking mutex_ in get_site_elevation(), which queues the
+    // getter behind SetPark's position refresh held up on the wire.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -33.856784, 151.215297, 42.0);
+    REQUIRE_NOTHROW(driver->set_connected(true));
 
-    // Latitude alone: the hemisphere is known but LST is not, so this is still
-    // refused rather than half-accepted.
-    // The error code is asserted, not just the type: a connect refused for an
-    // unrelated reason (a fake-board handshake failure, say) also throws
-    // AlpacaException, and these cases are about the site guard specifically.
-    auto refused_for_site = [](alpacacore::TelescopeDriver& driver) {
-        try {
-            driver.set_connected(true);
-            FAIL("Expected the connect to be refused");
-        } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
-        }
-        CHECK_FALSE(driver.get_connected());
-    };
+    constexpr auto kHold = std::chrono::milliseconds(1500);
+    mount.hold_next_reply(kHold);
+    std::thread parking([&] { driver->set_park(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // SetPark is inside its exchange
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_site_elevation(15.0);
+    CHECK(driver->get_site_elevation() == 15.0);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    parking.join();
+    CHECK(waited < kHold / 3);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SkyWatcher async - one configured coordinate is not enough to point (#274, #1474)", "[skywatcher][async]") {
+    // Latitude alone: the hemisphere is known but LST is not; longitude alone,
+    // the reverse. Either connects and still refuses to point, and the getter
+    // of the coordinate that was set answers.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    const int invalid_operation = alpacacore::AlpacaError::InvalidOperation;
 
     auto lat_only = sw::create_skywatcher_telescope(0, endpoint(mount), -33.87, std::nullopt, std::nullopt);
-    refused_for_site(*lat_only);
+    REQUIRE_NOTHROW(lat_only->set_connected(true));
+    CHECK(lat_only->get_site_latitude() == -33.87);
+    expect_alpaca_error([&] { lat_only->get_site_longitude(); }, invalid_operation);
+    expect_alpaca_error([&] { lat_only->get_right_ascension(); }, invalid_operation);
+    expect_alpaca_error([&] { lat_only->set_tracking(true); }, invalid_operation);
+    lat_only->set_connected(false);
 
     auto lon_only = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, 151.21, std::nullopt);
-    refused_for_site(*lon_only);
+    REQUIRE_NOTHROW(lon_only->set_connected(true));
+    CHECK(lon_only->get_site_longitude() == 151.21);
+    expect_alpaca_error([&] { lon_only->get_site_latitude(); }, invalid_operation);
+    expect_alpaca_error([&] { lon_only->get_sidereal_time(); }, invalid_operation);
+    expect_alpaca_error([&] { lon_only->set_tracking(true); }, invalid_operation);
+    lon_only->set_connected(false);
 }
 
 TEST_CASE("SkyWatcher async - 0.0/0.0 configured explicitly is accepted (#274)", "[skywatcher][async]") {
@@ -4042,21 +4108,22 @@ TEST_CASE("SkyWatcher async - 0.0/0.0 configured explicitly is accepted (#274)",
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - the ASCOM setters satisfy the site requirement (#274)", "[skywatcher][async]") {
+TEST_CASE("SkyWatcher async - the ASCOM setters before Connected supply the site (#274, #1474)",
+          "[skywatcher][async]") {
     // A raw Alpaca client that writes SiteLatitude and SiteLongitude before
-    // Connected has supplied the same information the config would have, so
-    // the connect must succeed. Both setters work while disconnected.
+    // Connected has supplied what the config would have. Both setters work
+    // while disconnected.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
 
     auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), std::nullopt, std::nullopt, std::nullopt);
     driver->set_site_latitude(-33.87);
-    // Still short one coordinate.
-    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
-
     driver->set_site_longitude(151.21);
     REQUIRE_NOTHROW(driver->set_connected(true));
     CHECK(driver->get_connected());
+    CHECK_NOTHROW(driver->get_right_ascension());
+    REQUIRE_NOTHROW(driver->set_tracking(true));
+    driver->set_tracking(false);
     driver->set_connected(false);
 }
 
@@ -4159,52 +4226,14 @@ TEST_CASE("SkyWatcher async - a sync that fails after its writes still publishes
     driver->set_connected(false);
 }
 
-TEST_CASE("SkyWatcher async - the client-clock disagreement WARN fires once per connection (#400)",
-          "[skywatcher][async]") {
-    // Only meaningful on a disciplined host (the WARN is gated on it); on an
-    // undisciplined runner the count stays 0 on both writes and the case
-    // still passes, which is the honest outcome without a discipline seam.
-    // The sink is restored by a guard, so a REQUIRE that throws out of the
-    // case cannot leave the global sink pointing at this frame's counter.
-    std::atomic<int> warns{0};
-    struct SinkGuard {
-        alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
-        ~SinkGuard() { alpacacore::logging::set_log_sink(previous); }
-    } sink_guard;
-    alpacacore::logging::set_log_sink(
-        [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
-            if (level == alpacacore::logging::LogLevel::Warn &&
-                message.find("Client UTCDate disagrees") != std::string::npos) {
-                ++warns;
-            }
-        });
-    {
-        FakeSkyWatcherMount mount;
-        REQUIRE(mount.ok());
-        auto driver = connected_driver(mount);
-        const auto far = std::chrono::system_clock::now() + std::chrono::minutes(30);
-        driver->set_utc_date(far);
-        driver->set_utc_date(far + std::chrono::seconds(1));
-        driver->set_utc_date(far + std::chrono::seconds(2));
-        const int first_session = warns.load();
-        CHECK(first_session <= 1);
-        // A reconnect re-arms it.
-        driver->set_connected(false);
-        driver->set_connected(true);
-        REQUIRE(driver->get_connected());
-        driver->set_utc_date(far);
-        CHECK(warns.load() == first_session * 2);
-        driver->set_connected(false);
-    }
-}
-
-TEST_CASE("SkyWatcher async - discipline gained after the write stops the client offset steering pointing (#405)",
-          "[skywatcher][async]") {
+TEST_CASE(
+    "SkyWatcher async - discipline gained after the write moves UTCDate and pointing to the host clock (#405, #1472)",
+    "[skywatcher][async]") {
     // Host undisciplined at the write: the client's +1 h reaches LST. The
     // host then becomes disciplined without a step (NTP slewing a clock that
     // was already close), which the step detector cannot see. The pointing
     // path re-samples the probe at most once per interval and drops back to
-    // the host clock; the UTCDate readback keeps honouring the client.
+    // the host clock, and the UTCDate readback with it (#1472).
     // Process-wide probe state is installed and restored by the guard, so a
     // REQUIRE that throws out of the case cannot leave a lambda that
     // captures this frame in the global slot.
@@ -4229,10 +4258,13 @@ TEST_CASE("SkyWatcher async - discipline gained after the write stops the client
         static_cast<void>(driver->get_sidereal_time());  // the read that re-samples
         const double d_after = wrap24(driver->get_sidereal_time() - lst0);
         CHECK((d_after < 0.002 || d_after > 23.998));
-        // The readback is the client's property and still says +1 h.
-        const auto readback = std::chrono::duration_cast<std::chrono::milliseconds>(
-            driver->get_utc_date() - (std::chrono::system_clock::now() + std::chrono::hours(1)));
+        // #1472: the readback moved back to the host clock with LST, and the
+        // next write is refused.
+        const auto readback = std::chrono::duration_cast<std::chrono::milliseconds>(driver->get_utc_date() -
+                                                                                    std::chrono::system_clock::now());
         CHECK(std::abs(readback.count()) < 500);
+        expect_alpaca_error([&] { driver->set_utc_date(std::chrono::system_clock::now()); },
+                            alpacacore::AlpacaError::PropertyNotImplemented);
         driver->set_connected(false);
     }
 }
@@ -5159,7 +5191,7 @@ TEST_CASE("SkyWatcher async - the connect stop-confirm gives up at 2 s of clock 
         }
     });
 
-    auto second = sw::create_skywatcher_telescope(0, endpoint(mount), 39.7392, -104.9903, 1609.0,
+    auto second = sw::create_skywatcher_telescope(0, endpoint(mount), 51.477833, -0.0015, 42.0,
                                                   std::make_unique<LongOutageWrapper>(clock), {}, clock);
     const auto started = clock.now();
     REQUIRE(call_on_clock(clock, [&] { second->set_connected(true); }, std::chrono::milliseconds(20000)));

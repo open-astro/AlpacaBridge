@@ -472,17 +472,17 @@
                     <p><small>The motor controller stores no site information, so the observing site must be set here (or by the client at connect time).</small></p>
                     <div class="form-group">
                         <label for="skywatcher-site-latitude">Site Latitude (deg):</label>
-                        <input type="number" id="skywatcher-site-latitude" name="skywatcherSiteLatitude" min="-90" max="90" step="any" placeholder="39.739200">
+                        <input type="number" id="skywatcher-site-latitude" name="skywatcherSiteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
                         <small>Required. Tracking direction, guide sign and pier side are all hemisphere-dependent.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-site-longitude">Site Longitude (deg):</label>
-                        <input type="number" id="skywatcher-site-longitude" name="skywatcherSiteLongitude" min="-180" max="180" step="any" placeholder="-104.990300">
+                        <input type="number" id="skywatcher-site-longitude" name="skywatcherSiteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
                         <small>Required. Use Alpaca convention: west negative, east positive.</small>
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-site-elevation">Site Elevation (m):</label>
-                        <input type="number" id="skywatcher-site-elevation" name="skywatcherSiteElevation" min="-300" max="10000" step="any" placeholder="1609">
+                        <input type="number" id="skywatcher-site-elevation" name="skywatcherSiteElevation" min="-300" max="10000" step="any" placeholder="42">
                         <small>Optional.</small>
                     </div>
                     <div class="form-group">
@@ -764,17 +764,17 @@
                         <h4>Site and Time</h4>
                         <div class="form-group">
                             <label for="zwo-mount-site-latitude">Site Latitude (deg):</label>
-                            <input type="number" id="zwo-mount-site-latitude" name="zwoMountSiteLatitude" min="-90" max="90" step="any" placeholder="39.739200">
+                            <input type="number" id="zwo-mount-site-latitude" name="zwoMountSiteLatitude" min="-90" max="90" step="any" placeholder="51.477833">
                             <small>Recommended. Set your observing latitude to avoid horizon test failures in Conform.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-site-longitude">Site Longitude (deg):</label>
-                            <input type="number" id="zwo-mount-site-longitude" name="zwoMountSiteLongitude" min="-180" max="180" step="any" placeholder="-104.990300">
+                            <input type="number" id="zwo-mount-site-longitude" name="zwoMountSiteLongitude" min="-180" max="180" step="any" placeholder="-0.001500">
                             <small>Use Alpaca convention: west negative, east positive.</small>
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-site-elevation">Site Elevation (m):</label>
-                            <input type="number" id="zwo-mount-site-elevation" name="zwoMountSiteElevation" min="-300" max="10000" step="any" placeholder="1609">
+                            <input type="number" id="zwo-mount-site-elevation" name="zwoMountSiteElevation" min="-300" max="10000" step="any" placeholder="42">
                             <small>Optional.</small>
                         </div>
                         <div class="form-group">
@@ -1255,6 +1255,22 @@
                         <input type="number" id="gphoto-camera-index" name="gphotoCameraIndex" value="0" min="0">
                         <small>0-based index from the USB autodetect list. Connect the camera over
                         USB and power it on before saving.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gphoto-mirror-lockup-settle-ms">Mirror lock-up settle (ms):</label>
+                        <input type="number" id="gphoto-mirror-lockup-settle-ms" name="gphotoMirrorLockupSettleMs" value="2000" min="500" max="10000" step="1">
+                        <small>Wait between the two shutter presses when mirror lock-up is on in the camera menu.</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="gphoto-long-exposure-nr">Long-exposure NR:</label>
+                        <select id="gphoto-long-exposure-nr" name="gphotoLongExposureNR">
+                            <option value="camera" selected>Camera setting</option>
+                            <option value="off">Off</option>
+                            <option value="on">On</option>
+                        </select>
+                        <small>Sets long-exposure noise reduction at connect. Canon: LENR is set in the camera menu.</small>
                     </div>
 
                 </div>
@@ -2026,7 +2042,7 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=13"></script>
-    <script src="/web/app.js?v=44"></script>
+    <script src="/web/format.js?v=14"></script>
+    <script src="/web/app.js?v=45"></script>
 </body>
 </html>

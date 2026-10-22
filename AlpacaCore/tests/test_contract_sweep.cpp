@@ -266,6 +266,10 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
             p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
             p.push_back({"get_at_home", [&] { (void)t.get_at_home(); }});
+            if (entry.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::NotConnected) {
+                p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
+                p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
+            }
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
@@ -292,6 +296,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
             p.push_back({"get_position", [&] { (void)f.get_position(); }});
             p.push_back({"get_is_moving", [&] { (void)f.get_is_moving(); }});
+            p.push_back({"get_max_step", [&] { (void)f.get_max_step(); }});
+            p.push_back({"get_max_increment", [&] { (void)f.get_max_increment(); }});
             p.push_back({"move(0)", [&] { f.move(0); }});
             p.push_back({"halt", [&] { f.halt(); }});
             break;
@@ -309,6 +315,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_cover_state", [&] { (void)c.get_cover_state(); }});
             p.push_back({"get_calibrator_state", [&] { (void)c.get_calibrator_state(); }});
             p.push_back({"get_brightness", [&] { (void)c.get_brightness(); }});
+            p.push_back({"get_max_brightness", [&] { (void)c.get_max_brightness(); }});
             // No open_cover probe: the Gemini Cover Lite has no cover and answers NotImplemented.
             break;
         }
@@ -420,6 +427,15 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    if (e.type == DeviceType::Telescope &&
+        e.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::Static) {
+        // A stated exemption: pinned so that the driver that is fixed flips this case (see ContractEntry).
+        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
+        INFO(e.id << " rate_getters_reason: " << e.rate_getters_reason);
+        REQUIRE(std::string(e.rate_getters_reason).size() > 0);
+        CHECK(thrown_code([&] { (void)t.get_right_ascension_rate(); }) == -1);
+        CHECK(thrown_code([&] { (void)t.get_declination_rate(); }) == -1);
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);
@@ -1077,6 +1093,9 @@ Tier2Host tier2_host_zwo_telescope() {
     return mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
+            if (chunk.find(":GU#") != std::string::npos) return "NG#";
+            if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
+            if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
             // Tracking on, and the target setters (:Sr, :Sd) accepted; "0#" would make the driver report
             // "ZWO mount rejected target RA".
             return (chunk.find(":GAT") != std::string::npos || chunk.find(":Sr") != std::string::npos ||
@@ -2881,12 +2900,48 @@ std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
 }
 #endif
 
+#ifdef ALPACACORE_ENABLE_ZWO
+std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
+    namespace zwo = alpacacore::vendor::zwo;
+    auto rig = std::make_unique<SnapshotRig>();
+    auto muted = std::make_shared<std::atomic<bool>>(false);
+    auto mount =
+        std::make_shared<alpacacore::test::FakeMountServer>([muted](const std::string& command) -> std::string {
+            if (command.find(":GU#") != std::string::npos) return muted->load() ? "e1#" : "NG#";
+            if (command.find(":GR#") != std::string::npos) return "12:00:00#";
+            if (command.find(":GD#") != std::string::npos) return "+45*00:00#";
+            if (command.find(":GA#") != std::string::npos) return "+45*00:00#";
+            if (command.find(":GZ#") != std::string::npos) return "180*00:00#";
+            if (command.find(":Ggr#") != std::string::npos) return "0.5#";
+            if (command.starts_with(":S")) return "1#";
+            return "0#";
+        });
+    REQUIRE(mount->ok());
+    zwo::ConnectionInfo info;
+    info.type = zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = mount->port();
+    info.response_timeout_ms = 100;
+    rig->fake = mount;
+    rig->driver = zwo::create_zwo_telescope_with_site(0, info, 30.0, -100.0, {}, false, *rig->clock);
+    rig->driver->set_connected(true);
+    rig->await_poll();
+    rig->hold_frame = [muted] { muted->store(true); };
+    return rig;
+}
+#endif
+
 // One X(id, getters) per adopter this build compiles in. `id` is the roster id in contract_sweep.h.
 // clang-format off
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
 #define CS3_SKYWATCHER(X) X(skywatcher_telescope, snapshot_telescope_getters(true))
 #else
 #define CS3_SKYWATCHER(X)
+#endif
+#ifdef ALPACACORE_ENABLE_ZWO
+#define CS3_ZWO(X) X(zwo_telescope, snapshot_telescope_getters(true))
+#else
+#define CS3_ZWO(X)
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
 #define CS3_CELESTRON(X) X(celestron_telescope, snapshot_telescope_getters(true)) X(celestron_focuser, snapshot_focuser_getters(false))
@@ -2919,7 +2974,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_astroasis_focuser() {
 #define CS3_ASTROASIS(X)
 #endif
 #define CONTRACT_SWEEP_SNAPSHOT_ADOPTERS(X) \
-    CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
+    CS3_ZWO(X) CS3_SKYWATCHER(X) CS3_CELESTRON(X) CS3_BISQUE(X) CS3_SYNSCAN(X) CS3_GEMINI(X) CS3_QHY(X) CS3_ASTROASIS(X)
 // clang-format on
 
 // Every getter must answer on the live link first: a getter that throws here is a setup defect of the hook,

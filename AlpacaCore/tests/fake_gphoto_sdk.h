@@ -112,9 +112,18 @@ inline std::string unique_test_model(const std::string& base) {
  *  - `set_choice_value` / `set_toggle_value` on an UNMODELLED widget insert a
  *    new map entry and succeed, where GPhotoSDKWrapper throws
  *    PropertyNotImplemented. Unreachable today (every production write is
- *    gated by has_widget or has_bulb_), but lenient in the direction a fake
- *    must not be; a test that scripts an absent widget must not rely on the
- *    write failing.
+ *    gated by has_widget or has_bulb_; the longexpnr write at connect is gated
+ *    by has_widget), but lenient in the direction a fake must not be; a test
+ *    that scripts an absent widget must not rely on the write failing. Script a
+ *    failing write with `refuse_choice_writes` instead.
+ *  - The mirror lock-up widgets (`mirrorlock`, `mirrorlockstatus`) are modelled
+ *    as text widgets holding "0"/"1" (`mirrorlockstatus` also "2" after the
+ *    first press). The real `mirrorlock` is a RANGE or TEXT widget
+ *    (`_get_INT`); the wrapper's type-aware read turns it into the same
+ *    string, so the fake skips that layer. The fake does not move `mirrorlockstatus` when the
+ *    driver presses the shutter, and it does not model a camera that stalls
+ *    in gp_camera_capture with mirror lock-up on (the real body times out
+ *    after 60 s); a case asserts that capture_and_download is never called.
  *  - `drain_events` sleeps out its WHOLE budget where the real wrapper
  *    returns as each event lands and polls again; the fake is the slower of
  *    the two, so the hold loop's timing is exercised at its harshest.
@@ -180,6 +189,10 @@ public:
     // Records every set_choice_value(handle, "eosremoterelease", value) call, in order (the Canon press/release
     // bulb path), so tests can assert press-then-release ordering.
     std::vector<std::string> remote_release_history;
+
+    // Every successful set_choice_value, per widget and in order (eosremoterelease, longexpnr, ...), so a case can
+    // assert a widget was written once, or not at all. A refused write is not recorded.
+    std::unordered_map<std::string, std::vector<std::string>> choice_write_history;
 
     // Widgets whose set_choice_value throws "I/O in progress", as a Canon body in mode dial B does for
     // the shutter-speed widget (it owns the shutter and refuses the write).
@@ -274,6 +287,7 @@ public:
             }
         }
         cam.choice_value[name] = value;
+        choice_write_history[name].push_back(value);
         if (name == "eosremoterelease") {
             remote_release_history.push_back(value);
         }

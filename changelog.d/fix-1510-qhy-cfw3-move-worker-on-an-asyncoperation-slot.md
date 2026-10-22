@@ -1,0 +1,3 @@
+### Changed
+
+- **QHY CFW3 filter wheel move runs on an `AsyncOperation` slot** (QHY, issue #1510): the goto arrival wait no longer uses a raw `std::thread` member; it runs in a `util::AsyncOperation` slot per decision 0006, and disconnect or destruction cancels and joins it. A second goto mid-move is still refused with `InvalidOperation`, and a failed move still raises on Position until the next move or a reconnect, as before; covered by `test_qhy_cfw3_filterwheel.cpp` ("A second goto mid-move is InvalidOperation", "A failed move makes Position raise until the next Position PUT", "Disconnect during a move cancels the wait and joins").

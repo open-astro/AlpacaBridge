@@ -91,10 +91,10 @@ TEST_CASE("iOptron iEAF Focuser Driver - Unsupported actions", "[ioptron][focuse
 TEST_CASE("iOptron iEAF Focuser Driver - Static capabilities", "[ioptron][focuser][unit]") {
     auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, "/dev/ttyUSB0");
 
-    // Range limits are fixed by the protocol (7-digit move field, hardware
-    // range 0..99999) and do not require a live connection.
-    CHECK(driver->get_max_step() == 99999);
-    CHECK(driver->get_max_increment() == 99999);
+    // Range limits are fixed by the protocol (7-digit move field, hardware range 0..99999), but MaxStep and
+    // MaxIncrement are properties: a disconnected read refuses (issue #1478), the value is read connected below.
+    require_alpaca_error([&]() { driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
 
     // Step size in microns is not exposed by the iEAF protocol -- but
     // disconnected, the connection check answers first (open-astro#309).
@@ -183,6 +183,8 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     CHECK(fake.connects() == 1);
     CHECK(driver->get_position() == 1000);
+    CHECK(driver->get_max_step() == 99999);
+    CHECK(driver->get_max_increment() == 99999);
     driver->move(1500);
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);

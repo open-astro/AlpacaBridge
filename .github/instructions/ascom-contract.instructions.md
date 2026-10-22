@@ -18,7 +18,7 @@ operation slot (`util::AsyncOperation`, see Threads & shutdown in [driver-lifecy
 `Slewing` flip in the same locked step (the public `Slewing` getter returns true while
 `parking_`; the body polls the hardware through a separate `poll_hardware_slewing_locked`).
 Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpark also
-stops the axes and cancels and joins the body); disconnect and the destructor cancel + join through the slot. Keep any
+stops the axes; SynScan supersedes the body, Celestron cancels and joins it until #1406); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
 that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
@@ -98,6 +98,15 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### A failed async operation body keeps its error (all drivers)
+
+The ASCOM async FAQ makes a failed async command (a goto, a slew, a cover move, an exposure) a failed
+operation. The body keeps its error, and the device's completion property (`IsMoving`, `Position`,
+`CoverState`/`CalibratorState`, `ImageReady`, `Slewing`, ...) raises it until the next command of that kind
+or a reconnect clears it. Never log the failure and report done, and never answer the property with a live
+read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
+site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
+
 ### UniqueID is the router's persisted GUID (all drivers)
 
 A driver does not build its `UniqueID`. The router assigns each configured device the version 4
@@ -131,6 +140,21 @@ geometry. Per-SDK constraints (the only vendor-specific part): ZWO width%8 / hei
 after binning; SVBONY width%8 / height%2; Player One width%4 / height%2; ToupTek even
 sensor-resolution width/height/offset AND an even binned output size (see the ToupTek
 odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
+
+### Camera PercentCompleted and cooler members (all camera vendors)
+
+- **`PercentCompleted` is valid only while `CameraState` is `Exposing`** (ICameraV4: "in all other states an
+  InvalidOperationException must be raised"). The rule lives once, in `CameraDriver::get_percent_completed_checked()`;
+  the GET route and the DeviceState builder both call it, never the virtual `get_percent_completed()` (the raw
+  driver value, 0..100). It reads `CameraState` and the raw value first, so a link fault or `NotConnected` still
+  surfaces before the `InvalidOperation` (ADR 0006, 0009). DeviceState therefore omits `PercentCompleted` while the
+  camera is not Exposing, on purpose, and carries it as an integer while Exposing. A new camera driver adds
+  nothing for this; it only keeps `get_percent_completed()` honest while Exposing.
+- **`CoolerOn` (get and set) and `CoolerPower` raise `PropertyNotImplemented` on a camera without a cooler**
+  (ICameraV4: "if not supported"), gated on the capability the driver already uses (ZWO and SVBONY: the SDK
+  control, Player One and QHY: the camera's cooler flag, GPhoto: none). Never answer `false` or `0.0` for a
+  member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
+- **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
 
 ### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
 

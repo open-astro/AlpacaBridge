@@ -1215,6 +1215,8 @@ function startEditDevice(device) {
         setFormValue('iguider-device-path', config.devicePath);
     } else if (vendor === 'gphoto') {
         setFormValue('gphoto-camera-index', config.cameraIndex);
+        setFormValue('gphoto-mirror-lockup-settle-ms', config.mirrorLockupSettleMs !== undefined ? config.mirrorLockupSettleMs : 2000);
+        setFormValue('gphoto-long-exposure-nr', config.longExposureNR || 'camera');
     } else if (vendor === 'touptek' && deviceType === 'switch') {
         // switchType selects the backend: 'thermal' (camera dew heater + fan) or
         // 'stellavita' (GPIO PowerBox, the default for legacy configs).
@@ -4637,6 +4639,12 @@ document.getElementById('device-form').addEventListener('submit', async function
     } else if (deviceData.vendor === 'gphoto') {
         const gphotoCameraIndex = readOptionalNumber(formData, 'gphotoCameraIndex');
         deviceData.cameraIndex = gphotoCameraIndex !== null ? gphotoCameraIndex : 0;
+        // Sent on every save, so a UI edit keeps both values.
+        const gphotoMirrorLockupSettleMs = readOptionalNumber(formData, 'gphotoMirrorLockupSettleMs');
+        if (gphotoMirrorLockupSettleMs !== null) {
+            deviceData.mirrorLockupSettleMs = gphotoMirrorLockupSettleMs;
+        }
+        deviceData.longExposureNR = formData.get('gphotoLongExposureNR') || 'camera';
     } else if (deviceData.vendor === 'touptek' && normalizeDeviceType(deviceData.deviceType) === 'switch') {
         // Unique field name (not "switchType") to avoid the FormData collision
         // with ZWO's switch-type select, which also submits while hidden.
@@ -5044,11 +5052,8 @@ function renderDeviceSettings(config) {
         addRowValue('Aperture Area (m^2)', area.toFixed(6));
     }
 
-    const hiddenKeys = new Set(['vendor', 'deviceType', 'deviceNumber',
-        'apertureDiameter', 'focalLength']);
-
     Object.keys(config)
-        .filter(key => !labelMap.has(key) && !hiddenKeys.has(key))
+        .filter(key => !labelMap.has(key) && deviceSettingShown(key))
         .sort()
         .forEach(key => addRow(key, humanizeSettingKey(key)));
 

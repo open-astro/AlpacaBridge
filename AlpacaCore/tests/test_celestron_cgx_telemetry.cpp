@@ -19,6 +19,7 @@
 #include <thread>
 
 #include "catch2_compat.h"
+#include "cgx_clock_cleanup.h"
 #include "fake_celestron_cgx_mount.h"
 #include "fake_task_clock.h"
 
@@ -30,6 +31,7 @@ struct TelemetryRig {
     alpacacore::test::FakeTaskClock clock;
     std::chrono::system_clock::time_point utc{1700000000s};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    alpacacore::test::CgxClockCleanup cleanup{driver, clock};
 
     TelemetryRig() {
         REQUIRE(mount.ok());
@@ -174,8 +176,8 @@ TEST_CASE("CGX telemetry rehome and reconnect discard the previous raw frame", "
     rig.coordinates();
     CHECK(rig.reads(0x10) == home_ra + 1);
     CHECK(rig.reads(0x11) == home_dec + 1);
-    rig.driver->set_connected(false);
-    rig.driver->set_connected(true);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     const int connect_ra = rig.reads(0x10), connect_dec = rig.reads(0x11);
     rig.coordinates();
     CHECK(rig.reads(0x10) == connect_ra + 1);
@@ -274,8 +276,8 @@ TEST_CASE("CGX telemetry bounds unobserved loss and refuses a known fault", "[ce
     CHECK(rig.reads(0x11) == dec);
     rig.clock.advance(1ms);
     CHECK_THROWS_AS(rig.driver->get_right_ascension(), alpacacore::AlpacaException);
-    rig.driver->set_connected(false);
-    rig.driver->set_connected(true);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, false);
+    alpacacore::test::set_cgx_connected(*rig.driver, rig.clock, true);
     // Recovery changed the transport generation, but did not restore calibration.
     CHECK_THROWS_AS(rig.driver->get_declination(), alpacacore::AlpacaException);
     rig.home();

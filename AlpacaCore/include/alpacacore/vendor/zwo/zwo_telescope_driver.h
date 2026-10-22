@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 
 #include <memory>
@@ -20,16 +21,12 @@
 
 namespace alpacacore::vendor::zwo {
 
-std::unique_ptr<TelescopeDriver> create_zwo_telescope(
-    int device_number,
-    const ConnectionInfo& connection_info);
+std::unique_ptr<TelescopeDriver> create_zwo_telescope(int device_number, const ConnectionInfo& connection_info,
+                                                      util::TaskClock& clock = util::default_task_clock());
 
 std::unique_ptr<TelescopeDriver> create_zwo_telescope_with_site(
-    int device_number,
-    const ConnectionInfo& connection_info,
-    std::optional<double> site_latitude_deg,
-    std::optional<double> site_longitude_deg,
-    std::optional<double> site_elevation_m,
-    std::optional<bool> sync_time_on_connect);
+    int device_number, const ConnectionInfo& connection_info, std::optional<double> site_latitude_deg,
+    std::optional<double> site_longitude_deg, std::optional<double> site_elevation_m,
+    std::optional<bool> sync_time_on_connect, util::TaskClock& clock = util::default_task_clock());
 
 } // namespace alpacacore::vendor::zwo

@@ -69,7 +69,7 @@ Symbol: `SerialLink`
 
 - Every serial wrapper on `stable/5.0` and `main` follows the Rules.
 - A connect can wait up to `util::kSerialProbeClaimWait` (20 s, sized for the CFW3 probe) for another device's probe on its port, which can outlast the Platform 7 five-second `Connecting` window.
-- The registry holds one process-wide line-settings lock; [#1439](https://github.com/open-astro/AlpacaBridge/issues/1439) records that `restore_serial_line_settings()` holds it across `tcgetattr`/`tcsetattr`, a defect to fix, not part of this decision.
+- The registry holds one process-wide line-settings lock, held only to copy or update a record; no terminal call (`tcgetattr`/`tcsetattr`) runs under it ([#1439](https://github.com/open-astro/AlpacaBridge/issues/1439)).
 
 ## Links
 

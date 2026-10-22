@@ -46,13 +46,15 @@ void register_skywatcher_factory(DeviceCatalog& catalog) {
 
         // #274: normalize refuses a config from the API with no site, so only a
         // saved one gets here without it. Register it so it stays listed and
-        // editable in the web UI; the driver refuses the connect until it is fixed.
+        // editable in the web UI; the driver connects and refuses to point until
+        // the site is set (decision 0019).
         if (!latitude || !longitude) {
             const char* missing = (!latitude && !longitude) ? "site coordinates"
                                   : !latitude               ? "site latitude"
                                                             : "site longitude";
             ALPACA_LOG_WARN("SkyWatcherCatalog", "Persisted Sky-Watcher telescope " + std::to_string(device_number) +
-                                                     " has no " + missing + " and will refuse to connect. " +
+                                                     " has no " + missing +
+                                                     "; it connects but refuses to point until the site is set. " +
                                                      std::string(kSkyWatcherMissingSite));
         }
 

@@ -317,6 +317,8 @@ Most ConformU checks can be replicated without hardware. The key is knowing whic
 
 **Camera drivers** must also test:
 - `CameraState` and `PercentCompleted` throw `NotConnected` while disconnected, and `CameraState` is `Idle` when connected before the first exposure
+- `get_percent_completed_checked()` raises `InvalidOperation` unless `CameraState` is `Exposing` (the shared rule is tested once in `test_device_state.cpp`); add a per-driver case that the camera leaves `Exposing` after a completed and a failed exposure
+- `CoolerOn` and `CoolerPower` raise `PropertyNotImplemented` on a camera without a cooler
 - `IsPulseGuiding` is false when idle
 - `ImageReady` is false before any exposure (or throws NotConnected)
 - `CanAbortExposure` and `CanStopExposure` are reportable

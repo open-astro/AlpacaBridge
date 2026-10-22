@@ -7,6 +7,7 @@ applyTo: "AlpacaCore/src/vendors/skywatcher/**,AlpacaCore/include/alpacacore/ven
 Related decisions and failures — read when changing the behavior they explain:
 
 - [Pointing-clock decision](../../docs/decisions/0001-skywatcher-pointing-clock.md)
+- [Connect-without-site decision](../../docs/decisions/0019-connect-without-site.md)
 - [EQMOD board-detection failures](../../docs/failures/0006-eqmod-board-detection.md)
 - [EQMOD pointing-validation failures](../../docs/failures/0007-eqmod-pointing-validation.md)
 - [EQMOD cross-axis motion failures](../../docs/failures/0008-eqmod-cross-axis-motion.md)
@@ -44,10 +45,17 @@ datagrams before each send so replies cannot get off-by-one.
   step-period math (`T1 = TMR_Freq * 360 / rate / CPR`, times the high-speed ratio in
   fast mode). The mount stores **no site or time** — site lat/long/elevation come from
   the web UI config or the Alpaca setters. **Latitude and longitude are mandatory on this
-  vendor** (#274): `configuredevice` rejects a skywatcher config without both, and
-  `Connected = true` throws `InvalidOperation` unless each has been set explicitly, by
-  config or by its setter. A config **already on disk** is registered anyway, with a WARN,
-  and left for the connect-time guard to refuse: a device dropped at startup never enters
+  vendor** (#274): `configuredevice` rejects a skywatcher config without both. Since #1474
+  ([decision 0019](../../docs/decisions/0019-connect-without-site.md)) `Connected = true`
+  succeeds without them and `require_site_locked()` makes every member that reads the
+  hemisphere or the longitude throw `InvalidOperation` until each has been set, by config
+  or by its setter; the site getters throw `InvalidOperation` until their own value is set
+  (SiteElevation included). `Park` and the no-indexer `FindHome` work without a site: they
+  move by mechanical counts and never call it. Their gotos skip RA backlash compensation
+  until the site is known (`dispatch_goto_locked()`), since the RA approach side reads
+  the hemisphere. A new call site of `hemisphere_south_locked()` or
+  `site_longitude_` in a public member must call it. A config **already on disk** is
+  registered anyway, with a WARN, and left for those refusals: a device dropped at startup never enters
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
   `register_device_from_config` — reject `ConfigSource::Api`, warn on `ConfigSource::Persisted`.
@@ -76,26 +84,26 @@ datagrams before each send so replies cannot get off-by-one.
   still says as history: the pier-side label is picked from the sky hour angle and is
   hemisphere-independent, which is one of #432's findings; the mechanical branch is
   `k * side` and mirrors with the hemisphere only on a board with a measured sense (#458).
-  The driver comment on the connect-time guard says the same. Time comes from two functions: `utc_now_locked()`
-  feeds every LST computation (pointing, `SiderealTime`, pier side, gotos) and applies the
-  client-set `UTCDate` offset only while the host clock is undisciplined (no NTP): sampled at
-  the write and, while such an offset is armed, re-sampled at most once per 30 s on the pointing
-  path through `detail::host_synchronized_probe()` (one `adjtimex` read, no device I/O; #405), so
-  a client's clock error never steers pointing on an NTP-good host and stops steering it within
-  about 30 s of the host becoming disciplined by slewing (INFO log; the flag only moves
-  undisciplined to disciplined, since ignoring the offset is the safe side);
-  `client_utc_now_locked()` feeds the `UTCDate` readback and always honours the client's write,
-  because that property is the client's to set and ConformU reads back what it wrote (#287,
-  #351). On an NTP-less host the router also steps the system clock from that write (#289). The
+  Time comes from one function ([decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md),
+  #1472): `utc_now_locked()` feeds the `UTCDate` readback and every LST computation (pointing,
+  `SiderealTime`, pier side, gotos), so a client can explain `SiderealTime` from its own
+  `UTCDate` and `SiteLongitude` reads. On a host the kernel reports NTP-disciplined
+  (`detail::host_synchronized_probe()`, one `adjtimex` read) a `UTCDate` write throws
+  `PropertyNotImplemented` and changes nothing. On an undisciplined host the write is accepted
+  and its offset applies to all three; while it is armed the probe is re-sampled at most once
+  per 30 s on the time path (#405), so the offset stops applying within about 30 s of the host
+  becoming disciplined by slewing (INFO log; the flag only moves undisciplined to disciplined,
+  since ignoring the offset is the safe side). Before #1472 the readback always honoured the
+  write while a disciplined host's pointing ignored it. On an NTP-less host the router also steps the system clock from that write (#289). The
   offset is not sticky: it is dropped (with an INFO log) as soon as the host clock is stepped
   underneath it (Sync Time, NTP taking over, `date`), detected as the system and steady clocks
   disagreeing by more than 1 s since the write, and re-armed by the next `UTCDate` write; the
   30 s re-sample above covers discipline gained without a step. Tests pin both branches through
   the probe seam (`ProbeGuard` in `test_skywatcher_async.cpp`) rather than the build host's own
-  clock state (#395). **This split is Sky-Watcher-only.** A mount with its own clock (OnStep,
+  clock state (#395). **This policy is Sky-Watcher-only.** A mount with its own clock (OnStep,
   Celestron, SynScan, iOptron, ZWO AM) has the ASCOM `UTCDate` setter write the MOUNT's time,
   and the driver's goto and sidereal logic then run on that clock (the mount itself may discard the write, as an aligned Celestron does), so those drivers keep aiming by the
-  client's instant on purpose; what they share with #301 is the once-per-connection WARN when
+  client's instant on purpose. They log the once-per-connection WARN when
   an NTP-disciplined host disagrees with the client by more than
   `HostClock::kClientDisagreementWarn`, through `alpacacore/util/client_utc_warning.h`
   (`ClientUtcWarning::warn_once()` after the write, flag re-armed on each real connect but
@@ -117,7 +125,7 @@ datagrams before each send so replies cannot get off-by-one.
   because a mount facing the other pole is the same mount turned half a turn about the
   vertical, and with the board's dec-axis count sense `eps`, which is wiring, not
   latitude (#458). `eps` is **measured, per mount code** (`measured_dec_axis_sense()`):
-  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +37.2 latitude on the same rig
+  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a northern latitude setting on the same rig
   2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north), +1 for the
   EQ-AL55i Pro (0x09; a reporter's mount at about +40, 2026-09-20, #579). Every other
   board keeps `k = +1`, the shipped model, which is 12 h out wherever that board's
@@ -150,7 +158,7 @@ datagrams before each send so replies cannot get off-by-one.
   rows are in the driver comment and asserted in `test_skywatcher_pointing.cpp`. Extend
   that file with a new hardware row for any change here.
 - **Motion limits (#436) are off by default and soft.** `minAltitudeDeg` and `meridianLimitMinutes` live in the catalog descriptor (`skywatcher_fields.h`); `util::MotionLimits` (`util/motion_limits.h`) is the pure decision. Only `SlewToCoordinatesAsync` (and so `SlewToTargetAsync`; the router refuses the synchronous forms with `MethodNotImplemented`) check the altitude floor, throwing `InvalidValue`; Park, FindHome, MoveAxis, Sync and PulseGuide are exempt from that check. The live guard (`run_limit_guard()`, its own `util::AsyncOperation` slot) watches MoveAxis and tracking while a limit is set and stops them on an inside-to-outside crossing through `set_tracking(false)` and `move_axis(axis, 0.0)` with `mutex_` released; it is edge-triggered, skips gotos, Park and FindHome, and `cancel_async_tasks()` joins it first. ConformU runs with both limits off.
-- **Goto backlash compensation (#437) is off by default, covers gotos only, and is a fixed final approach.** `backlashStepsRA`/`backlashStepsDec` (microsteps, integer 0-100000, default 0) and `backlashEnabledRA`/`backlashEnabledDec` (default false) are in the catalog descriptor (`skywatcher_fields.h`) and the web form; a config without them behaves as before. Each axis has one approach side, fixed in `backlash_approach_sign_locked()`: RA the tracking direction of the site's hemisphere (counts up north, down south, as `ra_axis_sign_locked()`), Dec increasing counts. When an axis is enabled with steps > 0 and a goto's move on it runs against that side, `dispatch_goto_locked()` sends the fast `:S` goto that many counts past the target, and the landing wait (`wait_for_slew_complete()`, through `send_final_approach_locked()`) sends the final leg once the first leg has landed by the rule every landing follows: `get_hardware_slewing_locked()` reads it stopped (a failed status read keeps the last answer for up to 10 s) and its count holds still across `kLandingSettle` (`wait_axis_stationary_locked()`). The leg is a slow GOTO (`:G` mode `2`) through `dispatch_goto_locked()`, under the goto's own `motion_generation_` and on the owing axes only (so it opens with that dispatch's `:K`), in the approach direction back onto the unchanged target, at a speed derived from the board's own `:s` (worm steps; a sixteenth of a worm turn per second, held under the slow-mode ceiling) and `:a`. A goto already in the approach direction, or of under one count, sends the same commands as before. **The driver never writes the position register (`:E`) for compensation**: the register always counts the motor, so a reversal, compensated or not, leaves it at most one gear gap from the output shaft and nothing builds up. The first design took up the slack before the move and then put the register back with `:E`; tracking, guide pulses and MoveAxis reverse the axis without compensation and never undid that shift, so the reported position could drift by the slack on each cycle (review of #437). The owed final leg carries the goto's `motion_generation_`: an AbortSlew, a MoveAxis, a pulse or a newer goto bumps it and the leg is dropped unsent, and a landing wait that gives up sends nothing. An earlier version polled `:f` itself and sent the leg the moment it read stopped, which skipped both rules: one failed read failed the goto with the mount `steps` past the target, and a leg sent while the last counts still arrive lands in the EQM-35 Pro window `kLandingSettle` exists for (review of #437). Only gotos that end in `wait_for_slew_complete()` are compensated (sky gotos and their landing refinements, Park, the count-frame FindHome); the AutoHome hunt passes `compensate_backlash=false` and waits on its own loop. The final leg runs while tracking is stopped and after the RA aim-ahead target was computed, so its duration shows up as RA lag at landing; a two-leg landing is not taken as a sample of `goto_overhead_seconds_`. `:s` is read at connect only for an enabled axis; a board that rejects it (Wave 100i) or answers 0 (EQ-AL55i) leaves that axis uncompensated with a WARN. **Guide pulses (`PulseGuide`) and rate motion (`MoveAxis`, `RightAscensionRate`/`DeclinationRate`) are deliberately not compensated** (CTO decision): autoguiders (PHD2 Dec backlash compensation, NINA) measure and correct backlash themselves, so a driver-side compensation would double it and make the guider oscillate, and a continuous move has no target to land on. A later issue may add rate or pulse compensation behind its own flag. Tests: `test_skywatcher_backlash.cpp`, over the fake mount's gear gap (`set_gear_gap()`, `shaft_degrees()`), which separates the motor the register counts from the shaft the sky sees, a coasting landing (`land_short_by()`, `commands_while_coasting()`) and a failed status read (`fail_status_replies()`).
+- **Goto backlash compensation (#437) is off by default, covers gotos only, and is a fixed final approach.** `backlashStepsRA`/`backlashStepsDec` (microsteps, integer 0-100000, default 0) and `backlashEnabledRA`/`backlashEnabledDec` (default false) are in the catalog descriptor (`skywatcher_fields.h`) and the web form; a config without them behaves as before. Each axis has one approach side, fixed in `backlash_approach_sign_locked()`: RA the tracking direction of the site's hemisphere (counts up north, down south, as `ra_axis_sign_locked()`; while no site is set RA is not compensated, so Park and FindHome without a site send the plain goto), Dec increasing counts. When an axis is enabled with steps > 0 and a goto's move on it runs against that side, `dispatch_goto_locked()` sends the fast `:S` goto that many counts past the target, and the landing wait (`wait_for_slew_complete()`, through `send_final_approach_locked()`) sends the final leg once the first leg has landed by the rule every landing follows: `get_hardware_slewing_locked()` reads it stopped (a failed status read keeps the last answer for up to 10 s) and its count holds still across `kLandingSettle` (`wait_axis_stationary_locked()`). The leg is a slow GOTO (`:G` mode `2`) through `dispatch_goto_locked()`, under the goto's own `motion_generation_` and on the owing axes only (so it opens with that dispatch's `:K`), in the approach direction back onto the unchanged target, at a speed derived from the board's own `:s` (worm steps; a sixteenth of a worm turn per second, held under the slow-mode ceiling) and `:a`. A goto already in the approach direction, or of under one count, sends the same commands as before. **The driver never writes the position register (`:E`) for compensation**: the register always counts the motor, so a reversal, compensated or not, leaves it at most one gear gap from the output shaft and nothing builds up. The first design took up the slack before the move and then put the register back with `:E`; tracking, guide pulses and MoveAxis reverse the axis without compensation and never undid that shift, so the reported position could drift by the slack on each cycle (review of #437). The owed final leg carries the goto's `motion_generation_`: an AbortSlew, a MoveAxis, a pulse or a newer goto bumps it and the leg is dropped unsent, and a landing wait that gives up sends nothing. An earlier version polled `:f` itself and sent the leg the moment it read stopped, which skipped both rules: one failed read failed the goto with the mount `steps` past the target, and a leg sent while the last counts still arrive lands in the EQM-35 Pro window `kLandingSettle` exists for (review of #437). Only gotos that end in `wait_for_slew_complete()` are compensated (sky gotos and their landing refinements, Park, the count-frame FindHome); the AutoHome hunt passes `compensate_backlash=false` and waits on its own loop. The final leg runs while tracking is stopped and after the RA aim-ahead target was computed, so its duration shows up as RA lag at landing; a two-leg landing is not taken as a sample of `goto_overhead_seconds_`. `:s` is read at connect only for an enabled axis; a board that rejects it (Wave 100i) or answers 0 (EQ-AL55i) leaves that axis uncompensated with a WARN. **Guide pulses (`PulseGuide`) and rate motion (`MoveAxis`, `RightAscensionRate`/`DeclinationRate`) are deliberately not compensated** (CTO decision): autoguiders (PHD2 Dec backlash compensation, NINA) measure and correct backlash themselves, so a driver-side compensation would double it and make the guider oscillate, and a continuous move has no target to land on. A later issue may add rate or pulse compensation behind its own flag. Tests: `test_skywatcher_backlash.cpp`, over the fake mount's gear gap (`set_gear_gap()`, `shaft_degrees()`), which separates the motor the register counts from the shaft the sky sees, a coasting landing (`land_short_by()`, `commands_while_coasting()`) and a failed status read (`fail_status_replies()`).
 - The driver's blocking `slew_to_coordinates()` is not reachable over HTTP (the router refuses the synchronous slews with `MethodNotImplemented`). Called directly, one superseded by another generation-changing motion can throw `InvalidOperation` while the hardware GOTO continues to its target; the error reports that the synchronous wait lost ownership and does not prove the mount stopped.
 - **Sync** uses the controller's own `:E` set-position command (motors must be fully
   stopped — the driver pauses tracking around the write), never a driver-side offset.
@@ -217,11 +225,9 @@ datagrams before each send so replies cannot get off-by-one.
   the slew in the background (AtPark turns true on completion); MoveAxis(0) issues the stop,
   keeps Slewing true via the manual flag, and a background task clears it and restores
   tracking once the axis reports stopped. This applies to every telescope driver.
-- ConformU needs a real site. Since #274 a Sky-Watcher device with no site refuses
-  `Connected` outright, so the run fails at connect. Since #358 the client is told why:
-  the router reports the driver's own sentence naming the two fields as the
-  `ErrorMessage` (the error number is still `NotConnected`), rather than a bare
-  "Connection failed" with the reason left in the server log.
+- ConformU needs a real site. Since #1474 a Sky-Watcher device with no site connects
+  and then fails every pointing test with `InvalidOperation`, whose message names the
+  missing fields (from #274 to #1474 it refused `Connected` outright).
   Set the observing site in the web UI before validating. Before #274 the site collapsed
   to 0,0 instead and the CheckMethods slew tests aborted with "highest elevation
   available is below the horizon".
@@ -644,7 +650,7 @@ against its checklist, 2026-09-06:
   internal contradiction to expose (whichever side the code calls pierEast, it consistently
   slews to and reports that side). Loopback regressions asserting the flip contract on the
   EQM-35 Pro and Wave profiles are in `test_skywatcher_async.cpp` ("Pier side across the
-  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at -37, TRACE log): gotos
+  meridian"). **Plate-solved on the rig 2026-09-24** (EQM-35 Pro at a southern site, TRACE log): gotos
   across the meridian and back, with the board's `:j` counts at every exposure. Every landing's
   dec branch was on the side of the meridian the solved hour angle puts it: `a2 < 0` for the
   east-side (HA < 0) targets IC 5148 and a Capricornus field, `a2 >= 0` for every west one, with
@@ -827,7 +833,7 @@ and each time the assertion itself was the review finding.
 
 - **Hardware bring-up, EQM-35 Pro over the mount's built-in USB, 2026-09-06** (Raspberry
   Pi 3B, Debian 13 arm64, direct USB-A-to-B, no handset in the chain):
-  - Pointing math at latitude -37.2: home points at the SOUTH celestial pole, so
+  - Pointing math at a southern site: home points at the SOUTH celestial pole, so
     `dec = -90 + a2`. The session "verified" this against raw counts — reported HA
     matched axis 1 to 0.0004 deg, and alt/az recomputed from the reported RA/Dec matched
     to 4 decimal places. **That was self-consistency only**: the driver reports the model
@@ -893,7 +899,7 @@ and each time the assertion itself was the review finding.
     and `MoveAxis(Dec, +rate)` again moved reported Dec and the counts up. Mount returned
     to home, tracking off.
   - **Absolute pointing and the southern meridian flip: plate-solved 2026-09-24.** Same
-    EQM-35 Pro at -37, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
+    EQM-35 Pro at a southern site, 5 s frames solved by ASTAP and precessed to date, the service at TRACE
     so every `:S` goto target, `:j` read and `:E` sync is in the log. The driver sent exactly
     its formula's axes on the 12 gotos that have a solve (a2 to 0.000 deg, a1 within the
     seconds between computing and logging the frame), and the board landed on the commanded
@@ -974,7 +980,7 @@ exposed to this rule (since #297 it applies the same branch/hemisphere XOR).
 `(branch_from_axis_locked(a2) > 0) != hemisphere_south_locked()` (XOR), which reproduces the
 table above (the reader is the plain `a2 >= 0` sign outside the sub-arcsecond deadband at
 the pole, see #459). Two loopback regressions on the EQM-35 Pro
-profile at latitude -37.2 assert the ASCOM contract against the driver's own pointing
+profile at a southern site assert the ASCOM contract against the driver's own pointing
 model -- reported Declination RISES under `+DeclinationRate` and after a North pulse --
 and both were confirmed to fail before the fix (axis moved -19.97 arcsec and -11.25
 arcsec respectively, the exact mirror of the passing northern-hemisphere cases). The
