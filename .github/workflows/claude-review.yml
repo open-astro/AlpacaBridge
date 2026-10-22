@@ -113,9 +113,9 @@ jobs:
       # Claude Code CLI, cached so a review does not depend on claude.ai/install.sh
       # answering (it returned 429 on some runs). These four steps run before the
       # checkout below, so no PR-head code exists on the runner yet and nothing
-      # from a PR can write into the cached files before the save. The cache is
-      # scoped to the base branch under pull_request_target. Keep the version in
-      # the key, the install and the check equal to the action's pinned
+      # from a PR can write into the cached files before the save. Under
+      # pull_request_target the cache is scoped to the default branch. Keep
+      # the version in the key, the install and the check equal to the action's pinned
       # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA below
       # is bumped. The version check is the only integrity check.
       - name: Restore the Claude Code CLI cache
@@ -130,6 +130,9 @@ jobs:
       - name: Install the Claude Code CLI on a cache miss
         if: steps.claude_cli_cache.outputs.cache-hit != 'true'
         run: |
+          # Without pipefail a failed curl (429) leaves bash reading an empty
+          # script, which exits 0, and the pipeline would pass.
+          set -o pipefail
           # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
           for wait in 15 30 60 120 stop; do
             if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
