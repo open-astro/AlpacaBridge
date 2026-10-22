@@ -9663,16 +9663,19 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::CoverCalibrator, kNum);
     }
     {
-        // case: apiversions and configureddevices refuse a verb other than GET with 405 (#1486)
+        // case: a verb other than GET on an Alpaca-defined management path is 400 + text/plain (#1508)
         alpacahttp::Router router;
         for (const std::string path :
-             {"/management/apiversions", "/management/v1/configureddevices", "/management/configureddevices"}) {
-            EXPECT(route_request(router, "GET", path).status_code() == 200);
+             {"/management/apiversions", "/management/v1/apiversions", "/management/v1/configureddevices",
+              "/management/configureddevices", "/management/v1/description", "/management/description"}) {
+            const auto get = route_request(router, "GET", path);
+            EXPECT(get.status_code() == 200);
             for (const char* verb : {"PUT", "POST", "DELETE"}) {
+                if (path.find("description") != std::string::npos && std::string(verb) != "DELETE") continue;
                 const auto response = route_request(router, verb, path, "{}");
-                EXPECT(response.status_code() == 405);
-                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-                EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x40B);
+                EXPECT(response.status_code() == 400);
+                EXPECT(response.get_header("Content-Type").find("text/plain") == 0);
+                EXPECT(response.body().find("Unsupported HTTP method") == 0);
             }
         }
     }

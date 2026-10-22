@@ -1664,6 +1664,10 @@ std::optional<Response> reject_disallowed_host(const Request& request, std::uint
 std::optional<Response> reject_cross_origin_request(const Request& request, std::uint32_t client_tx_id,
                                                     std::uint32_t server_tx_id, const char* what);
 
+// A verb the Alpaca Management API does not define for `what`: HTTP 400 with a
+// text/plain message (Alpaca API Reference s2.5, #1508).
+void set_wrong_verb_text(Response& response, const char* what);
+
 }  // namespace
 
 Router::Router() : Router(CatalogExtension{}) {}
@@ -2428,13 +2432,9 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                                ", allowed hosts='" + join_host_list(resulting_hosts) + "'");
             }
         } else if (request.method() != HttpMethod::GET) {
-            AlpacaResponse alpaca_response = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::INVALID_OPERATION,
-                "Unsupported HTTP method for description endpoint"
-            );
-            response.set_body(alpaca_response);
-            response.set_status(405, "Method Not Allowed");
+            // Alpaca API Reference s2.5: a method the path does not define is a
+            // text message with HTTP 400 (#1508).
+            set_wrong_verb_text(response, "description");
             return response;
         }
 
@@ -2478,11 +2478,7 @@ Response Router::handle_configured_devices(const Request& request, std::uint32_t
 
     // #1486: the Management API defines this path for GET only.
     if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for configureddevices endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
+        set_wrong_verb_text(response, "configureddevices");  // #1508: 400 + text, not 405
         return response;
     }
 
@@ -2862,6 +2858,14 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 
     throw std::runtime_error("Unknown device type: " + type_str);
 }
+
+namespace {
+void set_wrong_verb_text(Response& response, const char* what) {
+    response.set_status(400, "Bad Request");
+    response.set_content_type("text/plain");
+    response.set_body(std::string("Unsupported HTTP method for ") + what + " endpoint");
+}
+}  // namespace
 
 namespace {
 void prune_stale_client_connections(std::unordered_map<std::string, std::chrono::steady_clock::time_point>& clients) {
@@ -6547,11 +6551,7 @@ Response Router::handle_api_versions(const Request& request, std::uint32_t serve
 
     // #1486: the Management API defines this path for GET only.
     if (request.method() != HttpMethod::GET) {
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_OPERATION,
-                                "Unsupported HTTP method for apiversions endpoint");
-        response.set_body(alpaca_response);
-        response.set_status(405, "Method Not Allowed");
+        set_wrong_verb_text(response, "apiversions");  // #1508: 400 + text, not 405
         return response;
     }
 
