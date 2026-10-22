@@ -63,7 +63,8 @@ bool is_keepable_unique_id(std::string_view text) {
     const std::size_t underscore = text.rfind('_');
     if (underscore == std::string_view::npos) return true;
     const std::string_view tail = text.substr(underscore + 1);
-    const bool slot_id = !tail.empty() && tail.size() <= 5 && tail.find_first_not_of("0123456789") == std::string_view::npos;
+    const bool slot_id =
+        !tail.empty() && tail.size() <= 5 && tail.find_first_not_of("0123456789") == std::string_view::npos;
     return !slot_id;
 }
 
