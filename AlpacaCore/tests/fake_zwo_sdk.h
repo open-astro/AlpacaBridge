@@ -58,6 +58,8 @@ public:
     bool auto_complete_exposure{true};
     bool fail_exposure_register_write{false};
     bool fail_exposure_start{false};
+    // false models a camera without a cooler: get_control_caps omits CoolerOn and CoolerPower.
+    bool report_cooler_controls{true};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
     int zero_temperature_reads_after_open{0};
     // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
@@ -212,15 +214,22 @@ public:
         hit("get_control_caps");
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
-        return {{ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
-                {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
-                {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
-                {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
-                {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
-                {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
-                {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
-                {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
-                {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
+        std::vector<ControlCaps> caps = {
+            {ControlType::Exposure, "Exposure", "Exposure time", 1, 3'600'000'000L, 100'000, false, true},
+            {ControlType::Gain, "Gain", "Gain", 0, 500, 100, false, true},
+            {ControlType::Offset, "Offset", "Offset", 0, 100, 10, false, true},
+            {ControlType::Temperature, "Temperature", "Temperature", -500, 500, 0, false, false},
+            {ControlType::CoolerOn, "Cooler", "Cooler", 0, 1, 0, false, true},
+            {ControlType::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false},
+            {ControlType::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true},
+            {ControlType::HighSpeedMode, "High Speed", "High speed", 0, 1, 0, false, true},
+            {ControlType::AntiDewHeater, "Anti Dew", "Anti-dew heater", 0, 100, 0, false, true}};
+        if (!report_cooler_controls) {
+            std::erase_if(caps, [](const ControlCaps& c) {
+                return c.type == ControlType::CoolerOn || c.type == ControlType::CoolerPower;
+            });
+        }
+        return caps;
     }
 
     bool get_control_value(int camera_id, ControlType type, long& value, bool& is_auto) override {

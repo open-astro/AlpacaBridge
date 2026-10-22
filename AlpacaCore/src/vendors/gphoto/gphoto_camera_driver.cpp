@@ -697,20 +697,20 @@ public:
         return *sensor_temperature_;
     }
 
+    // No gphoto2 camera has a cooler: CanGetCoolerPower and CanSetCCDTemperature are false, so the cooler
+    // members raise PropertyNotImplemented (ICameraV4: "if not supported").
     bool get_cooler_on() const override {
         ensure_connected();
-        return false;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
-    void set_cooler_on(bool cooler_on) override {
+    void set_cooler_on(bool /*cooler_on*/) override {
         ensure_connected();
-        if (cooler_on) {
-            throw AlpacaException("Cooler not supported", AlpacaError::NotImplemented);
-        }
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
 
     double get_cooler_power() const override {
         ensure_connected();
-        return 0.0;
+        throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
     double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
 

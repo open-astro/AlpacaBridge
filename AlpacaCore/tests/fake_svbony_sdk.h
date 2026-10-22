@@ -382,6 +382,18 @@ public:
         std::lock_guard lock(mutex_);
         auto_values_[control] = is_auto;
     }
+    // The default camera has no cooler. This adds CoolerEnable, CoolerPower and TargetTemperature (the controls
+    // behind CoolerOn, CoolerPower and CanSetCCDTemperature); call it before the driver connects.
+    void add_cooler_controls() {
+        std::lock_guard lock(mutex_);
+        controls_.push_back({Control::CoolerEnable, "Cooler", "Cooler enable", 0, 1, 0, false, true});
+        controls_.push_back({Control::CoolerPower, "Cooler Power", "Cooler power", 0, 100, 0, false, false});
+        controls_.push_back(
+            {Control::TargetTemperature, "Target Temperature", "Target temperature", -500, 300, 0, false, true});
+        values_[Control::CoolerEnable] = 0;
+        values_[Control::CoolerPower] = 0;
+        values_[Control::TargetTemperature] = 0;
+    }
     // Holds each open_camera() for `delay` (bounded, never indefinite), so a test can observe Connecting.
     void set_open_delay(std::chrono::milliseconds delay) {
         open_delay_ms_.store(std::clamp<std::int64_t>(delay.count(), 0, 20000));

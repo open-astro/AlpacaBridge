@@ -17,8 +17,10 @@
 #include <chrono>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "fake_svbony_sdk.h"
 #include "locked_svbony_sdk.h"
@@ -253,4 +255,83 @@ TEST_CASE("SVBONY Camera Driver - default factory still works without an SDK arg
     REQUIRE(driver != nullptr);
     CHECK(driver->get_device_number() == 2);
     CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; the cooler members raise
+// PropertyNotImplemented on a camera without a cooler (the cooler controls the SDK reports are the capability).
+namespace {
+
+std::unique_ptr<alpacacore::CameraDriver> svbony_connected_camera(alpacacore::test::FakeSVBSDK& sdk) {
+    auto camera = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    camera->set_connected(true);
+    REQUIRE(camera->get_connected());
+    return camera;
+}
+
+}  // namespace
+
+TEST_CASE("SVBONY Camera - PercentCompleted only while Exposing", "[svbony][camera][unit]") {
+    using namespace std::chrono_literals;
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    // Declared after the camera so it runs first: a failed REQUIRE must not leave the SDK read held or a
+    // scripted stop failure set while the driver joins its worker.
+    struct ResetSdkOnExit {
+        alpacacore::test::FakeSVBSDK& sdk;
+        ~ResetSdkOnExit() {
+            sdk.set_persistent_failure("stop_video_capture", false);
+            sdk.release_video_data();
+        }
+    } reset_sdk{sdk};
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(*camera); }
+    SECTION("idle after a completed exposure") {
+        camera->start_exposure(0.001, true);
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (!camera->get_image_ready() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        REQUIRE(camera->get_image_ready());
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+    SECTION("while exposing") {
+        sdk.block_video_data();
+        camera->start_exposure(0.001, true);
+        REQUIRE(sdk.wait_for_video_data(2s));
+        alpacacore::test::require_percent_completed_available(*camera);
+    }
+    SECTION("in the Error state after an unconfirmed capture stop") {
+        sdk.block_video_data();
+        camera->start_exposure(0.001, true);
+        REQUIRE(sdk.wait_for_video_data(2s));
+        sdk.set_persistent_failure("stop_video_capture");
+        require_alpaca_error([&] { camera->abort_exposure(); }, alpacacore::AlpacaError::DriverException);
+        const int reads = sdk.completed_video_data_reads();
+        sdk.release_video_data();
+        REQUIRE(sdk.wait_for_completed_video_data(reads + 1, 2s));
+        const auto deadline = std::chrono::steady_clock::now() + 2s;
+        while (camera->get_camera_state() != alpacacore::CameraState::Error &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(1ms);
+        }
+        REQUIRE(camera->get_camera_state() == alpacacore::CameraState::Error);
+        alpacacore::test::require_percent_completed_unavailable(*camera);
+    }
+}
+
+TEST_CASE("SVBONY Camera - cooler members need the cooler capability", "[svbony][camera][unit]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    auto camera = svbony_connected_camera(sdk);
+    CHECK_FALSE(camera->get_can_get_cooler_power());
+    alpacacore::test::require_no_cooler_members(*camera);
+}
+
+TEST_CASE("SVBONY Camera - cooler members work with the cooler capability", "[svbony][camera][unit]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    sdk.add_cooler_controls();
+    auto camera = svbony_connected_camera(sdk);
+    REQUIRE(camera->get_can_get_cooler_power());
+    camera->set_cooler_on(true);
+    CHECK(camera->get_cooler_on());
+    CHECK(camera->get_cooler_power() == 0.0);
 }

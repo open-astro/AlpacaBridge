@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 
+#include "camera_percent_cooler_checks.h"
 #include "catch2_compat.h"
 #include "fake_iguider_v4l2.h"
 #include "fake_task_clock.h"
@@ -131,6 +132,7 @@ TEST_CASE("iOptron iGuider Camera Driver - Not connected throws", "[ioptron][igu
     require_alpaca_error([&] { (void)c.get_image_ready(); }, nc);
     require_alpaca_error([&] { (void)c.get_camera_state(); }, nc);
     require_alpaca_error([&] { (void)c.get_percent_completed(); }, nc);
+    require_alpaca_error([&] { (void)c.get_percent_completed_checked(); }, nc);
     require_alpaca_error([&] { c.abort_exposure(); }, nc);
     require_alpaca_error([&] { (void)c.get_num_x(); }, nc);
     require_alpaca_error([&] { (void)c.get_camera_x_size(); }, nc);
@@ -224,7 +226,7 @@ TEST_CASE("iOptron iGuider Camera Driver - State machine", "[ioptron][iguider][c
     CHECK(c.get_camera_state() == CameraState::Idle);
     CHECK(c.get_image_ready() == false);
     CHECK(c.get_is_pulse_guiding() == false);
-    CHECK(c.get_percent_completed() == 0.0);
+    alpacacore::test::require_percent_completed_unavailable(c);  // Idle: InvalidOperation, not 0 (#1477)
     require_alpaca_error([&] { (void)c.get_last_exposure_duration(); }, AlpacaError::ValueNotSet);
     try {
         (void)c.get_image_array();
@@ -246,8 +248,52 @@ TEST_CASE("iOptron iGuider Camera Driver - State machine", "[ioptron][iguider][c
     rig.fake.stalled = false;
     expose(c, 0.01);
     CHECK(c.get_camera_state() == CameraState::Idle);
-    CHECK(c.get_percent_completed() == 100.0);
+    alpacacore::test::require_percent_completed_unavailable(c);  // Idle after a frame: not 100 (#1477)
     CHECK(c.get_last_exposure_duration() == 0.01);
+}
+
+// Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing. The iGuider fake can hold an
+// exposure open (stalled), so this is the one camera test that reads a real in-progress value.
+TEST_CASE("iOptron iGuider Camera Driver - PercentCompleted only while Exposing", "[ioptron][iguider][camera][unit]") {
+    Rig rig;
+    auto& c = *rig.camera;
+    c.set_connected(true);
+
+    SECTION("idle before the first exposure") { alpacacore::test::require_percent_completed_unavailable(c); }
+    SECTION("idle after a completed exposure") {
+        expose(c, 0.01);
+        alpacacore::test::require_percent_completed_unavailable(c);
+    }
+    SECTION("idle after an aborted exposure") {
+        rig.fake.stalled = true;
+        c.start_exposure(0.01, true);
+        c.abort_exposure();
+        alpacacore::test::require_percent_completed_unavailable(c);
+    }
+    SECTION("while exposing") {
+        rig.fake.stalled = true;
+        c.start_exposure(0.01, true);
+        alpacacore::test::require_percent_completed_available(c);
+        c.abort_exposure();
+    }
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - a latched link fault surfaces before the PercentCompleted rule",
+          "[ioptron][iguider][camera][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    Rig rig("", clock);
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    REQUIRE(rig.fake.wait_for_frames(3, std::chrono::seconds(2)));
+
+    rig.fake.stalled = true;
+    c.start_exposure(0.01, true);
+    clock.advance(std::chrono::seconds(11));
+    REQUIRE(wait_until([&] { return !c.get_link_fault().empty(); }));
+    CHECK(c.get_camera_state() == CameraState::Error);
+    // Error is not Exposing, but the fault is the answer: DriverException, not InvalidOperation.
+    require_alpaca_error([&] { (void)c.get_percent_completed_checked(); }, AlpacaError::DriverException);
+    CHECK_FALSE(alpacacore::test::device_state_percent_completed(c).has_value());
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - Unsupported methods", "[ioptron][iguider][camera][unit]") {
