@@ -25,8 +25,6 @@
 
 #include <alpacacore/util/task_clock.h>
 #include <arpa/inet.h>
-#include <functional>
-#include <mutex>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -35,6 +33,8 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
