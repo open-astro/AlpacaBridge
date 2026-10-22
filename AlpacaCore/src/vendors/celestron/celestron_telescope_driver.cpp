@@ -702,24 +702,37 @@ public:
         return get_tracking_locked();
     }
 
+    // The device exchange runs under the wrapper's per-link lock only; mutex_ is taken to read state and again to
+    // publish. setter_mutex_ keeps two setters' wire order and published order the same.
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        auto& protocol = CelestronProtocolWrapper::instance();
+        std::lock_guard<std::mutex> setter(setter_mutex_);
+        int mode = 0;
         if (tracking) {
-            const AlignmentMode alignment = alignment_mode_locked();
-            if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
-                ensure_site_info_cached_locked();
+            AlignmentMode alignment = AlignmentMode::AltAz;
+            bool read_site = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                check_connected();
+                alignment = alignment_mode_locked();
+                read_site = alignment != AlignmentMode::AltAz && !site_info_valid_ && site_info_attempt_due_locked();
             }
+            if (read_site) {
+                read_site_info_unlocked();
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
             if (alignment != AlignmentMode::AltAz && !site_info_valid_) {
                 throw AlpacaException("Set SiteLatitude before enabling equatorial tracking", AlpacaError::ValueNotSet);
             }
-            const int mode = tracking_mode_for_alignment_locked(alignment);
-            protocol.set_tracking_mode(mode);
-            set_tracking_mode_cached_locked(mode);
+            mode = tracking_mode_for_alignment_locked(alignment);
         } else {
-            protocol.set_tracking_mode(0);
-            set_tracking_mode_cached_locked(0);
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+        }
+        CelestronProtocolWrapper::instance().set_tracking_mode(mode);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_) {
+            set_tracking_mode_cached_locked(mode);
         }
     }
 
@@ -749,13 +762,17 @@ public:
         if (!std::isfinite(rate.ra) || !std::isfinite(rate.dec)) {
             throw AlpacaException("GuideRate must be a finite number", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        std::lock_guard<std::mutex> setter(setter_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+        }
         double ra_percent = (rate.ra / kSiderealDegPerSec) * 100.0;
         double dec_percent = (rate.dec / kSiderealDegPerSec) * 100.0;
         auto& protocol = CelestronProtocolWrapper::instance();
         protocol.set_autoguide_rate(0, ra_percent);
         protocol.set_autoguide_rate(1, dec_percent);
+        std::lock_guard<std::mutex> lock(mutex_);
         guide_rate_ = rate;
     }
 
@@ -1198,7 +1215,11 @@ public:
     // is tried on its own so one failure does not skip the others. Returns
     // the first failure's message, or an empty string when every stop was
     // answered (#742). mutex_ must be held.
-    std::string stop_park_slew_locked() const { return util::stop_goto_and_axes(CelestronProtocolWrapper::instance()); }
+    std::string stop_park_slew_locked() const { return stop_park_slew_wire(); }
+
+    // The stop exchanges alone: the wrapper's per-link lock serialises them, so a caller with mutex_ free may send
+    // them.
+    static std::string stop_park_slew_wire() { return util::stop_goto_and_axes(CelestronProtocolWrapper::instance()); }
 
     void clear_motion_errors_locked() {
         last_slew_error_.clear();
@@ -1275,19 +1296,37 @@ public:
     }
 
     void fail_home_locked(const std::string& message) const {
-        const std::string stop_error = stop_park_slew_locked();
+        begin_home_failure_locked(message);
+        finish_home_failure_locked(message, stop_park_slew_locked());
+    }
+
+    // The two halves of fail_home_locked, for the status poll, which sends the stop between them with mutex_ free
+    // (the wrapper's per-link lock serialises it): the error is sticky from the first half on, so a getter in the
+    // window reports the failure rather than a finished home.
+    void begin_home_failure_locked(const std::string& message) const {
         homing_ = false;
         at_home_ = false;
         last_slew_error_ = message;
+        last_home_error_ = message;
+        ALPACA_LOG_WARN("Celestron", message);
+    }
+
+    // `message` is what begin_home_failure_locked stored; a new initiator that cleared it in the window owns the
+    // state now, so only the log carries the stop's outcome then.
+    void finish_home_failure_locked(const std::string& message, const std::string& stop_error) const {
+        if (!stop_error.empty()) {
+            ALPACA_LOG_ERROR("Celestron",
+                             "stop after FindHome failure failed: " + stop_error + "; the mount may still be moving");
+        }
+        if (last_slew_error_ != message) {
+            return;
+        }
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
             last_slew_error_ += "; stopping after failure failed: " + stop_error + "; the mount may still be moving";
-            ALPACA_LOG_ERROR("Celestron",
-                             "stop after FindHome failure failed: " + stop_error + "; the mount may still be moving");
+            last_home_error_ = last_slew_error_;
         }
-        last_home_error_ = last_slew_error_;
-        ALPACA_LOG_WARN("Celestron", message);
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -2419,10 +2458,9 @@ private:
 
     // One poll tick. The site read and the sample exchanges run WITHOUT mutex_, so a getter never waits behind a
     // slow link and the snapshot mutex is never held across I/O; the frame is decoded and published under mutex_.
-    // The exception is a FindHome in flight: its completion check (check_homing_complete_locked) runs under mutex_,
-    // so on a dead link during FindHome each tick holds mutex_ for one exchange timeout and the getters wait. Returns
-    // false when the connection is gone or lost and the poll body should end. `ctx` is null for the test seam's direct
-    // tick, which also ignores the pause.
+    // So do a FindHome in flight's completion check and the stops of its third failure (decision 0016 rule 1).
+    // Returns false when the connection is gone or lost and the poll body should end. `ctx` is null for the test seam's
+    // direct tick, which also ignores the pause.
     bool poll_status_once(util::OperationContext* ctx, int tick) {
         const auto stopped = [ctx] { return ctx != nullptr && ctx->stop_reason() != util::StopReason::None; };
         // Held for the whole tick of the poll body, so pausing it can wait out a tick already in flight.
@@ -2435,16 +2473,48 @@ private:
         }
         SamplePlan plan;
         bool read_site = false;
+        bool check_home = false;
+        std::uint64_t home_generation = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!connected_ || link_lost_.load() || stopped()) {
                 return false;
             }
-            if (homing_) {
-                check_homing_complete_locked();  // a FindHome in flight is completed here, not by a getter
-                if (home_status_poll_failures_ != 0) {
-                    return true;  // it timed out: no second timeout in this tick (Disconnect waits for the tick)
+            check_home = homing_;
+            home_generation = motion_generation_;
+        }
+        if (check_home) {
+            // A FindHome in flight is completed here, not by a getter. The exchanges and the stops of a third
+            // failure run with mutex_ free; the result is published under it only if the same FindHome is still on.
+            const HomeProbe probe = probe_homing_complete();
+            std::string failure;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!connected_ || stopped()) {
+                    return false;
                 }
+                if (homing_ && motion_generation_ == home_generation) {
+                    failure = apply_home_probe_locked(probe);
+                    if (!failure.empty()) {
+                        begin_home_failure_locked(failure);
+                    }
+                }
+            }
+            if (!failure.empty()) {
+                // A motion initiator that starts in this window is stopped too; the window is one exchange wide.
+                const std::string stop_error = stop_park_slew_wire();
+                std::lock_guard<std::mutex> lock(mutex_);
+                finish_home_failure_locked(failure, stop_error);
+            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (home_status_poll_failures_ != 0) {
+                return true;  // it timed out: no second timeout in this tick (Disconnect waits for the tick)
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!connected_ || link_lost_.load() || stopped()) {
+                return false;
             }
             plan = sample_plan_locked(tick % kSlowPollEvery == 0);
             // The control path owns the Slewing value while it moves the mount itself.
@@ -2618,11 +2688,11 @@ private:
             return true;
         }
         if (homing_) {
-            check_homing_complete_locked();
+            // The status poll completes a FindHome with mutex_ free; this caller holds mutex_ and asks no exchange.
             if (!last_slew_error_.empty()) {
                 throw AlpacaException(last_slew_error_);
             }
-            return homing_; // still homing = still slewing
+            return true;  // still homing = still slewing
         }
         bool was_slewing = slewing_cached_;
         try {
@@ -2669,37 +2739,46 @@ private:
         return slewing_cached_;
     }
 
-    void check_homing_complete_locked() const {
+    // The FindHome completion exchanges, with no driver state touched: the status poll runs them with mutex_ free.
+    struct HomeProbe {
+        bool done = false;
+        std::optional<std::string> error;  // the exchange failed: what it threw
+    };
+
+    static HomeProbe probe_homing_complete() {
         try {
             auto& protocol = CelestronProtocolWrapper::instance();
-            bool ra_done = protocol.is_level_done(0);
-            bool dec_done = protocol.is_level_done(1);
+            const bool ra_done = protocol.is_level_done(0);
+            const bool dec_done = protocol.is_level_done(1);
+            return {ra_done && dec_done, std::nullopt};
+        } catch (const std::exception& ex) {
+            return {false, std::string(ex.what())};
+        } catch (...) {
+            return {false, std::string("unknown exception")};
+        }
+    }
+
+    // Applies a probe under mutex_. Returns the failure message when this was the third failed check (the caller then
+    // stops the mount and finishes the failure), else empty.
+    std::string apply_home_probe_locked(const HomeProbe& probe) const {
+        if (!probe.error) {
             home_status_poll_failures_ = 0;
-            if (ra_done && dec_done) {
+            if (probe.done) {
                 homing_ = false;
                 at_home_ = true;
                 set_slewing_locked(false);
                 publish_measurement_locked();
             }
-        } catch (const std::exception& ex) {
-            const int failures = ++home_status_poll_failures_;
-            if (failures < kLinkFailureThreshold) {
-                ALPACA_LOG_WARN("Celestron", "FindHome status poll failed (" + std::to_string(failures) + "/" +
-                                                 std::to_string(kLinkFailureThreshold) + "): " + ex.what());
-                return;
-            }
-            fail_home_locked("FindHome completion polling failed after " + std::to_string(failures) +
-                             " consecutive failures: " + ex.what());
-        } catch (...) {
-            const int failures = ++home_status_poll_failures_;
-            if (failures < kLinkFailureThreshold) {
-                ALPACA_LOG_WARN("Celestron", "FindHome status poll failed (" + std::to_string(failures) + "/" +
-                                                 std::to_string(kLinkFailureThreshold) + "): unknown exception");
-                return;
-            }
-            fail_home_locked("FindHome completion polling failed after " + std::to_string(failures) +
-                             " consecutive failures: unknown exception");
+            return {};
         }
+        const int failures = ++home_status_poll_failures_;
+        if (failures < kLinkFailureThreshold) {
+            ALPACA_LOG_WARN("Celestron", "FindHome status poll failed (" + std::to_string(failures) + "/" +
+                                             std::to_string(kLinkFailureThreshold) + "): " + *probe.error);
+            return {};
+        }
+        return "FindHome completion polling failed after " + std::to_string(failures) +
+               " consecutive failures: " + *probe.error;
     }
 
     // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation
@@ -2787,16 +2866,41 @@ private:
         return south ? 3 : 2;
     }
 
-    void ensure_site_info_cached_locked() const {
+    // True when a control-path site read is due (connected, and past kSiteInfoRetryDelay since the last try); stamps
+    // the try.
+    bool site_info_attempt_due_locked() const {
         if (!connected_) {
-            return;
+            return false;
         }
         auto now = clock_.now();
         if (!site_info_valid_ && last_site_info_attempt_ != util::TaskClock::clock::time_point::min() &&
             (now - last_site_info_attempt_) < kSiteInfoRetryDelay) {
-            return;
+            return false;
         }
         last_site_info_attempt_ = now;
+        return true;
+    }
+
+    // The site read for a caller with mutex_ free: the exchange runs unlocked, the result is published under it,
+    // and a client's SiteLatitude/SiteLongitude write that landed meanwhile wins.
+    void read_site_info_unlocked() {
+        std::optional<LocationInfo> info;
+        try {
+            info = CelestronProtocolWrapper::instance().get_location();
+        } catch (...) {  // NOLINT(bugprone-empty-catch): the caller reports the missing site
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (connected_ && info && !site_info_valid_) {
+            site_latitude_cached_ = info->latitude_degrees;
+            site_longitude_cached_ = info->longitude_degrees;
+            site_info_valid_ = true;
+        }
+    }
+
+    void ensure_site_info_cached_locked() const {
+        if (!site_info_attempt_due_locked()) {
+            return;
+        }
         try {
             LocationInfo info = CelestronProtocolWrapper::instance().get_location();
             site_latitude_cached_ = info.latitude_degrees;
@@ -3243,6 +3347,9 @@ private:
     // MoveAxis, AbortSlew, Unpark, and disconnect. Never taken under mutex_; a
     // blocking slew releases it before waiting for motion completion.
     std::mutex initiator_mutex_;
+    // Serialises set_tracking and set_guide_rate end to end (wire write, then publish). Taken first, never under
+    // mutex_; the wrapper's per-link lock and mutex_ nest inside it.
+    std::mutex setter_mutex_;
     // Declared last, initialised last; must outlive the driver (decision 0005).
     util::TaskClock& clock_;
     // Declared after clock_ (the slots take it) and last, so they are destroyed

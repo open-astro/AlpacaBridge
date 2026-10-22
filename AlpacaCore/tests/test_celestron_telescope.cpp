@@ -776,6 +776,12 @@ struct SnapshotMount {
     std::atomic<bool> l_fail{false};  // the slewing query goes unanswered
     std::atomic<bool> z_fail{false};  // the alt-az query goes unanswered
     std::atomic<int> slow_count{0};   // pier-side and tracking-mode queries received
+    std::atomic<bool> level_mute{false};  // the FindHome level-done query goes unanswered
+    std::atomic<int> level_count{0};      // level-done queries received
+    std::atomic<int> m_delay_ms{0};       // the goto cancel (a stop exchange) answers after this long
+    std::atomic<int> m_count{0};          // goto cancels received
+    std::atomic<int> t_delay_ms{0};       // the tracking-mode write answers after this long
+    std::atomic<int> t_count{0};          // tracking-mode writes received
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -814,10 +820,15 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             st.slow_count.fetch_add(1);
             return st.tracking.load() ? std::string("\x02#") : std::string("\x00#", 2);
         case 'T':
+            st.t_count.fetch_add(1);
+            if (st.t_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.t_delay_ms.load()));
             st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
             return "#";
-        case 'W':
         case 'M':
+            st.m_count.fetch_add(1);
+            if (st.m_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.m_delay_ms.load()));
+            return "#";
+        case 'W':
         case 's':
         case 'S':
             return "#";
@@ -827,6 +838,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
+            if (op == 0x12) {                                                      // MC_LEVEL_DONE
+                st.level_count.fetch_add(1);
+                if (st.level_mute.load()) return "";
+            }
             return std::string("\xFF#");
         }
         default:
@@ -1309,6 +1324,91 @@ TEST_CASE("Celestron UTCDate - a written UTCDate reads back advanced by the task
     const auto reseeded = driver->get_utc_date();
     const auto gap = reseeded > written ? reseeded - written : written - reseeded;
     CHECK(gap > std::chrono::minutes(30));
+    driver->set_connected(false);
+}
+
+// Decision 0016 rule 1 (#1437): a control-path exchange runs under the link's I/O lock only, never under the
+// driver mutex_ a getter takes. Each case parks one exchange in the fake mount and times the getters meanwhile.
+namespace {
+
+bool snapshot_wait_for(const std::function<bool()>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
+// A no-device getter and a snapshot getter, each held to the budget a fake-mount exchange would overrun.
+void check_getters_do_not_wait(alpacacore::TelescopeDriver& driver) {
+    CHECK(snapshot_timed([&] { (void)driver.get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver.get_can_find_home(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver.get_right_ascension(); }) < kSnapshotGetterBudget);
+}
+
+}  // namespace
+
+TEST_CASE("Celestron FindHome - a completion check on a silent link does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+
+    std::thread tick([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    REQUIRE(snapshot_wait_for([&] { return st->level_count.load() > 0; }));
+    check_getters_do_not_wait(*driver);
+    tick.join();
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron FindHome - the third failed check still sends the stops and no getter waits for them",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(st->m_count.load() == 0);  // two failures: no stop yet
+
+    st->m_delay_ms = 600;
+    std::thread tick([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    REQUIRE(snapshot_wait_for([&] { return st->m_count.load() > 0; }));  // the safety stop went out
+    check_getters_do_not_wait(*driver);
+    tick.join();
+    CHECK_THROWS_WITH(driver->get_slewing(), Catch::Matchers::ContainsSubstring("FindHome completion polling failed"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron setters - a slow set_tracking exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+
+    st->t_delay_ms = 200;  // under the 300 ms exchange timeout: the write succeeds
+    const int writes = st->t_count.load();
+    std::thread setter([&] { driver->set_tracking(false); });
+    REQUIRE(snapshot_wait_for([&] { return st->t_count.load() > writes; }));
+    check_getters_do_not_wait(*driver);
+    setter.join();
+    CHECK_FALSE(driver->get_tracking());
     driver->set_connected(false);
 }
 

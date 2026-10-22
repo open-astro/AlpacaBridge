@@ -1,0 +1,3 @@
+### Fixed
+
+- **Celestron NexStar: Name, RightAscension and the other getters no longer wait behind a FindHome check on a silent mount, and a slow set_tracking or set_guide_rate no longer blocks them** (Celestron, issue #1437): the FindHome completion check, the stops sent after its third failed check, `set_tracking` and `set_guide_rate` now exchange with the mount without holding the driver state lock, so a getter returns at once instead of waiting one exchange timeout. The safety stop still goes out on the third failed check. Covered by the three `[iolock]` cases in `test_celestron_telescope.cpp`. The connect handshake still holds the state lock and stays tracked in #1437.
