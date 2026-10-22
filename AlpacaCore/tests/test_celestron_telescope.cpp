@@ -1412,4 +1412,170 @@ TEST_CASE("Celestron setters - a slow set_tracking exchange does not hold the ge
     driver->set_connected(false);
 }
 
+namespace {
+
+// Runs `op` on its own thread with every mount exchange slowed to kSlowExchange (under the 300 ms exchange timeout, so
+// each succeeds), waits until its first exchange is on the wire and checks the getters meanwhile. A getter that waited
+// behind the exchange would pay the whole of kSlowExchange.
+constexpr int kSlowExchangeMs = 150;
+
+// The driver runs on the fake task clock, so an op that waits on it (the blocking slew) gets virtual seconds from the
+// loop below once the getters have been checked.
+template <typename Op>
+void check_getters_during(FakeTaskClock& clock, SnapshotMount& st, alpacacore::TelescopeDriver& driver, Op&& op) {
+    st.latency_ms = kSlowExchangeMs;
+    const int before = st.transactions.load();
+    std::atomic<bool> done{false};
+    std::thread worker([&] {
+        try {
+            op();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the getters, not the op
+        }
+        done.store(true);
+    });
+    REQUIRE(snapshot_wait_for([&] { return st.transactions.load() > before; }));
+    check_getters_do_not_wait(driver);
+    while (!done.load()) {
+        clock.advance(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    worker.join();
+    st.latency_ms = 0;
+}
+
+struct SlowMountDriver {
+    FakeTaskClock clock;
+    std::shared_ptr<SnapshotMount> st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server{[this](const std::string& c) { return snapshot_reply(*st, c); }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    SlowMountDriver() {
+        REQUIRE(server.ok());
+        driver = snapshot_driver(server, clock);
+        REQUIRE(driver->get_connected());
+        cel::set_status_poll_paused_for_testing(*driver, true);
+    }
+    ~SlowMountDriver() { driver->set_connected(false); }
+};
+
+}  // namespace
+
+TEST_CASE("Celestron connect - a slow handshake does not hold Connected or Name",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    st->latency_ms = kSlowExchangeMs;
+    std::thread connecting([&] { driver->set_connected(true); });
+    REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > 0; }));
+    CHECK(snapshot_timed([&] { CHECK_FALSE(driver->get_connected()); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver->get_can_find_home(); }) < kSnapshotGetterBudget);
+    connecting.join();
+    st->latency_ms = 0;
+    CHECK(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron disconnect - a close behind an exchange in flight does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    mount.st->latency_ms = kSlowExchangeMs;
+    const int before = mount.st->transactions.load();
+    std::thread setter([&] {
+        try {
+            mount.driver->set_tracking(false);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the getters
+        }
+    });
+    REQUIRE(snapshot_wait_for([&] { return mount.st->transactions.load() > before; }));
+    std::thread closing([&] { mount.driver->set_connected(false); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));  // let the close reach its lock
+    CHECK(snapshot_timed([&] { (void)mount.driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)mount.driver->get_connected(); }) < kSnapshotGetterBudget);
+    setter.join();
+    closing.join();
+    mount.st->latency_ms = 0;
+    CHECK_FALSE(mount.driver->get_connected());
+}
+
+TEST_CASE("Celestron SlewToCoordinatesAsync - the initiator and its goto do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver,
+                         [&] { mount.driver->slew_to_coordinates_async(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron SlewToCoordinates - the blocking initiator does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->slew_to_coordinates(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron Park - the initiator and the park slew do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->park(); });
+}
+
+TEST_CASE("Celestron SyncToCoordinates - the sync exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron FindHome - the dispatch does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->find_home(); });
+}
+
+TEST_CASE("Celestron MoveAxis - the rate write does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->move_axis(0, 1.0); });
+}
+
+TEST_CASE("Celestron AbortSlew - the stops do not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->abort_slew(); });
+}
+
+TEST_CASE("Celestron PulseGuide - the pier read and the guide write do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    REQUIRE(mount.driver->get_can_pulse_guide());
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->pulse_guide(0, 500); });
+}
+
+TEST_CASE("Celestron site and time writes - the write exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    SECTION("SiteLatitude") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_latitude(-33.5); });
+    }
+    SECTION("SiteLongitude") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->set_site_longitude(151.5); });
+    }
+    SECTION("UTCDate") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_utc_date(std::chrono::system_clock::now()); });
+    }
+    SECTION("CommandString") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { (void)mount.driver->command_string("V", true); });
+    }
+    SECTION("GuideRate") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_guide_rate(alpacacore::GuideRate{0.002, 0.002}); });
+    }
+}
+
 #endif  // _WIN32
