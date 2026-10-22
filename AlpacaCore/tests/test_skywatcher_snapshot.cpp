@@ -358,27 +358,26 @@ TEST_CASE("SkyWatcher snapshot - asynchronous initiators make no position read",
 TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the rate with no board read",
           "[skywatcher][snapshot]") {
     FakeTaskClock clock;
-    FakeSkyWatcherMount mount;  // moves in real time, like the model
+    FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
     REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // no poll re-anchors the model from here
     constexpr double kRate = 1.0;                     // deg/s on the Dec axis
 
     // Start: the last anchor is the connect's frame, 400 ms old, and the five
-    // start transactions take 50 ms each. The new rate applies from the start,
-    // not from that anchor or from the first of those transactions.
-    std::this_thread::sleep_for(milliseconds(400));
-    clock.advance(milliseconds(400));  // the model runs on the task clock
+    // start transactions take 50 ms of task time each. The new rate applies
+    // from the start, not from that anchor or from the first of those
+    // transactions.
+    clock.advance(milliseconds(400));
     const double at_rest = driver->get_declination();
-    mount.set_reply_latency(milliseconds(50));
+    mount.set_reply_hook([&clock] { clock.advance(milliseconds(50)); });
     driver->move_axis(1, kRate);
-    mount.set_reply_latency(milliseconds(0));
+    mount.set_reply_hook({});
     const double started = driver->get_declination();
     CHECK(std::abs(started - at_rest) < 0.1);
 
     // A new rate on the moving axis: the 0.4 deg covered so far is kept.
-    std::this_thread::sleep_for(milliseconds(400));
-    clock.advance(milliseconds(400));  // the model runs on the task clock
+    clock.advance(milliseconds(400));
     const double moving = driver->get_declination();
     REQUIRE(std::abs(moving - started) > 0.3);
     driver->move_axis(1, -kRate);
@@ -386,8 +385,7 @@ TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the
     CHECK(std::abs(reversed - moving) < 0.1);
 
     // Stop: the motion up to the stop is kept too.
-    std::this_thread::sleep_for(milliseconds(400));
-    clock.advance(milliseconds(400));  // the model runs on the task clock
+    clock.advance(milliseconds(400));
     const double moving_back = driver->get_declination();
     REQUIRE(std::abs(moving_back - reversed) > 0.3);
     driver->move_axis(1, 0.0);
