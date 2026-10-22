@@ -2395,10 +2395,14 @@ private:
         // bracket around the tick: let it finish (mutex_ is dropped so its publish can run). No new tick starts. The
         // wait is bounded: a tick on a silent link can take several response timeouts, and past the bound the hunt
         // reads anyway, queued behind it. A superseding command or a stop ends the wait at once.
-        const auto wait_until = std::chrono::steady_clock::now() + kPollSampleWaitBound;
-        while (poll_sampling_.load() && std::chrono::steady_clock::now() < wait_until) {
+        const auto wait_until = clock_.now() + kPollSampleWaitBound;
+        while (poll_sampling_.load() && clock_.now() < wait_until) {
             lock.unlock();
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            if (ctx != nullptr) {
+                (void)ctx->wait_for(std::chrono::milliseconds(2));  // a stop ends it at once; the check below reads it
+            } else {
+                clock_.sleep_for(std::chrono::milliseconds(2));
+            }
             lock.lock();
             if (motion_generation_ != owner_generation ||
                 (ctx != nullptr && ctx->stop_reason() != util::StopReason::None)) {

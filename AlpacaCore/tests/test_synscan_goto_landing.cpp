@@ -37,6 +37,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -1486,10 +1487,11 @@ struct HuntBehindHeldTick {
         const auto started = clock.now();
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(kTargetRa, kTargetDec));
         // The slew loop reports Slewing through the driver's 8 s start window whatever the handset says, waiting on
-        // this clock between re-reads; the landing hunt waits on the wall clock, and the paused status poll waits on
-        // neither, so nothing waits on this clock once the task has reached the hunt.
-        // step_virtual() waits for a woken task to park again, which a task spinning in the hunt never does, so
-        // the clock is advanced by hand across the end of the window and the slew loop's last 250 ms re-read.
+        // this clock between re-reads; the landing hunt waits for the held tick in 2 ms sleeps on the same clock, and
+        // the paused status poll waits on neither, so the hunt is the only waiter once the window has ended.
+        // step_virtual() waits for a woken task to park again, which a hunt sleeping in 2 ms steps does only after
+        // each advance, so the clock is advanced by hand across the end of the window and the slew loop's last
+        // 250 ms re-read.
         while (clock.now() - started < std::chrono::milliseconds(7900)) {
             step_virtual(clock);
         }
@@ -1498,8 +1500,7 @@ struct HuntBehindHeldTick {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
-        const bool in_hunt = clock.waiter_count() == 0;
-        REQUIRE(in_hunt);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(2)));  // the hunt, sleeping out the held tick
     }
 
     ~HuntBehindHeldTick() { driver->set_connected(false); }
@@ -1846,11 +1847,25 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
         }
         done.store(true);
     });
-    // The GOTO ends and the hunt asks for the line: virtual time steps through the whole GOTO and the landing, for
-    // up to 5 s of real time. The slew cannot finish while the tick holds the line (without the wait it ends first).
-    const auto hold_until = Clock::now() + std::chrono::seconds(5);
-    while (!done.load() && Clock::now() < hold_until) step_virtual(clock);
-    CHECK_FALSE(done.load());
+    // The GOTO ends and the hunt asks for the line: virtual time steps through the whole GOTO and the landing. The
+    // hunt reads nothing while the tick holds the line, up to the 1.5 s bound, so a stretch of virtual time at least
+    // the bound separates two precise reads that start after the GOTO's 8 s start window.
+    auto last_reads = st->position_reads.load();
+    const auto slew_started = clock.now();
+    auto last_change = slew_started;
+    std::chrono::nanoseconds longest_gap{};
+    const auto hold_until = Clock::now() + std::chrono::seconds(60);
+    while (!done.load() && Clock::now() < hold_until) {
+        step_virtual(clock);
+        if (st->position_reads.load() != last_reads) {
+            if (last_change - slew_started >= std::chrono::seconds(8)) {
+                longest_gap = std::max(longest_gap, clock.now() - last_change);
+            }
+            last_reads = st->position_reads.load();
+            last_change = clock.now();
+        }
+    }
+    CHECK(longest_gap >= std::chrono::milliseconds(1400));
 
     release.store(true);
     tick.join();
@@ -1867,3 +1882,63 @@ TEST_CASE("SynScan GOTO landing - the hunt waits for a poll tick that is inside 
 }
 
 #endif  // !_WIN32
+
+namespace {
+
+// Virtual time one slew_to_coordinates takes, stepped to completion. With `poll_in_flight` a poll tick is parked
+// between its sample and its publish for the whole slew, so poll_sampling_ stays set at every tick hunt.
+std::chrono::nanoseconds virtual_slew_duration(bool poll_in_flight) {
+    alpacacore::test::FakeTaskClock clock;
+    auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);
+    alpacacore::test::FakeMountServer server(responder(st));
+    REQUIRE(server.ok());
+    auto driver = make_driver(server.port(), clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    use_fast_guide_rate(*driver);
+    alpacacore::vendor::synscan::set_status_poll_paused_for_testing(*driver, true);
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool release = false;
+    std::thread poll;
+    if (poll_in_flight) {
+        alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, [&] {
+            std::unique_lock<std::mutex> lock(mutex);
+            entered = true;
+            cv.notify_all();
+            cv.wait_for(lock, std::chrono::seconds(60), [&] { return release; });
+        });
+        poll = std::thread([&] { alpacacore::vendor::synscan::poll_status_now_for_testing(*driver); });
+        std::unique_lock<std::mutex> lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(10), [&] { return entered; }));
+    }
+
+    const auto started = clock.now();
+    REQUIRE_NOTHROW(run_virtual(clock, [&] { driver->slew_to_coordinates(kTargetRa, kTargetDec); }));
+    const auto elapsed = clock.now() - started;
+
+    if (poll.joinable()) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            release = true;
+        }
+        cv.notify_all();
+        poll.join();
+        alpacacore::vendor::synscan::set_status_poll_after_sample_hook_for_testing(*driver, nullptr);
+    }
+    driver->set_connected(false);
+    return elapsed;
+}
+
+}  // namespace
+
+TEST_CASE("SynScan GOTO landing - the tick hunt waits out a poll tick in flight on the task clock (#1403)",
+          "[synscan][telescope][goto-landing]") {
+    const auto baseline = virtual_slew_duration(false);
+    const auto held = virtual_slew_duration(true);
+    // Each hunt waits kPollSampleWaitBound (1500 ms) for the parked tick; the wait is virtual time, so it shows in
+    // the clock. A wait on the steady clock would add no virtual time (and 1.5 s of real time).
+    CHECK(held - baseline >= std::chrono::milliseconds(1400));
+}
