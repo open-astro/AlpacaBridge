@@ -561,7 +561,8 @@ public:
                                               std::string(e.what()));
             }
             if (skip_priming) {
-                ALPACA_LOG_DEBUG(kLogTag, "Skipping the sensor geometry priming capture (mirror lock-up on or unknown)");
+                ALPACA_LOG_DEBUG(kLogTag,
+                                 "Skipping the sensor geometry priming capture (mirror lock-up on or unknown)");
                 connected_.store(true);
                 return;
             }
