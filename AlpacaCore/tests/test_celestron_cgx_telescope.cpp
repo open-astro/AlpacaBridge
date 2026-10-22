@@ -548,7 +548,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
             REQUIRE(wait_until([&] { return driver->get_at_home() && !driver->get_slewing(); }));
         }
         mount.set_stop_completion_reads(10);
-        mount.fragment_next_reply();
+        mount.fragment_next_reply(std::pair<std::uint8_t, std::uint8_t>{0x10, 0x24});
         auto initiator = std::async(std::launch::async, [&] {
             if (unpark)
                 driver->unpark();
@@ -557,12 +557,15 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         });
         const bool verifying = mount.wait_for_reply_fragment(2s);
         const auto returned = initiator.wait_for(100ms);
+        auto progress = std::async(std::launch::async, [&] { return driver->get_slewing(); });
+        const auto progress_early = progress.wait_for(100ms);
         auto tracking = std::async(std::launch::async, [&] { return driver->get_tracking(); });
         const auto tracking_early = tracking.wait_for(100ms);
         // Tracking reads must wait through the complete ACK pair, rather than
         // see stale true or a normal-dispatch "unknown" failure. Inspect the
         // pending completion state during the scripted post-ACK deceleration.
         mount.release_reply_tail();
+        const bool pending_during_ack = progress.get();
         const bool slewing = driver->get_slewing();
         const bool parked = driver->get_at_park();
         const int ra_reads = mount.count_command(0x10, 0x01);
@@ -589,6 +592,8 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         CHECK_FALSE(tracking.get());
         REQUIRE(verifying);
         CHECK(returned == std::future_status::ready);
+        CHECK(progress_early == std::future_status::ready);
+        CHECK(pending_during_ack);
         CHECK(slewing);
         CHECK(parked == unpark);
         CHECK(coordinates_refused);
@@ -597,6 +602,7 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stop initiators return before ve
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }));
         CHECK_FALSE(driver->get_at_park());
         driver->set_connected(false);
+        require_alpaca_error([&] { static_cast<void>(driver->get_slewing()); }, alpacacore::AlpacaError::NotConnected);
     }
 }
 
@@ -2771,12 +2777,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - stops the responsive axis when t
 
         auto abort = std::async(std::launch::async, [&] { driver->abort_slew(); });
         REQUIRE(wait_until([&] { return mount.count_command(silent_axis, 0x24) > silent_stops_before; }));
-        CHECK(driver->get_slewing());
         CHECK(abort.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready);
         abort.get();
 
         // Three lost stop ACKs cost 3 * 500 ms, followed by the sole stop
-        // owner's 500 ms busy-verification budget.
+        // owner's 3 s busy-verification budget. The held-ACK test above pins
+        // intermediate Slewing without racing this worker's completion.
         // Bound that worker drain separately from the nonblocking initiator.
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }, std::chrono::seconds(5)));
 

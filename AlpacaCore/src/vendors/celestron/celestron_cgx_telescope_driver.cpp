@@ -353,7 +353,7 @@ private:
     util::AsyncOperation pulse_slot_;
     util::OperationGeneration stop_generation_;
     util::AsyncOperation stop_slot_;
-    bool stop_pending_ = false;
+    std::atomic<bool> stop_pending_{false};  // Slewing reads progress without waiting for stop I/O under mutex_.
     bool unpark_after_stop_ = false;
     bool calibrated_ = false;
     std::uint64_t reference_generation_ = 0;
@@ -1221,6 +1221,8 @@ void CelestronCgxTelescopeDriver::set_site_longitude(double longitude) {
     info_.site_longitude_degrees = longitude;
 }
 bool CelestronCgxTelescopeDriver::get_slewing() const {
+    require_connected();
+    if (stop_pending_ || stop_slot_.running()) return true;
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
     if (stop_pending_ || stop_slot_.running()) return true;
