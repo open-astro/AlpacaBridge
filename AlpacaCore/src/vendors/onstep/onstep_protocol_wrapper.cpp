@@ -589,11 +589,20 @@ public:
 
     // Decision 0005 (#1378): the loss and last-alive stamps read the clock of
     // the driver that uses this process-wide wrapper, so the driver's #521
-    // outage is measured on one clock. Default: the process clock.
-    void set_task_clock(util::TaskClock& c) { clock_.store(&c); }
+    // outage is measured on one clock. Default: the process clock. A stamp
+    // taken on another clock means nothing on the new one, so a change of
+    // clock forgets them (#1460); production keeps one clock throughout.
+    void set_task_clock(util::TaskClock& c) {
+        if (clock_.exchange(&c) != &c) {
+            forget_clock_stamps();
+        }
+    }
     void release_task_clock(util::TaskClock& c) {
         util::TaskClock* expected = &c;
-        clock_.compare_exchange_strong(expected, &util::default_task_clock());
+        if (&c != &util::default_task_clock() &&
+            clock_.compare_exchange_strong(expected, &util::default_task_clock())) {
+            forget_clock_stamps();
+        }
     }
 
     bool link_alive() {
@@ -1391,6 +1400,16 @@ private:
     }
 
     util::TaskClock& clock() const { return *clock_.load(); }
+
+    // The last-alive and loss stamps, as no loss and no alive time (#1460).
+    void forget_clock_stamps() {
+        last_alive_ns_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(loss_mutex_);
+            alive_before_loss_.reset();
+        }
+        (void)link_lost_at_.consume();  // its own mutex, after loss_mutex_ as in record_loss()
+    }
 
     void clear_loss() {
         std::lock_guard<std::mutex> lock(loss_mutex_);

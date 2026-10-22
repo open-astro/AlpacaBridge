@@ -384,7 +384,7 @@ public:
             pulse_cancel_.store(true);
             pulse_cv_.notify_all();
             cancel_goto_thread_request();
-            ZWOMountProtocolWrapper::instance().cancel_pending_io();
+            protocol_.cancel_pending_io();
             // open-astro#720: fence before teardown, so a pending GOTO setup
             // cannot send ":MS" after Connected=false returns.
             cancel_and_join_goto_thread();
@@ -425,7 +425,7 @@ public:
                 stop_poll_thread();
                 stop_pulse_thread();
                 try {
-                    ZWOMountProtocolWrapper::instance().disconnect();
+                    protocol_.disconnect();
                 } catch (const std::exception& e) {
                     ALPACA_LOG_WARN("ZWO", "Disconnect failed: " + std::string(e.what()));
                 }
@@ -444,7 +444,7 @@ public:
         // set_connected_mutex_ is this driver's transition lock and the protocol wrapper's own mutex is
         // its I/O lock: the handshake below runs under them and never under mutex_, which each step
         // takes for the short state publish only (decision 0016).
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
         auto reset_session_state_for_connect = [&](bool keep_telemetry_caches = false) {
             std::lock_guard<std::mutex> pulse_lock(pulse_mutex_);
             std::lock_guard<std::mutex> lock(mutex_);
@@ -761,13 +761,13 @@ public:
 
     std::string command_blind(std::string_view command, bool) override {
         check_connected();
-        ZWOMountProtocolWrapper::instance().send_command_blind(std::string(command));
+        protocol_.send_command_blind(std::string(command));
         return "";
     }
 
     bool command_bool(std::string_view command, bool) override {
         check_connected();
-        const std::string response = ZWOMountProtocolWrapper::instance().send_command(std::string(command), false);
+        const std::string response = protocol_.send_command(std::string(command), false);
         if (response.empty()) {
             return false;
         }
@@ -777,7 +777,7 @@ public:
 
     std::string command_string(std::string_view command, bool) override {
         check_connected();
-        return ZWOMountProtocolWrapper::instance().send_command(std::string(command), false);
+        return protocol_.send_command(std::string(command), false);
     }
 
     AlignmentMode get_alignment_mode() const override {
@@ -877,7 +877,7 @@ public:
             // return early without the parked validation.
             ensure_not_parked("Tracking");
         }
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
         const auto now = clock_.now();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -997,8 +997,7 @@ public:
             guide_rate_multiple = std::clamp(guide_rate_multiple, 0.10, 0.90);
             // set_guide_rate() returns the readback value from its internal
             // verification — no extra round-trip needed.
-            const double actual_multiple =
-                ZWOMountProtocolWrapper::instance().set_guide_rate(guide_rate_multiple);
+            const double actual_multiple = protocol_.set_guide_rate(guide_rate_multiple);
             const double actual_deg_per_sec = actual_multiple * kSiderealRateDegPerSec;
             std::lock_guard<std::mutex> lock(mutex_);
             guide_rate_ = {actual_deg_per_sec, actual_deg_per_sec};
@@ -1186,7 +1185,7 @@ public:
         }
         // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
         if (to_send.has_value()) {
-            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            protocol_.set_site_info(to_send.value());
             std::lock_guard<std::mutex> lock(mutex_);
             pending_site_longitude_ = to_send->longitude_degrees;
             site_longitude_deg_ = to_send->longitude_degrees;
@@ -1228,7 +1227,7 @@ public:
         }
         // The serial write runs outside mutex_ so no getter waits on it (decision 0016).
         if (to_send.has_value()) {
-            ZWOMountProtocolWrapper::instance().set_site_info(to_send.value());
+            protocol_.set_site_info(to_send.value());
             std::lock_guard<std::mutex> lock(mutex_);
             pending_site_latitude_ = to_send->latitude_degrees;
             site_latitude_deg_ = to_send->latitude_degrees;
@@ -1259,7 +1258,7 @@ public:
         // stop or the jog below. One fence covers both branches.
         cancel_and_join_goto_thread();
 
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
 
         if (std::abs(rate) < 1e-9) {
             // open-astro#775: ":Q" stops every axis, but MoveAxis(axis, 0) must not
@@ -1445,7 +1444,7 @@ public:
         }
 
         if (connected_.load()) {
-            ZWOMountProtocolWrapper::instance().set_target_dec(dec);
+            protocol_.set_target_dec(dec);
         }
     }
 
@@ -1469,7 +1468,7 @@ public:
         }
 
         if (connected_.load()) {
-            ZWOMountProtocolWrapper::instance().set_target_ra(ra);
+            protocol_.set_target_ra(ra);
         }
     }
 
@@ -1488,7 +1487,7 @@ public:
         }
         check_connected();
 
-        ZWOMountProtocolWrapper::instance().set_tracking_rate(rate);
+        protocol_.set_tracking_rate(rate);
 
         std::lock_guard<std::mutex> lock(mutex_);
         tracking_rate_cached_ = rate;
@@ -1521,7 +1520,7 @@ public:
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
 
         if (connected_.load()) {
-            ZWOMountProtocolWrapper::instance().set_time_info(info);
+            protocol_.set_time_info(info);
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1543,7 +1542,7 @@ public:
         // open-astro#720: a pending GOTO setup must not send ":MS" after ":hC".
         cancel_and_join_goto_thread();
         reset_position_offsets();
-        ZWOMountProtocolWrapper::instance().go_home();
+        protocol_.go_home();
         std::lock_guard<std::mutex> lock(mutex_);
         parked_cached_ = false;
         park_command_active_ = false;
@@ -1569,7 +1568,7 @@ public:
         if (get_at_park()) {
             return;
         }
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
         try {
             if (protocol.get_status().mode == MountMode::AltAzimuth) {
                 throw AlpacaException(
@@ -1606,7 +1605,7 @@ public:
         // wire when the cancel lands goes out before the ":Q" below, which
         // stops it. The join waits for at most one mount round trip.
         cancel_and_join_goto_thread();
-        ZWOMountProtocolWrapper::instance().abort_motion();
+        protocol_.abort_motion();
         std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[0] = false;
         manual_axis_slewing_[1] = false;
@@ -1714,7 +1713,7 @@ public:
     void set_park() override {
         check_connected();
         reset_position_offsets();
-        if (!ZWOMountProtocolWrapper::instance().set_custom_park_here()) {
+        if (!protocol_.set_custom_park_here()) {
             throw AlpacaException("Mount rejected set park request", AlpacaError::InvalidOperation);
         }
     }
@@ -1859,7 +1858,7 @@ public:
                 }
                 resume_poll();
             };
-            auto& protocol = ZWOMountProtocolWrapper::instance();
+            auto& protocol = protocol_;
             try {
                 if (goto_cancel_.load()) {
                     abandon();
@@ -2015,7 +2014,7 @@ public:
         validate_ra(target_ra, "RightAscension");
         validate_dec(target_dec, "Declination");
 
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
 
         auto attempt_sync = [&]() {
             try {
@@ -2110,7 +2109,7 @@ public:
     void unpark() override {
         check_connected();
         reset_position_offsets();
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
         // Guard the poll thread's park-state warm against re-parking us: some
         // firmware keeps reporting :Gps=Completed briefly after :Spu, and the
         // warm logic's Completed branch would otherwise flip parked_cached_
@@ -2389,7 +2388,7 @@ private:
     // Returns false, having sent nothing more, once goto_cancel_ is set
     // (open-astro#720): the GOTO setup thread then exits.
     bool synchronize_mount_time_and_site_for_goto() {
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
 
         std::optional<SiteInfo> site_to_write;
         {
@@ -2480,7 +2479,7 @@ private:
         std::unique_lock<std::mutex> lock(mutex_);
         const auto now = clock_.now();
         if (!connected_.load()) return;
-        const bool transport_lost = ZWOMountProtocolWrapper::instance().link_lost();
+        const bool transport_lost = protocol_.link_lost();
         // An intentional guide pause is not silence from the link; allow a full poll deadline afterward.
         const bool expired =
             caches_ready_.load() &&
@@ -2498,7 +2497,7 @@ private:
         pulse_cancel_.store(true);
         pulse_thread_stop_.store(true);
         goto_cancel_.store(true);
-        ZWOMountProtocolWrapper::instance().cancel_pending_io();
+        protocol_.cancel_pending_io();
         lock.unlock();  // The state lock is a leaf; wake the motion workers outside it.
         {
             // Pair with each wait's predicate check before notifying, without changing a newer connect's flags.
@@ -2562,7 +2561,7 @@ private:
     void refresh_cached_values() const {
         update_link_state();
         if (!connected_.load() || poll_stop_.load()) return;
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
         const auto token = snapshot_.begin_poll();
         PolledFrame frame;
         {
@@ -2704,7 +2703,7 @@ private:
                 const auto now = clock_.now();
                 if (!poll_stop_.load() && now >= next_time_refresh) {
                     try {
-                        const TimeInfo mount_time = ZWOMountProtocolWrapper::instance().get_time_info();
+                        const TimeInfo mount_time = protocol_.get_time_info();
                         const auto utc = to_utc_time_point(mount_time);
                         std::lock_guard<std::mutex> lock(mutex_);
                         last_utc_set_ = utc;
@@ -2718,7 +2717,7 @@ private:
                 }
                 if (!ctx.wait_for(250ms)) break;
             }
-            if (!connected_.load()) ZWOMountProtocolWrapper::instance().try_disconnect();
+            if (!connected_.load()) protocol_.try_disconnect();
         });
     }
 
@@ -2738,7 +2737,7 @@ private:
     };
 
     void run_pulse_task(const PulseTask& task) {
-        auto& protocol = ZWOMountProtocolWrapper::instance();
+        auto& protocol = protocol_;
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2922,6 +2921,8 @@ private:
     const int device_number_;
     const ConnectionInfo connection_info_;
 
+    // Outlives every worker; the destructor joins them before closing this entry's link.
+    mutable ZWOMountProtocolWrapper protocol_;
     util::TaskClock& clock_;
     mutable util::StateSnapshot<PolledFrame> snapshot_;
     util::OperationGeneration poll_generation_;

@@ -71,6 +71,7 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)
     # AM mount serial-port ownership over a pty (issue #1202).
     list(APPEND TEST_SOURCES test_zwo_mount_serial_ownership.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_network_isolation.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
