@@ -9665,9 +9665,9 @@ int main() {
     {
         // case: a verb other than GET on an Alpaca-defined management path is 400 + text/plain (#1508)
         alpacahttp::Router router;
-        for (const std::string path : {"/management/apiversions", "/management/v1/apiversions",
-                                       "/management/v1/configureddevices", "/management/configureddevices",
-                                       "/management/v1/description", "/management/description"}) {
+        for (const std::string path :
+             {"/management/apiversions", "/management/v1/apiversions", "/management/v1/configureddevices",
+              "/management/configureddevices", "/management/v1/description", "/management/description"}) {
             const auto get = route_request(router, "GET", path);
             EXPECT(get.status_code() == 200);
             for (const char* verb : {"PUT", "POST", "DELETE"}) {
