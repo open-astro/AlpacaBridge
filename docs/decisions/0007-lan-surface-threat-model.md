@@ -4,11 +4,11 @@ Status: accepted
 
 ## Context
 
-AlpacaBridge listens on every interface (`create_listener()` in `AlpacaHTTP/src/http/server.cpp`, listener bound to `INADDR_ANY`, port 6800 by default) and answers UDP discovery probes on 32227 (`AlpacaHTTP/src/discovery/discovery.cpp`). The host is a single-board computer on an observatory LAN, and often is the LAN: the Wi-Fi manager turns the board into a hotspot, sometimes an open one. ASCOM Alpaca has no authentication and no transport security, so a client that can reach the port can already slew the mount, take frames and change the site. We do not add authentication the protocol does not have.
+AlpacaBridge listens on every interface (`create_listener()` in `AlpacaHTTP/src/http/server.cpp`, listener bound to `INADDR_ANY`, port 6800 by default) and answers UDP discovery probes on port 32227 by default (`discovery.port`, configurable; `AlpacaHTTP/src/discovery/discovery.cpp`). The host is a single-board computer on an observatory LAN, and often is the LAN: the Wi-Fi manager turns the board into a hotspot, sometimes an open one. ASCOM Alpaca has no authentication and no transport security, so a client that can reach the port can already slew the mount, take frames and change the site. We do not add authentication the protocol does not have.
 
 The audit findings NS-01 to NS-14 read as unrelated defects. Against the code they are one question asked five times: who may reach this surface, what can they do, what is trusted, and what does a hostile or careless caller cost. This record answers it once per surface, states the trust limit, fixes the bounds each surface must keep and maps every finding to where it is handled. Every audit claim was re-read against current main.
 
-Five surfaces: (1) Device API `/api/v1/<type>/<n>/...`; (2) Management API `/management/v1/...`; (3) Web UI `AlpacaHTTP/web/`; (4) Wi-Fi API `/management/v1/wifi/*` over NetworkManager and `debian/alpacabridge.polkit-rules`; (5) Discovery responder, UDP 32227.
+Five surfaces: (1) Device API `/api/v1/<type>/<n>/...`; (2) Management API `/management/v1/...`; (3) Web UI `AlpacaHTTP/web/`; (4) Wi-Fi API `/management/v1/wifi/*` over NetworkManager and `debian/alpacabridge.polkit-rules`; (5) Discovery responder, UDP, default port 32227, configurable.
 
 ## Decision
 
@@ -53,7 +53,7 @@ The guard compares `Origin` with `Host` as strings. It passes every GET and ever
 
 ### Surface 5: Discovery responder
 
-- **Who can reach it.** Any host that can send UDP to port 32227, including the multicast group.
+- **Who can reach it.** Any host that can send UDP to the discovery port (default 32227, set by `discovery.port` or `ALPACAHTTP_DISCOVERY_PORT`; Alpaca API Reference s5.8.1), including the multicast group.
 - **What it can do.** Learn that an Alpaca server exists and its HTTP port. The reply is a fixed JSON object with the `AlpacaPort` key (`Discovery::handle_probe`, `AlpacaHTTP/src/discovery/discovery.cpp`). At the default port 6800 it is 19 bytes against a 16-byte minimum matching probe (`alpacadiscovery1`); this small amplification is not a useful reflector and needs no rate limit.
 - **What is trusted and why.** The sender address is spoofable and the reply goes to it; with a reply this small that is accepted.
 - **Logging.** `handle_probe` logs every probe at INFO and every non-Alpaca datagram at DEBUG (issue #740), so a host sending garbage in a loop adds no WARNING line. A valid probe still logs one INFO line per probe.

@@ -176,6 +176,11 @@ public:
     // may be flipped while requests run; the next request sees the new value.
     void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
 
+    // discovery.port as the server read it at start (#1509). The description
+    // reports it and the web UI edits it; the responder binds it only at
+    // start, so a saved change shows after the next restart.
+    void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
+
     // open-astro#547: check every registered telescope for client silence
     // during motion and stop any that have gone quiet past the configured
     // interval. Called once a second from the server's existing low-
@@ -215,6 +220,7 @@ private:
     std::shared_ptr<const std::vector<std::string>> allowed_hosts_ = std::make_shared<const std::vector<std::string>>();
     mutable std::mutex allowed_hosts_mutex_;
     std::atomic<bool> host_check_enabled_{false};
+    std::atomic<std::uint16_t> discovery_port_{32227};
     // Serializes a description PUT's validate, persist and apply, so two
     // writes cannot interleave and leave the file and memory disagreeing.
     // route() never takes it.

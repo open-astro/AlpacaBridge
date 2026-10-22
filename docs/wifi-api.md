@@ -218,7 +218,7 @@ The robust client flow:
 2. Fire the request; treat a timeout/socket error after acceptance as
    expected, not as failure.
 3. Re-locate the device on the new network: Alpaca UDP discovery
-   (port 32227), mDNS hostname, or `172.24.1.1` when the hotspot is/returns
+   (UDP port 32227 unless `discovery.port` changed it), mDNS hostname, or `172.24.1.1` when the hotspot is/returns
    active.
 4. Poll `status` until it reflects the new state.
 

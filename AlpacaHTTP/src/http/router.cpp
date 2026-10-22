@@ -177,7 +177,7 @@ using ConfigKeyValues = std::vector<std::pair<std::string, std::string>>;
 using ConfigSectionValues = std::pair<std::string, ConfigKeyValues>;
 
 // Update keys under one or more top-level sections of the config file (the
-// `server:` and `http:` ones) in a single read/rewrite pass, so a request that
+// `server:`, `http:` and `discovery:` ones) in a single read/rewrite pass, so a request that
 // sets several values can never leave the file with only some of them
 // applied. An existing key is replaced in place, a missing key is appended to
 // its section, and a missing section is appended to the file.
@@ -2089,6 +2089,8 @@ nlohmann::json Router::build_description_payload() const {
         }
         target["HostCheckEnabled"] = host_check_enabled_.load(std::memory_order_acquire);
         target["AllowedHosts"] = join_host_list(*hosts);
+        // #1509: additive; every key the spec requires stays.
+        target["DiscoveryPort"] = discovery_port_.load(std::memory_order_acquire);
     };
 
     if (management_driver_) {
@@ -2310,11 +2312,41 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                     break;
                 }
             }
-            if (!new_location && !new_profile_name && !new_sync_clock && !new_host_check && !new_allowed_hosts) {
+            // #1509: discovery.port, a JSON integer or a numeric string, 1-65535.
+            std::optional<std::uint16_t> new_discovery_port;
+            for (const char* key : {"DiscoveryPort", "discoveryPort", "discovery_port"}) {
+                if (body.contains(key)) {
+                    const auto& v = body[key];
+                    long long parsed = 0;
+                    bool numeric = false;
+                    if (v.is_number_integer()) {
+                        parsed = v.get<long long>();
+                        numeric = true;
+                    } else if (v.is_string()) {
+                        const std::string text = v.get<std::string>();
+                        if (!text.empty() && text.size() <= 5 &&
+                            std::all_of(text.begin(), text.end(), [](unsigned char c) { return std::isdigit(c); })) {
+                            parsed = std::stoll(text);
+                            numeric = true;
+                        }
+                    }
+                    if (!numeric || parsed < 1 || parsed > 65535) {
+                        response.set_body(make_error_response(client_tx_id, server_tx_id,
+                                                              util::ErrorCode::INVALID_VALUE,
+                                                              "DiscoveryPort must be an integer from 1 to 65535"));
+                        response.set_status(400, "Bad Request");
+                        return response;
+                    }
+                    new_discovery_port = static_cast<std::uint16_t>(parsed);
+                    break;
+                }
+            }
+            if (!new_location && !new_profile_name && !new_sync_clock && !new_host_check && !new_allowed_hosts &&
+                !new_discovery_port) {
                 AlpacaResponse err = make_error_response(
                     client_tx_id, server_tx_id, util::ErrorCode::VALUE_NOT_SET,
                     "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
-                    "'HostCheckEnabled' or 'AllowedHosts' property");
+                    "'HostCheckEnabled', 'AllowedHosts' or 'DiscoveryPort' property");
                 response.set_body(err);
                 response.set_status(400, "Bad Request");  // #1476
                 return response;
@@ -2391,8 +2423,15 @@ Response Router::handle_description(const Request& request, std::uint32_t server
                 if (new_sync_clock) {
                     persist_values.emplace_back("sync_system_clock_from_clients", *new_sync_clock ? "true" : "false");
                 }
+                std::vector<std::pair<std::string, std::string>> persist_discovery_values;
+                if (new_discovery_port) {
+                    persist_discovery_values.emplace_back("port", std::to_string(*new_discovery_port));
+                }
                 std::string persist_error;
-                if (!update_config_values(config_path, {{"server", persist_values}, {"http", persist_http_values}},
+                if (!update_config_values(config_path,
+                                          {{"server", persist_values},
+                                           {"http", persist_http_values},
+                                           {"discovery", persist_discovery_values}},
                                           persist_error)) {
                     AlpacaResponse err = make_error_response(client_tx_id, server_tx_id, util::ErrorCode::DRIVER_ERROR,
                                                              "Failed to persist server settings: " + persist_error);
@@ -2425,6 +2464,11 @@ Response Router::handle_description(const Request& request, std::uint32_t server
             }
             if (new_host_check && *new_host_check) {
                 set_host_check_enabled(true);
+            }
+            if (new_discovery_port) {
+                set_discovery_port(*new_discovery_port);
+                util::log_info("Discovery port set to " + std::to_string(*new_discovery_port) + " by " +
+                               request.remote_address() + "; it applies when the service restarts");
             }
             if (new_host_check || new_allowed_hosts) {
                 util::log_info("Host check settings changed by " + request.remote_address() +

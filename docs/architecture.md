@@ -148,7 +148,7 @@ AlpacaHTTP is the HTTP server layer. It translates Alpaca REST/JSON requests int
 - **Server** (`src/http/server.cpp`) — POSIX socket server, thread-per-connection model, listens on port 6800
 - **Router** (`src/http/router.cpp`) — maps HTTP routes to AlpacaCore driver method calls for all device types
 - **Config** (`src/core/config.cpp`) — JSON-based device configuration, persisted to disk
-- **Discovery** (`src/discovery/discovery.cpp`) — Alpaca UDP discovery responder (port 32227)
+- **Discovery** (`src/discovery/discovery.cpp`) — Alpaca UDP discovery responder (UDP port `discovery.port`, default 32227, configurable; applied on restart)
 - **Web UI** (`web/`) — browser-based management interface for device configuration
 - **Error Mapping** (`src/util/error_mapping.cpp`) — maps `AlpacaException` to Alpaca error numbers
 - **JSON Utils** (`src/core/json_utils.cpp`) — request/response serialization
