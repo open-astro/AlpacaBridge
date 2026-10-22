@@ -561,7 +561,7 @@ public:
                                               std::string(e.what()));
             }
             if (skip_priming) {
-                ALPACA_LOG_DEBUG(kLogTag, "Skipping the sensor geometry priming capture (mirror lock-up on)");
+                ALPACA_LOG_DEBUG(kLogTag, "Skipping the sensor geometry priming capture (mirror lock-up on or unknown)");
                 connected_.store(true);
                 return;
             }
@@ -1492,7 +1492,7 @@ private:
         try {
             sdk_.close_camera(handle);
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // The handle belongs to a device that is gone; the failure is already latched and logged.
+            // The handle belongs to a device that is gone; a close failure adds nothing the caller can act on.
         }
     }
 

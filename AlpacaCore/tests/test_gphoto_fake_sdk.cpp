@@ -1182,7 +1182,8 @@ TEST_CASE("GPhoto camera fake - MLU on runs press release settle press release o
           "[gphoto][camera][unit][fakesdk][taskclock][mlu]") {
     const auto [widget, value] = GENERATE(std::pair<std::string, std::string>{"mirrorlock", "1"},
                                           std::pair<std::string, std::string>{"mirrorlockstatus", "1"},
-                                          std::pair<std::string, std::string>{"mirrorlockstatus", "2"});
+                                          std::pair<std::string, std::string>{"mirrorlockstatus", "2"},
+                                          std::pair<std::string, std::string>{"mirrorlock", "On"});
     CAPTURE(widget, value);
     reset_gphoto_sensor_cache();
     constexpr int kCap = 200;
@@ -1591,6 +1592,77 @@ TEST_CASE("GPhoto camera fake - a refused longexpnr write warns and does not fai
     CHECK(warnings.count_containing("long-exposure NR") == 1);
 
     driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - longExposureNR with no matching choice warns and writes nothing",
+          "[gphoto][camera][unit][fakesdk][lenr]") {
+    // Falsified by: delete the match == choices.end() guard in apply_long_exposure_nr_locked (the write then
+    // dereferences the end iterator).
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_camera();
+    cam.choices["longexpnr"] = {"Enable", "Disable"};
+    cam.choice_value["longexpnr"] = "Enable";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    GPhotoWarnCapture warnings;
+    GPhotoOptions options;
+    options.long_exposure_nr = "off";
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder,
+                                                                   alpacacore::util::default_task_clock(), options);
+    driver->set_connected(true);
+
+    CHECK(driver->get_connected() == true);
+    CHECK(fake.choice_write_history.count("longexpnr") == 0);
+    CHECK(warnings.count_containing("long-exposure NR has no \"off\" choice on this camera") == 1);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - a camera gone from the USB bus during the longexpnr write fails the connect",
+          "[gphoto][camera][unit][fakesdk][lenr]") {
+    // Falsified by: remove the GPhotoDeviceGoneException rethrow in apply_long_exposure_nr_locked (the catch
+    // of std::exception then logs a WARN and the connect succeeds on a dead handle).
+    const std::string call = GENERATE(as<std::string>{}, "has_widget", "get_choices", "set_choice_value");
+    CAPTURE(call);
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto cam = make_camera();
+    cam.choices["longexpnr"] = {"On", "Off"};
+    cam.choice_value["longexpnr"] = "On";
+    fake.cameras.push_back(cam);
+    FakeRawDecoder decoder;
+
+    // A first connect with the default options learns the geometry, so the next connect ends right after
+    // configure_after_connect_locked and the longexpnr step is the last of its kind.
+    auto primer = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    primer->set_connected(true);
+    primer->set_connected(false);
+    fake.call_log.clear();
+    primer->set_connected(true);
+    const int baseline = count_calls(fake, call);
+    primer->set_connected(false);
+    fake.call_log.clear();
+    const int closed_before = fake.close_count;
+    const int opened_before = fake.open_count;
+
+    int seen = 0;
+    fake.before_call = [&](const std::string& name) {
+        if (name == call && ++seen == baseline + 1) {
+            throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Could not find the requested device",
+                                                                        alpacacore::AlpacaError::DriverException);
+        }
+    };
+    GPhotoOptions options;
+    options.long_exposure_nr = "off";
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder,
+                                                                   alpacacore::util::default_task_clock(), options);
+    CHECK_THROWS(driver->set_connected(true));
+
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.open_count - opened_before == 1);
+    CHECK(fake.close_count - closed_before == 1);
 }
 
 TEST_CASE("GPhoto camera fake - MLU read finding the camera gone from the USB bus reports a disconnect",
