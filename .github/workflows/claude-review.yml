@@ -110,6 +110,62 @@ jobs:
             sleep 30
           done
 
+      # Claude Code CLI, cached so a review does not depend on claude.ai/install.sh
+      # answering (it returned 429 on some runs). These four steps run before the
+      # checkout below, so no PR-head code exists on the runner yet and nothing
+      # from a PR can write into the cached files before the save. Under
+      # pull_request_target the cache is scoped to the default branch. Keep
+      # the version in the key, the install and the check equal to the action's pinned
+      # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA below
+      # is bumped. The version check is the only integrity check.
+      - name: Restore the Claude Code CLI cache
+        id: claude_cli_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.local/share/claude
+            ~/.local/bin/claude
+          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install the Claude Code CLI on a cache miss
+        if: steps.claude_cli_cache.outputs.cache-hit != 'true'
+        run: |
+          # Without pipefail a failed curl (429) leaves bash reading an empty
+          # script, which exits 0, and the pipeline would pass.
+          set -o pipefail
+          # Longer backoff than the action's own installer: 15, 30, 60, 120 s.
+          for wait in 15 30 60 120 stop; do
+            if curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.302; then
+              exit 0
+            fi
+            if [ "${wait}" = stop ]; then
+              echo "::error::The Claude Code CLI install failed after 5 attempts."
+              exit 1
+            fi
+            echo "Install failed; retrying in ${wait} s."
+            sleep "${wait}"
+          done
+
+      - name: Check the Claude Code CLI version
+        run: |
+          reported="$("${HOME}/.local/bin/claude" --version)" || reported="(claude did not run)"
+          case "${reported}" in
+            2.1.302\ *|2.1.302) echo "Claude Code CLI ${reported}" ;;
+            *)
+              echo "::error::Expected Claude Code CLI 2.1.302, got: ${reported}"
+              exit 1
+              ;;
+          esac
+
+      - name: Save the Claude Code CLI cache
+        if: steps.claude_cli_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.local/share/claude
+            ~/.local/bin/claude
+          key: claude-code-cli-2.1.302-${{ runner.os }}-${{ runner.arch }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # Review the head the author pushed, not the base branch or merge ref.
@@ -231,6 +287,9 @@ jobs:
           # API error body by default. Print it once, then revert this line: it
           # also prints the whole review session into the public job log.
           show_full_output: true
+          # The cached CLI above; its version must match the action's pinned
+          # `claudeCodeVersion` (src/entrypoints/run.ts) whenever the action SHA is bumped.
+          path_to_claude_code_executable: /home/runner/.local/bin/claude
           # Explicit token: the action's OIDC exchange 401s pull_request_target
           # runs. The comment then posts as github-actions[bot].
           github_token: ${{ github.token }}
