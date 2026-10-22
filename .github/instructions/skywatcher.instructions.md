@@ -125,7 +125,7 @@ datagrams before each send so replies cannot get off-by-one.
   because a mount facing the other pole is the same mount turned half a turn about the
   vertical, and with the board's dec-axis count sense `eps`, which is wiring, not
   latitude (#458). `eps` is **measured, per mount code** (`measured_dec_axis_sense()`):
-  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a +51.477833 latitude on the same rig
+  -1 for the EQM-35 Pro (0x32; south 2026-09-12 and a northern latitude setting on the same rig
   2026-09-19), +1 for the Wave 150i (0x45; the #432 report, north), +1 for the
   EQ-AL55i Pro (0x09; a reporter's mount at about +40, 2026-09-20, #579). Every other
   board keeps `k = +1`, the shipped model, which is 12 h out wherever that board's

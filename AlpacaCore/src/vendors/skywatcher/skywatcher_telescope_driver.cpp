@@ -3269,8 +3269,8 @@ private:
     //
     // The fifth (open-astro#458), 2026-09-19, the same EQM-35 Pro with the
     // 4.0.0 build, still set up facing the south pole but with the driver's
-    // latitude at +51.477833, which is a northern mount turned half a turn about
-    // the vertical. For HA -3 h, dec +30 the driver sent a1 = +45, a2 = -60
+    // latitude set to a northern value, which is a northern mount turned half a turn
+    // about the vertical. For HA -3 h, dec +30 the driver sent a1 = +45, a2 = -60
     // and reported alt 52, az 87; the saddle ended front-left and slightly
     // down (SE, about -8 deg), which is HA +9 h, alt -10.7: 12 h out, the k
     // this build now applies to 0x32 in the north.

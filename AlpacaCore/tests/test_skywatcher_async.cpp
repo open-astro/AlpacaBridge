@@ -2873,7 +2873,7 @@ TEST_CASE("SkyWatcher - a SiteLatitude write during a DEC MoveAxis still re-appl
 //
 // The hardware-validated MoveAxis data point
 // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at
-// latitude -33.856784: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
+// a southern site: pressing N increased reported Dec, i.e. a POSITIVE a1/a2
 // axis rate on the a2 >= 0 branch increases sky Dec below the equator) is
 // the independent check that the south-of-equator direction asserted here
 // is the physically correct one, not just internally consistent.
