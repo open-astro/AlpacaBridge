@@ -361,35 +361,38 @@ TEST_CASE("SkyWatcher snapshot - MoveAxis anchors the model where it changes the
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount, clock);
-    REQUIRE(clock.wait_for_waiters(1, kRendezvous));  // no poll re-anchors the model from here
-    constexpr double kRate = 1.0;                     // deg/s on the Dec axis
+    constexpr double kRate = 3.0;  // deg/s on the Dec axis
 
-    // Start: the last anchor is the connect's frame, 400 ms old, and the five
-    // start transactions take 50 ms of task time each. The new rate applies
-    // from the start, not from that anchor or from the first of those
-    // transactions.
-    clock.advance(milliseconds(400));
+    // One step lets a poll run and settle: the model is anchored on its frame.
+    // The fake board never moves, so no later poll may run; the poll waits
+    // 100 ms of task time, and the three 30 ms spans below stay under that
+    // in all. The model alone must carry the motion.
+    step(clock, milliseconds(400));
     const double at_rest = driver->get_declination();
-    mount.set_reply_hook([&clock] { clock.advance(milliseconds(50)); });
+
+    // Start: the six transactions of the stop and start take 5 ms of task
+    // time each. The new rate applies from the start, not from the anchor
+    // or from the first of those transactions.
+    mount.set_reply_hook([&clock] { clock.advance(milliseconds(5)); });
     driver->move_axis(1, kRate);
     mount.set_reply_hook({});
     const double started = driver->get_declination();
-    CHECK(std::abs(started - at_rest) < 0.1);
+    CHECK(std::abs(started - at_rest) < 0.02);
 
-    // A new rate on the moving axis: the 0.4 deg covered so far is kept.
-    clock.advance(milliseconds(400));
+    // A new rate on the moving axis: the 0.09 deg covered so far is kept.
+    clock.advance(milliseconds(30));
     const double moving = driver->get_declination();
-    REQUIRE(std::abs(moving - started) > 0.3);
+    REQUIRE(std::abs(moving - started) > 0.05);
     driver->move_axis(1, -kRate);
     const double reversed = driver->get_declination();
-    CHECK(std::abs(reversed - moving) < 0.1);
+    CHECK(std::abs(reversed - moving) < 0.02);
 
     // Stop: the motion up to the stop is kept too.
-    clock.advance(milliseconds(400));
+    clock.advance(milliseconds(30));
     const double moving_back = driver->get_declination();
-    REQUIRE(std::abs(moving_back - reversed) > 0.3);
+    REQUIRE(std::abs(moving_back - reversed) > 0.05);
     driver->move_axis(1, 0.0);
-    CHECK(std::abs(driver->get_declination() - moving_back) < 0.1);
+    CHECK(std::abs(driver->get_declination() - moving_back) < 0.02);
     driver->set_connected(false);
 }
 

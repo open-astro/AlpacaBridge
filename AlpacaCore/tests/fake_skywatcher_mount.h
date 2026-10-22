@@ -108,7 +108,8 @@ public:
     /// Runs on the fake's thread once per transaction, next to the latency
     /// sleep, so a case on a fake task clock can let task time pass during a
     /// multi-transaction command. Set it before the traffic it covers; an empty
-    /// function clears it.
+    /// function clears it. The hook must not take a lock the driver holds
+    /// across a transaction: a clock advance takes each due waiter's mutex.
     void set_reply_hook(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(hook_mutex_);
         reply_hook_ = std::move(hook);
