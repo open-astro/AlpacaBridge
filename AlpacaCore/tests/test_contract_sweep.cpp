@@ -266,6 +266,10 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_slewing", [&] { (void)t.get_slewing(); }});
             p.push_back({"get_at_park", [&] { (void)t.get_at_park(); }});
             p.push_back({"get_at_home", [&] { (void)t.get_at_home(); }});
+            if (entry.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::NotConnected) {
+                p.push_back({"get_right_ascension_rate", [&] { (void)t.get_right_ascension_rate(); }});
+                p.push_back({"get_declination_rate", [&] { (void)t.get_declination_rate(); }});
+            }
             p.push_back({"slew_to_coordinates", [&] { t.slew_to_coordinates(1.0, 1.0); }});
             p.push_back({"abort_slew", [&] { t.abort_slew(); }});
             break;
@@ -292,6 +296,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& f = dynamic_cast<alpacacore::FocuserDriver&>(d);
             p.push_back({"get_position", [&] { (void)f.get_position(); }});
             p.push_back({"get_is_moving", [&] { (void)f.get_is_moving(); }});
+            p.push_back({"get_max_step", [&] { (void)f.get_max_step(); }});
+            p.push_back({"get_max_increment", [&] { (void)f.get_max_increment(); }});
             p.push_back({"move(0)", [&] { f.move(0); }});
             p.push_back({"halt", [&] { f.halt(); }});
             break;
@@ -309,6 +315,7 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             p.push_back({"get_cover_state", [&] { (void)c.get_cover_state(); }});
             p.push_back({"get_calibrator_state", [&] { (void)c.get_calibrator_state(); }});
             p.push_back({"get_brightness", [&] { (void)c.get_brightness(); }});
+            p.push_back({"get_max_brightness", [&] { (void)c.get_max_brightness(); }});
             // No open_cover probe: the Gemini Cover Lite has no cover and answers NotImplemented.
             break;
         }
@@ -420,6 +427,15 @@ std::vector<Probe> can_getter_probes(AlpacaDriver& d, DeviceType type) {
     for (const auto& [name, fn] : probes) {
         INFO(e.id << " " << name);
         CHECK(thrown_code(fn) == err::NotConnected);
+    }
+    if (e.type == DeviceType::Telescope &&
+        e.rate_getters_disconnected == alpacacore::test::contract::DisconnectedRead::Static) {
+        // A stated exemption: pinned so that the driver that is fixed flips this case (see ContractEntry).
+        auto& t = dynamic_cast<alpacacore::TelescopeDriver&>(*d);
+        INFO(e.id << " rate_getters_reason: " << e.rate_getters_reason);
+        REQUIRE(std::string(e.rate_getters_reason).size() > 0);
+        CHECK(thrown_code([&] { (void)t.get_right_ascension_rate(); }) == -1);
+        CHECK(thrown_code([&] { (void)t.get_declination_rate(); }) == -1);
     }
     if (e.type == DeviceType::Switch) {
         auto& s = dynamic_cast<alpacacore::SwitchDriver&>(*d);

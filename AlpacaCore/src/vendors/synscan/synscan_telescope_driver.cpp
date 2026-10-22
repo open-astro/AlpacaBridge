@@ -732,6 +732,7 @@ public:
     }
 
     double get_declination_rate() const override {
+        check_connected();
         return 0.0;
     }
 
@@ -830,6 +831,7 @@ public:
     }
 
     double get_right_ascension_rate() const override {
+        check_connected();
         return 0.0;
     }
 

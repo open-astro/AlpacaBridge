@@ -306,15 +306,10 @@ public:
     }
 
     bool get_temp_comp() const override {
-        // Was an early return of false while disconnected, which answered a
-        // property that should have refused. The try/catch below still covers
-        // a transport failure on a CONNECTED focuser.
+        // A failed read raises (the wrapper throws DriverException on a reply it cannot parse, NotConnected
+        // on a lost link); reporting "off" would answer a property the driver could not read (issue #1478).
         ensure_connected();
-        try {
-            return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
-        } catch (const std::exception&) {
-            return false;
-        }
+        return const_cast<GeminiFocuserDriver*>(this)->protocol_.get_temp_comp_enabled();
     }
 
     void set_temp_comp(bool temp_comp) override {
