@@ -1532,3 +1532,39 @@ TEST_CASE("GPhoto camera fake - a refused longexpnr write warns and does not fai
 
     driver->set_connected(false);
 }
+
+TEST_CASE("GPhoto camera fake - MLU read finding the camera gone from the USB bus reports a disconnect",
+          "[gphoto][camera][unit][fakesdk][mlu]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_mlu_camera("mirrorlock", "0"));
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected() == true);
+
+    std::atomic<bool> armed{true};
+    fake.before_call = [&](const std::string& name) {
+        if (armed.load() && name == "has_widget") {
+            throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Could not find the requested device",
+                                                                        alpacacore::AlpacaError::DriverException);
+        }
+    };
+    require_alpaca_error([&] { driver->start_exposure(0.01, true); }, alpacacore::AlpacaError::NotConnected);
+
+    // The body left the bus: the client must see Connected false and reconnect.
+    CHECK(driver->get_connected() == false);
+    CHECK(fake.close_count == fake.open_count);
+
+    // Reconnect enumerates again and the next exposure works.
+    armed.store(false);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    driver->start_exposure(0.01, true);
+    wait_for_exposure_to_finish(*driver);
+    CHECK(driver->get_image_ready() == true);
+
+    driver->set_connected(false);
+    CHECK(fake.close_count == fake.open_count);
+}

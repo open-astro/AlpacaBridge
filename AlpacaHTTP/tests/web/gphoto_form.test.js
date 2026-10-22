@@ -42,6 +42,7 @@ test('the settle input agrees with the catalog range and default', () => {
     assert.ok(input.includes(`min="${settle.range.min}"`));
     assert.ok(input.includes(`max="${settle.range.max}"`));
     assert.ok(input.includes(`value="${settle.default}"`));
+    assert.ok(input.includes('step="1"'), 'integer field must step by 1');
 });
 
 test('the long-exposure NR select offers the catalog values and defaults to camera', () => {

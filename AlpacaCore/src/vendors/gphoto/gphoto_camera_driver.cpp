@@ -1017,7 +1017,15 @@ public:
             // body answers gp_camera_capture only after a 60 s timeout, so the shutter is fired with two
             // eosremoterelease press/release pairs (mlu_capture_with_abort). A body that cannot do that must
             // fail here, before the worker starts, rather than stall.
-            use_mlu = mirror_lockup_on_locked(active_handle);
+            try {
+                use_mlu = mirror_lockup_on_locked(active_handle);
+            } catch (const GPhotoDeviceGoneException& e) {
+                // Same teardown as a worker that finds the camera gone (#1064): report disconnected so the
+                // client reconnects, instead of leaving Connected true on a dead handle.
+                mark_device_gone_locked(active_handle);
+                throw AlpacaException(std::string("Camera is no longer connected: ") + e.what(),
+                                      AlpacaError::NotConnected);
+            }
             if (use_mlu && !remote_release_pair_.has_value()) {
                 throw AlpacaException(
                     "Mirror lock-up is on in the camera, but this camera has no eosremoterelease press/release "
@@ -1470,7 +1478,14 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         exposure_error_ = what;
         exposure_failed_ = true;
-        if (!device_gone || handle_ != handle) return;
+        if (!device_gone) return;
+        mark_device_gone_locked(handle);
+    }
+
+    // Requires mutex_ held. The camera behind `handle` left the USB bus: forget the handle, report
+    // disconnected and close it. A handle that is no longer current is left alone.
+    void mark_device_gone_locked(int handle) {
+        if (handle_ != handle) return;
         handle_ = -1;
         connected_.store(false);
         try {
