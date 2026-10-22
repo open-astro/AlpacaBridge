@@ -96,6 +96,9 @@ struct MountStatus {
     // :Mn#/:Ms#/:Me#/:Mw# move, so a MoveAxis, and also a home or spiral
     // guide; not a pulse guide). Firmware without the letter never sets it.
     bool is_guide_active = false;
+    // 'h': a home is running (Home state HS_HOMING). 'I': a park is running.
+    bool is_homing = false;
+    bool is_parking = false;
     // 'G': a pulse guide is running. While it runs OnStepX drops 'g' even
     // when a MoveAxis is still running on the other axis.
     bool is_pulse_guide_active = false;
@@ -294,9 +297,10 @@ public:
     /**
      * @brief Park the mount at its configured park position.
      *
-     * Sends :hP#.
+     * Sends :hP#. Returns true when the mount accepted the park (bare '1');
+     * on false, get_last_command_error() says why (OnStepX, OnStep 4.x).
      */
-    void park();
+    bool park();
 
     /**
      * @brief Set the current position as the park position.
@@ -315,14 +319,23 @@ public:
     /**
      * @brief Seek the mount's home position using its home sensors.
      *
-     * Sends :hC#.
-     *
-     * TODO: Verify against real OnStep firmware — the INDI reference driver
-     * does not expose a dedicated find-home command distinct from park, so
-     * this was inferred from general OnStep command documentation and needs
-     * hardware confirmation.
+     * Sends :hC#, which has no reply: on OnStepX, get_last_command_error()
+     * right after it says whether the home started (checked on the HM-17,
+     * OnStepX 10.23a, #1430).
      */
     void find_home();
+
+    /**
+     * @brief The error code of the last command on this link (:GE#).
+     *
+     * OnStepX and OnStep 4.x keep it per serial channel with the same codes
+     * (0 no error, 22 mount in motion, 12 no park position set, ...;
+     * OnStepX adds 25 for an explicit success: docs/COMMAND_REFERENCE.md,
+     * OnStep Globals.h CommandErrors). Any later command replaces it, so read
+     * it right after the command it is about. Empty when the reply is not a
+     * two-digit code (firmware without :GE#); waits at most 1 s.
+     */
+    std::optional<int> get_last_command_error();
 
     /**
      * @brief Select the mount's half-max slew rate for :Mn#/:Ms#/:Me#/:Mw#

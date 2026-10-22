@@ -18,6 +18,7 @@
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -51,6 +52,12 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
                                                               std::optional<double> site_longitude_deg = std::nullopt,
                                                               std::optional<double> site_elevation_m = std::nullopt,
                                                               std::optional<bool> sync_time_on_connect = std::nullopt);
+
+/// Test seam: runs `hook` in a Park or FindHome between releasing the driver
+/// lock and starting its background part (#1430), so a case can land a newer
+/// command in that gap. Set only while no Park or FindHome is in flight.
+/// `driver` must come from the factories above; anything else is ignored.
+void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 namespace detail {
 // open-astro#521 / #1241: how long the serial link may be gone before motion

@@ -1311,11 +1311,21 @@ Tier2Host tier2_host_synscan_telescope() {
 #endif
 
 #ifdef ALPACACORE_ENABLE_ONSTEP
-// Recipe of test_onstep_concurrency_stress.cpp.
+// Recipe of test_onstep_concurrency_stress.cpp, with an idle OnStepX for
+// :GU# and :hP#. The default "0#" has no 'N', so :GU# would report a GOTO that
+// never ends, and Park stops running motion and waits for it first (#1430).
 Tier2Host tier2_host_onstep_telescope() {
     namespace ons = alpacacore::vendor::onstep;
-    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope",
-                             alpacacore::test::FakeMountServer::default_responder(),
+    auto idle_onstep = [fallback = alpacacore::test::FakeMountServer::default_responder()](const std::string& chunk) {
+        if (chunk.rfind(":GU", 0) == 0) {
+            return std::string("nNp#");  // not tracking, no GOTO, not parked
+        }
+        if (chunk.rfind(":hP", 0) == 0) {
+            return std::string("1");  // park accepted (bare digit)
+        }
+        return fallback(chunk);
+    };
+    return mount_server_host("onstep_telescope", "onstep", "onstep_telescope", idle_onstep,
                              [](int port, bool hold) -> std::unique_ptr<AlpacaDriver> {
                                  ons::ConnectionInfo info;
                                  info.type = ons::ConnectionType::Network;
