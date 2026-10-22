@@ -262,16 +262,34 @@ TEST_CASE("Gemini Focuser Driver - connected, TempCompAvailable is true", "[gemi
 
     CHECK(driver->get_temp_comp_available() == true);
 
-    // BOTH branches, because get_temp_comp() catches every std::exception and
-    // returns false: an assertion that only ever sees "off" passes whether the
-    // ":24#" round trip worked or threw, which makes it no assertion at all.
-    // The fake defaults to "10#" (off); "11#" is the reading that can only
-    // come back from a round trip that actually happened.
+    // BOTH branches: an assertion that only ever sees "off" says nothing about
+    // the ":24#" round trip. The fake defaults to "10#" (off); "11#" is the
+    // reading that can only come back from a round trip that actually happened.
     CHECK(driver->get_temp_comp() == false);
     fake.set_temp_comp_reply(true);
     CHECK(driver->get_temp_comp() == true);
     fake.set_temp_comp_reply(false);
     CHECK(driver->get_temp_comp() == false);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("Gemini Focuser Driver - a failed TempComp read raises DriverException, not false",
+          "[gemini][focuser][unit][fake]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path());
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    fake.set_garbage_temp_comp(true);
+    // ASCOM: a property that cannot read its value raises, it does not report "off" (issue #1478).
+    int code = -1;
+    try {
+        (void)driver->get_temp_comp();
+    } catch (const alpacacore::AlpacaException& ex) {
+        code = ex.error_code();
+    }
+    CHECK(code == alpacacore::AlpacaError::DriverException);
 
     driver->set_connected(false);
 }

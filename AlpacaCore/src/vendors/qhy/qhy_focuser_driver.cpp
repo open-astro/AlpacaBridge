@@ -240,8 +240,14 @@ public:
 
     bool get_is_moving() const override { return served_frame().moving; }
 
-    int get_max_step() const override { return settings_.max_step; }
-    int get_max_increment() const override { return settings_.max_step; }
+    int get_max_step() const override {
+        ensure_connected();
+        return settings_.max_step;
+    }
+    int get_max_increment() const override {
+        ensure_connected();
+        return settings_.max_step;
+    }
 
     int get_position() const override { return served_frame().position; }
 

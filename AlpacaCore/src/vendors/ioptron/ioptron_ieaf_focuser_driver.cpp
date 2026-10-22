@@ -195,9 +195,15 @@ public:
         return cached_status().moving;
     }
 
-    int get_max_step() const override { return IEAF_MAX_STEP; }
+    int get_max_step() const override {
+        ensure_connected();
+        return IEAF_MAX_STEP;
+    }
 
-    int get_max_increment() const override { return IEAF_MAX_STEP; }
+    int get_max_increment() const override {
+        ensure_connected();
+        return IEAF_MAX_STEP;
+    }
 
     int get_position() const override {
         ensure_connected();
