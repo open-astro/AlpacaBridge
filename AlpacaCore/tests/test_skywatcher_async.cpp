@@ -4046,6 +4046,29 @@ TEST_CASE("SkyWatcher async - connects without a site and refuses what needs one
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher async - SiteElevation never waits behind device I/O (decision 0016)", "[skywatcher][async]") {
+    // Falsified by: taking mutex_ in get_site_elevation(), which queues the
+    // getter behind SetPark's position refresh held up on the wire.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -33.856784, 151.215297, 42.0);
+    REQUIRE_NOTHROW(driver->set_connected(true));
+
+    constexpr auto kHold = std::chrono::milliseconds(1500);
+    mount.hold_next_reply(kHold);
+    std::thread parking([&] { driver->set_park(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // SetPark is inside its exchange
+
+    const auto started = std::chrono::steady_clock::now();
+    CHECK(driver->get_site_elevation() == 42.0);
+    driver->set_site_elevation(15.0);
+    CHECK(driver->get_site_elevation() == 15.0);
+    const auto waited = std::chrono::steady_clock::now() - started;
+    parking.join();
+    CHECK(waited < kHold / 3);
+    driver->set_connected(false);
+}
+
 TEST_CASE("SkyWatcher async - one configured coordinate is not enough to point (#274, #1474)", "[skywatcher][async]") {
     // Latitude alone: the hemisphere is known but LST is not; longitude alone,
     // the reverse. Either connects and still refuses to point, and the getter

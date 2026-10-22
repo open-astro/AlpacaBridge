@@ -1120,21 +1120,23 @@ public:
 
     // Decision 0019: a site value never set reads as InvalidOperation (the
     // ASCOM time and place FAQ), not as 0.0, which is a real place.
+    // Lock-free (decision 0016 rule 1): mutex_ is held across serial and UDP
+    // exchanges, so a poll of this getter must not queue behind them. The
+    // setter writes the value before the flag; the acquire load of the flag
+    // here orders the value read after it.
     double get_site_elevation() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!site_elevation_set_) {
+        if (!site_elevation_set_.load(std::memory_order_acquire)) {
             throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
         }
-        return site_elevation_m_;
+        return site_elevation_m_.load(std::memory_order_relaxed);
     }
 
     void set_site_elevation(double elevation) override {
         if (!std::isfinite(elevation) || elevation < -300.0 || elevation > 10000.0) {
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters", AlpacaError::InvalidValue);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        site_elevation_m_ = elevation;
-        site_elevation_set_ = true;
+        site_elevation_m_.store(elevation, std::memory_order_relaxed);
+        site_elevation_set_.store(true, std::memory_order_release);
     }
 
     double get_site_latitude() const override {
@@ -6167,14 +6169,14 @@ private:
 
     double site_latitude_;
     double site_longitude_;
-    double site_elevation_m_;
+    std::atomic<double> site_elevation_m_;  // read without mutex_, see get_site_elevation()
     // open-astro#274: "was this coordinate ever explicitly set", tracked apart
     // from the value because 0.0 is a legitimate coordinate. Seeded from the
     // constructor's optionals and set by each ASCOM setter for its own axis.
     // Declared after site_elevation_m_ to match the initialiser order.
     bool site_latitude_set_;
     bool site_longitude_set_;
-    bool site_elevation_set_;  // decision 0019: SiteElevation reads as unset until written
+    std::atomic<bool> site_elevation_set_;  // decision 0019: SiteElevation reads as unset until written
     // Client UTCDate offset and the anchors client_offset_survives_locked()
     // uses to notice a host clock step underneath it -- both clocks answer
     // that question, and both time paths ask it. Mutable: the drop happens on
