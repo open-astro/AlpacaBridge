@@ -208,8 +208,8 @@ TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][cam
         alpacacore::test::require_percent_completed_unavailable(*camera);
     }
     SECTION("after a failed exposure") {
-        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them); the old value
-        // here was 100 because the failed frame still counted as an image.
+        // Three Failed statuses exhaust the retries (the driver waits 250 ms on the task clock between them);
+        // the old value here was 100 because the failed frame still counted as an image.
         camera->start_exposure(0.001, true);
         sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
                                     alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
