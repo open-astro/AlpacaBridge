@@ -171,6 +171,7 @@ int main() {
     // Alpaca process on this host holds it, so that half only runs when
     // nobody else answers there.
     {
+        // case: the responder binds the configured discovery port and not 32227
         constexpr std::uint16_t kConfiguredPort = 40123;
         alpacahttp::Config configured = config;
         configured.set_discovery_port(kConfiguredPort);

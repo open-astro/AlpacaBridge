@@ -8769,6 +8769,7 @@ int main() {
     // config file's discovery: section and leaves the rest of the file alone.
     // The responder binds it on the next restart.
     {
+        // case: DiscoveryPort in the management description is read, validated 1-65535 and saved under discovery
         const std::string description = "/management/v1/description";
 
         char path_template[] = "/tmp/alpacahttp_test_routing_discport_XXXXXX";

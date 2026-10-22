@@ -391,6 +391,7 @@ int main() {
     // is read from the file and ALPACAHTTP_DISCOVERY_PORT, and a value outside
     // 1-65535 keeps the default.
     {
+        // case: discovery.port defaults to 32227, reads file and env, rejects out-of-range
         alpacahttp::Config fresh;
         EXPECT(fresh.discovery_port() == 32227);
         EXPECT(alpacahttp::Config::kDefaultDiscoveryPort == 32227);
