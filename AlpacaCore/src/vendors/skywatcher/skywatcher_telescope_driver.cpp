@@ -71,7 +71,7 @@ constexpr int measured_dec_axis_sense(std::uint8_t mount_code) {
     switch (mount_code) {
         case 0x09:  // EQ-AL55i Pro: dovetail west at a2 = +89.4, north (+40), 2026-09-20
             return +1;
-        case 0x32:  // EQM-35 Pro: -33.856784 on 2026-09-12, and at +51.477833 on 2026-09-19
+        case 0x32:  // EQM-35 Pro: measured at a southern site on 2026-09-12, and at a northern site on 2026-09-19
             return -1;
         case 0x45:  // Wave 150i: the #432 report, +45.45
             return +1;
@@ -3244,7 +3244,7 @@ private:
     // sky position while the driver reported the target back. It passed
     // ConformU because the driver reports the same model it commands.
     //
-    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at latitude -33.856784
+    // MEASURED ON HARDWARE, 2026-09-12, EQM-35 Pro at a southern site
     // with the shipped 3.5.1 build, tube position read off the mount by hand.
     // Each row is an axis position the driver was commanded to, and where the
     // OTA physically ended up:
@@ -4273,7 +4273,7 @@ private:
     // run would do it). XOR-ing the branch test with the hemisphere is the
     // full fix: MoveAxis, which then applied no sign transform at all (since #297 it does), is the
     // hardware-observed reference for which way a raw axis rate moves reported Dec
-    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at latitude -33.856784). The sign is evaluated once
+    // (.github/instructions/skywatcher.instructions.md, EQM-35 Pro at a southern site). The sign is evaluated once
     // at (re)apply time and held: it is NOT re-evaluated as this offset's own motion carries the axis across the branch
     // boundary (a2 through 0). This was tracked as a bug for a while (open-astro#255, deferred from #214) and even
     // implemented -- and the "fix" made the axis reverse and oscillate right at the crossing, breaking the
@@ -4658,7 +4658,8 @@ private:
     // from, as a count direction (+1 increasing). RA: the tracking direction
     // of the site's hemisphere, so tracking resumes with the gears already
     // engaged; Dec: increasing counts. Fixed here, in one place: a later
-    // change can make them config without touching the config keys.
+    // change can make them config without touching the config keys. RA's side
+    // needs the site; dispatch_goto_locked() skips RA while it is unknown.
     int backlash_approach_sign_locked(int channel) const {
         return channel == kAxisRa ? (ra_axis_sign_locked() > 0.0 ? 1 : -1) : 1;
     }
@@ -4746,8 +4747,13 @@ private:
             // from the approach side (send_final_approach_locked(), from the
             // landing wait). A move of under one count has no direction.
             const int approach = backlash_approach_sign_locked(plan.channel);
-            if (compensate_backlash && backlash_rate_deg_s_[i] > 0.0 && std::abs(delta) * cpr / 360.0 >= 0.5 &&
-                (delta > 0.0 ? 1 : -1) != approach) {
+            // Park and the no-indexer FindHome run without a site (decision
+            // 0019), and the RA approach side reads the hemisphere: an unset
+            // latitude would read as north and load a southern rig's gears
+            // the wrong way. RA is left uncompensated until the site is known.
+            const bool approach_known = plan.channel != kAxisRa || site_coordinates_known_locked();
+            if (compensate_backlash && approach_known && backlash_rate_deg_s_[i] > 0.0 &&
+                std::abs(delta) * cpr / 360.0 >= 0.5 && (delta > 0.0 ? 1 : -1) != approach) {
                 const uint32_t steps = i == 0 ? backlash_.ra.steps : backlash_.dec.steps;
                 first_leg = (approach > 0 ? target - steps : target + steps) & kCountsMask;
                 owes.owed[i] = true;
