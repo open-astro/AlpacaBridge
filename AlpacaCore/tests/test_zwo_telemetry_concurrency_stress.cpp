@@ -14,12 +14,16 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
@@ -52,6 +56,9 @@ void error(const std::function<void()>& call, int code, const std::string& text 
 
 struct Rig {
     test::FakeTaskClock clock;
+    std::atomic<int> ra_hours{12};
+    std::mutex commands_mutex;
+    std::vector<std::string> commands;
     std::atomic<bool> bad_status{false}, bad_ra{false}, bad_dec{false}, moving{false};
     std::atomic<bool> silent{false}, hold_status{false}, status_entered{false}, release_status{false};
     std::atomic<bool> park_error{false};
@@ -70,6 +77,10 @@ struct Rig {
         for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
             const auto command = pending.substr(0, end + 1);
             pending.erase(0, end + 1);
+            {
+                std::lock_guard<std::mutex> lock(commands_mutex);
+                commands.push_back(command);
+            }
             if (command == ":GU#") {
                 ++gu;
                 const bool was_moving = moving.load();
@@ -84,7 +95,8 @@ struct Rig {
                     std::this_thread::sleep_for(650ms);  // Transport latency, not a driver timer.
                     late_reply_ready.store(true);
                 }
-                if (!silent.load() && !withhold_ra.load()) response += bad_ra.load() ? "bad#" : "12:00:00#";
+                if (!silent.load() && !withhold_ra.load())
+                    response += bad_ra.load() ? "bad#" : std::to_string(ra_hours.load()) + ":00:00#";
             } else if (command == ":GD#") {
                 ++gd;
                 if (delay_dec.exchange(false)) {
@@ -130,13 +142,13 @@ struct Rig {
     }};
     std::unique_ptr<TelescopeDriver> driver;
 
-    explicit Rig(int response_timeout_ms = 100) {
+    explicit Rig(int response_timeout_ms = 100, int device_number = 0) {
         vendor::zwo::ConnectionInfo info;
         info.type = vendor::zwo::ConnectionType::Network;
         info.host = "127.0.0.1";
         info.tcp_port = server.port();
         info.response_timeout_ms = response_timeout_ms;
-        driver = vendor::zwo::create_zwo_telescope_with_site(0, info, 30.0, -100.0, {}, false, clock);
+        driver = vendor::zwo::create_zwo_telescope_with_site(device_number, info, 30.0, -100.0, {}, false, clock);
     }
     ~Rig() {
         release_status.store(true);
@@ -154,8 +166,157 @@ struct Rig {
         clock.advance(duration);
         REQUIRE(clock.wait_for_woken_settled(5s));
     }
+    int count(const std::string& command) {
+        std::lock_guard<std::mutex> lock(commands_mutex);
+        return static_cast<int>(std::count(commands.begin(), commands.end(), command));
+    }
 };
 }  // namespace
+
+TEST_CASE("ZWO disconnecting an idle entry leaves its connected sibling untouched", "[zwo][telescope][isolation]") {
+    const bool asynchronous = GENERATE(false, true);
+    Rig live(100, 3), idle(100, 7);
+    live.connect();
+    if (asynchronous)
+        idle.driver->disconnect();
+    else
+        idle.driver->set_connected(false);
+    idle.driver.reset();  // Join even a teardown issued before the entry ever connected.
+    CHECK(live.driver->command_string(":GVP", false) == "AM5N");
+    live.tick();
+    CHECK(live.driver->get_connected());
+    CHECK(live.driver->get_right_ascension() == 12.0);
+    CHECK(live.driver->get_link_fault().empty());
+}
+
+TEST_CASE("ZWO sibling telescope reads writes and safety stops use their own endpoints",
+          "[zwo][telescope][isolation]") {
+    Rig a(100, 3), b(100, 7);
+    b.ra_hours.store(18);
+    a.connect();
+    b.connect();
+    a.tick();
+    CHECK(a.driver->get_right_ascension() == 12.0);
+    CHECK(b.driver->get_right_ascension() == 18.0);
+    a.driver->set_target_right_ascension(6.0);
+    b.driver->set_target_right_ascension(9.0);
+    a.driver->set_tracking_rate(1);
+    b.driver->set_tracking_rate(2);
+    a.driver->abort_slew();
+    b.driver->move_axis(0, 0.0);
+    CHECK(a.count(":Sr06:00:00#") == 1);
+    CHECK(a.count(":Sr09:00:00#") == 0);
+    CHECK(b.count(":Sr09:00:00#") == 1);
+    CHECK(b.count(":Sr06:00:00#") == 0);
+    CHECK(a.count(":TL#") == 1);
+    CHECK(a.count(":TS#") == 0);
+    CHECK(b.count(":TS#") == 1);
+    CHECK(b.count(":TL#") == 0);
+    CHECK(a.count(":Q#") == 1);
+    CHECK(b.count(":Q#") == 1);
+    CHECK(b.count(":Qe#") == 1);
+    CHECK(b.count(":Qw#") == 1);
+    CHECK(a.count(":Qe#") == 0);
+    CHECK(a.count(":Qw#") == 0);
+    b.driver->set_connected(false);
+    b.driver.reset();
+    CHECK(a.driver->command_string(":GVP", false) == "AM5N");
+    a.tick();
+    CHECK(a.driver->get_connected());
+    CHECK(a.driver->get_link_fault().empty());
+}
+
+TEST_CASE("ZWO a failed sibling connect and destruction cannot close a healthy link", "[zwo][telescope][isolation]") {
+    Rig live(100, 3);
+    live.connect();
+    vendor::zwo::ConnectionInfo info;
+    info.port_path = "/dev/does-not-exist-issue-1524";
+    auto failed = vendor::zwo::create_zwo_telescope(7, info);
+    CHECK_THROWS_AS(failed->set_connected(true), AlpacaException);
+    failed.reset();
+    CHECK(live.driver->command_string(":GVP", false) == "AM5N");
+    live.tick();
+    CHECK(live.driver->get_connected());
+    CHECK(live.driver->get_link_fault().empty());
+}
+
+TEST_CASE("ZWO pulse and GOTO workers keep their endpoint after a sibling connects", "[zwo][telescope][isolation]") {
+    Rig a(100, 3), b(100, 7);
+    a.connect();
+    b.connect();
+    a.driver->pulse_guide(0, 100);
+    REQUIRE(eventually([&] { return a.pulse_commands.load() == 1; }));
+    REQUIRE(a.clock.wait_for_waiters(2, 5s));
+    a.clock.advance(100ms);
+    REQUIRE(a.clock.wait_for_woken_settled(5s));
+    CHECK(b.pulse_commands.load() == 0);
+    a.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return a.gotos.load() == 1; }));
+    CHECK(b.gotos.load() == 0);
+    a.driver->abort_slew();
+    CHECK(a.stops.load() == 1);
+    CHECK(b.stops.load() == 0);
+    b.driver.reset();
+    CHECK(a.driver->command_string(":GVP", false) == "AM5N");
+}
+
+TEST_CASE("ZWO one-sided fault loss and explicit reconnect leave a sibling healthy", "[zwo][telescope][isolation]") {
+    const bool transport_loss = GENERATE(false, true);
+    Rig a(100, 3), b(100, 7);
+    b.ra_hours.store(18);
+    a.connect();
+    b.connect();
+    if (transport_loss) {
+        REQUIRE(b.server.drop_connections());
+        b.tick();
+    } else {
+        b.silent.store(true);
+        b.tick();
+        b.tick();
+        b.tick();
+        CHECK(b.driver->get_connected());
+        CHECK_FALSE(b.driver->get_link_fault().empty());
+        CHECK(a.driver->get_link_fault().empty());
+        b.tick(30s);
+        b.silent.store(false);
+    }
+    CHECK_FALSE(b.driver->get_connected());
+    CHECK(b.driver->get_device_state().empty());
+    CHECK(a.driver->command_string(":GVP", false) == "AM5N");
+    a.tick();
+    CHECK(a.driver->get_connected());
+    CHECK(a.driver->get_right_ascension() == 12.0);
+    CHECK(a.driver->get_link_fault().empty());
+    b.connect();
+    CHECK(b.driver->get_right_ascension() == 18.0);
+    a.tick();
+    CHECK(a.driver->get_right_ascension() == 12.0);
+    CHECK(a.count(":MS#") == 0);
+    CHECK(b.count(":MS#") == 0);
+}
+
+TEST_CASE("ZWO a blocked sibling exchange cannot stall another telescope",
+          "[zwo][telescope][isolation][getter-stall]") {
+    Rig a(100, 3), b(5000, 7);
+    a.connect();
+    b.connect();
+    b.hold_status.store(true);
+    b.clock.advance(250ms);
+    REQUIRE(eventually([&] { return b.status_entered.load(); }));
+    const auto begin = std::chrono::steady_clock::now();
+    CHECK(a.driver->get_right_ascension() == 12.0);
+    CHECK(std::chrono::steady_clock::now() - begin < 100ms);
+    auto command = std::async(std::launch::async, [&] { return a.driver->command_string(":GVP", false); });
+    const auto ready = command.wait_for(250ms);
+    const auto disconnect_start = std::chrono::steady_clock::now();
+    b.driver->set_connected(false);
+    b.driver.reset();
+    b.release_status.store(true);  // Teardown must cancel the read before the fake releases its reply.
+    CHECK(std::chrono::steady_clock::now() - disconnect_start < 2s);
+    CHECK(ready == std::future_status::ready);
+    CHECK(command.get() == "AM5N");
+    CHECK(a.driver->command_string(":GVP", false) == "AM5N");
+}
 
 TEST_CASE("ZWO initial unavailable telemetry never performs getter I/O", "[zwo][telescope][telemetry][getter-stall]") {
     const int failure = GENERATE(0, 1, 2);

@@ -438,6 +438,7 @@ alpacacore::vendor::zwo::ConnectionInfo zwo_endpoint(int port) {
 // round-trip too).
 alpacacore::test::FakeMountServer::Responder zwo_responder() {
     return [](const std::string& chunk) -> std::string {
+        if (chunk.starts_with(":Sr")) return "1#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -495,6 +496,61 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
     // open-astro#326: settle_connected() rather than a bare set_connected().
     CHECK(alpacacore::test::settle_connected(*driver, false));
 
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+}
+
+TEST_CASE("ZWO mount - sibling lifecycle storms cannot redirect a connected telescope",
+          "[zwo][telescope][stress][isolation]") {
+    using namespace alpacacore;
+    test::FakeMountServer a(
+        [](const std::string& command) { return command == ":GVP#" ? std::string("AM5#") : zwo_responder()(command); });
+    test::FakeMountServer b([](const std::string& command) {
+        return command == ":GVP#" ? std::string("AM5N#") : zwo_responder()(command);
+    });
+    REQUIRE(a.ok());
+    REQUIRE(b.ok());
+    auto stable = vendor::zwo::create_zwo_telescope(3, zwo_endpoint(a.port()));
+    auto changing = vendor::zwo::create_zwo_telescope(7, zwo_endpoint(b.port()));
+    REQUIRE(test::settle_connected(*stable, true));
+    REQUIRE(test::settle_connected(*changing, true));
+    REQUIRE(stable->command_string(":GVP", false) == "AM5");
+    REQUIRE(changing->command_string(":GVP", false) == "AM5N");
+    test::StressCallGuard stable_guard({});  // The stable entry has no legitimate disconnect/error.
+    test::StressCallGuard guard{AlpacaError::NotConnected, AlpacaError::InvalidValue, AlpacaError::InvalidOperation,
+                                AlpacaError::DriverException};
+    std::atomic<int> wrong_endpoint{0}, accepted{0};
+    std::jthread reader([&](std::stop_token stop) {
+        while (!stop.stop_requested()) {
+            stable_guard([&] {
+                if (stable->command_string(":GVP", false) != "AM5") ++wrong_endpoint;
+                ++accepted;
+            });
+            stable_guard([&] { static_cast<void>(stable->get_right_ascension()); });
+            stable_guard([&] { stable->set_target_right_ascension(6.0); });
+        }
+    });
+    test::run_lifecycle_stress(*changing, [&](AlpacaDriver& d) {
+        auto& scope = static_cast<TelescopeDriver&>(d);
+        guard([&] {
+            if (scope.command_string(":GVP", false) != "AM5N") ++wrong_endpoint;
+        });
+        guard([&] { static_cast<void>(scope.get_right_ascension()); });
+        guard([&] { scope.set_target_right_ascension(9.0); });
+        guard([&] { scope.abort_slew(); });
+    });
+    reader.request_stop();
+    reader.join();
+    CHECK(test::settle_connected(*changing, false));
+    changing.reset();
+    CHECK(stable->command_string(":GVP", false) == "AM5");
+    CHECK(stable->get_connected());
+    CHECK(wrong_endpoint.load() == 0);
+    CHECK(accepted.load() > 0);
+    INFO(stable_guard.report());
+    CHECK(stable_guard.unexpected_count() == 0);
+    CHECK(stable_guard.total_calls() > 0);
     INFO(guard.report());
     CHECK(guard.unexpected_count() == 0);
     CHECK(guard.total_calls() > 0);
