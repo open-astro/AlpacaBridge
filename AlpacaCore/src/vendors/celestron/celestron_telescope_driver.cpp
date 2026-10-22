@@ -3383,6 +3383,7 @@ private:
                 return false;
             }
             bool slewing = get_slewing_fresh(lock);
+            // cppcheck-suppress identicalConditionAfterEarlyExit
             if (motion_generation_ != owner_generation) {
                 return false;  // the read released mutex_: a concurrent motion command took the mount meanwhile
             }
