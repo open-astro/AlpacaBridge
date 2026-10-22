@@ -341,7 +341,7 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 // ---- ZWO mount auto-detection (USB + WiFi) -------------------------------
 //
 // The probes below are self-contained (they open their own fd/socket and do
-// not touch the singleton's mutex), so enumerate_zwo_mounts() can run
+// not touch a live wrapper's mutex), so enumerate_zwo_mounts() can run
 // independently of any live connection. Each probe sends :GVP and reads until
 // the '#' terminator or the probe timeout, returning the mount model string
 // (e.g. "AM5N") on success or empty on failure.
@@ -542,14 +542,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
 }  // namespace
 
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
-    // The probes below open candidate ports/sockets directly and do NOT take
-    // the ZWOMountProtocolWrapper singleton's mutex. This is intentional: the
-    // wrapper is a process-wide singleton holding at most ONE physical ZWO
-    // connection at a time, and enumeration is called from connect() only
-    // after disconnecting any live link. A probe could still race an external
-    // open of the same port in another process, which is a pre-existing
-    // constraint of the serial auto-detect pattern shared with the other
-    // protocol drivers (iOptron, SynScan, ...).
+    // Probes own temporary links; the serial registry keeps them off connected siblings' ports.
     std::vector<ZWODeviceInfo> results;
 
 #ifndef _WIN32
@@ -1020,14 +1013,19 @@ private:
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
 
-        hostent* host_entry = gethostbyname(host.c_str());
-        if (host_entry == nullptr) {
+        // Each link needs its own lookup result when sibling connects run concurrently.
+        addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        addrinfo* result = nullptr;
+        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
             close(socket_fd_);
             socket_fd_ = -1;
             return false;
         }
 
-        addr.sin_addr = *reinterpret_cast<in_addr*>(host_entry->h_addr);
+        addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
+        freeaddrinfo(result);
 
         if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             close(socket_fd_);
@@ -1232,11 +1230,6 @@ ZWOMountProtocolWrapper::ZWOMountProtocolWrapper()
     : pimpl_(std::make_unique<Impl>()) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
-
-ZWOMountProtocolWrapper& ZWOMountProtocolWrapper::instance() {
-    static ZWOMountProtocolWrapper wrapper;
-    return wrapper;
-}
 
 bool ZWOMountProtocolWrapper::link_lost() const { return pimpl_->link_lost(); }
 void ZWOMountProtocolWrapper::cancel_pending_io() { pimpl_->cancel_pending_io(); }

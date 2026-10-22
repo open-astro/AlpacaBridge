@@ -21,7 +21,11 @@ Park twice is a no-op; `Unpark`/`AbortSlew` during a park clear `parking_` (Unpa
 stops the axes; SynScan supersedes the body, Celestron cancels and joins it until #1406); disconnect and the destructor cancel + join through the slot. Keep any
 pre-slew safety gate (Celestron alignment check) synchronous in `park()` so a refused park
 still throws instead of silently never reaching `AtPark`. Drivers with native park commands
-that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task — verified
+that return at once (iOptron `:MP1#`, OnStep `:hP#`, ZWO `:hP#`) need no task (OnStep has one for
+a park or home that must first stop a running motion, or that the mount refused as in motion or
+without a reason: OnStepX refuses it while an axis moves or brakes, so the call sends the stops or
+the first try and returns, and a task waits for the mount to be still and parks or retries,
+keeping a refusal for `Slewing`/`AtPark`/`AtHome`, #1430) — verified
 on the iOptron HAE29C with ConformU 4.5.0 (Park 11.5 s of motion, initiator well under 1 s).
 `MoveAxis(axis, 0)` must likewise send the stop and return; only add a background
 stop-completion task (SkyWatcher) when the mount has a deceleration ramp longer than the
