@@ -60,6 +60,7 @@ bool is_keepable_unique_id(std::string_view text) {
     for (const char c : text) {
         if (c < 0x20 || c > 0x7E) return false;
     }
+    // A tail of at most 5 digits is a device number, so a client-sent `ZWO_SN_12345` is replaced.
     const std::size_t underscore = text.rfind('_');
     if (underscore == std::string_view::npos) return true;
     const std::string_view tail = text.substr(underscore + 1);

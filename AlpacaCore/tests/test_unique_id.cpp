@@ -54,7 +54,8 @@ TEST_CASE("Unique id - a stored ID is kept when it is a GUID or a long non-slot 
     CHECK_FALSE(is_keepable_unique_id(""));
     CHECK_FALSE(is_keepable_unique_id("SkyWatcher_0"));          // device-number ID
     CHECK_FALSE(is_keepable_unique_id("ASTROASIS_FOCUSER_3"));   // device-number ID
-    CHECK(is_keepable_unique_id("ZWO_UID_0011223344556677"));    // all-digit hex tail is not a slot
+    CHECK(is_keepable_unique_id("ZWO_UID_0000000000012345"));    // 16-digit tail is longer than a slot
+    CHECK_FALSE(is_keepable_unique_id("ZWO_SN_12345"));          // 5-digit tail reads as a slot
     CHECK_FALSE(is_keepable_unique_id("short-id"));              // under 12 characters
     CHECK_FALSE(is_keepable_unique_id("has a\nnewline in it"));  // not printable
     CHECK_FALSE(is_keepable_unique_id(std::string(200, 'a')));   // over the length cap
