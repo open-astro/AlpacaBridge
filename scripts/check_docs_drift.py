@@ -445,7 +445,6 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 # its own list.
 DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
-    "celestron_telescope_driver.cpp": ("Celestron", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
     "skywatcher_telescope_driver.cpp": ("Sky-Watcher", "telescopes"),
