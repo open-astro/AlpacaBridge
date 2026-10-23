@@ -1757,6 +1757,72 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when an async got
     driver->set_connected(false);
 }
 
+// A poll tick reads the pending stop while the async goto still owns the mount. The goto then fails before it is sent
+// and hands the stop to its own generation, and a sync queued behind it takes the lock before the tick's try_lock: the
+// tick finds the lock busy again but must not move the stop back to the older generation, which the next free tick
+// would drop as superseded.
+TEST_CASE("Celestron FindHome - the failure stops still go out when a sync follows an async goto that was not sent",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->p_mute = true;     // the pier-side read times out, before the goto
+    st->s_delay_ms = 300;  // the sync holds the initiator lock through the retry's try_lock
+    std::thread slewer;
+    std::thread syncer;
+    std::atomic<bool> refused{false};
+    int calls = 0;
+    int s_before = 0;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        ++calls;
+        if (calls == 1) {  // the third failure
+            const int p_before = st->p_count.load();
+            slewer = std::thread([&] {
+                try {
+                    driver->slew_to_coordinates_async(1.5, 20.0);
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return st->p_count.load() > p_before; }));  // the slew owns the mount
+            s_before = st->s_count.load();
+            syncer = std::thread([&] {
+                try {
+                    driver->sync_to_coordinates(1.5, 20.0);  // queues on the initiator lock
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): only its hold on the lock counts
+                }
+            });
+        } else if (calls == 2) {  // the retry tick, which read the stop before the hand-back
+            CHECK(snapshot_wait_for([&] { return refused.load(); }));                 // the stop was handed back
+            CHECK(snapshot_wait_for([&] { return st->s_count.load() > s_before; }));  // the sync owns the lock
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    (void)cel::poll_status_now_for_testing(*driver);  // the retry finds the lock busy again
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(calls == 2);
+    REQUIRE(slewer.joinable());
+    REQUIRE(syncer.joinable());
+    slewer.join();
+    syncer.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
 // Park takes a motion generation before its body starts. When the slot refuses the start and no body was displaced no
 // goto went out, so a failure stop deferred meanwhile stays pending, through a poll tick in the window too.
 TEST_CASE("Celestron FindHome - the failure stops still go out when Park cannot start its body",

@@ -1186,12 +1186,15 @@ public:
     }
 
     // Sends the failure stops with mutex_ free and publishes the outcome: Sent finishes the failure, Busy keeps the
-    // stop pending for the next poll tick, Superseded drops it.
+    // stop pending for the next poll tick, Superseded drops it. Busy never writes an older generation over a newer one
+    // (generations only go up): a retry that read the stop before an initiator handed it on leaves it handed on.
     void send_failure_stop(std::uint64_t generation, const std::string& message, bool home) const {
         const FailureStop stop = stop_park_slew_unless_superseded(generation);
         std::lock_guard<std::mutex> lock(mutex_);
         if (stop.outcome == StopOutcome::Busy) {
-            pending_stop_ = PendingStop{generation, message, home};
+            if (!pending_stop_ || pending_stop_->generation <= generation) {
+                pending_stop_ = PendingStop{generation, message, home};
+            }
             return;
         }
         if (pending_stop_ && pending_stop_->generation == generation) {
