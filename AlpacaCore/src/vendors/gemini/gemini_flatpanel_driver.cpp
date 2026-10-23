@@ -140,7 +140,8 @@ public:
                 // The port that worked last time goes first: one handshake instead of the full
                 // search (5-13 s on a rig, past a client's connect timeout).
                 if (const auto remembered =
-                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_flatpanel_port)) {
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                     probe_gemini_flatpanel_port)) {
                     ALPACA_LOG_INFO("Gemini", "Flat panel answered on remembered port " + *remembered);
                     effective.serial_port = *remembered;
                 } else {
@@ -515,7 +516,8 @@ public:
                 // The port that worked last time goes first: one handshake instead of the full
                 // search (5-13 s on a rig, past a client's connect timeout).
                 if (const auto remembered =
-                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_flatpanel_port)) {
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                     probe_gemini_flatpanel_port)) {
                     ALPACA_LOG_INFO("Gemini", "Flat panel v2 answered on remembered port " + *remembered);
                     effective.serial_port = *remembered;
                 } else {

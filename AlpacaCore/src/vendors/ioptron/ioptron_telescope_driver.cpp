@@ -289,7 +289,8 @@ public:
                     // tries this place first. A configured port or host has no resolver and is
                     // never stored.
                     if (connection_resolver_) {
-                        util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_), location_of(info));
+                        util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_),
+                                                        location_of(info));
                     }
                 },
                 "iOptron");
