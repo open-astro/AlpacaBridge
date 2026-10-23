@@ -10,12 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/filterwheel_driver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/version.h>
-
-#include <alpacacore/filterwheel_driver.h>
 
 #include <atomic>
 #include <chrono>
@@ -524,8 +523,7 @@ TEST_CASE("QHY Filter Wheel Driver - Getters do not wait behind a connect", "[qh
 
 // Falsified by: set_connected(false) closing the shared handle without the I/O lock,
 // so a read in flight sees a closed handle (physical_closes/underflow_closes).
-TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in flight",
-          "[qhy][filterwheel][unit]") {
+TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in flight", "[qhy][filterwheel][unit]") {
     auto fake = make_fake();
     SlowCall slow(fake);
     LockedQHYSDK sdk(fake);
