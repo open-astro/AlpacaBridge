@@ -45,6 +45,7 @@ namespace alpacacore::vendor::zwo {
 namespace {
 
 constexpr double kSiderealRateDegPerSec = 360.0 / 86164.0905;
+
 constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
@@ -227,8 +228,7 @@ public:
           site_latitude_deg_(site_latitude_deg.value_or(0.0)),
           site_longitude_deg_(site_longitude_deg.value_or(0.0)),
           site_coords_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
-          does_refraction_(false),
+          site_elevation_m_(site_elevation_m),
           slew_settle_time_s_(0),
           guide_rate_({0.5 * kSiderealRateDegPerSec, 0.5 * kSiderealRateDegPerSec}),
           tracking_rate_cached_(0),
@@ -883,11 +883,11 @@ public:
             if (!tracking) {
                 goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
             }
-            snapshot_.write([](PolledFrame&) {});
             if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
                 tracking_state_cached_ == tracking) {
-                return;
+                return;  // a no-op write changes nothing, so it must not drop the poll in flight
             }
+            snapshot_.write([](PolledFrame&) {});
         }
         auto wait_for_pulse_completion = [this](std::chrono::milliseconds max_wait) {
             const auto deadline = clock_.now() + max_wait;
@@ -1088,14 +1088,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -1134,7 +1133,10 @@ public:
 
     double get_site_elevation() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return site_elevation_m_;
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -2960,9 +2962,8 @@ private:
     mutable double site_latitude_deg_;
     mutable double site_longitude_deg_;
     mutable bool site_coords_valid_;
-    double site_elevation_m_;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
 
-    bool does_refraction_;
     int slew_settle_time_s_;
 
     mutable GuideRate guide_rate_;

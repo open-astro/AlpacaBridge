@@ -298,3 +298,29 @@ TEST_CASE("SkyWatcher Telescope Driver - non-finite guide rate is rejected",
     require_alpaca_error([&]() { driver->set_guide_rate({0.004, nan}); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&]() { driver->set_guide_rate({inf, 0.004}); }, alpacacore::AlpacaError::InvalidValue);
 }
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("SkyWatcher Telescope Driver spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
+          "[skywatcher][telescope][unit][spec-audit]") {
+    auto driver = make_driver(0);
+    // ITelescopeV4.DestinationSideOfPier: InvalidValue for RA outside 0..24 h or Dec outside -90..90, checked
+    // before the connection (ascom-contract), so a disconnected driver answers InvalidValue too.
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(-1.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, 91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, -91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("SkyWatcher Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[skywatcher][telescope][unit][spec-audit]") {
+    auto driver = make_driver(0);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}

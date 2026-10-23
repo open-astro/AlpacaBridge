@@ -122,6 +122,11 @@ public:
     /// driver its full serial timeout (3 s).
     void set_muted(bool on) { muted_.store(on); }
 
+    /// Answer the connect handshake, the settings telemetry (cmd_id 4) and every
+    /// other command except the position poll (cmd_id 5, asked first by
+    /// poll_state_once): the shape of a connect whose first state frame is lost.
+    void set_state_muted(bool on) { state_muted_.store(on); }
+
 private:
     void run() {
         std::string pending;
@@ -175,6 +180,7 @@ private:
         }
         if (muted_.load()) return;
         const int id = field(cmd, "cmd_id");
+        if (state_muted_.load() && id == 5) return;
         std::string reply;
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
@@ -260,6 +266,7 @@ private:
     std::string held_reply_;
     std::atomic<bool> garbage_{false};
     std::atomic<bool> muted_{false};
+    std::atomic<bool> state_muted_{false};
     std::atomic<int> kicks_{0};
 };
 

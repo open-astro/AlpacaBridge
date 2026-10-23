@@ -229,6 +229,24 @@ TEST_CASE("ZWO mount identity rejects malformed foreign and incomplete replies",
     }
 }
 
+TEST_CASE("ZWO refused identity quotes the reply with control bytes replaced",
+          "[zwo][telescope][identity][issue1523]") {
+    IdentityRig rig;
+    REQUIRE(rig.server.ok());
+    rig.set_identity("OnStep\x01\x1b[31mX#");
+    rig.make_driver(rig.info());
+    try {
+        rig.driver->set_connected(true);
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& error) {
+        const std::string what = error.what();
+        CHECK(what.find("'OnStep??[31mX'") != std::string::npos);
+        CHECK(what.find('\x1b') == std::string::npos);
+        CHECK(what.find("check the configured serial port or host") != std::string::npos);
+    }
+    CHECK_FALSE(rig.driver->get_connected());
+}
+
 TEST_CASE("ZWO refused identity leaves no writes and permits corrected endpoint retry",
           "[zwo][telescope][identity][issue1523]") {
     const bool serial = GENERATE(false, true);
