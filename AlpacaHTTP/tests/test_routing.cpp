@@ -8262,7 +8262,7 @@ int main() {
         EXPECT(alpacacore::util::is_unique_id(first_id));
         EXPECT(listed_unique_id(9471) == first_id);  // the driver reports the stored GUID
 
-        // A GUID another entry holds, or a value that is not a GUID, is replaced.
+        // An ID another entry holds, or a device-number ID, is replaced.
         const auto copy = configure(9472, first_id);
         EXPECT(copy.ok);
         EXPECT(alpacacore::util::is_unique_id(stored_id(9472)));

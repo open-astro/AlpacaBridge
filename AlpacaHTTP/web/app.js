@@ -1525,7 +1525,7 @@ function startEditDevice(device) {
         form.dataset.originalDeviceNumber = String(device.DeviceNumber);
         form.dataset.originalVendor = vendor;
         // Decision 0018: an edit removes the entry and adds it again, so it sends
-        // the device's GUID back to keep its UniqueID (and a rotator's offset).
+        // the device's stored ID back to keep its UniqueID (and a rotator's offset).
         form.dataset.originalUniqueId = typeof config.uniqueId === 'string' ? config.uniqueId : '';
     }
 
