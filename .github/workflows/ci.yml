@@ -1302,8 +1302,8 @@ jobs:
         # mirrors this install (ZIZMOR_VER / ZIZMOR_SHA256) — update both.
         run: |
           set -euo pipefail
-          ver=1.25.2
-          sha256=4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d
+          ver=1.31.1
+          sha256=37eebbd5762a44f262d94875431b14a6d2402991e90a685113ea97b8b41be833
           curl -fsSL "https://github.com/zizmorcore/zizmor/releases/download/v${ver}/zizmor-aarch64-unknown-linux-gnu.tar.gz" \
             -o /tmp/zizmor.tgz
           echo "${sha256}  /tmp/zizmor.tgz" | sha256sum --check --strict -
