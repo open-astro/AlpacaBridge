@@ -52,7 +52,7 @@ public:
 
     // Offset for @p key. When @p key has no entry and @p legacy_key has one,
     // moves that entry to @p key and returns it: the one-time move from a
-    // driver-built ID to the persisted GUID (decision 0018). A failed move
+    // driver-built ID to the stored ID (decision 0018). A failed move
     // still returns the offset and leaves the legacy entry in place.
     static double load_or_adopt(const std::string& key, const std::string& legacy_key);
 

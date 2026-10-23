@@ -408,7 +408,7 @@ private:
     // Caller holds mutex_.
     std::string unique_id_locked() const { return unique_id_for(serial_number_, rotator_id_); }
 
-    // The offset-store key: the persisted GUID (decision 0018), or the
+    // The offset-store key: the stored ID (decision 0018), or the
     // serial-based ID when none was assigned. Takes no lock of its own beyond
     // the base accessor, so it is safe under mutex_.
     std::string store_key_locked() const {

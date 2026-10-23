@@ -161,7 +161,7 @@ public:
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
-                // Keyed by the persisted GUID (decision 0018). The offset saved under
+                // Keyed by the stored ID (decision 0018). The offset saved under
                 // the device-number ID is moved by adopt_legacy_state(), never here: a
                 // rotator added later on the same number must not inherit it.
                 const double saved_offset = util::RotatorSyncOffsetStore::load(get_unique_id());

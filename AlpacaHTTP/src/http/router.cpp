@@ -7117,8 +7117,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a GUID the client sends back (the web UI's edit
-        // removes the entry first, so its own GUID is free again) unless another
+        // Decision 0018: keep a stored ID the client sends back (the web UI's edit
+        // removes the entry first, so its own ID is free again) unless another
         // entry holds it, or another configuredevice call chose it and has not
         // stored its entry yet; otherwise mint one. The entry this call replaces
         // (same vendor, type and number, as add_or_replace_persisted_device()
@@ -8480,7 +8480,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
-            // Decision 0018: the configured device's persisted GUID is its UniqueID.
+            // Decision 0018: the configured device's stored ID is its UniqueID.
             std::string unique_id = stored_unique_id(config);
             if (unique_id.empty()) {
                 unique_id = alpacacore::util::generate_unique_id();

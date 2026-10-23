@@ -74,7 +74,7 @@ public:
     }
 
     /**
-     * @brief Assign the persisted GUID (decision 0018). The router calls this
+     * @brief Assign the stored ID (decision 0018). The router calls this
      * once, after construction and before the driver is registered.
      */
     void assign_unique_id(std::string unique_id) {

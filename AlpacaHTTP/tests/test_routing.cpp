@@ -8242,7 +8242,7 @@ int main() {
     }
 
     {
-        // case: every configured device gets a persisted GUID as its UniqueID (#1471)
+        // case: every configured device gets a stored ID as its UniqueID (#1471)
         alpacahttp::Router router;
         alpacahttp::test_catalog::add_schema_and_factory(router.catalog());
         const auto configure = [&](int number, const std::optional<std::string>& unique_id) {
