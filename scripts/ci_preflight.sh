@@ -162,8 +162,8 @@ ensure_tool() {
 
 # Pinned zizmor release (keep in sync with .github/workflows/ci.yml). GitHub
 # release assets are immutable, so the hash is stable for a given version.
-ZIZMOR_VER="1.25.2"
-ZIZMOR_SHA256="4b4b9491112c2a09b318101c0d3349b73af1c4f532e097dd6d0164f2abda760d"
+ZIZMOR_VER="1.31.1"
+ZIZMOR_SHA256="37eebbd5762a44f262d94875431b14a6d2402991e90a685113ea97b8b41be833"
 
 # ensure_zizmor: prints a usable zizmor binary path on stdout and returns 0, or
 # returns non-zero if unavailable. zizmor is not packaged in apt, so (mirroring
