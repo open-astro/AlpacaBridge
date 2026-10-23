@@ -239,7 +239,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - DeviceState TimeStamp is when the frame was 
 TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never throws DriverException",
           "[qhy][focuser][snapshot][unit]") {
     FakeQhyQFocuser fake;
-    fake.set_muted(true);
+    fake.set_state_muted(true);
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::qhy::create_qhy_focuser(0, fake.slave_path(), {}, clock);
     // Both first polls are lost: the connect is refused, so no getter can run on a
@@ -247,7 +247,7 @@ TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never thro
     CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
     CHECK_FALSE(driver->get_connected());
     CHECK_FALSE(driver->get_device_firmware().has_value());
-    fake.set_muted(false);
+    fake.set_state_muted(false);
     // The port was released: a connect with replies back succeeds and serves a frame.
     REQUIRE_NOTHROW(driver->set_connected(true));
     CHECK_NOTHROW(driver->get_position());

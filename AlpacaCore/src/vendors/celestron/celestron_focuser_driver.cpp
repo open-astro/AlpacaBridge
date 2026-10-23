@@ -222,6 +222,10 @@ public:
                     std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
                     firmware_.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lock(calibration_mutex_);
+                    calibration_ = CalibrationState{};
+                }
                 protocol_.disconnect();
                 throw AlpacaException("Celestron focuser did not answer the first state poll",
                                       AlpacaError::DriverException);

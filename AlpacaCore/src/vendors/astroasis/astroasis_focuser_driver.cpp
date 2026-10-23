@@ -191,6 +191,7 @@ public:
             }
             if (!snapshot_.read().has_value()) {
                 reset_state();
+                max_step_.store(0);
                 protocol_.disconnect();
                 throw AlpacaException("Astroasis focuser did not answer the first state poll",
                                       AlpacaError::DriverException);

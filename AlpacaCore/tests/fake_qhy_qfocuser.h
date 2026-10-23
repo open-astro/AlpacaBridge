@@ -122,6 +122,10 @@ public:
     /// driver its full serial timeout (3 s).
     void set_muted(bool on) { muted_.store(on); }
 
+    /// Answer the connect handshake and every command except the state polls
+    /// (cmd_id 4 and 5): the shape of a connect whose first poll replies are lost.
+    void set_state_muted(bool on) { state_muted_.store(on); }
+
 private:
     void run() {
         std::string pending;
@@ -175,6 +179,7 @@ private:
         }
         if (muted_.load()) return;
         const int id = field(cmd, "cmd_id");
+        if (state_muted_.load() && (id == 4 || id == 5)) return;
         std::string reply;
         if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0)
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
