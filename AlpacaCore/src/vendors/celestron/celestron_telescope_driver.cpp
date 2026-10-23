@@ -3801,8 +3801,8 @@ private:
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
-    std::function<void()> slewing_read_hook_;  // guarded by status_poll_hook_mutex_
-    std::function<void()> failure_stop_hook_;  // guarded by status_poll_hook_mutex_
+    std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
+    std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
 };
 
