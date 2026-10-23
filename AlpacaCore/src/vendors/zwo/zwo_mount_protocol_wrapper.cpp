@@ -1259,6 +1259,13 @@ void ZWOMountProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
 
+bool is_zwo_am_model_reply(std::string_view reply) {
+    std::string body = trim_copy(std::string(reply));
+    if (!body.empty() && body.back() == '#') body.pop_back();
+    static const std::regex kPattern(R"(^AM[0-9]+[A-Z]?$)");
+    return std::regex_match(trim_copy(std::move(body)), kPattern);
+}
+
 std::string ZWOMountProtocolWrapper::get_mount_info() {
     std::string response = send_command(":GVP");
     throw_if_mount_error(response, ":GVP");

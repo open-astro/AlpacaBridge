@@ -15,9 +15,15 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace alpacacore::vendor::zwo {
+
+/// True when a :GVP reply names a ZWO AM mount: after trimming white space and dropping one trailing '#', the
+/// body is "AM", digits and at most one capital letter (AM3, AM5, AM5N, AM7). Anything else (OnStep, LX200 GPS,
+/// "0", empty) is another device family.
+bool is_zwo_am_model_reply(std::string_view reply);
 
 enum class ConnectionType {
     Serial,
