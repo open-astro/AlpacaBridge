@@ -18,8 +18,10 @@
 // case runs over a pty (serial) and over loopback TCP.
 #ifndef _WIN32
 
+#include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -60,6 +62,8 @@ Responder slow_position_mount(bool mute_late = false) {
                 out += "GN#";
             } else if (cmd == ":GAT") {
                 out += "1#";
+            } else if (cmd.rfind(":Sr", 0) == 0) {
+                out += "1";
             }  // blind commands (:Mg.., :Q) get no reply
         }
         return out;
@@ -150,6 +154,64 @@ TEST_CASE("ZWO mount reply sync - the abort is not held by the fence", "[zwo][re
         const auto start = Clock::now();
         wrapper.abort_motion();
         CHECK(ms_since(start) < 350);
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - an ordinary write after a timed-out query reads its own ack",
+          "[zwo][reply-sync][issue1527]") {
+    on_both_transports(slow_position_mount(), [](ZWOMountProtocolWrapper& wrapper) {
+        CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
+        CHECK_NOTHROW(wrapper.set_target_ra(2.5));
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a disconnect during the fence ends it and writes nothing",
+          "[zwo][reply-sync][issue1527]") {
+    std::atomic<bool> saw_slew{false};
+    const Responder inner = slow_position_mount(true);
+    const Responder responder = [&saw_slew, inner](const std::string& chunk) {
+        if (chunk.find(":MS#") != std::string::npos) saw_slew = true;
+        return inner(chunk);
+    };
+    on_both_transports(responder, [&saw_slew](ZWOMountProtocolWrapper& wrapper) {
+        saw_slew = false;
+        CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
+        std::atomic<bool> not_connected{false};
+        std::atomic<long> returned_after_cancel_ms{-1};
+        std::atomic<Clock::rep> cancel_at{0};
+        std::thread sender([&] {
+            try {
+                (void)wrapper.send_command(":MS", true, 2000);
+            } catch (const alpacacore::AlpacaException& e) {
+                not_connected = e.error_code() == alpacacore::AlpacaError::NotConnected;
+            }
+            returned_after_cancel_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           Clock::now().time_since_epoch() - Clock::duration(cancel_at.load()))
+                                           .count();
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        cancel_at = Clock::now().time_since_epoch().count();
+        wrapper.cancel_pending_io();
+        sender.join();
+        CHECK(not_connected);
+        CHECK(returned_after_cancel_ms.load() < 150);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        CHECK_FALSE(saw_slew);
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a silent mount does not slow queued guide pulses", "[zwo][reply-sync][issue1527]") {
+    on_both_transports(slow_position_mount(true), [](ZWOMountProtocolWrapper& wrapper) {
+        // The pulse worker's shape: a blind pulse, then a best-effort 250 ms position read that times out.
+        const auto start = Clock::now();
+        for (int i = 0; i < 5; ++i) {
+            wrapper.pulse_guide(2, 50);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            CHECK_THROWS(wrapper.get_current_equatorial(kQueryTimeoutMs));
+        }
+        // Without the fence this loop takes 2.3 s (pty) and 3.4 s (tcp); the fence adds only a
+        // margin because it spends the read's own timeout (a fence on the full bound took 4.1 s on the pty).
+        CHECK(ms_since(start) < 3800);
     });
 }
 

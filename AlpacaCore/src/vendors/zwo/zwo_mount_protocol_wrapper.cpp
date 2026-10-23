@@ -772,19 +772,28 @@ public:
             full_command.push_back('#');
         }
 
-        settle_owed_reply();
-        discard_pending_input();
-        if (!write_data(full_command)) {
-            note_transport_error();
-            throw AlpacaException("Failed to send command to ZWO mount");
-        }
-
         int timeout_ms = timeout_ms_override;
         if (timeout_ms <= 0) {
             timeout_ms = connection_info_.response_timeout_ms;
         }
         if (timeout_ms <= 0) {
             timeout_ms = 5000;
+        }
+
+        // The fence spends the exchange's own timeout: when the owed reply never comes, the exchange costs no more
+        // than it did before the fence. When the owed reply arrived, the exchange keeps its full timeout.
+        const auto fence_start = std::chrono::steady_clock::now();
+        const bool owed_arrived = settle_owed_reply(fence_start + std::chrono::milliseconds(timeout_ms));
+        if (!owed_arrived) {
+            const auto spent =
+                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fence_start)
+                    .count();
+            timeout_ms = static_cast<int>(std::max<long long>(0, timeout_ms - spent));
+        }
+        discard_pending_input();
+        if (!write_data(full_command)) {
+            note_transport_error();
+            throw AlpacaException("Failed to send command to ZWO mount");
         }
 
         // A getter (":G...") or a '#'-terminated exchange always has a reply; a silent timeout leaves one owed.
@@ -830,46 +839,68 @@ public:
 
 private:
     // Waits for the reply a timed-out query still owes, then lets the line go quiet, so the next exchange starts
-    // on a clean line (issue #1527). Bounded: it ends at kOwedReplyBoundMs after the timeout, or kOwedReplyQuietMs
-    // after the reply's '#', whichever comes first, and ends at once when the link closes. Added latency to the
-    // exchange after a timeout is at most kOwedReplyBoundMs; an exchange with nothing owed pays nothing.
-    // POSIX only; on Windows the plain input purge in discard_pending_input() remains.
-    void settle_owed_reply() {
-        if (!reply_owed_) return;
-#ifndef _WIN32
-        const int fd = connection_type_ == ConnectionType::Serial ? serial_fd_ : socket_fd_;
-        const auto hard_stop = owed_until_ + std::chrono::milliseconds(kOwedReplyQuietMs);
+    // on a clean line (issue #1527). Bounded: it ends at the earlier of kOwedReplyBoundMs after the timeout and
+    // `cap` (the exchange's own timeout, so a short best-effort query is never slower than its timeout), or
+    // kOwedReplyQuietMs after the reply's '#'. It waits in kReadPollDelay slices and throws NotConnected as soon
+    // as the link closes, before anything is written. An exchange with nothing owed pays nothing.
+    // Returns true when the owed reply arrived. POSIX only; on Windows the plain input purge in
+    // discard_pending_input() remains.
+    bool settle_owed_reply(std::chrono::steady_clock::time_point cap) {
+        if (!reply_owed_) return false;
         bool terminated = false;
+#ifndef _WIN32
+        using Clock = std::chrono::steady_clock;
+        const int fd = connection_type_ == ConnectionType::Serial ? serial_fd_ : socket_fd_;
+        const auto deadline = std::min(owed_until_, cap);
+        auto quiet_until = Clock::time_point{};
         while (!closing_.load()) {
-            const auto now = std::chrono::steady_clock::now();
-            auto wait = terminated ? std::chrono::milliseconds(kOwedReplyQuietMs)
-                                   : std::chrono::duration_cast<std::chrono::milliseconds>(owed_until_ - now);
-            wait = std::min(wait, std::chrono::duration_cast<std::chrono::milliseconds>(hard_stop - now));
-            if (wait.count() <= 0) break;
-            pollfd pfd = {fd, POLLIN, 0};
-            const int ready = ::poll(&pfd, 1, static_cast<int>(wait.count()));
-            if (ready < 0 && errno == EINTR) continue;
-            if (ready <= 0) break;
+            const auto now = Clock::now();
+            if (terminated ? now >= quiet_until : now >= deadline) break;
+            const auto end = terminated ? quiet_until : deadline;
+            const int slice_ms = static_cast<int>(std::max<std::chrono::milliseconds::rep>(
+                1,
+                std::min<std::chrono::milliseconds::rep>(
+                    kReadPollDelay.count(), std::chrono::duration_cast<std::chrono::milliseconds>(end - now).count())));
             char buf[128];
-            const ssize_t count = connection_type_ == ConnectionType::Serial
-                                      ? ::read(fd, buf, sizeof(buf))
-                                      : ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
-            if (count == 0 && connection_type_ != ConnectionType::Serial) link_lost_.store(true);
-            if (count <= 0) {
-                if (count < 0 && errno != EAGAIN && errno != EINTR) note_transport_error();
+            ssize_t count = 0;
+            if (connection_type_ == ConnectionType::Serial) {
+                count = util::tty_read(fd, buf, sizeof(buf), slice_ms);
+            } else {
+                pollfd pfd = {fd, POLLIN, 0};
+                const int ready = ::poll(&pfd, 1, slice_ms);
+                if (ready < 0 && errno == EINTR) continue;
+                if (ready < 0)
+                    count = -1;
+                else if (ready > 0)
+                    count = ::recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+                if (ready > 0 && count == 0) link_lost_.store(true);
+                if (count < 0 && (errno == EAGAIN || errno == EINTR)) count = 0;
+            }
+            if (count < 0) {
+                note_transport_error();
                 break;
             }
+            if (count == 0) {
+                if (link_lost_.load()) break;
+                continue;
+            }
             if (std::memchr(buf, '#', static_cast<std::size_t>(count)) != nullptr) terminated = true;
+            if (terminated) quiet_until = Clock::now() + std::chrono::milliseconds(kOwedReplyQuietMs);
         }
+#else
+        (void)cap;
 #endif
         reply_owed_ = false;
+        if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
         if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
+        return terminated;
     }
 
     // Drops what is queued before a command is written. This cannot tell a stale reply from a fresh one of the
     // same shape: a late RA reply and the RA reply of the next ":GR" are the same bytes, and the protocol has no
     // sequence number. settle_owed_reply() narrows the window to a reply later than kOwedReplyBoundMs after its
-    // timeout, or to a reply owed by a command that was never marked (a blind command); it does not close it.
+    // timeout (or later than the next exchange's own timeout, when that is shorter), or to a reply owed by a command
+    // that was never marked (a blind command); it does not close it.
     void discard_pending_input() {
         if (connection_type_ == ConnectionType::Serial) {
 #ifdef _WIN32
@@ -1190,7 +1221,7 @@ private:
             const auto now = std::chrono::steady_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
             if (elapsed.count() > timeout_ms) {
-                if (reply_expected && response.empty()) {
+                if (reply_expected) {
                     reply_owed_ = true;
                     owed_until_ = now + std::chrono::milliseconds(kOwedReplyBoundMs);
                 }
