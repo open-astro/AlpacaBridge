@@ -1,0 +1,3 @@
+### Fixed
+
+- **GPhoto camera-gone-during-longexpnr test no longer fails intermittently**, tests, issue #1557. Test processes share `config/gphoto_sensor_cache.tsv`, so another process could drop the primed line and add a priming capture whose extra `has_widget`, `get_choices` and `set_choice_value` calls shifted the call count the case used to place its fault. The fake now records the widget of the running call and the case faults on `longexpnr` itself. Covered by `GPhoto camera fake - a camera gone from the USB bus during the longexpnr write fails the connect`, which asserts the fault fired once and the connect throws.
