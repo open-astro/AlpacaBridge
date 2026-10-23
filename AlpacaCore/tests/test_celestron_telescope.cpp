@@ -784,8 +784,11 @@ struct SnapshotMount {
     std::atomic<int> t_count{0};          // tracking-mode writes received
     std::atomic<bool> h_mute{false};      // the time write goes unanswered
     std::atomic<int> s_delay_ms{0};       // the sync reply arrives after this long
-    std::atomic<int> l_delay_ms{0};       // the slewing query answers after this long
-    std::atomic<int> l_count{0};          // slewing queries received
+    std::atomic<int> p_delay_ms{0};       // the pier-side query answers after this long
+    std::atomic<int> s_count{0};          // sync and time commands received
+    std::atomic<int> order{0};            // arrival counter shared by the goto and cancel records below
+    std::atomic<int> goto_last{0};        // arrival number of the last goto (0: none)
+    std::atomic<int> cancel_first{0};     // arrival number of the first goto cancel (0: none)
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -812,17 +815,18 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'Z':
             if (st.z_fail.load()) return "";
             return "20AB0500,10000500#";
+        case 'r':
+        case 'R':
+            st.goto_last.store(st.order.fetch_add(1) + 1);
+            return "#";
         case 'L':
-            st.l_count.fetch_add(1);
-            if (st.l_delay_ms.load() > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(st.l_delay_ms.load()));
-            }
             if (st.l_fail.load()) return "";
             return st.slewing.load() ? "1#" : "0#";
         case 'J':
             return "1#";
         case 'p':
             st.slow_count.fetch_add(1);
+            if (st.p_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.p_delay_ms.load()));
             return std::string(1, st.pier.load()) + "#";
         case 't':
             st.slow_count.fetch_add(1);
@@ -837,11 +841,16 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             return "#";
         case 'M':
             st.m_count.fetch_add(1);
+            {
+                int none = 0;
+                st.cancel_first.compare_exchange_strong(none, st.order.fetch_add(1) + 1);
+            }
             if (st.m_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.m_delay_ms.load()));
             return "#";
         case 'W':
         case 's':
         case 'S':
+            st.s_count.fetch_add(1);
             if (st.s_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.s_delay_ms.load()));
             return "#";
         case 'P': {  // AUX passthrough: P len dev op ...
@@ -1510,8 +1519,12 @@ TEST_CASE("Celestron disconnect - a close behind an exchange in flight does not 
         }
     });
     REQUIRE(snapshot_wait_for([&] { return mount.st->transactions.load() > before; }));
-    std::thread closing([&] { mount.driver->set_connected(false); });
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));  // let the close reach its lock
+    std::atomic<bool> close_started{false};
+    std::thread closing([&] {
+        close_started.store(true);
+        mount.driver->set_connected(false);
+    });
+    REQUIRE(snapshot_wait_for([&] { return close_started.load(); }));
     CHECK(snapshot_timed([&] { (void)mount.driver->get_name(); }) < kSnapshotGetterBudget);
     CHECK(snapshot_timed([&] { (void)mount.driver->get_connected(); }) < kSnapshotGetterBudget);
     setter.join();
@@ -1642,8 +1655,9 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held 
     std::thread syncer;
     cel::set_failure_stop_hook_for_testing(*driver, [&] {
         if (!syncer.joinable()) {
+            const int before = st->s_count.load();
             syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the sync owns initiator_mutex_
+            REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
         }
     });
     (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
@@ -1720,6 +1734,30 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
     REQUIRE(aborted);
     CHECK_FALSE(driver->get_slewing());
     driver->set_connected(false);
+}
+
+// AbortSlew joins the slew body before its stops go out: the park body sends its GOTO with mutex_ free, so a stop sent
+// first could be followed by a GOTO that starts the mount again.
+TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of a park in flight",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    mount.st->p_delay_ms = 300;  // the park body is in a slow pier-side read, past its last supersede check
+    const int before = mount.st->slow_count.load();
+    std::thread slewer([&] {
+        try {
+            mount.driver->park();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
+        }
+    });
+    REQUIRE(snapshot_wait_for([&] { return mount.st->slow_count.load() > before; }));
+    try {
+        mount.driver->abort_slew();
+    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
+    }
+    slewer.join();
+    mount.st->p_delay_ms = 0;
+    REQUIRE(mount.st->cancel_first.load() > 0);
+    CHECK(mount.st->goto_last.load() < mount.st->cancel_first.load());  // no goto after the first cancel
 }
 
 #endif  // _WIN32

@@ -1933,6 +1933,7 @@ public:
             }
             if (stop_error.empty()) {
                 clear_motion_errors_locked();
+                pending_stop_.reset();  // a deferred failure stop must not rewrite last_slew_error_ after Unpark
             } else {
                 last_home_error_.clear();
                 last_slew_error_ = "Unpark could not stop the park slew: " + stop_error;
@@ -2015,6 +2016,9 @@ public:
             check_connected();
             check_not_fully_parked_locked("AbortSlew");  // AbortSlew may cancel a park in flight
             slew_.cancel();
+            // Bumped before any stop goes out: a blocking slew that sees the mount stopped must also see that it
+            // was superseded, so it cannot run its completion tail before slew_aborted_ is set.
+            ++motion_generation_;
         }
         try {
             // Stop both pulse chains and the slew body before stopping hardware, so none can re-arm a guide pulse
@@ -2043,7 +2047,6 @@ public:
             parking_ = false;  // an aborted park never reaches AtPark
             set_slewing_locked(false);
             slew_aborted_ = true;
-            ++motion_generation_;
             flip_in_progress_ = false;
             slew_force_until_ = util::TaskClock::clock::time_point::min();
             position_override_until_ = util::TaskClock::clock::time_point::min();
@@ -3425,8 +3428,9 @@ private:
         return true;
     }
 
-    // The blocking slew's and the park's dispatch. The caller holds the initiator lock, so no other initiator runs
-    // while mutex_ is free for the exchanges.
+    // The blocking slew's and the park's dispatch. The blocking slew's caller holds the initiator lock. The park
+    // body runs on the slot thread without it; that is safe because every initiator cancels and joins slew_
+    // before it acts, so no other initiator runs while mutex_ is free for the exchanges.
     void do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec) {
         validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_slew_safety(lock, "SlewToCoordinates");
