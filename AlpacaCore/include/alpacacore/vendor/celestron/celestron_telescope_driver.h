@@ -56,6 +56,15 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
 /// Runs between the poll's sample and its publish, without any driver lock held; null clears it.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs after a slewing read (the slew-complete wait, the park poll), before its result is applied, without any
+/// driver lock held; null clears it.
+void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs when the poll or the slew-complete wait has found a failure, before its stops are sent, without any driver
+/// lock held; null clears it.
+void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// Runs in the park's and the blocking slew's dispatch, after the flip decision and before the GOTO, with mutex_
+/// released (a blocking slew still holds its initiator lock); null clears it.
+void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
