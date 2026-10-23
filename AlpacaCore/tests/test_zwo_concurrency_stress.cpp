@@ -410,9 +410,9 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-fligh
 // thread, the async disconnect teardown thread, and the poll/pulse threads
 // racing set_connected(false) and destruction. Those threads only exist on a
 // CONNECTED driver, so these tests connect through a FakeMountServer (the
-// wrapper treats a successful TCP connect as mount-connected; every
-// post-connect query tolerates failure). The operate callback drives the
-// exact newly-fixed paths: async GOTO and pulse guiding racing disconnects.
+// responder supplies the mandatory AM identity and valid telemetry).
+// The operate callback drives the exact newly-fixed paths: async GOTO and
+// pulse guiding racing disconnects.
 #ifndef _WIN32
 
 namespace {
@@ -433,13 +433,14 @@ alpacacore::vendor::zwo::ConnectionInfo zwo_endpoint(int port) {
 // from pulse_guide() before ever touching pulse_mutex_, so the storm never
 // exercised the pulse_mutex_ -> mutex_ acquisition that inverts the
 // connect path's mutex_ -> pulse_mutex_ order, and TSan had nothing to
-// report. Default "0#" is a validly-terminated reply for everything else
+// report. :GVP# supplies the mandatory AM5 identity; default "0#" terminates the rest
 // (":MS#" -> "0" is a GOTO accept, so the GOTO thread completes its protocol
 // round-trip too).
 alpacacore::test::FakeMountServer::Responder zwo_responder() {
     return [](const std::string& chunk) -> std::string {
-        if (chunk.find(":GVP#") != std::string::npos) return "AM5#";
-        if (chunk.starts_with(":Sr")) return "1#";
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
+        if (chunk.starts_with(":Sr") || chunk.starts_with(":Sd")) return "1#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -459,6 +460,8 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
     alpacacore::test::FakeMountServer server(zwo_responder());
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(server.port()));
+    REQUIRE(alpacacore::test::settle_connected(*driver, true));
+    REQUIRE(driver->get_tracking());
 
     // open-astro#326: one guard per call -- before this the callback stopped at
     // the first throw, so only the first getter was ever storm-tested.
@@ -561,6 +564,11 @@ TEST_CASE("ZWO mount - destruction races an in-flight connect", "[zwo][telescope
     alpacacore::test::FakeMountServer server(zwo_responder());
     REQUIRE(server.ok());
     const int port = server.port();
+    {
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(port));
+        REQUIRE(alpacacore::test::settle_connected(*driver, true));
+        REQUIRE(driver->get_tracking());
+    }
     alpacacore::test::run_destruction_during_connect_stress(
         [port]() { return alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(port)); });
 }
@@ -571,15 +579,9 @@ TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[z
 
     for (int i = 0; i < 25; ++i) {
         auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(server.port()));
-        static_cast<void>(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-        try {
-            driver->slew_to_coordinates_async(5.0, 20.0);
-        } catch (const std::exception&) {
-        }
-        try {
-            driver->pulse_guide(0, 300);
-        } catch (const std::exception&) {
-        }
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
+        REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
         if ((i % 2) != 0) {
             // Half the time the async teardown thread is also live at
             // destruction — the destructor must join GOTO, teardown, poll and
