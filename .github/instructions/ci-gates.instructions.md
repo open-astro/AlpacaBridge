@@ -61,7 +61,9 @@ author must do. Read the docstring before changing a gate.
   over the base branch's records; when a base with records gives no list, the review does not run. The
   bot answers every listed rule with a `- NNNN-slug.md rule N: pass|defect|n/a: reason` line, and
   `check_adr_scope.py --checklist` fails the job before posting when one is missing, a rule gets two
-  verdicts, or a defect line sits under the approving sign-off.
+  verdicts, or a defect line sits under the approving sign-off. Once that check passes, the "Fold the
+  decision-record checklist" step puts the checklist in a `<details>` block under a summary of its
+  verdict counts, before the post step.
   See `docs/decisions/README.md` ("Changing a record").
 - **Layering** (`scripts/check_layering.py`, gate 2f): the vendor-include baselines in the script
   only go down; the PR that deletes includes lowers them. It also enforces CMake rules L1-L3
