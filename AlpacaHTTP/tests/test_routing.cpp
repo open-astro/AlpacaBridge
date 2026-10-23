@@ -6995,10 +6995,14 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+    }
 
-        // An integer outside the field's type is refused by name, never
-        // wrapped into a valid-looking value (ADR 0007 rule 4). A wrapped call
-        // still fails later in NetworkManager, so the name is the signal.
+    {
+        // case: a Wi-Fi integer outside its field's type is refused by name, never wrapped (#1476, ADR 0007)
+        // get<int>() wrapped Priority 4294967296 to 0 and get<uint32_t>() Channel
+        // 4294967297 to 1. A wrapped call still fails later in NetworkManager,
+        // so the field name in ErrorMessage is the signal.
+        alpacahttp::Router router;
         for (const auto& [path, body, field] : {
                  std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":4294967296}", "Priority"},
                  std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":18446744073709551615}",
@@ -7432,11 +7436,11 @@ int main() {
         }
     }
 
-    // ADR 0007 rule 4: a deviceNumber outside int, or with a fraction, is
-    // refused by name; get<int>() wrapped 4294967299 to device 3 and cut 3.5
-    // to 3. Rule 9: a config error the client sent is not logged at WARNING
-    // or above.
     {
+        // case: a deviceNumber outside int or with a fraction is refused by name, logged below WARNING (#1476)
+        // ADR 0007 rule 4: get<int>() wrapped 4294967299 to device 3 and cut
+        // 3.5 to 3. Rule 9: a config error the client sent is not logged at
+        // WARNING or above.
         std::vector<std::string> loud;
         std::mutex loud_mutex;
         struct SinkRestore {
@@ -7481,10 +7485,10 @@ int main() {
         }
     }
 
-    // A hand-written persisted entry whose deviceNumber is outside int has no
-    // key, so it is listed as failed with no number instead of standing in
-    // for device 3, the number get<int>() wrapped it to.
     {
+        // case: a persisted deviceNumber outside int is listed as failed with no number (#1476)
+        // It has no key, so it does not stand in for device 3, the number
+        // get<int>() wrapped it to.
         const ScopedCwd scratch;
         std::filesystem::create_directories("config");
         {
