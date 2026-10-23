@@ -874,6 +874,9 @@ public:
     void slew_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
         detail::validate_ra_dec(ra, dec);
+        // Initiator lock: the gate, the command and the state write happen in the order of the commands on the
+        // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
@@ -889,15 +892,18 @@ public:
         protocol.slew_to_ra_dec(ra, dec);
         lock.lock();
         note_slew_started_locked();
+        const uint64_t epoch = slew_epoch_;
+        ilock.unlock();
 
         // Wait for completion.
         const SlewWaitGuard waiting(slew_waiters_);
-        wait_for_slew_complete(lock);
+        wait_for_slew_complete(lock, epoch);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
         detail::validate_ra_dec(ra, dec);
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
@@ -1001,6 +1007,8 @@ public:
         }
         detail::validate_move_axis_rate(rate);
 
+        // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();
@@ -1049,8 +1057,11 @@ public:
     }
 
     void abort_slew() override {
+        // Initiator lock: the state clear and the command follow any initiator whose command is on the wire.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        ++slew_epoch_;
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1195,6 +1206,7 @@ private:
     }
 
     void note_slew_started_locked() {
+        ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
@@ -1490,6 +1502,7 @@ private:
             return true;
         }
         bool complete = false;
+        const uint64_t epoch = slew_epoch_;
         lock.unlock();
         try {
             complete = BisqueProtocolWrapper::instance().is_slew_complete();
@@ -1501,6 +1514,9 @@ private:
         check_connected();
         if (!complete) {
             return true;
+        }
+        if (epoch != slew_epoch_) {
+            return slewing_cached_;  // a slew start or abort wrote meanwhile: the answer is about an older slew
         }
         // No measurement here: an initiator is timed against the 1 s target, and a retarget starts a new slew at
         // once. Drop the tick in flight; the next poll publishes the position.
@@ -1534,7 +1550,8 @@ private:
     }
 
     // Called with `lock` held; each exchange runs with it released, so a getter never waits for a poll of TheSkyX.
-    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock) {
+    // `epoch` is slew_epoch_ right after this slew started: a newer slew start or an abort keeps the flag it wrote.
+    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t epoch) {
         // One failed poll is tolerated (a transient TheSkyX hiccup); this many in a
         // row is a persistent fault and is reported as such, not as a 120 s timeout.
         constexpr int kMaxConsecutivePollFailures = 3;
@@ -1570,7 +1587,9 @@ private:
             if (complete) {
                 publish_measurement();  // the position read after the stop goes out with Slewing false
                 lock.lock();
-                slewing_cached_ = false;
+                if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
+                    slewing_cached_ = false;
+                }
                 if (slew_settle_time_seconds_ > 0) {
                     lock.unlock();
                     clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
@@ -1596,6 +1615,9 @@ private:
     int device_number_;
     ConnectionInfo connection_info_;
     std::mutex transition_mutex_;
+    // Serialises the motion initiators (MoveAxis, the slew forms) with AbortSlew across gate, exchange and state
+    // write. Order: initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf).
+    std::mutex initiator_mutex_;
     mutable std::mutex mutex_;
     bool connected_ = false;
 
@@ -1638,6 +1660,7 @@ private:
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
+    uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;

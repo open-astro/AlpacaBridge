@@ -466,3 +466,40 @@ TEST_CASE("Bisque snapshot - Name, Connected and Tracking answer while a SetTrac
     CHECK(timed([&] { (void)rig.driver->get_tracking(); }) < milliseconds(500));
     worker.join();
 }
+
+namespace {
+
+// Starts `initiator` on a thread, waits until its TheSkyX command (the `exchanges`-th transaction after the call) is
+// on the wire, calls AbortSlew, then checks that Slewing is false: the abort reached TheSkyX after the command, so the
+// mount is stopped and the driver must say so.
+void abort_during_initiator_exchange(int exchanges, const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 300;
+    rig.mount.slew_polls_needed = 100000;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { initiator(*rig.driver); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + exchanges && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    std::this_thread::sleep_for(milliseconds(50));
+    rig.driver->abort_slew();
+    worker.join();
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+}  // namespace
+
+// Falsified by: bisque_telescope_driver.cpp, move_axis: drop initiator_mutex_ so the start exchange runs outside it.
+TEST_CASE("Bisque snapshot - AbortSlew during the MoveAxis start exchange leaves Slewing false",
+          "[bisque][telescope][snapshot]") {
+    abort_during_initiator_exchange(1, [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, slew_to_coordinates_async: drop initiator_mutex_ so the slew command
+// and note_slew_started_locked() run outside it.
+TEST_CASE("Bisque snapshot - AbortSlew during the SlewToCoordinatesAsync exchange leaves Slewing false",
+          "[bisque][telescope][snapshot]") {
+    abort_during_initiator_exchange(2, [](alpacacore::TelescopeDriver& d) { d.slew_to_coordinates_async(5.0, 10.0); });
+}
