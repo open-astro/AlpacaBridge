@@ -44,6 +44,9 @@ using alpacacore::util::SerialClaimKind;
 using alpacacore::util::SerialPortClaim;
 
 constexpr const char* kUnitId = "0b3f5a52-7d2e-4c1a-9a53-2f6a1c0d8e11";
+// The store key of the unit at enumeration index 0, and at index 1.
+const std::string kKey = alpacacore::util::location_key(kUnitId, 0);
+const std::string kKeyAtOne = alpacacore::util::location_key(kUnitId, 1);
 
 // What a connect did, as the stubs saw it.
 struct Counts {
@@ -54,17 +57,18 @@ struct Counts {
 struct PdhKind {
     using Fake = alpacacore::test::FakeGeminiPdh;
     using Driver = alpacacore::SwitchDriver;
-    static std::unique_ptr<Driver> make() { return gemini::create_gemini_pdh_switch_by_index(0, 0); }
+    static std::unique_ptr<Driver> make(int index = 0) { return gemini::create_gemini_pdh_switch_by_index(0, index); }
     static std::unique_ptr<Driver> make_configured(const std::string& port) {
         return gemini::create_gemini_pdh_switch(0, port, 19200);
     }
-    static void hook(Counts& c, const std::string& scan_result) {
+    static void hook(Counts& c, const std::string& scan_result, const std::string& second_result = {}) {
         gemini::GeminiPdhScanHooks hooks;
         hooks.on_probe = [&c](const std::string&) { ++c.probes; };
-        hooks.enumerate = [&c, scan_result] {
+        hooks.enumerate = [&c, scan_result, second_result] {
             ++c.scans;
             std::vector<gemini::GeminiPdhPortInfo> found;
             if (!scan_result.empty()) found.push_back({scan_result, ""});
+            if (!second_result.empty()) found.push_back({second_result, ""});
             return found;
         };
         gemini::set_gemini_pdh_scan_hooks_for_testing(std::move(hooks));
@@ -76,21 +80,22 @@ template <bool Pro>
 struct PanelKind {
     using Fake = alpacacore::test::FakeGeminiFlatPanel;
     using Driver = alpacacore::CoverCalibratorDriver;
-    static std::unique_ptr<Driver> make() {
-        return Pro ? gemini::create_gemini_flatpanel_pro_by_index(0, 0)
-                   : gemini::create_gemini_flatpanel_by_index(0, 0);
+    static std::unique_ptr<Driver> make(int index = 0) {
+        return Pro ? gemini::create_gemini_flatpanel_pro_by_index(0, index)
+                   : gemini::create_gemini_flatpanel_by_index(0, index);
     }
     static std::unique_ptr<Driver> make_configured(const std::string& port) {
         return Pro ? gemini::create_gemini_flatpanel_pro(0, port, 9600)
                    : gemini::create_gemini_flatpanel(0, port, 9600);
     }
-    static void hook(Counts& c, const std::string& scan_result) {
+    static void hook(Counts& c, const std::string& scan_result, const std::string& second_result = {}) {
         gemini::GeminiFlatPanelScanHooks hooks;
         hooks.on_probe = [&c](const std::string&) { ++c.probes; };
-        hooks.enumerate = [&c, scan_result] {
+        hooks.enumerate = [&c, scan_result, second_result] {
             ++c.scans;
             std::vector<gemini::GeminiFlatPanelPortInfo> found;
             if (!scan_result.empty()) found.push_back({scan_result, ""});
+            if (!second_result.empty()) found.push_back({second_result, ""});
             return found;
         };
         gemini::set_gemini_flatpanel_scan_hooks_for_testing(std::move(hooks));
@@ -123,7 +128,7 @@ void check_second_connect_probes_once() {
     REQUIRE(driver->get_connected());
     CHECK(counts.scans == 1);
     CHECK(counts.probes == 0);  // the stub scan stands in for the probes of a real scan
-    REQUIRE(DeviceLocationStore::load(kUnitId) == fake.slave_path());
+    REQUIRE(DeviceLocationStore::load(kKey) == fake.slave_path());
 
     driver->set_connected(false);
     REQUIRE_FALSE(driver->get_connected());
@@ -131,7 +136,7 @@ void check_second_connect_probes_once() {
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 1);
     CHECK(counts.scans == 1);  // no second search
-    CHECK(DeviceLocationStore::load(kUnitId) == fake.slave_path());
+    CHECK(DeviceLocationStore::load(kKey) == fake.slave_path());
 }
 
 // The remembered port is gone: one failed probe, then the full search finds the device and replaces it.
@@ -142,7 +147,7 @@ void check_gone_port_falls_back_to_the_search() {
     Counts counts;
     HookGuard<Kind> guard;
     Kind::hook(counts, fake.slave_path());
-    REQUIRE(DeviceLocationStore::save(kUnitId, "/dev/nonexistent-remembered-port"));
+    REQUIRE(DeviceLocationStore::save(kKey, "/dev/nonexistent-remembered-port"));
 
     auto driver = Kind::make();
     driver->assign_unique_id(kUnitId);
@@ -150,7 +155,7 @@ void check_gone_port_falls_back_to_the_search() {
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 1);
     CHECK(counts.scans == 1);
-    CHECK(DeviceLocationStore::load(kUnitId) == fake.slave_path());
+    CHECK(DeviceLocationStore::load(kKey) == fake.slave_path());
 }
 
 // A port another connected driver holds is never probed, whether remembered or not; the search finds the
@@ -165,7 +170,7 @@ void check_held_port_is_never_probed() {
     Kind::hook(counts, real.slave_path());
     auto other = SerialPortClaim::acquire(held_fake.slave_path(), SerialClaimKind::Link, "Other device");
     REQUIRE(other);
-    REQUIRE(DeviceLocationStore::save(kUnitId, held_fake.slave_path()));
+    REQUIRE(DeviceLocationStore::save(kKey, held_fake.slave_path()));
 
     auto driver = Kind::make();
     driver->assign_unique_id(kUnitId);
@@ -174,7 +179,29 @@ void check_held_port_is_never_probed() {
     CHECK(counts.probes == 0);
     CHECK(counts.scans == 1);
     CHECK(held_fake.commands().empty());  // never opened, never written to
-    CHECK(DeviceLocationStore::load(kUnitId) == real.slave_path());
+    CHECK(DeviceLocationStore::load(kKey) == real.slave_path());
+}
+
+// The user renumbers the entry (same id, index 0 to 1): the port found at index 0 must not answer for
+// index 1. The new index searches and its result is stored under its own key.
+template <typename Kind>
+void check_changed_index_ignores_the_remembered_port() {
+    alpacacore::test::TempLocationDir store;
+    typename Kind::Fake first;
+    typename Kind::Fake second;
+    Counts counts;
+    HookGuard<Kind> guard;
+    Kind::hook(counts, first.slave_path(), second.slave_path());
+    REQUIRE(DeviceLocationStore::save(kKey, first.slave_path()));
+
+    auto driver = Kind::make(1);
+    driver->assign_unique_id(kUnitId);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(counts.probes == 0);
+    CHECK(counts.scans == 1);
+    CHECK(DeviceLocationStore::load(kKeyAtOne) == second.slave_path());
+    CHECK(DeviceLocationStore::load(kKey) == first.slave_path());
 }
 
 // A configured port is used as given: the store is neither read nor written, and nothing is probed or searched.
@@ -185,7 +212,7 @@ void check_configured_port_never_touches_the_store() {
     Counts counts;
     HookGuard<Kind> guard;
     Kind::hook(counts, "/dev/should-not-be-searched");
-    REQUIRE(DeviceLocationStore::save(kUnitId, "/dev/nonexistent-remembered-port"));
+    REQUIRE(DeviceLocationStore::save(kKey, "/dev/nonexistent-remembered-port"));
 
     auto driver = Kind::make_configured(fake.slave_path());
     driver->assign_unique_id(kUnitId);
@@ -193,7 +220,7 @@ void check_configured_port_never_touches_the_store() {
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 0);
     CHECK(counts.scans == 0);
-    CHECK(DeviceLocationStore::load(kUnitId) == "/dev/nonexistent-remembered-port");  // unchanged
+    CHECK(DeviceLocationStore::load(kKey) == "/dev/nonexistent-remembered-port");  // unchanged
 
     // A key with no entry stays without one.
     auto second = Kind::make_configured(fake.slave_path());
@@ -244,7 +271,7 @@ TEST_CASE("Gemini PDH auto-detect - a remembered port that answers as another de
     Counts counts;
     HookGuard<PdhKind> guard;
     PdhKind::hook(counts, hub.slave_path());
-    REQUIRE(DeviceLocationStore::save(kUnitId, wrong_device.slave_path()));
+    REQUIRE(DeviceLocationStore::save(kKey, wrong_device.slave_path()));
 
     auto driver = PdhKind::make();
     driver->assign_unique_id(kUnitId);
@@ -252,7 +279,7 @@ TEST_CASE("Gemini PDH auto-detect - a remembered port that answers as another de
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 1);
     CHECK(counts.scans == 1);
-    CHECK(DeviceLocationStore::load(kUnitId) == hub.slave_path());
+    CHECK(DeviceLocationStore::load(kKey) == hub.slave_path());
 }
 
 TEST_CASE("Gemini PDH auto-detect - a port a connected driver holds is never probed",
@@ -283,4 +310,19 @@ TEST_CASE("Gemini flat panel Lite - a configured port never reads or writes the 
 TEST_CASE("Gemini flat panel Pro - a configured port never reads or writes the location store",
           "[gemini][flatpanel][serial][location][issue1452]") {
     check_configured_port_never_touches_the_store<ProPanel>();
+}
+
+TEST_CASE("Gemini PDH auto-detect - a changed hub index ignores the port remembered for the old index",
+          "[gemini][pdh][serial][location][issue1452]") {
+    check_changed_index_ignores_the_remembered_port<PdhKind>();
+}
+
+TEST_CASE("Gemini flat panel Lite auto-detect - a changed panel index ignores the port remembered for the old index",
+          "[gemini][flatpanel][serial][location][issue1452]") {
+    check_changed_index_ignores_the_remembered_port<LitePanel>();
+}
+
+TEST_CASE("Gemini flat panel Pro auto-detect - a changed panel index ignores the port remembered for the old index",
+          "[gemini][flatpanel][serial][location][issue1452]") {
+    check_changed_index_ignores_the_remembered_port<ProPanel>();
 }

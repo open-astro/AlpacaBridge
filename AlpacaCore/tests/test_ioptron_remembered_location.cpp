@@ -37,6 +37,7 @@ namespace ioptron = alpacacore::vendor::ioptron;
 using alpacacore::util::DeviceLocationStore;
 
 constexpr const char* kUnitId = "7e41c0b2-5d3a-4f68-a1b9-0c2d8e6f3a47";
+const std::string kKey = alpacacore::util::location_key(kUnitId, 0);
 
 struct Counts {
     std::atomic<int> probes{0};
@@ -46,12 +47,14 @@ struct Counts {
 // Stubs the sweep to find @p port on loopback and counts probes and sweeps; clears them on exit.
 class ScanStub {
 public:
-    ScanStub(Counts& counts, int port) {
+    ScanStub(Counts& counts, int port, int second_port = 0) {
         ioptron::iOptronScanHooks hooks;
         hooks.on_probe = [&counts](const std::string&) { ++counts.probes; };
-        hooks.enumerate_hosts = [&counts, port] {
+        hooks.enumerate_hosts = [&counts, port, second_port] {
             ++counts.sweeps;
-            return std::vector<ioptron::iOptronNetworkHostInfo>{{"127.0.0.1", port, "0012"}};
+            std::vector<ioptron::iOptronNetworkHostInfo> found{{"127.0.0.1", port, "0012"}};
+            if (second_port != 0) found.push_back({"127.0.0.1", second_port, "0012"});
+            return found;
         };
         ioptron::set_ioptron_scan_hooks_for_testing(std::move(hooks));
     }
@@ -60,8 +63,8 @@ public:
     ScanStub& operator=(const ScanStub&) = delete;
 };
 
-std::unique_ptr<alpacacore::TelescopeDriver> make_auto(const std::string& id) {
-    auto driver = ioptron::create_ioptron_telescope_auto_network(0, 0, -33.856784, 151.215297, 42.0);
+std::unique_ptr<alpacacore::TelescopeDriver> make_auto(const std::string& id, int index = 0) {
+    auto driver = ioptron::create_ioptron_telescope_auto_network(0, index, -33.856784, 151.215297, 42.0);
     driver->assign_unique_id(id);
     return driver;
 }
@@ -83,7 +86,7 @@ TEST_CASE("iOptron network auto-detect - a fresh driver probes the remembered ad
         REQUIRE(first->get_connected());
         CHECK(counts.sweeps == 1);
         CHECK(counts.probes == 0);  // the stub sweep stands in for the probes of a real sweep
-        CHECK(DeviceLocationStore::load(kUnitId) == where);
+        CHECK(DeviceLocationStore::load(kKey) == where);
         first->set_connected(false);
     }
 
@@ -92,7 +95,7 @@ TEST_CASE("iOptron network auto-detect - a fresh driver probes the remembered ad
     REQUIRE(second->get_connected());
     CHECK(counts.probes == 1);
     CHECK(counts.sweeps == 1);  // no second sweep
-    CHECK(DeviceLocationStore::load(kUnitId) == where);
+    CHECK(DeviceLocationStore::load(kKey) == where);
     second->set_connected(false);
 }
 
@@ -103,14 +106,14 @@ TEST_CASE("iOptron network auto-detect - a remembered address that no longer ans
     REQUIRE(fake.ok());
     Counts counts;
     ScanStub stub(counts, fake.port());
-    REQUIRE(DeviceLocationStore::save(kUnitId, "127.0.0.1:1"));  // nothing listens on port 1
+    REQUIRE(DeviceLocationStore::save(kKey, "127.0.0.1:1"));  // nothing listens on port 1
 
     auto driver = make_auto(kUnitId);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 1);
     CHECK(counts.sweeps == 1);
-    CHECK(DeviceLocationStore::load(kUnitId) == "127.0.0.1:" + std::to_string(fake.port()));
+    CHECK(DeviceLocationStore::load(kKey) == "127.0.0.1:" + std::to_string(fake.port()));
     driver->set_connected(false);
 }
 
@@ -121,14 +124,35 @@ TEST_CASE("iOptron network auto-detect - a location the store holds for a serial
     REQUIRE(fake.ok());
     Counts counts;
     ScanStub stub(counts, fake.port());
-    REQUIRE(DeviceLocationStore::save(kUnitId, "/dev/serial/by-id/usb-Example_Adapter-if00-port0"));
+    REQUIRE(DeviceLocationStore::save(kKey, "/dev/serial/by-id/usb-Example_Adapter-if00-port0"));
 
     auto driver = make_auto(kUnitId);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 0);
     CHECK(counts.sweeps == 1);
-    CHECK(DeviceLocationStore::load(kUnitId) == "127.0.0.1:" + std::to_string(fake.port()));
+    CHECK(DeviceLocationStore::load(kKey) == "127.0.0.1:" + std::to_string(fake.port()));
+    driver->set_connected(false);
+}
+
+TEST_CASE("iOptron network auto-detect - a changed mount index ignores the address remembered for the old index",
+          "[ioptron][telescope][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    alpacacore::test::FakeIoptronMount first("0012", 0.0);
+    alpacacore::test::FakeIoptronMount second("0012", 0.0);
+    REQUIRE(first.ok());
+    REQUIRE(second.ok());
+    Counts counts;
+    ScanStub stub(counts, first.port(), second.port());
+    REQUIRE(DeviceLocationStore::save(kKey, "127.0.0.1:" + std::to_string(first.port())));
+
+    auto driver = make_auto(kUnitId, 1);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(counts.probes == 0);
+    CHECK(counts.sweeps == 1);
+    CHECK(DeviceLocationStore::load(alpacacore::util::location_key(kUnitId, 1)) ==
+          "127.0.0.1:" + std::to_string(second.port()));
     driver->set_connected(false);
 }
 
@@ -139,7 +163,7 @@ TEST_CASE("iOptron - a configured address never reads or writes the location sto
     REQUIRE(fake.ok());
     Counts counts;
     ScanStub stub(counts, 1);
-    REQUIRE(DeviceLocationStore::save(kUnitId, "127.0.0.1:1"));
+    REQUIRE(DeviceLocationStore::save(kKey, "127.0.0.1:1"));
 
     ioptron::ConnectionInfo info;
     info.type = ioptron::ConnectionType::Network;
@@ -151,7 +175,7 @@ TEST_CASE("iOptron - a configured address never reads or writes the location sto
     REQUIRE(driver->get_connected());
     CHECK(counts.probes == 0);
     CHECK(counts.sweeps == 0);
-    CHECK(DeviceLocationStore::load(kUnitId) == "127.0.0.1:1");  // unchanged
+    CHECK(DeviceLocationStore::load(kKey) == "127.0.0.1:1");  // unchanged
     driver->set_connected(false);
 }
 

@@ -50,6 +50,12 @@ public:
     static bool save(const std::string& key, const std::string& location);
 };
 
+// The store key for the unit @p unique_id as found at enumeration index
+// @p index: "<id>#<index>". The index is part of the key because a user can
+// renumber an entry (decision 0018 keeps its id), and a location found at the
+// old index must not answer for the new one.
+std::string location_key(const std::string& unique_id, int index);
+
 // The location to remember for the serial port @p port_path: the
 // /dev/serial/by-id symlink in @p by_id_dir that resolves to the same device
 // (it survives a replug under another ttyUSBn), else @p port_path itself.

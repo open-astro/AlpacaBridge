@@ -231,7 +231,7 @@ public:
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
                 // The port that worked last time goes first: one handshake instead of the full
                 // search, which takes about 8 s on a rig and outlasts a client's connect timeout.
-                if (const auto remembered = util::recall_serial_location(get_unique_id(), probe_gemini_pdh_port)) {
+                if (const auto remembered = util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_pdh_port)) {
                     ALPACA_LOG_INFO("Gemini",
                                     "Power & Data Hubs Advanced 3 answered on remembered port " + *remembered);
                     effective.serial_port = *remembered;
@@ -264,7 +264,8 @@ public:
             protocol_.connect(effective);
             // Remember the port only after the handshake held: a port the user configured is never stored.
             if (auto_detected) {
-                util::DeviceLocationStore::save(get_unique_id(), util::serial_location_for(effective.serial_port));
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
             }
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);

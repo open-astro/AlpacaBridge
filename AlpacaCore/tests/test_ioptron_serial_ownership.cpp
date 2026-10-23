@@ -405,12 +405,14 @@ struct SerialScanCounts {
 // Stubs the serial scan to find @p port and counts probes and scans; clears the stubs on exit.
 class SerialScanStub {
 public:
-    SerialScanStub(SerialScanCounts& counts, std::string port) {
+    SerialScanStub(SerialScanCounts& counts, std::string port, std::string second = {}) {
         ioptron::iOptronScanHooks hooks;
         hooks.on_probe = [&counts](const std::string&) { ++counts.probes; };
-        hooks.enumerate_ports = [&counts, port = std::move(port)] {
+        hooks.enumerate_ports = [&counts, port = std::move(port), second = std::move(second)] {
             ++counts.scans;
-            return std::vector<ioptron::iOptronPortInfo>{{port, "", "0036"}};
+            std::vector<ioptron::iOptronPortInfo> found{{port, "", "0036"}};
+            if (!second.empty()) found.push_back({second, "", "0036"});
+            return found;
         };
         ioptron::set_ioptron_scan_hooks_for_testing(std::move(hooks));
     }
@@ -419,7 +421,7 @@ public:
     SerialScanStub& operator=(const SerialScanStub&) = delete;
 };
 
-constexpr const char* kMountId = "3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948";
+const std::string kMountId = alpacacore::util::location_key("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948", 0);
 
 }  // namespace
 
@@ -480,6 +482,22 @@ TEST_CASE("iOptron serial auto-detect - without a location key the scan runs and
     REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, "/dev/nonexistent-remembered-port"));
 
     const auto info = ioptron::resolve_ioptron_serial_auto(0);
+    CHECK(info.port_path == mount.slave_path());
+    CHECK(counts.probes == 0);
+    CHECK(counts.scans == 1);
+}
+
+TEST_CASE("iOptron serial auto-detect - a changed mount index ignores the port remembered for the old index",
+          "[ioptron][serial][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    FakeIoptronSerial old_mount("0036", 0);
+    FakeIoptronSerial mount("0036", 0);
+    SerialScanCounts counts;
+    SerialScanStub stub(counts, old_mount.slave_path(), mount.slave_path());
+    REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, old_mount.slave_path()));
+
+    const auto info = ioptron::resolve_ioptron_serial_auto(
+        1, alpacacore::util::location_key("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948", 1));
     CHECK(info.port_path == mount.slave_path());
     CHECK(counts.probes == 0);
     CHECK(counts.scans == 1);

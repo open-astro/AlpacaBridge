@@ -223,6 +223,8 @@ public:
 
     // The auto-detect factories need the driver's unique id inside the resolver,
     // and the id is assigned only after the driver exists. Call before the first connect.
+    void set_location_index(int index) { location_index_ = index; }
+
     void set_connection_resolver(util::ConnectionResolver<ConnectionInfo> resolver) {
         connection_resolver_ = std::move(resolver);
     }
@@ -287,7 +289,7 @@ public:
                     // tries this place first. A configured port or host has no resolver and is
                     // never stored.
                     if (connection_resolver_) {
-                        util::DeviceLocationStore::save(get_unique_id(), location_of(info));
+                        util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_), location_of(info));
                     }
                 },
                 "iOptron");
@@ -2816,6 +2818,7 @@ private:
     // connection_resolved_ is true once a connect has run the resolver, so a
     // later connect retries that endpoint before scanning again.
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    int location_index_ = 0;  // the mount index the resolver searches, part of the location key
     bool connection_resolved_ = false;
     std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
@@ -3104,8 +3107,10 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number
         util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{}, std::function<void()>{},
         std::function<void()>{}, clock);
     const iOptronTelescopeDriver* self = driver.get();
-    driver->set_connection_resolver(
-        [self, mount_index] { return resolve_ioptron_serial_auto(mount_index, self->get_unique_id()); });
+    driver->set_location_index(mount_index);
+    driver->set_connection_resolver([self, mount_index] {
+        return resolve_ioptron_serial_auto(mount_index, util::location_key(self->get_unique_id(), mount_index));
+    });
     return driver;
 }
 
@@ -3122,8 +3127,10 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int devic
         util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{}, std::function<void()>{},
         std::function<void()>{}, clock);
     const iOptronTelescopeDriver* self = driver.get();
-    driver->set_connection_resolver(
-        [self, mount_index] { return resolve_ioptron_network_auto(mount_index, self->get_unique_id()); });
+    driver->set_location_index(mount_index);
+    driver->set_connection_resolver([self, mount_index] {
+        return resolve_ioptron_network_auto(mount_index, util::location_key(self->get_unique_id(), mount_index));
+    });
     return driver;
 }
 

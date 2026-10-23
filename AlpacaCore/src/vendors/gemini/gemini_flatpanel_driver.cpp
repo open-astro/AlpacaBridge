@@ -140,7 +140,7 @@ public:
                 // The port that worked last time goes first: one handshake instead of the full
                 // search (5-13 s on a rig, past a client's connect timeout).
                 if (const auto remembered =
-                        util::recall_serial_location(get_unique_id(), probe_gemini_flatpanel_port)) {
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_flatpanel_port)) {
                     ALPACA_LOG_INFO("Gemini", "Flat panel answered on remembered port " + *remembered);
                     effective.serial_port = *remembered;
                 } else {
@@ -167,7 +167,8 @@ public:
             std::string firmware = protocol_.connect(effective);
             // Remember the port only after the handshake held: a port the user configured is never stored.
             if (auto_detected) {
-                util::DeviceLocationStore::save(get_unique_id(), util::serial_location_for(effective.serial_port));
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
             }
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
@@ -514,7 +515,7 @@ public:
                 // The port that worked last time goes first: one handshake instead of the full
                 // search (5-13 s on a rig, past a client's connect timeout).
                 if (const auto remembered =
-                        util::recall_serial_location(get_unique_id(), probe_gemini_flatpanel_port)) {
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_flatpanel_port)) {
                     ALPACA_LOG_INFO("Gemini", "Flat panel v2 answered on remembered port " + *remembered);
                     effective.serial_port = *remembered;
                 } else {
@@ -538,7 +539,8 @@ public:
             std::string firmware = protocol_.connect(effective);
             // Remember the port only after the handshake held: a port the user configured is never stored.
             if (auto_detected) {
-                util::DeviceLocationStore::save(get_unique_id(), util::serial_location_for(effective.serial_port));
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
             }
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);

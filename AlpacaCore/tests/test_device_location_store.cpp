@@ -171,3 +171,10 @@ TEST_CASE("Device location store - recall_serial_location runs the handshake onc
     CHECK_FALSE(recall_serial_location("N", accept).has_value());
     CHECK(calls == 2);
 }
+
+TEST_CASE("Device location store - location_key separates the enumeration indexes of one id",
+          "[device-location][issue1452]") {
+    using alpacacore::util::location_key;
+    CHECK(location_key("A", 0) == "A#0");
+    CHECK(location_key("A", 0) != location_key("A", 1));
+}

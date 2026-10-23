@@ -187,6 +187,10 @@ bool DeviceLocationStore::save(const std::string& key, const std::string& locati
     }
 }
 
+std::string location_key(const std::string& unique_id, int index) {
+    return unique_id + "#" + std::to_string(index);
+}
+
 std::string serial_location_for(const std::string& port_path, const std::string& by_id_dir) {
     std::error_code ec;
     const std::filesystem::path dir(by_id_dir);
