@@ -21,14 +21,15 @@ namespace alpacacore::util {
 // Remembers where an auto-detected device was last found, so the next connect
 // tries that one place before it runs the full hardware search.
 //
-// One flat JSON object of strings in a state file, key = driver unique id
-// (decision 0018), value = the location: a serial path, or "host:port" for a
-// network device. It is runtime state, kept apart from the user's settings in
-// registered_devices.json (the same split as decision 0008). AlpacaCore carries
-// no JSON library, so this reads and writes only that shape. Every call is
-// mutex-guarded and never throws: a missing, unreadable or corrupt file means
-// no remembered location, and a failed save logs a WARNING and returns false,
-// so a connect never fails on storage.
+// One flat JSON object of strings in a state file, key = location_key() of the
+// driver unique id (decision 0018) and its enumeration index, value = the
+// location: a serial path, or "host:port" for a network device. It is runtime
+// state, kept apart from the user's settings in registered_devices.json (the
+// same split as decision 0008). AlpacaCore carries no JSON library, so this
+// reads and writes only that shape. Every call is mutex-guarded and never
+// throws: a missing, unreadable or corrupt file means no remembered location,
+// and a failed save logs a WARNING and returns false, so a connect never fails
+// on storage.
 //
 // Only the auto-detect path touches the store. A port or address the user
 // configured is used as given and is never read from or written to it.
