@@ -69,7 +69,7 @@ public:
 
     // Decision 0018: the router calls this at the upgrade start only, so the
     // offset saved under the device-number ID moves to the device that held that
-    // number then. A client that connected first has read 0 from the GUID key,
+    // number then. A client that connected first has read 0 from the stored-ID key,
     // so a connected driver takes the moved offset too. Lock order:
     // transition_mutex_, sync_mutex_, state_mutex_.
     void adopt_legacy_state() override {

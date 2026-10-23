@@ -8825,7 +8825,7 @@ void Router::load_persisted_devices() {
         }
     }
     // A removed rotator's offset goes here, not at removal: the web UI's edit
-    // removes and re-adds the entry with the same GUID (decisions 0008, 0018).
+    // removes and re-adds the entry with the same stored ID (decisions 0008, 0018).
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
         pruned > 0) {
         util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");

@@ -46,8 +46,8 @@ The rules a change is checked against. Each names where it applies and what chec
 ## Consequences
 
 - Every existing device without a keepable stored ID reports a new `UniqueID` once, after the upgrade; one with a stored `ZWO_UID_` keeps it. A client that stored the old ID sees a new device and must be pointed at it once. The changelog entry for issue #1471 goes under Breaking changes.
-- Restoring an old config backup brings back the GUIDs it held; copying one config to a second host gives both hosts the same GUIDs, so a cloned SD card should be re-configured.
-- A management client that edits a device by removing and re-adding it without sending the GUID back gets a new one; the web UI sends it.
+- Restoring an old config backup brings back the stored IDs it held; copying one config to a second host gives both hosts the same stored IDs, so a cloned SD card should be re-configured.
+- A management client that edits a device by removing and re-adding it without sending the stored ID back gets a new one; the web UI sends it.
 - A client that sends the ID of a device removed earlier gets it back, since no stored entry holds it; before the next start prunes it, a rotator configured that way also reads the removed rotator's offset. It takes a deliberate client.
 - The ZWO camera's catalog no longer generates `ZWO_UID_` values, but a stored one stays. The direct factories that unit tests use still do, for the fallback.
 - `prune_unknown_unique_ids()` removes only GUID-shaped offset keys, so the offset of a removed rotator whose kept ID is not a GUID stays in the file.

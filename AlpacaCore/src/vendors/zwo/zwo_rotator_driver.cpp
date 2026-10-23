@@ -506,7 +506,7 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
         }
-        // Persisted Sync offset, keyed by the GUID (decision 0018). An offset
+        // Persisted Sync offset, keyed by the stored ID (decision 0018). An offset
         // saved under the serial-based ID moves here, since the serial read just
         // above names the body. One saved under an SDK-ID or device-number ID
         // names only a slot, so adopt_legacy_state() moves it at the upgrade

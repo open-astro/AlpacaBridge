@@ -5,9 +5,9 @@
 
 ### Fixed
 
-- **UniqueID is a persisted GUID per configured device** (AlpacaHTTP router, AlpacaCore, issue #1471, decision 0018): the router keeps the GUID across edits and renumbering, assigns it to the driver, and lists a device that failed to load with it. The 43 drivers no longer build the ID from a device number, index or serial; `get_unique_id()` returns the assigned GUID and each driver keeps only a `fallback_unique_id()` for unit tests. For the upgrade, see Breaking changes.
+- **UniqueID is a persisted GUID per configured device** (AlpacaHTTP router, AlpacaCore, issue #1471, decision 0018): the router keeps the stored ID (a GUID, or a kept value such as `ZWO_UID_`) across edits and renumbering, assigns it to the driver, and lists a device that failed to load with it. The 43 drivers no longer build the ID from a device number, index or serial; `get_unique_id()` returns the assigned ID and each driver keeps only a `fallback_unique_id()` for unit tests. For the upgrade, see Breaking changes.
 - **A removed rotator's Sync offset is cleared** (AlpacaHTTP router, issue #1473, decision 0008): the next start drops the offset of every rotator no longer configured, so a new rotator at the same number starts at its mechanical position. An offset saved under a device-number ID before the upgrade moves only to the rotator configured on that number at the upgrade, never to one added later. For the Sync failure, see Breaking changes.
-- **Two `configuredevice` calls sending the same GUID no longer both keep it** (AlpacaHTTP router, issue #1471): a GUID one call has chosen is reserved until that call stores its entry, so a concurrent call mints a new one. Configuring a stored entry's own number again keeps the GUID it sends back.
+- **Two `configuredevice` calls sending the same ID no longer both keep it** (AlpacaHTTP router, issue #1471): an ID one call has chosen is reserved until that call stores its entry, so a concurrent call mints a new one. Configuring a stored entry's own number again keeps the GUID it sends back.
 
 ### Changed (docs)
 
