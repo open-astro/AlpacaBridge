@@ -1588,15 +1588,27 @@ void start_move(alpacacore::TelescopeDriver& driver, ParkHomeFake& mount, int ax
 // advance it in `step`s until Slewing reads false, so the stop, the settle
 // wait and the retries run without a sleep for a driver timer (decision 0005
 // rule 2). Slewing raises a refusal the body kept, which this rethrows.
-void settle(ParkHomeFake& mount, alpacacore::TelescopeDriver& driver,
+// `waits_before` is mount.clock.wait_count() read before the Park or FindHome
+// call. A MoveAxis re-send waiter can still sit on the clock after that call,
+// so the rendezvous counts the body's own waits: step n goes out once wait
+// number n after `waits_before` is registered.
+void settle(ParkHomeFake& mount, alpacacore::TelescopeDriver& driver, std::uint64_t waits_before,
             std::chrono::milliseconds step = std::chrono::milliseconds(100)) {
     const auto give_up = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    std::uint64_t waits_wanted = waits_before;
     while (driver.get_slewing()) {
         REQUIRE(std::chrono::steady_clock::now() < give_up);
-        // Let the body reach its wait first, so no step lands while it works.
-        (void)mount.clock.wait_for_waiters(1, std::chrono::milliseconds(200));
+        // Let the body reach its next wait first, so no step lands while it
+        // works. A body past its last wait (the mount still slews on the
+        // clock) registers none: advance after the bound, and count from the
+        // waits seen so far.
+        if (mount.clock.wait_for_wait_count(waits_wanted + 1, std::chrono::milliseconds(200))) {
+            ++waits_wanted;
+        } else {
+            waits_wanted = mount.clock.wait_count();
+        }
         mount.clock.advance(step);
-        (void)mount.clock.wait_for_woken_settled(std::chrono::seconds(5));
+        REQUIRE(mount.clock.wait_for_woken_settled(std::chrono::seconds(5)));
     }
 }
 
@@ -1604,8 +1616,9 @@ void settle(ParkHomeFake& mount, alpacacore::TelescopeDriver& driver,
 // can decide at once), then Slewing until the background part ends.
 void on_clock(ParkHomeFake& mount, alpacacore::TelescopeDriver& driver, const std::function<void()>& call,
               std::chrono::milliseconds step = std::chrono::milliseconds(100)) {
+    const auto waits_before = mount.clock.wait_count();
     call();
-    settle(mount, driver, step);
+    settle(mount, driver, waits_before, step);
 }
 
 }  // namespace
@@ -2050,6 +2063,7 @@ TEST_CASE("OnStep Telescope Driver - Park and FindHome return at once while they
     const auto t0 = mount->clock.now();
     const auto call = GENERATE(0, 1);
     const char* const sent = call == 0 ? ":hP#" : ":hC#";
+    const auto waits_before = mount->clock.wait_count();
     if (call == 0) {
         REQUIRE_NOTHROW(driver->park());
     } else {
@@ -2060,7 +2074,7 @@ TEST_CASE("OnStep Telescope Driver - Park and FindHome return at once while they
     CHECK(mount->count(sent) == 0);  // the mount still brakes
     CHECK(driver->get_slewing());    // the background part runs
     CHECK_NOTHROW(driver->get_at_park());
-    settle(*mount, *driver);
+    settle(*mount, *driver, waits_before);
     CHECK(mount->count(sent) == 1);
     driver->set_connected(false);
 }
@@ -2195,6 +2209,7 @@ TEST_CASE("OnStep Telescope Driver - a Park refusal met in the background is kep
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     start_move(*driver, *mount, 0, 1.0);
+    const auto waits_before = mount->clock.wait_count();
     REQUIRE_NOTHROW(driver->park());  // stops, then refused in the background
     const auto require_refusal = [](const std::function<void()>& fn) {
         try {
@@ -2205,7 +2220,7 @@ TEST_CASE("OnStep Telescope Driver - a Park refusal met in the background is kep
             CHECK(std::string(ex.what()).find("no park position set") != std::string::npos);
         }
     };
-    require_refusal([&] { settle(*mount, *driver); });
+    require_refusal([&] { settle(*mount, *driver, waits_before); });
     require_refusal([&] { (void)driver->get_slewing(); });  // still kept
     require_refusal([&] { (void)driver->get_at_park(); });
     CHECK_NOTHROW(driver->get_at_home());  // a park's refusal only
@@ -2239,8 +2254,9 @@ TEST_CASE("OnStep Telescope Driver - a FindHome refusal met in the background is
     auto driver = connect_park_home_fake(server, *mount);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     start_move(*driver, *mount, 1, 1.0);
+    const auto waits_before = mount->clock.wait_count();
     REQUIRE_NOTHROW(driver->find_home());
-    CHECK_THROWS_AS(settle(*mount, *driver), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(settle(*mount, *driver, waits_before), alpacacore::AlpacaException);
     CHECK_THROWS_AS(driver->get_at_home(), alpacacore::AlpacaException);
     CHECK_NOTHROW(driver->get_at_park());
     driver->set_connected(false);

@@ -102,6 +102,13 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### Telescope refraction, site elevation and DestinationSideOfPier (all telescope drivers)
+
+- `DoesRefraction` throws `PropertyNotImplemented` on read and write in a driver that neither knows nor computes refraction (ITelescopeV4). Never store the flag and read it back: it would claim a correction the driver does not apply. OnStep reads it from the firmware.
+- `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
+- `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
+- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron follows this; the other adopters are not converted yet.
+
 ### A failed async operation body keeps its error (all drivers)
 
 The ASCOM async FAQ makes a failed async command (a goto, a slew, a cover move, an exposure) a failed
@@ -111,11 +118,15 @@ or a reconnect clears it. Never log the failure and report done, and never answe
 read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
 site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
 
-### UniqueID is the router's persisted GUID (all drivers)
+### UniqueID is the router's stored ID (all drivers)
 
-A driver does not build its `UniqueID`. The router assigns each configured device the version 4
-UUID stored in its config entry (`uniqueId`) through `AlpacaDriver::assign_unique_id()` before it
-registers the driver, and the base class's non-virtual `get_unique_id()` returns it. A new driver
+A driver does not build its `UniqueID`. The router assigns each configured device the ID stored
+in its config entry (`uniqueId`; never changed once stored) through `AlpacaDriver::assign_unique_id()` before it
+registers the driver. The router keeps a stored or client-sent ID that `is_keepable_unique_id()` accepts
+(a version 4 UUID, or 12 to 128 printable ASCII characters that are not a device-number ID such as
+`SkyWatcher_0`; `ZWO_UID_<hex>` and `my-rig-focuser-A` pass) and that no other entry holds; only an entry
+with none, a device-number ID or a duplicate gets a minted UUID, once (decision 0018). The base
+class's non-virtual `get_unique_id()` returns the assigned ID. A new driver
 implements only `fallback_unique_id()`, which answers for a driver a unit test builds directly; never
 key persistent state on the fallback. A driver that keys state on its ID (the rotator Sync offset)
 reads `get_unique_id()`, or `assigned_unique_id()` while holding its own mutex. State saved under an

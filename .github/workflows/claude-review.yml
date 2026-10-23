@@ -408,6 +408,26 @@ jobs:
             exit 1
           fi
 
+      # The checklist runs to dozens of lines, so it is folded under a
+      # summary of its verdict counts after the check above has passed. The
+      # counts use the checker's own CHECKLIST_RE from the same extracted
+      # copy. The heading and the sign-off stay outside the fold, and every
+      # defect line is repeated under Defects. A missing section or "none in scope" is
+      # left as written.
+      - name: Fold the decision-record checklist
+        run: |
+          if [ ! -s review-comment.md ]; then
+            exit 0
+          fi
+          python3 -I - "${RUNNER_TEMP}/adr-tools/scripts" review-comment.md <<'EOF'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          from check_adr_scope import fold_checklist  # same checklist and sign-off rules as the gate
+          path = sys.argv[2]
+          text = open(path, encoding="utf-8").read()
+          open(path, "w", encoding="utf-8").write(fold_checklist(text))
+          EOF
+
       # Posting is a deterministic step: the agent only writes the file.
       - name: Post the review comment
         id: post

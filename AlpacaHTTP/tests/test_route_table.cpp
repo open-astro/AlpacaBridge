@@ -100,10 +100,14 @@ std::vector<std::string> load_type_names() {
     return names;
 }
 
+// A Device API 400 is a text/plain message with no JSON envelope (#1476): error_number stays kNoEnvelope.
+constexpr int kNoEnvelope = -1;
+
 struct Answer {
     int status = 0;
-    int error_number = -1;
+    int error_number = kNoEnvelope;
     std::string message;
+    std::string content_type;
 };
 
 // No Origin header: a foreign Origin is answered 403 before the wrong-verb 400.
@@ -120,10 +124,13 @@ Answer send(alpacahttp::Router& router, const std::string& verb, const std::stri
     const auto response = router.route(request, 1);
     Answer answer;
     answer.status = response.status_code();
+    answer.content_type = response.get_header("Content-Type");
     const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-    if (!json.is_discarded()) {
+    if (json.is_object()) {
         answer.error_number = json.value("ErrorNumber", -1);
         answer.message = json.value("ErrorMessage", "");
+    } else {
+        answer.message = response.body();
     }
     return answer;
 }
@@ -198,9 +205,9 @@ void check_route_table(alpacahttp::Router& router) {
                     send(router, verb, "/api/v1/" + type + "/" + std::to_string(kProbeDevice) + "/" + method);
                 ++probes;
                 const unsigned bit = verb == "GET" ? kGet : kPut;
-                if (a.status != 400 || a.error_number != kInvalidValue) {
+                if (a.status != 400 || a.error_number != kNoEnvelope || a.content_type.find("text/plain") != 0) {
                     failures.push_back(type + "/" + method + " " + verb + ": status " + std::to_string(a.status) +
-                                       " error " + std::to_string(a.error_number) + " (want 400/0x401 from a gate)");
+                                       " type '" + a.content_type + "' (want 400 text/plain from a gate)");
                 } else if (starts_with(a.message, "Device not found: ")) {
                     live |= bit;
                 } else if (!starts_with(a.message, "Unknown method: ") &&
@@ -430,35 +437,33 @@ struct Rejection {
 // D. One request per rejection class, status + Alpaca error number + message.
 void check_rejections(alpacahttp::Router& router) {
     const std::vector<Rejection> cases = {
-        {"wrong verb (PUT to a GET property)", "PUT", "/api/v1/telescope/4646/altitude", "ClientID=1", 400,
-         kInvalidValue, "Method 'altitude' does not accept PUT"},
-        {"wrong verb (GET to a PUT command)", "GET", "/api/v1/telescope/4646/abortslew", "", 400, kInvalidValue,
+        {"wrong verb (PUT to a GET property)", "PUT", "/api/v1/telescope/4646/altitude", "ClientID=1", 400, kNoEnvelope,
+         "Method 'altitude' does not accept PUT"},
+        {"wrong verb (GET to a PUT command)", "GET", "/api/v1/telescope/4646/abortslew", "", 400, kNoEnvelope,
          "Method 'abortslew' does not accept GET"},
-        {"wrong verb (POST)", "POST", "/api/v1/telescope/4646/altitude", "", 400, kInvalidValue,
+        {"wrong verb (POST)", "POST", "/api/v1/telescope/4646/altitude", "", 400, kNoEnvelope,
          "Method 'altitude' does not accept POST"},
-        {"unknown method", "GET", "/api/v1/telescope/4646/notarealmethod", "", 400, kInvalidValue,
+        {"unknown method", "GET", "/api/v1/telescope/4646/notarealmethod", "", 400, kNoEnvelope,
          "Unknown method: notarealmethod"},
-        {"unknown method (case matters)", "GET", "/api/v1/telescope/4646/Altitude", "", 400, kInvalidValue,
+        {"unknown method (case matters)", "GET", "/api/v1/telescope/4646/Altitude", "", 400, kNoEnvelope,
          "Unknown method: Altitude"},
-        {"device number over uint32", "GET", "/api/v1/telescope/4294967296/connected", "", 400, kInvalidValue,
+        {"device number over uint32", "GET", "/api/v1/telescope/4294967296/connected", "", 400, kNoEnvelope,
          "Invalid device number for device type: telescope"},
-        {"device number over uint64", "GET", "/api/v1/telescope/99999999999999999999/connected", "", 400, kInvalidValue,
+        {"device number over uint64", "GET", "/api/v1/telescope/99999999999999999999/connected", "", 400, kNoEnvelope,
          "Invalid device number for device type: telescope"},
-        {"device number in range but unregistered", "GET", "/api/v1/telescope/4242/connected", "", 400, kInvalidValue,
+        {"device number in range but unregistered", "GET", "/api/v1/telescope/4242/connected", "", 400, kNoEnvelope,
          "Device not found: telescope #4242"},
-        {"unknown device type", "GET", "/api/v1/wibble/0/connected", "", 400, kInvalidValue,
+        {"unknown device type", "GET", "/api/v1/wibble/0/connected", "", 400, kNoEnvelope,
          "Unknown device type: wibble"},
-        // NaN-class parameters are not an HTTP error: the router answers 200
-        // with the Alpaca InvalidValue number in the body.
-        {"NaN parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=nan&ClientID=1", 200,
-         kInvalidValue, "Invalid value for parameter: TargetDeclination"},
-        {"inf parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=inf&ClientID=1", 200,
-         kInvalidValue, "Invalid value for parameter: TargetDeclination"},
+        // NaN-class parameters do not parse as an Alpaca number: HTTP 400 text (#1476).
+        {"NaN parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=nan&ClientID=1", 400,
+         kNoEnvelope, "Invalid value for parameter: TargetDeclination"},
+        {"inf parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=inf&ClientID=1", 400,
+         kNoEnvelope, "Invalid value for parameter: TargetDeclination"},
         {"-infinity parameter", "PUT", "/api/v1/telescope/4646/targetdeclination",
-         "TargetDeclination=-infinity&ClientID=1", 200, kInvalidValue,
-         "Invalid value for parameter: TargetDeclination"},
+         "TargetDeclination=-infinity&ClientID=1", 400, kNoEnvelope, "Invalid value for parameter: TargetDeclination"},
         {"hex-float parameter", "PUT", "/api/v1/telescope/4646/targetdeclination", "TargetDeclination=0x1p3&ClientID=1",
-         200, kInvalidValue, "Invalid value for parameter: TargetDeclination"},
+         400, kNoEnvelope, "Invalid value for parameter: TargetDeclination"},
     };
     std::vector<std::string> failures;
     for (const auto& c : cases) {
@@ -510,13 +515,13 @@ void check_type_names(alpacahttp::Router& router) {
     const std::vector<std::string> fixture = load_type_names();
     for (const auto& name : fixture) {
         const Answer a = send(router, "GET", "/api/v1/" + name + "/" + std::to_string(kProbeDevice) + "/connected");
-        if (a.status != 400 || a.error_number != kInvalidValue || !starts_with(a.message, "Device not found: ")) {
+        if (a.status != 400 || a.error_number != kNoEnvelope || !starts_with(a.message, "Device not found: ")) {
             failures.push_back("fixture name '" + name + "' is not recognised by the router: HTTP " +
                                std::to_string(a.status) + " '" + a.message + "'");
         }
     }
     const Answer plural = send(router, "GET", "/api/v1/telescopes/" + std::to_string(kProbeDevice) + "/connected");
-    if (plural.status != 400 || plural.error_number != kInvalidValue ||
+    if (plural.status != 400 || plural.error_number != kNoEnvelope ||
         plural.message != "Unknown device type: telescopes") {
         failures.push_back("'telescopes' must be rejected as an unknown type, got HTTP " +
                            std::to_string(plural.status) + " '" + plural.message + "'");

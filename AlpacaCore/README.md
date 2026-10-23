@@ -52,7 +52,7 @@ AlpacaCore makes it easy for anyone to build drivers for any vendor device using
    - Configure CMake for your vendor SDK
 3. **Test thoroughly** - Verify all functionality works as expected
 
-**For complete driver development guide, see [Driver Development Guide](docs/development/driver-development.md)**
+**For complete driver development guide, see [Driver Development Guide](../docs/development.md#building-drivers)**
 
 The guide includes:
 - Three-layer architecture overview
@@ -79,7 +79,7 @@ The guide includes:
 
 ## Building
 
-For detailed build instructions, prerequisites, build options, and troubleshooting, see the [Building Guide](docs/building/building.md).
+For detailed build instructions, prerequisites, build options, and troubleshooting, see the [Building Guide](../docs/development.md#build-and-run).
 
 **Quick Start**:
 ```bash
@@ -93,7 +93,7 @@ To force a clean rebuild:
 cmake --build . --clean-first --parallel
 ```
 
-See the [Documentation Index](docs/README.md) for all available guides.
+See the [Documentation Index](../docs/agent-instructions.md) for all available guides.
 
 ## License
 

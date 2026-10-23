@@ -44,6 +44,17 @@ namespace alpacacore::vendor::zwo {
 namespace {
 
 constexpr double kSiderealRateDegPerSec = 360.0 / 86164.0905;
+
+// A device reply quoted in an error or log line: control and non-ASCII bytes become '?', and it is cut at 48
+// characters, so a hostile reply cannot forge log lines (CWE-117).
+std::string sanitize_for_log(std::string_view text) {
+    std::string out;
+    for (const char ch : text) {
+        if (out.size() >= 48) break;
+        out.push_back(ch >= 0x20 && ch < 0x7f ? ch : '?');
+    }
+    return out;
+}
 constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
@@ -226,8 +237,7 @@ public:
           site_latitude_deg_(site_latitude_deg.value_or(0.0)),
           site_longitude_deg_(site_longitude_deg.value_or(0.0)),
           site_coords_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
-          does_refraction_(false),
+          site_elevation_m_(site_elevation_m),
           slew_settle_time_s_(0),
           guide_rate_({0.5 * kSiderealRateDegPerSec, 0.5 * kSiderealRateDegPerSec}),
           tracking_rate_cached_(0),
@@ -659,12 +669,26 @@ public:
                 reset_session_state_for_connect();
                 connected_.store(true);
 
+                // Identity gate (decision 0017 rule 8): nothing is written to a device that has not answered :GVP
+                // as a ZWO AM mount. One attempt plus one retry, each under the command timeout.
                 std::string mount_info;
-                try {
-                    mount_info = protocol.get_mount_info();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                    mount_info.clear();
+                std::string refusal;
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    try {
+                        mount_info = protocol.get_mount_info();
+                        if (is_zwo_am_model_reply(mount_info)) {
+                            refusal.clear();
+                            break;
+                        }
+                        refusal = "the device answered :GVP with '" + sanitize_for_log(mount_info) +
+                                  "', which is not a ZWO AM mount";
+                    } catch (const std::exception& e) {
+                        refusal = std::string("the device gave no usable reply to :GVP (") +
+                                  sanitize_for_log(e.what()) + "), so it is not confirmed as a ZWO AM mount";
+                    }
+                }
+                if (!refusal.empty()) {
+                    throw AlpacaException("Refusing to connect: " + refusal, AlpacaError::NotConnected);
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
@@ -884,11 +908,11 @@ public:
             if (!tracking) {
                 goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
             }
-            snapshot_.write([](PolledFrame&) {});
             if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
                 tracking_state_cached_ == tracking) {
-                return;
+                return;  // a no-op write changes nothing, so it must not drop the poll in flight
             }
+            snapshot_.write([](PolledFrame&) {});
         }
         auto wait_for_pulse_completion = [this](std::chrono::milliseconds max_wait) {
             const auto deadline = clock_.now() + max_wait;
@@ -1089,14 +1113,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -1135,7 +1158,10 @@ public:
 
     double get_site_elevation() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return site_elevation_m_;
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -2959,9 +2985,8 @@ private:
     mutable double site_latitude_deg_;
     mutable double site_longitude_deg_;
     mutable bool site_coords_valid_;
-    double site_elevation_m_;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
 
-    bool does_refraction_;
     int slew_settle_time_s_;
 
     mutable GuideRate guide_rate_;

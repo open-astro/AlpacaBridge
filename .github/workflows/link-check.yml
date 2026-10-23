@@ -1,0 +1,75 @@
+# Checks the links in the repository's Markdown files with lychee every week
+# (issue #1362): relative links offline, then http(s) links. A broken link
+# fails the run and is listed in the job summary; scheduled-failure.yml opens
+# one tracked issue for it and closes the issue on the next green run.
+#
+# Not a pull_request check: external hosts are flaky, so a PR must not wait on
+# them. Hosts that cannot be checked are in .lycheeignore, each with a reason.
+# CHANGELOG.md and changelog.d/ are skipped: old entries are a record, not a
+# promise, and a fragment's links are relative to the repository root, where
+# it ends up in CHANGELOG.md, not to changelog.d/.
+
+name: Link check
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"   # Monday, after the other scheduled workflows
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: link-check
+  cancel-in-progress: false
+
+jobs:
+  links:
+    name: Check Markdown links
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore the link cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-links-${{ github.run_id }}
+          restore-keys: lychee-links-
+
+      - name: Relative links (offline)
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
+        with:
+          args: >-
+            --offline --no-progress
+            --exclude-path CHANGELOG.md --exclude-path changelog.d
+            './**/*.md' '.github/**/*.md' '.claude/**/*.md'
+          fail: true
+          jobSummary: true
+
+      # After the offline pass even when it failed, so one run lists both kinds.
+      - name: External links (http and https)
+        if: ${{ !cancelled() }}
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8  # v2.9.0
+        with:
+          args: >-
+            --no-progress --accept 200,206,429
+            --max-retries 2 --timeout 20
+            --cache --max-cache-age 14d --cache-exclude-status '400..=599'
+            --exclude-path CHANGELOG.md --exclude-path changelog.d
+            './**/*.md' '.github/**/*.md' '.claude/**/*.md'
+          fail: true
+          jobSummary: true
+
+      - name: Save the link cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: .lycheecache
+          key: lychee-links-${{ github.run_id }}

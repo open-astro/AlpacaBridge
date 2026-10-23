@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -110,6 +111,25 @@ struct GeminiFlatPanelPortInfo {
  * @return Vector of detected flat panel ports
  */
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports();
+
+/**
+ * @brief The auto-detect identity probe of one serial port (>H# at 9600 baud).
+ *
+ * Opens the port under a probe claim, so a port a connected driver holds is
+ * refused without being opened. Returns true for any well-formed "*H" reply, as
+ * the scan does. The driver calls it on the remembered port before it runs the
+ * full scan.
+ */
+bool probe_gemini_flatpanel_port(const std::string& port_path);
+
+/// Test seam for the driver's port search: @p on_probe sees every
+/// probe_gemini_flatpanel_port() call; @p enumerate, when set, replaces
+/// enumerate_gemini_flatpanel_ports(). Empty members restore the real behaviour.
+struct GeminiFlatPanelScanHooks {
+    std::function<void(const std::string&)> on_probe;
+    std::function<std::vector<GeminiFlatPanelPortInfo>()> enumerate;
+};
+void set_gemini_flatpanel_scan_hooks_for_testing(GeminiFlatPanelScanHooks hooks);
 
 /**
  * @brief Check whether a probe reply matches the flat panel's >H# handshake.

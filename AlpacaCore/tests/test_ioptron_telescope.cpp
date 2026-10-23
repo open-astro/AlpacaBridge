@@ -1185,3 +1185,29 @@ TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a 
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
     driver->set_connected(false);
 }
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("iOptron Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[ioptron][telescope][unit][spec-audit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("iOptron Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
+          "[ioptron][telescope][unit][spec-audit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_site_elevation(42.0);
+    CHECK(driver->get_site_elevation() == 42.0);
+}

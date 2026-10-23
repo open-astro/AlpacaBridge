@@ -204,15 +204,33 @@ public:
                 firmware_.clear();
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns. A failure leaves the snapshot
-            // empty; the getters then report it and the poll fills it later.
+            // answer the moment Connect returns.
             snapshot_.reset();
             {
                 std::lock_guard<std::mutex> lock(health_mutex_);
                 health_.reset();
                 temperature_retry_at_.reset();
             }
+            // A lost or dropped first reply gets one retry. A connect whose
+            // retry also publishes nothing fails: Connected true means the
+            // getters have a frame to serve (decisions 0010 and 0016).
             poll_state_once();
+            if (!snapshot_.read().has_value()) {
+                poll_state_once();
+            }
+            if (!snapshot_.read().has_value()) {
+                {
+                    std::lock_guard<std::mutex> lock(health_mutex_);
+                    health_.reset();
+                }
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
+                protocol_.disconnect();
+                throw AlpacaException("Gemini focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
+            }
             connected_.store(true);
             start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
@@ -376,7 +394,7 @@ private:
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

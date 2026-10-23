@@ -1,0 +1,5 @@
+# One regular expression per line, one comment line giving the reason for each.
+# The loopback address of the service on the machine that reads the docs, not a public page.
+^https?://localhost(:[0-9]+)?(/|$)
+# YouTube answers a link checker's request with 500 or a consent page; the video is checked by hand.
+^https://youtu\.be/

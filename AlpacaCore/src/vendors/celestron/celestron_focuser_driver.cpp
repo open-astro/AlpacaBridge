@@ -207,12 +207,28 @@ public:
             // First frame before Connected reads true, so a getter has an
             // answer the moment Connect returns. Connect may do I/O (decision
             // 0016 rule 4); a getter may not. A lost first reply gets one
-            // retry here. A connect whose retry also publishes nothing still
-            // connects, and getters answer "not available yet" until the
-            // 250 ms poll publishes.
+            // retry here. A connect whose retry also publishes nothing
+            // fails: Connected true means the getters have a frame to serve.
             poll_state_once();
             if (!snapshot_.read().has_value()) {
                 poll_state_once();
+            }
+            if (!snapshot_.read().has_value()) {
+                {
+                    std::lock_guard<std::mutex> lock(health_mutex_);
+                    health_.reset();
+                }
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(calibration_mutex_);
+                    calibration_ = CalibrationState{};
+                }
+                protocol_.disconnect();
+                throw AlpacaException("Celestron focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
             }
             connected_.store(true);
             start_state_poll();
@@ -616,13 +632,13 @@ private:
         throw_if_faulted();
         auto reading = snapshot_.read();
         if (!reading.has_value()) {
-            // Connected but no frame: the connect's polls were lost, or a
-            // racing Move/Halt write dropped it. Getters never touch the
-            // device (decisions 0010 and 0016): answer "not available yet"
-            // until the next poll, at most one poll period away.
+            // Connected but no frame: a call that raced a disconnect and
+            // reconnect (connect publishes the first frame before Connected
+            // reads true). Getters never touch the device (decisions 0010
+            // and 0016).
             ensure_connected();
             throw_if_faulted();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

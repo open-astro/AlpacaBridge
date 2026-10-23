@@ -12,9 +12,10 @@
 
 #pragma once
 
-// One do-nothing driver per Alpaca device type, used by test_route_table to
-// reach the router's per-type dispatchers (#646). Every pure virtual of the
-// device interface returns a value-initialised default; nothing here models
+// One do-nothing driver per Alpaca device type, used by test_route_table and
+// test_routing to reach the router's per-type dispatchers (#646). Every pure
+// virtual of the device interface returns a value-initialised default, except
+// that FilterWheelStub returns the focus offsets last set; nothing else models
 // device behaviour. If a driver interface gains or loses a pure virtual this
 // header stops compiling, which is the cue to update it deliberately.
 
@@ -258,14 +259,15 @@ public:
 
     int get_position() const override { return int{}; }
     void set_position(int position) override {}
-    std::vector<int> get_focus_offsets() const override { return std::vector<int>{}; }
-    void set_focus_offsets(const std::vector<int>& offsets) override {}
+    std::vector<int> get_focus_offsets() const override { return focus_offsets_; }
+    void set_focus_offsets(const std::vector<int>& offsets) override { focus_offsets_ = offsets; }
     std::vector<std::string> get_names() const override { return std::vector<std::string>{}; }
     void set_names(const std::vector<std::string>& names) override {}
 
 private:
     int number_;
     bool connected_ = false;
+    std::vector<int> focus_offsets_;  // last set, so a test can read back what the router parsed
 };
 
 class FocuserStub final : public alpacacore::FocuserDriver {

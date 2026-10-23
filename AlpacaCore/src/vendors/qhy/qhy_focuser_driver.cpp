@@ -184,11 +184,26 @@ public:
                 if (info.board_version > 0) firmware_ += " (board " + std::to_string(info.board_version) + ")";
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns. A failure leaves the snapshot
-            // empty; the getters then report it and the poll fills it later.
+            // answer the moment Connect returns.
             reset_state();
             link_lost_.store(false);
+            // A lost or dropped first reply gets one retry. A connect whose
+            // retry also publishes nothing fails: Connected true means the
+            // getters have a frame to serve (decisions 0010 and 0016).
             poll_state_once();
+            if (!snapshot_.read().has_value()) {
+                poll_state_once();
+            }
+            if (!snapshot_.read().has_value()) {
+                reset_state();
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
+                protocol_.disconnect();
+                throw AlpacaException("QHY Q-Focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
+            }
             connected_.store(true);
             start_state_poll();
             ALPACA_LOG_INFO(kLogTag, "Q-Focuser connected (firmware " + std::to_string(info.firmware) + ")");
@@ -362,7 +377,7 @@ private:
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

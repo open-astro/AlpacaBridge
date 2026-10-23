@@ -463,9 +463,27 @@ bool skip_or_count_held_port(const std::string& resolved, const std::string& nam
 }  // namespace
 #endif
 
-std::string probe_ioptron_serial_port(const std::string& port_path) { return probe_ioptron_port(port_path); }
+namespace {
+iOptronScanHooks& scan_hooks() {
+    static iOptronScanHooks hooks;
+    return hooks;
+}
+}  // namespace
+
+void set_ioptron_scan_hooks_for_testing(iOptronScanHooks hooks) { scan_hooks() = std::move(hooks); }
+
+std::string probe_ioptron_serial_port(const std::string& port_path) {
+    if (const auto& on_probe = scan_hooks().on_probe) on_probe(port_path);
+    return probe_ioptron_port(port_path);
+}
+
+std::string probe_ioptron_network_host(const std::string& host, int tcp_port) {
+    if (const auto& on_probe = scan_hooks().on_probe) on_probe(host + ":" + std::to_string(tcp_port));
+    return probe_ioptron_network(host, tcp_port, 2500);
+}
 
 std::vector<iOptronPortInfo> enumerate_ioptron_ports() {
+    if (const auto& enumerate = scan_hooks().enumerate_ports) return enumerate();
     std::vector<iOptronPortInfo> results;
 
 #ifndef _WIN32
@@ -566,6 +584,7 @@ iOptronNetworkHostInfo try_known_address(const char* host, int port, int timeout
 }
 
 std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts() {
+    if (const auto& enumerate = scan_hooks().enumerate_hosts) return enumerate();
     std::vector<iOptronNetworkHostInfo> results;
 
 #ifndef _WIN32
