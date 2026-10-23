@@ -414,7 +414,9 @@ namespace {
 // a test can ask what the no-I/O getters do while the wire is busy. The hook is
 // installed once, before any thread runs; only the atomics change afterwards.
 constexpr auto kHold = std::chrono::milliseconds(300);
-constexpr auto kGetterBudget = std::chrono::milliseconds(20);
+// Half the hold: a blocked getter waits the full hold, so half separates the two
+// without a tight limit that a loaded sanitizer runner could miss.
+constexpr auto kGetterBudget = kHold / 2;
 
 struct SlowCall {
     explicit SlowCall(FakeQHYSDK& fake) {

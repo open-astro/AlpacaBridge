@@ -275,7 +275,10 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             validate_position_locked(position);
-            id = camera_id_.value();
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            id = *camera_id_;
             // Set BEFORE issuing the move (not after): if move_cfw throws mid-
             // call the catch below clears it again. Assumption: a failing
             // SendOrder2QHYCCDCFW means the order never reached the wheel, so
@@ -453,13 +456,30 @@ private:
             const int initial_pos = sdk_.get_cfw_position(id);
 
             std::lock_guard<std::mutex> lock(mutex_);
-            camera_id_ = id;
-            if (!enumerated_model.empty()) {
-                camera_model_ = enumerated_model;
+            // Publish with a rollback: normalize_slot_data_locked() can throw
+            // (allocation), and a half-published slot count must not outlive a
+            // connect that fails.
+            const auto saved_id = camera_id_;
+            const auto saved_model = camera_model_;
+            const auto saved_names = filter_names_;
+            const auto saved_offsets = focus_offsets_;
+            try {
+                camera_id_ = id;
+                if (!enumerated_model.empty()) {
+                    camera_model_ = enumerated_model;
+                }
+                slot_count_ = slots;
+                slot_count_valid_ = true;
+                normalize_slot_data_locked();
+            } catch (...) {
+                camera_id_ = saved_id;
+                camera_model_ = saved_model;
+                filter_names_ = saved_names;
+                focus_offsets_ = saved_offsets;
+                slot_count_valid_ = false;
+                slot_count_ = 0;
+                throw;
             }
-            slot_count_ = slots;
-            slot_count_valid_ = true;
-            normalize_slot_data_locked();
             if (initial_pos >= 0) {
                 cached_position_ = initial_pos;
             } else {
