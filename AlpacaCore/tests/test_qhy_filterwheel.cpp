@@ -15,12 +15,17 @@
 #include <alpacacore/vendor/qhy/qhy_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <alpacacore/filterwheel_driver.h>
+
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "catch2_compat.h"
+#include "concurrency_stress.h"
 #include "fake_qhy_sdk.h"
 #include "fake_task_clock.h"
 #include "locked_qhy_sdk.h"
@@ -399,4 +404,178 @@ TEST_CASE("QHY Filter Wheel Driver - A wheel settling on a non-target slot repor
     // The pending state ended: later reads are served from the settled slot.
     CHECK(driver->get_position() == 2);
     driver->set_connected(false);
+}
+
+// ── Getters never wait on device I/O (decision 0016, issue #1395) ───────────
+
+namespace {
+
+// Holds one named SDK call open for kHold through FakeQHYSDK::before_call, so
+// a test can ask what the no-I/O getters do while the wire is busy. The hook is
+// installed once, before any thread runs; only the atomics change afterwards.
+constexpr auto kHold = std::chrono::milliseconds(300);
+constexpr auto kGetterBudget = std::chrono::milliseconds(20);
+
+struct SlowCall {
+    explicit SlowCall(FakeQHYSDK& fake) {
+        fake.before_call = [this](const std::string& fn) {
+            if (!armed.load() || (!match.empty() && fn != match)) {
+                return;
+            }
+            inside.store(true);
+            std::this_thread::sleep_for(kHold);
+        };
+    }
+    void arm(const std::string& fn) {
+        match = fn;
+        inside.store(false);
+        armed.store(true);
+    }
+    void disarm() { armed.store(false); }
+    bool wait_inside() const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!inside.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return inside.load();
+    }
+    std::string match;  // empty: every call
+    std::atomic<bool> armed{false};
+    std::atomic<bool> inside{false};
+};
+
+// Slowest of the no-I/O getters, in milliseconds.
+long long slowest_no_io_getter_ms(alpacacore::FilterWheelDriver& d) {
+    long long worst = 0;
+    const auto timed = [&](const std::function<void()>& fn) {
+        const auto t0 = std::chrono::steady_clock::now();
+        fn();
+        const auto dt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0);
+        worst = std::max<long long>(worst, dt.count());
+    };
+    timed([&] { static_cast<void>(d.get_name()); });
+    timed([&] { static_cast<void>(d.get_unique_id()); });
+    timed([&] { static_cast<void>(d.get_connected()); });
+    timed([&] { static_cast<void>(d.get_connecting()); });
+    timed([&] { static_cast<void>(d.get_names()); });
+    timed([&] { static_cast<void>(d.get_focus_offsets()); });
+    return worst;
+}
+
+}  // namespace
+
+// Falsified by: qhy_filterwheel_driver.cpp get_position() taking mutex_ across
+// get_cfw_position(), so Name/Names wait out the ~100-130 ms status read.
+TEST_CASE("QHY Filter Wheel Driver - Getters do not wait behind a Position read", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    SlowCall slow(fake);
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_position(3);  // pending: every Position read is live
+
+    slow.arm("get_cfw_position");
+    std::thread reader([&] { static_cast<void>(driver->get_position()); });
+    REQUIRE(slow.wait_inside());
+    const long long worst = slowest_no_io_getter_ms(*driver);
+    slow.disarm();
+    reader.join();
+    CHECK(worst <= kGetterBudget.count());
+    driver->set_connected(false);
+}
+
+// Falsified by: set_position() holding mutex_ across move_cfw().
+TEST_CASE("QHY Filter Wheel Driver - Getters do not wait behind a move", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    SlowCall slow(fake);
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+
+    slow.arm("move_cfw");
+    std::thread mover([&] { driver->set_position(2); });
+    REQUIRE(slow.wait_inside());
+    const long long worst = slowest_no_io_getter_ms(*driver);
+    slow.disarm();
+    mover.join();
+    CHECK(worst <= kGetterBudget.count());
+    driver->set_connected(false);
+}
+
+// Falsified by: set_connected(true) holding mutex_ across the connect SDK calls.
+TEST_CASE("QHY Filter Wheel Driver - Getters do not wait behind a connect", "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    SlowCall slow(fake);
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+
+    slow.arm("get_param");
+    std::thread connecter([&] { driver->set_connected(true); });
+    REQUIRE(slow.wait_inside());
+    const long long worst = slowest_no_io_getter_ms(*driver);
+    CHECK_FALSE(driver->get_connected());
+    slow.disarm();
+    connecter.join();
+    CHECK(worst <= kGetterBudget.count());
+    CHECK(driver->get_connected());
+    CHECK(driver->get_names().size() == 5);
+    driver->set_connected(false);
+}
+
+// Falsified by: set_connected(false) closing the shared handle without the I/O lock,
+// so a read in flight sees a closed handle (physical_closes/underflow_closes).
+TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in flight",
+          "[qhy][filterwheel][unit]") {
+    auto fake = make_fake();
+    SlowCall slow(fake);
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    driver->set_position(3);
+
+    slow.arm("get_cfw_position");
+    std::thread reader([&] {
+        try {
+            static_cast<void>(driver->get_position());
+        } catch (const alpacacore::AlpacaException&) {
+            // NotConnected from losing the race is a valid outcome.
+        }
+    });
+    REQUIRE(slow.wait_inside());
+    const auto t0 = std::chrono::steady_clock::now();
+    driver->set_connected(false);
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    slow.disarm();
+    reader.join();
+    CHECK(elapsed < std::chrono::seconds(5));
+    CHECK_FALSE(driver->get_connected());
+    // The read held the I/O lock, so the close came after it: no close under a live call.
+    CHECK(fake.physical_closes == 1);
+    CHECK(fake.underflow_closes == 0);
+}
+
+// Falsified by: set_position() validating the slot count without re-checking the
+// connection, so a racing disconnect surfaces as DriverException "slot count unavailable".
+TEST_CASE("QHY Filter Wheel Driver - concurrent connect/disconnect/operate stress", "[qhy][filterwheel][stress]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(15)));
+    CHECK_NOTHROW(driver->set_connected(false));
+
+    alpacacore::test::StressCallGuard guard({alpacacore::AlpacaError::NotConnected});
+    alpacacore::test::run_lifecycle_stress(*driver, [&guard](alpacacore::AlpacaDriver& d) {
+        auto& wheel = static_cast<alpacacore::FilterWheelDriver&>(d);
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { static_cast<void>(wheel.get_names()); });
+        guard([&] { static_cast<void>(wheel.get_focus_offsets()); });
+        guard([&] { wheel.set_position(3); });
+        guard([&] { static_cast<void>(wheel.get_position()); });
+        guard([&] { wheel.set_position(0); });
+        guard([&] { static_cast<void>(wheel.get_device_state()); });
+    });
+    INFO(guard.report());
+    CHECK(guard.unexpected_count() == 0);
+    CHECK(guard.total_calls() > 0);
+    CHECK(fake.underflow_closes == 0);
 }
