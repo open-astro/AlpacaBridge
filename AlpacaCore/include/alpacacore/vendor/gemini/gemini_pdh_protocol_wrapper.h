@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -128,6 +129,24 @@ struct GeminiPdhPortInfo {
  * @return Vector of detected hub ports
  */
 std::vector<GeminiPdhPortInfo> enumerate_gemini_pdh_ports();
+
+/**
+ * @brief The auto-detect identity probe of one serial port (>H# at 19200 baud).
+ *
+ * Opens the port under a probe claim, so a port a connected driver holds is
+ * refused without being opened. Returns true only for the hub's exact reply.
+ * The driver calls it on the remembered port before it runs the full scan.
+ */
+bool probe_gemini_pdh_port(const std::string& port_path);
+
+/// Test seam for the driver's port search: @p on_probe sees every
+/// probe_gemini_pdh_port() call; @p enumerate, when set, replaces
+/// enumerate_gemini_pdh_ports(). Empty members restore the real behaviour.
+struct GeminiPdhScanHooks {
+    std::function<void(const std::string&)> on_probe;
+    std::function<std::vector<GeminiPdhPortInfo>()> enumerate;
+};
+void set_gemini_pdh_scan_hooks_for_testing(GeminiPdhScanHooks hooks);
 
 /**
  * @brief Check whether a >H# reply identifies a Power & Data Hubs Advanced 3.

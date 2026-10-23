@@ -18,6 +18,7 @@
 // Disconnect, and the three auto-detect probes (all matching the same
 // Prolific chip class) wait for each other instead of sharing a port.
 
+#include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
@@ -41,6 +42,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "device_location_test_dir.h"
 #include "fake_ioptron_ieaf.h"
 #include "fake_pty_write.h"
 
@@ -389,4 +391,96 @@ TEST_CASE("iOptron serial probes - a mount scan and an iEFW scan probing the sam
     CHECK_FALSE(wheel_on_mount);
     CHECK_FALSE(is_serial_port_in_use(wheel.slave_path()));
     CHECK_FALSE(is_serial_port_in_use(mount.slave_path()));
+}
+
+// --- Remembered port (issue #1452): the auto path tries the port that worked before it scans ---
+
+namespace {
+
+struct SerialScanCounts {
+    std::atomic<int> probes{0};
+    std::atomic<int> scans{0};
+};
+
+// Stubs the serial scan to find @p port and counts probes and scans; clears the stubs on exit.
+class SerialScanStub {
+public:
+    SerialScanStub(SerialScanCounts& counts, std::string port) {
+        ioptron::iOptronScanHooks hooks;
+        hooks.on_probe = [&counts](const std::string&) { ++counts.probes; };
+        hooks.enumerate_ports = [&counts, port = std::move(port)] {
+            ++counts.scans;
+            return std::vector<ioptron::iOptronPortInfo>{{port, "", "0036"}};
+        };
+        ioptron::set_ioptron_scan_hooks_for_testing(std::move(hooks));
+    }
+    ~SerialScanStub() { ioptron::set_ioptron_scan_hooks_for_testing({}); }
+    SerialScanStub(const SerialScanStub&) = delete;
+    SerialScanStub& operator=(const SerialScanStub&) = delete;
+};
+
+constexpr const char* kMountId = "3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948";
+
+}  // namespace
+
+TEST_CASE("iOptron serial auto-detect - a remembered port that answers costs one probe and no scan",
+          "[ioptron][serial][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    FakeIoptronSerial mount("0036", 0);
+    SerialScanCounts counts;
+    SerialScanStub stub(counts, "/dev/should-not-be-scanned");
+    REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, mount.slave_path()));
+
+    const auto info = ioptron::resolve_ioptron_serial_auto(0, kMountId);
+    CHECK(info.port_path == mount.slave_path());
+    CHECK(info.baud_rate == 115200);
+    CHECK(counts.probes == 1);
+    CHECK(counts.scans == 0);
+}
+
+TEST_CASE("iOptron serial auto-detect - a remembered port that fails the handshake falls back to the scan",
+          "[ioptron][serial][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    FakeIoptronSerial wheel("", 99);  // a wheel now sits on the remembered port: it never answers :MountInfo#
+    FakeIoptronSerial mount("0036", 0);
+    SerialScanCounts counts;
+    SerialScanStub stub(counts, mount.slave_path());
+    REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, wheel.slave_path()));
+
+    const auto info = ioptron::resolve_ioptron_serial_auto(0, kMountId);
+    CHECK(info.port_path == mount.slave_path());
+    CHECK(counts.probes == 1);
+    CHECK(counts.scans == 1);
+    CHECK_FALSE(is_serial_port_in_use(wheel.slave_path()));
+}
+
+TEST_CASE("iOptron serial auto-detect - a remembered port another connected driver holds is never probed",
+          "[ioptron][serial][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    FakeIoptronSerial held("0036", 0);
+    FakeIoptronSerial mount("0036", 0);
+    SerialScanCounts counts;
+    SerialScanStub stub(counts, mount.slave_path());
+    auto other = SerialPortClaim::acquire(held.slave_path(), SerialClaimKind::Link, "Other device");
+    REQUIRE(other);
+    REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, held.slave_path()));
+
+    const auto info = ioptron::resolve_ioptron_serial_auto(0, kMountId);
+    CHECK(info.port_path == mount.slave_path());
+    CHECK(counts.probes == 0);
+    CHECK(counts.scans == 1);
+}
+
+TEST_CASE("iOptron serial auto-detect - without a location key the scan runs and the store is not read",
+          "[ioptron][serial][location][issue1452]") {
+    alpacacore::test::TempLocationDir store;
+    FakeIoptronSerial mount("0036", 0);
+    SerialScanCounts counts;
+    SerialScanStub stub(counts, mount.slave_path());
+    REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, "/dev/nonexistent-remembered-port"));
+
+    const auto info = ioptron::resolve_ioptron_serial_auto(0);
+    CHECK(info.port_path == mount.slave_path());
+    CHECK(counts.probes == 0);
+    CHECK(counts.scans == 1);
 }
