@@ -811,6 +811,18 @@ std::chrono::milliseconds time_of(Fn&& fn) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 }
 
+// The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing
+// an exchange may refuse it with NotConnected but must never fail it on a closed handle (DriverException).
+template <typename Fn>
+int outcome_of(Fn&& fn) {
+    try {
+        fn();
+    } catch (const AlpacaException& ex) {
+        return ex.error_code();
+    }
+    return 0;
+}
+
 constexpr std::chrono::milliseconds kSlowDevice{300};
 constexpr std::chrono::milliseconds kNoIoBound{20};
 
@@ -864,12 +876,36 @@ TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and
     std::atomic<bool> entered{false};
     delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
 
-    std::thread read([&] { (void)time_of([&] { (void)thermal->get_switch_value(0); }); });
+    std::atomic<int> outcome{-1};
+    std::thread read([&] { outcome = outcome_of([&] { (void)thermal->get_switch_value(0); }); });
     wait_for_entered(entered);
 
     CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
     read.join();
     fake.before_call = nullptr;
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the handle after the write",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "put_heat", kSlowDevice, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread write([&] { outcome = outcome_of([&] { thermal->set_switch_value(0, 1.0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    write.join();
+    fake.before_call = nullptr;
+    // The close waits for the write: it never lands on a closed handle (the fake raises DriverException).
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
     CHECK_FALSE(thermal->get_connected());
     CHECK(fake.underflow_closes == 0);
     CHECK(fake.physical_opens == fake.physical_closes);

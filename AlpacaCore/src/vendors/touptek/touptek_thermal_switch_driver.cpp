@@ -410,16 +410,20 @@ private:
         Status status = status_cache_.get([this] {
             std::lock_guard<std::mutex> io(io_mutex_);
             Status fresh;
-            if (!connected_.load() || !handle_) {
-                // A disconnect that won the I/O lock has closed the handle. Returning (not throwing) keeps it
+            std::vector<ThermalElement> elements;
+            {
+                // One hold: a disconnect clears elements_ under mutex_ without the I/O lock, so an
+                // empty copy means it won the race and this is not a device frame.
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (connected_.load() && handle_) {
+                    elements = elements_;
+                }
+            }
+            if (elements.empty()) {
+                // A disconnect that won the race has cleared the state. Returning (not throwing) keeps it
                 // out of the link-health count; the disconnect's reset() drops this frame.
                 fresh.closed = true;
                 return fresh;
-            }
-            std::vector<ThermalElement> elements;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                elements = elements_;
             }
             fresh.values.reserve(elements.size());
             for (const auto& element : elements) {
