@@ -940,6 +940,11 @@ jobs:
         # here a change to when it opens or closes an issue fails the PR.
         run: python3 scripts/scheduled_run_issue.py --self-test
 
+      - name: Self-test the issue label checker
+        # issue-labels.yml runs it on issue events only; here a change to which
+        # labels count or when its comment is made or removed fails the PR.
+        run: python3 scripts/check_issue_labels.py --self-test
+
   connect-error-hook:
     name: Connect-error hook
     runs-on: ubuntu-24.04-arm   # pure text scan; arch-independent
