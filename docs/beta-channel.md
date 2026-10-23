@@ -48,7 +48,10 @@ The URL names `binary-arm64` on purpose: AlpacaBridge ships for arm64 only.
 `alpacabridge_X.Y.Z-beta.N_arm64.deb` and its `.sha256` under Assets. Download both, check the
 file with `sha256sum -c alpacabridge_X.Y.Z-beta.N_arm64.deb.sha256`, then run
 `sudo apt install ./alpacabridge_X.Y.Z-beta.N_arm64.deb`. apt does not offer the next beta to a
-build installed this way; repeat the download for each beta, or opt in as above.
+build installed this way; repeat the download for each beta, or opt in as above. Once pruning is on (it is off until
+`PRUNE_SUPERSEDED_RELEASES` is set), older betas are tags only, with no Release or `.deb`. A pruned
+release can be recreated, `.deb` attached, by re-running that tag's original push-triggered `Release`
+run (`gh run rerun <run id>`); GitHub allows a re-run only within 30 days of the run.
 
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
@@ -108,7 +111,12 @@ because CI's all-vendors job is instrumented and unoptimized; a failure fails th
 2. **Publish.** `release.yml` creates a GitHub pre-release from the notes file, builds the arm64
    `.deb` in a Debian trixie container and attaches it and its `alpacabridge-dbgsym` debug-symbols
    package, each with a `.sha256` (job `deb`, which runs for every tag, stable or beta). The `.deb`
-   is also published to the apt `beta` component (outside this repository).
+   is also published to the apt `beta` component (outside this repository). When the repository
+   variable `PRUNE_SUPERSEDED_RELEASES` is `true`, a last job (`prune`) then deletes the GitHub
+   Releases this tag supersedes: beta N removes the releases of `beta.1` to `beta.(N-1)`, and the
+   stable `vX.Y.Z` removes every `vX.Y.Z-beta.*` release (`scripts/release_prune.py`). Tags are
+   never deleted, and stable releases, `nightly-build` and the betas of another X.Y.Z are not
+   touched. Pruning is off until that variable is set.
 3. **Fix.** A bug found in beta that the previous stable release did not have is fixed by a PR
    against `stable/X.Y` (see "Rules for the stable branch"); it is not fixed on `main` first and
    cherry-picked. A defect that release also had, or a fix for code the branch does not have,

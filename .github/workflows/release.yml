@@ -309,3 +309,40 @@ jobs:
             "dist/alpacabridge_${NOTES_NAME}_arm64.deb.sha256" \
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb" \
             "dist/alpacabridge-dbgsym_${NOTES_NAME}_arm64.deb.sha256"
+
+  prune:
+    # Last job: once the .deb is attached, delete the GitHub Releases this tag
+    # supersedes (older betas of the same X.Y.Z; every beta of X.Y.Z after the
+    # stable). Tags stay; older betas are tags only, with no Release or .deb. A
+    # pruned release can be recreated, .deb attached, by re-running that tag's
+    # original push-triggered run (gh run rerun <run id>), which GitHub allows
+    # only within 30 days of the run. Off until the repository variable
+    # PRUNE_SUPERSEDED_RELEASES is 'true'; a dry run never prunes.
+    name: Prune superseded releases
+    if: github.event_name == 'push' && vars.PRUNE_SUPERSEDED_RELEASES == 'true'
+    needs: deb
+    permissions:
+      contents: write   # gh release delete
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v4.x pinned (immutable ref)
+        with:
+          persist-credentials: false
+
+      - name: Delete superseded releases (tags are kept)
+        run: |
+          set -euo pipefail
+          python3 scripts/release_prune.py --self-test
+          gh release list --repo "${GITHUB_REPOSITORY}" --limit 1000 --json tagName --jq '.[].tagName' > existing.txt
+          mapfile -t existing < existing.txt
+          python3 scripts/release_prune.py "${RELEASE_TAG}" "${existing[@]}" > doomed.txt
+          mapfile -t doomed < doomed.txt
+          for tag in "${doomed[@]}"; do
+            echo "Deleting release ${tag} (the tag stays)"
+            gh release delete "${tag}" --repo "${GITHUB_REPOSITORY}" --yes
+          done
