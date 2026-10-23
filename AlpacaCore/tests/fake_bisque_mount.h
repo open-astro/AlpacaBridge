@@ -38,6 +38,10 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
+ * `find_home_ms`, `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the FindHome,
+ * SetTracking, GetRaDec, IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`),
+ * as a TheSkyX stuck in one call.
+ *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
  * default: most cases read the fixed position).
@@ -68,6 +72,11 @@ public:
     std::atomic<int> altaz_reads{0};
     std::atomic<int> transactions{0};
     std::atomic<int> latency_ms{0};
+    std::atomic<int> find_home_ms{0};
+    std::atomic<int> set_tracking_ms{0};
+    std::atomic<int> position_ms{0};
+    std::atomic<int> is_parked_ms{0};
+    std::atomic<int> slew_complete_ms{0};
     std::atomic<bool> mute{false};
     std::atomic<bool> pier_west{false};
     std::atomic<double> ra_hours{5.5};
@@ -88,7 +97,15 @@ private:
         if (has(command, "ConnectAndDoNotUnpark")) return "1#";
         if (mute) return "";
         if (latency_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(latency_ms.load()));
+        if (has(command, "FindHome")) {
+            if (find_home_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(find_home_ms.load()));
+            return "|No error. Error = 0.OK#";
+        }
+        if (has(command, "SetTracking") && set_tracking_ms.load() > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(set_tracking_ms.load()));
+        }
         if (has(command, "GetRaDec")) {
+            if (position_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(position_ms.load()));
             ++position_reads;
             return "|No error. Error = 0." + std::to_string(ra_hours.load()) + "," +
                    std::to_string(dec_degrees.load()) + "#";
@@ -105,6 +122,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsParked")) {
+            if (is_parked_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(is_parked_ms.load()));
             if (parking_ && ++park_polls > park_polls_needed.load()) {
                 parking_ = false;
                 parked = true;
@@ -128,6 +146,9 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
+            if (slew_complete_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
+            }
             if (fail_slew_polls.load() > 0) {
                 --fail_slew_polls;
                 return "|No error. Error = 1.IsSlewComplete unavailable#";
