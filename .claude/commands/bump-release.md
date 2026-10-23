@@ -141,6 +141,10 @@ Today's date in `YYYY-MM-DD` (UTC is fine). Then:
    the README badge date, so this is not optional: it read 2026-09-24 on the 2026-09-27 release.
    Between releases `/conformu` and `/commit` move it forward; it may run ahead of the badge, never
    behind.
+6. README authored-line badge: `python3 scripts/check_docs_drift.py --badge` prints the count and a
+   paste-ready `badge:` line; replace the `[![Authored code]...` line at the top of `README.md` with
+   it. Check 25 (issue #1465) fails when the badge is more than 5% from the count; counting rules
+   live in the script.
 
 Verify with `python3 scripts/check_docs_drift.py` before moving on.
 
