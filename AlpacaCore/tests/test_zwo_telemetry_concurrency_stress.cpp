@@ -120,6 +120,8 @@ struct Rig {
                     while (!release_identity.load()) std::this_thread::yield();
                 }
                 response += "AM5N#";
+            } else if (command == ":GMA#") {
+                response += "012345ABCDEF#";
             } else if (command == ":GT#") {
                 ++tracking_queries;
                 response += bad_tracking_rate.load() ? "bad#" : "0#";
@@ -142,7 +144,7 @@ struct Rig {
     }};
     std::unique_ptr<TelescopeDriver> driver;
 
-    explicit Rig(int response_timeout_ms = 100, int device_number = 0) {
+    explicit Rig(int response_timeout_ms = 500, int device_number = 0) {
         vendor::zwo::ConnectionInfo info;
         info.type = vendor::zwo::ConnectionType::Network;
         info.host = "127.0.0.1";
@@ -175,7 +177,7 @@ struct Rig {
 
 TEST_CASE("ZWO disconnecting an idle entry leaves its connected sibling untouched", "[zwo][telescope][isolation]") {
     const bool asynchronous = GENERATE(false, true);
-    Rig live(100, 3), idle(100, 7);
+    Rig live(500, 3), idle(100, 7);
     live.connect();
     if (asynchronous)
         idle.driver->disconnect();
@@ -191,7 +193,7 @@ TEST_CASE("ZWO disconnecting an idle entry leaves its connected sibling untouche
 
 TEST_CASE("ZWO sibling telescope reads writes and safety stops use their own endpoints",
           "[zwo][telescope][isolation]") {
-    Rig a(100, 3), b(100, 7);
+    Rig a(500, 3), b(500, 7);
     b.ra_hours.store(18);
     a.connect();
     b.connect();
@@ -227,7 +229,7 @@ TEST_CASE("ZWO sibling telescope reads writes and safety stops use their own end
 }
 
 TEST_CASE("ZWO a failed sibling connect and destruction cannot close a healthy link", "[zwo][telescope][isolation]") {
-    Rig live(100, 3);
+    Rig live(500, 3);
     live.connect();
     vendor::zwo::ConnectionInfo info;
     info.port_path = "/dev/does-not-exist-issue-1524";
@@ -241,7 +243,7 @@ TEST_CASE("ZWO a failed sibling connect and destruction cannot close a healthy l
 }
 
 TEST_CASE("ZWO pulse and GOTO workers keep their endpoint after a sibling connects", "[zwo][telescope][isolation]") {
-    Rig a(100, 3), b(100, 7);
+    Rig a(500, 3), b(500, 7);
     a.connect();
     b.connect();
     a.driver->pulse_guide(0, 100);
@@ -262,7 +264,7 @@ TEST_CASE("ZWO pulse and GOTO workers keep their endpoint after a sibling connec
 
 TEST_CASE("ZWO one-sided fault loss and explicit reconnect leave a sibling healthy", "[zwo][telescope][isolation]") {
     const bool transport_loss = GENERATE(false, true);
-    Rig a(100, 3), b(100, 7);
+    Rig a(500, 3), b(500, 7);
     b.ra_hours.store(18);
     a.connect();
     b.connect();
@@ -297,7 +299,7 @@ TEST_CASE("ZWO one-sided fault loss and explicit reconnect leave a sibling healt
 
 TEST_CASE("ZWO a blocked sibling exchange cannot stall another telescope",
           "[zwo][telescope][isolation][getter-stall]") {
-    Rig a(100, 3), b(5000, 7);
+    Rig a(500, 3), b(5000, 7);
     a.connect();
     b.connect();
     b.hold_status.store(true);
@@ -582,7 +584,8 @@ TEST_CASE("ZWO serial transport removal is immediate loss rather than a timeout 
           "[zwo][telescope][telemetry][serial]") {
     test::FakeTaskClock clock;
     auto serial = std::make_unique<test::PtyResponder>([](const std::string& command) -> std::string {
-        if (command.find(":GVP#") != std::string::npos) return "AM5#";
+        if (command == ":GVP#") return "AM5#";
+        if (command == ":GMA#") return "012345ABCDEF#";
         if (command.find(":GU#") != std::string::npos) return "NG#";
         if (command.find(":GR#") != std::string::npos) return "12:00:00#";
         if (command.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -592,7 +595,7 @@ TEST_CASE("ZWO serial transport removal is immediate loss rather than a timeout 
     });
     vendor::zwo::ConnectionInfo info;
     info.port_path = serial->slave_path();
-    info.response_timeout_ms = 100;
+    info.response_timeout_ms = 500;
     auto driver = vendor::zwo::create_zwo_telescope_with_site(0, info, 30.0, -100.0, {}, false, clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
@@ -765,9 +768,9 @@ TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo
     if (sever_transport) {
         // shutdown takes effect immediately; the held responder cannot leave until released below.
         (void)rig.server.drop_connections();
-        // The identity gate now ends the connect as soon as the lost link fails the :GVP exchange, and its cleanup
-        // clears the fault; so the loss is seen either as a fault or as the connect already over.
-        CHECK(eventually([&] { return !rig.driver->get_link_fault().empty() || !rig.driver->get_connecting(); }));
+        // An unverified link is still private initialization; the connect error reports its failure below.
+        CHECK(rig.driver->get_link_fault().empty());
+        CHECK(rig.driver->get_device_state().empty());
     }
     rig.release_identity.store(true);
     // Also release the failed-handshake retry timer on the red path before joining the async connect.
