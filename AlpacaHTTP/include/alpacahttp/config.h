@@ -42,6 +42,9 @@ public:
     Config() = default;
     ~Config() = default;
 
+    // Alpaca API Reference s5.8.1: the discovery port's default.
+    static constexpr std::uint16_t kDefaultDiscoveryPort = 32227;
+
     // Load configuration from file
     bool load(const std::string& config_path);
     bool load_default();
@@ -49,6 +52,11 @@ public:
     // Getters
     std::uint16_t http_port() const { return http_port_; }
     bool discovery_enabled() const { return discovery_enabled_; }
+    // discovery.port: the UDP port the Alpaca discovery responder binds.
+    // Alpaca API Reference s5.8.1: defaults to 32227, configurable by the
+    // astronomer user; 1-65535. Read at responder start, so a change takes
+    // effect when the service restarts.
+    std::uint16_t discovery_port() const { return discovery_port_; }
     LogLevel log_level() const { return log_level_; }
     const std::string& server_name() const { return server_name_; }
     const std::string& manufacturer() const { return manufacturer_; }
@@ -101,6 +109,12 @@ public:
     // Set values (for testing/overrides)
     void set_http_port(std::uint16_t port) { http_port_ = port; }
     void set_discovery_enabled(bool enabled) { discovery_enabled_ = enabled; }
+    // Port 0 is not a valid discovery port: the call is ignored.
+    void set_discovery_port(std::uint16_t port) {
+        if (port != 0) {
+            discovery_port_ = port;
+        }
+    }
     void set_log_level(LogLevel level) { log_level_ = level; }
     void set_server_name(const std::string& name) { server_name_ = name; }
     void set_manufacturer(const std::string& mfg) { manufacturer_ = mfg; }
@@ -147,6 +161,7 @@ public:
 private:
     std::uint16_t http_port_ = 6800;
     bool discovery_enabled_ = true;
+    std::uint16_t discovery_port_ = kDefaultDiscoveryPort;
     LogLevel log_level_ = LogLevel::WARNING;
     std::string server_name_ = "AlpacaHTTP";
     std::string manufacturer_ = "OpenAstro.net";

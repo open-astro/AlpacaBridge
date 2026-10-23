@@ -8764,6 +8764,76 @@ int main() {
         EXPECT(router.route(request, 1).status_code() == 403);
     }
 
+    // #1509: DiscoveryPort is a server setting next to HostCheckEnabled. GET
+    // reports it (32227 by default), PUT validates 1-65535, writes it to the
+    // config file's discovery: section and leaves the rest of the file alone.
+    // The responder binds it on the next restart.
+    {
+        // case: DiscoveryPort in the management description is read, validated 1-65535 and saved under discovery
+        const std::string description = "/management/v1/description";
+
+        char path_template[] = "/tmp/alpacahttp_test_routing_discport_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        ::close(fd);
+        const std::string config_path = path_template;
+        const std::string original_file =
+            "http:\n"
+            "  port: 6811\n"
+            "discovery:\n"
+            "  enabled: true\n";
+        {
+            std::ofstream out(config_path);
+            out << original_file;
+        }
+        const auto file_text = [&config_path]() {
+            std::ifstream in(config_path);
+            std::stringstream buf;
+            buf << in.rdbuf();
+            return buf.str();
+        };
+        const auto reported = [&description](alpacahttp::Router& router) {
+            const auto response = route_with_host(router, "GET", description, std::nullopt);
+            EXPECT(response.status_code() == 200);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            // Additive: the spec keys stay.
+            EXPECT(json["Value"].contains("ServerName") && json["Value"].contains("Manufacturer"));
+            EXPECT(json["Value"].contains("DiscoveryPort") && json["Value"]["DiscoveryPort"].is_number_integer());
+            return json["Value"]["DiscoveryPort"].get<int>();
+        };
+
+        alpacahttp::Router router;
+        router.set_config_path(config_path);
+        EXPECT(reported(router) == 32227);
+
+        for (const char* bad :
+             {R"({"DiscoveryPort": 0})", R"({"DiscoveryPort": 65536})", R"({"DiscoveryPort": -1})",
+              R"({"DiscoveryPort": "abc"})", R"({"DiscoveryPort": 1.5})", R"({"DiscoveryPort": true})"}) {
+            const auto response = route_with_host(router, "PUT", description, std::nullopt, bad);
+            EXPECT(response.status_code() == 400);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            EXPECT(!json.is_discarded());
+            EXPECT(json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(json.value("ErrorMessage", "") == "DiscoveryPort must be an integer from 1 to 65535");
+            EXPECT(file_text() == original_file);
+        }
+        EXPECT(reported(router) == 32227);
+
+        const auto saved = route_with_host(router, "PUT", description, std::nullopt, R"({"DiscoveryPort": 40000})");
+        EXPECT(saved.status_code() == 200);
+        EXPECT(reported(router) == 40000);
+        EXPECT(file_text() == "http:\n  port: 6811\ndiscovery:\n  enabled: true\n  port: \"40000\"\n");
+
+        // A numeric string, the form the web UI's number input could send.
+        EXPECT(
+            route_with_host(router, "PUT", description, std::nullopt, R"({"DiscoveryPort": "41000"})").status_code() ==
+            200);
+        EXPECT(reported(router) == 41000);
+
+        ::unlink(config_path.c_str());
+    }
+
     // The Host check is a server setting: PUT /management/v1/description takes
     // HostCheckEnabled and AllowedHosts, writes them to the config file's
     // http: section and applies them to the next request; GET reports them.
@@ -9043,7 +9113,7 @@ int main() {
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x402);
             EXPECT(json.value("ErrorMessage", "") ==
                    "Request must include a 'Location', 'ProfileName', 'SyncSystemClockFromClients', "
-                   "'HostCheckEnabled' or 'AllowedHosts' property");
+                   "'HostCheckEnabled', 'AllowedHosts' or 'DiscoveryPort' property");
         }
         ::unlink(config_path.c_str());
 
