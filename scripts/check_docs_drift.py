@@ -2595,7 +2595,7 @@ AUTHORED_LINES_EXTENSIONS = frozenset((
 AUTHORED_LINES_EXCLUDED_PREFIXES = ("AlpacaCore/external/",)
 AUTHORED_LINES_ROUND = 1000
 # Fail only when the badge is further than this fraction of the computed count
-# from it. 5% of ~190k lines is ~9k, i.e. months of ordinary churn.
+# from it. 5% of ~247k lines is ~12k, i.e. months of ordinary churn.
 AUTHORED_LINES_TOLERANCE = 0.05
 MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
 
