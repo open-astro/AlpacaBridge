@@ -8571,7 +8571,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("siteElevation");
     copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
-    // Decision 0018: the server-owned GUID, for every device type.
+    // Decision 0018: the server-owned stored ID, for every device type.
     if (const std::string unique_id = stored_unique_id(config); !unique_id.empty()) {
         sanitized["uniqueId"] = unique_id;
     }
