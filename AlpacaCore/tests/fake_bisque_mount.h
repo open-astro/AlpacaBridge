@@ -38,8 +38,9 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
- * `find_home_ms`, `set_tracking_ms`, `position_ms` and `is_parked_ms` delay only the FindHome, SetTracking, GetRaDec
- * and IsParked replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in one call.
+ * `find_home_ms`, `set_tracking_ms`, `position_ms`, `is_parked_ms` and `slew_complete_ms` delay only the FindHome,
+ * SetTracking, GetRaDec, IsParked and IsSlewComplete replies by that many real milliseconds (on top of `latency_ms`),
+ * as a TheSkyX stuck in one call.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -75,6 +76,7 @@ public:
     std::atomic<int> set_tracking_ms{0};
     std::atomic<int> position_ms{0};
     std::atomic<int> is_parked_ms{0};
+    std::atomic<int> slew_complete_ms{0};
     std::atomic<bool> mute{false};
     std::atomic<bool> pier_west{false};
     std::atomic<double> ra_hours{5.5};
@@ -144,6 +146,9 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsSlewComplete")) {
+            if (slew_complete_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(slew_complete_ms.load()));
+            }
             if (fail_slew_polls.load() > 0) {
                 --fail_slew_polls;
                 return "|No error. Error = 1.IsSlewComplete unavailable#";
