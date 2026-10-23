@@ -295,7 +295,7 @@ jobs:
           subject-path: dist/${{ steps.version.outputs.asset }}
 
       - name: Attest the SBOM
-        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e  # v4.1.0 pinned (immutable ref)
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6  # v4.2.2 pinned (immutable ref)
         with:
           subject-path: dist/${{ steps.version.outputs.asset }}
           sbom-path: dist/sbom.spdx.json
