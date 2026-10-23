@@ -554,7 +554,7 @@ TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in 
 
 // Falsified by: set_position() validating the slot count without re-checking the
 // connection, so a racing disconnect surfaces as DriverException "slot count unavailable".
-TEST_CASE("QHY Filter Wheel Driver - concurrent connect/disconnect/operate stress", "[qhy][filterwheel][stress]") {
+TEST_CASE("QHY Filter Wheel Driver - concurrent connect/disconnect/operate stress", "[qhy][filterwheel][stress-guard]") {
     auto fake = make_fake();
     LockedQHYSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
