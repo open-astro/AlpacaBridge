@@ -60,6 +60,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -419,22 +420,53 @@ std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::st
     return value;
 }
 
+// A JSON number as an int: a JSON integer inside int, or a finite float with
+// no fraction (a hand-written 3.0) inside int. nullopt for anything else, so
+// no caller narrows with get<int>(), which wraps 2^32 to 0 and cuts 3.5 to 3
+// (ADR 0007 rule 4).
+std::optional<int> whole_json_int(const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        const auto v = value.get<std::uint64_t>();
+        if (!std::in_range<int>(v)) return std::nullopt;
+        return static_cast<int>(v);
+    }
+    if (value.is_number_integer()) {
+        const auto v = value.get<std::int64_t>();
+        if (!std::in_range<int>(v)) return std::nullopt;
+        return static_cast<int>(v);
+    }
+    if (value.is_number_float()) {
+        const double d = value.get<double>();
+        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(std::numeric_limits<int>::min()) ||
+            d > static_cast<double>(std::numeric_limits<int>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<int>(d);
+    }
+    return std::nullopt;
+}
+
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
         return std::nullopt;
     }
     const auto type_it = entry.find("deviceType");
     const auto number_it = entry.find("deviceNumber");
-    // Any JSON number is accepted, as config_get<int>() accepts it at
-    // registration: a hand-written 3.0 registers as device 3, so the walks
-    // over the persisted list must find that same entry or removedevice
-    // would drop it from the registry and leave it in the file.
-    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() || !number_it->is_number()) {
+    // The numbers config_get<int>() accepts at registration (whole_json_int):
+    // a hand-written 3.0 registers as device 3, so the walks over the
+    // persisted list must find that same entry or removedevice would drop it
+    // from the registry and leave it in the file. A number registration
+    // refuses (4294967299, 3.5) has no key, like a wrong-typed one.
+    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end()) {
+        return std::nullopt;
+    }
+    const auto number = whole_json_int(*number_it);
+    if (!number) {
         return std::nullopt;
     }
     PersistedKey key;
     key.device_type = to_lower_copy(type_it->get<std::string>());
-    key.device_number = number_it->get<int>();
+    key.device_number = *number;
     const auto vendor_it = entry.find("vendor");
     if (vendor_it != entry.end() && vendor_it->is_string()) {
         key.vendor = vendor_it->get<std::string>();
@@ -555,24 +587,9 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
 // refuse "0.5" and values outside int; before this, the JSON path truncated
 // 0.5 to 0 and wrapped 2^32 to 0 in all six device dispatchers.
 int json_int_value(const nlohmann::json& value, const std::string& param_name) {
-    constexpr auto kMin = static_cast<long long>(std::numeric_limits<int>::min());
-    constexpr auto kMax = static_cast<long long>(std::numeric_limits<int>::max());
-    if (value.is_number_unsigned()) {
-        const auto v = value.get<std::uint64_t>();
-        if (v > static_cast<std::uint64_t>(kMax)) throw_bad_request("Invalid value for parameter: " + param_name);
-        return static_cast<int>(v);
-    }
-    if (value.is_number_integer()) {
-        const auto v = value.get<std::int64_t>();
-        if (v < kMin || v > kMax) throw_bad_request("Invalid value for parameter: " + param_name);
-        return static_cast<int>(v);
-    }
-    if (value.is_number_float()) {
-        const double d = value.get<double>();
-        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(kMin) || d > static_cast<double>(kMax)) {
-            throw_bad_request("Invalid value for parameter: " + param_name);
-        }
-        return static_cast<int>(d);
+    if (value.is_number()) {
+        if (const auto v = whole_json_int(value)) return *v;
+        throw_bad_request("Invalid value for parameter: " + param_name);
     }
     if (value.is_string()) {
         return parse_int_value(value.get<std::string>(), param_name);
@@ -6986,6 +7003,15 @@ T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
     if (it == config.end() || it->is_null()) {
         return fallback;
     }
+    if constexpr (std::is_same_v<T, int>) {
+        // get<int>() would wrap 4294967299 to 3 and cut 3.5 to 3 (ADR 0007 rule 4).
+        if (it->is_number()) {
+            if (const auto v = whole_json_int(*it)) return *v;
+            throw alpacacore::AlpacaException(std::string("Device config field '") + key +
+                                                  "' must be a whole number inside int",
+                                              alpacacore::AlpacaError::InvalidValue);
+        }
+    }
     try {
         return it->template get<T>();
     } catch (const nlohmann::json::exception&) {
@@ -7234,7 +7260,12 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
-        util::log_error("Error configuring device: " + std::string(e.what()));
+        // A config field the client typed wrong is InvalidValue: DEBUG, not ERROR (ADR 0007 rule 9).
+        if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+            log_alpaca_exception("Error configuring device", *alpaca);
+        } else {
+            util::log_error("Error configuring device: " + util::escape_for_log(e.what(), 4096));
+        }
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::exception_to_error_code(e),
@@ -7374,7 +7405,12 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         }
         
     } catch (const std::exception& e) {
-        util::log_error("Error removing device: " + std::string(e.what()));
+        // A config field the client typed wrong is InvalidValue: DEBUG, not ERROR (ADR 0007 rule 9).
+        if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+            log_alpaca_exception("Error removing device", *alpaca);
+        } else {
+            util::log_error("Error removing device: " + util::escape_for_log(e.what(), 4096));
+        }
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::exception_to_error_code(e),
@@ -8143,7 +8179,12 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             }
             int priority = 0;
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
-                priority = pr->get<int>();
+                // Range-check before narrowing: get<int>() wraps 2^32 to 0.
+                if (pr->is_number_unsigned() ? !std::in_range<int>(pr->get<std::uint64_t>())
+                                             : !std::in_range<int>(pr->get<std::int64_t>())) {
+                    throw util::WifiError("Priority must be an int");
+                }
+                priority = static_cast<int>(pr->get<std::int64_t>());
             }
             ok.value = wifi.save_profile(ssid, passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
@@ -8173,7 +8214,10 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             }
             std::uint32_t channel = 0;
             if (const auto* c = find_json_value(body, "Channel"); c && c->is_number_unsigned()) {
-                channel = c->get<std::uint32_t>();
+                if (!std::in_range<std::uint32_t>(c->get<std::uint64_t>())) {
+                    throw util::WifiError("Channel must be a uint32");
+                }
+                channel = static_cast<std::uint32_t>(c->get<std::uint64_t>());
             }
             bool enabled = true;
             if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {

@@ -6995,6 +6995,24 @@ int main() {
             const auto json = nlohmann::json::parse(response.body(), nullptr, false);
             EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
         }
+
+        // An integer outside the field's type is refused by name, never
+        // wrapped into a valid-looking value (ADR 0007 rule 4). A wrapped call
+        // still fails later in NetworkManager, so the name is the signal.
+        for (const auto& [path, body, field] : {
+                 std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":4294967296}", "Priority"},
+                 std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":18446744073709551615}", "Priority"},
+                 std::tuple{"/management/v1/wifi/ap", "{\"Ssid\":\"x\",\"Channel\":4294967297}", "Channel"},
+             }) {
+            const auto response = route_request(router, "PUT", path, body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            const auto message = json.is_discarded() ? std::string{} : json.value("ErrorMessage", std::string{});
+            if (message.find(field) == std::string::npos) {
+                std::cerr << path << " " << body << " -> " << response.body() << "\n";
+            }
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(message.find(field) != std::string::npos);
+        }
     }
 
     // Response header names are case-insensitive (RFC 7230 §3.2). The server's
@@ -7411,6 +7429,74 @@ int main() {
                 EXPECT(json.value("ErrorMessage", "").find("Cross-origin") != std::string::npos);
             }
         }
+    }
+
+    // ADR 0007 rule 4: a deviceNumber outside int, or with a fraction, is
+    // refused by name; get<int>() wrapped 4294967299 to device 3 and cut 3.5
+    // to 3. Rule 9: a config error the client sent is not logged at WARNING
+    // or above.
+    {
+        std::vector<std::string> loud;
+        std::mutex loud_mutex;
+        struct SinkRestore {
+            alpacacore::logging::LogSink sink = alpacacore::logging::get_log_sink();
+            ~SinkRestore() { alpacacore::logging::set_log_sink(sink); }
+        } sink_restore;
+        alpacacore::logging::set_log_sink(
+            [&](alpacacore::logging::LogLevel level, std::string_view, std::string_view message) {
+                if (level < alpacacore::logging::LogLevel::Warn) return;
+                std::lock_guard<std::mutex> lock(loud_mutex);
+                loud.emplace_back(message);
+            });
+
+        alpacahttp::Router router;
+        for (const auto& [path, body, field] : {
+                 std::tuple{"/management/v1/configuredevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299})",
+                            "deviceNumber"},
+                 std::tuple{"/management/v1/configuredevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":3.5})", "deviceNumber"},
+                 std::tuple{"/management/v1/removedevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299})",
+                            "deviceNumber"},
+                 std::tuple{"/management/v1/configuredevice",
+                            R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
+                 std::tuple{"/management/v1/removedevice",
+                            R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
+             }) {
+            const auto response = route_request(router, "POST", path, body);
+            const auto json = nlohmann::json::parse(response.body(), nullptr, false);
+            const auto message = json.is_discarded() ? std::string{} : json.value("ErrorMessage", std::string{});
+            if (message.find(field) == std::string::npos) {
+                std::cerr << path << " " << body << " -> " << response.body() << "\n";
+            }
+            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(message.find(field) != std::string::npos);
+        }
+        {
+            std::lock_guard<std::mutex> lock(loud_mutex);
+            for (const auto& line : loud) std::cerr << "logged at WARNING or above: " << line << "\n";
+            EXPECT(loud.empty());
+        }
+    }
+
+    // A hand-written persisted entry whose deviceNumber is outside int has no
+    // key, so it is listed as failed with no number instead of standing in
+    // for device 3, the number get<int>() wrapped it to.
+    {
+        const ScopedCwd scratch;
+        std::filesystem::create_directories("config");
+        {
+            std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
+            out << R"([{"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299}])";
+        }
+        alpacahttp::Router router;
+        const auto listed =
+            nlohmann::json::parse(route_request(router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
+        EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
+        EXPECT(listed["Value"].size() == 1);
+        if (listed["Value"][0].value("DeviceNumber", 0) != -1) std::cerr << listed.dump() << "\n";
+        EXPECT(listed["Value"][0].value("DeviceNumber", 0) == -1);
     }
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
