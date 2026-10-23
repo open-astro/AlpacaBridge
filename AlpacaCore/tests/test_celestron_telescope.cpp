@@ -2164,6 +2164,30 @@ TEST_CASE("Celestron snapshot - gps_status reports the GPS module's link and rea
     require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
 }
 
+TEST_CASE("Celestron snapshot - gps_status is not listed once the link is lost",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(driver->can_action("gps_status"));
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+    st->mute = false;
+    driver->set_connected(false);
+}
+
 TEST_CASE("Celestron snapshot - gps_status is not listed on a mount without a GPS module",
           "[celestron][telescope][snapshot]") {
     FakeTaskClock clock;

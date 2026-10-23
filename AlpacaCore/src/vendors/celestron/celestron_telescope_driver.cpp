@@ -355,7 +355,7 @@ public:
 
     std::vector<std::string> get_supported_actions() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_ || !has_gps_) return {};
+        if (!connected_ || link_lost_.load() || !has_gps_) return {};
         return {std::string(kGpsStatusAction)};
     }
 
@@ -381,7 +381,7 @@ public:
 
     bool can_action(std::string_view action_name) const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return connected_ && has_gps_ && util::is_gps_status_action(action_name);
+        return connected_ && !link_lost_.load() && has_gps_ && util::is_gps_status_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool raw) override {
