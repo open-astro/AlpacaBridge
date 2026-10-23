@@ -98,6 +98,12 @@ author must do. Read the docstring before changing a gate.
   files, relative links offline and then `http(s)` links, Mondays and on dispatch only; a host it
   cannot check goes in `.lycheeignore` with a reason line. `scheduled-failure.yml` watches it by
   workflow name, so its failure shows as one tracked issue.
+- **Daily APT install check** (`.github/workflows/apt-install-check.yml`, issue #1360): in a
+  `debian:trixie` container it runs the install commands cut out of README.md's Installation
+  section (never copied into the workflow), compares the installed version with the newest stable
+  Release (a Release under 24 h old may still be missing), fails on any `not found` from `ldd`
+  and, from 5.1 on (`--version` is not on `stable/5.0`), runs `alpacabridge --version`.
+  `scheduled-failure.yml` watches it by workflow name.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
   6-hour default wasted six hours of runner time first. Give every new job a bound; when a job

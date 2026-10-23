@@ -1,0 +1,133 @@
+# Checks every day that the newest stable release installs from the OpenAstro
+# APT repository (issue #1360), the way README.md tells a user to do it.
+#
+# The install commands are cut out of README.md's Installation section at run
+# time and run as written, so a README that drifts from the real repository
+# fails here instead of on a user's machine. The installed version must equal
+# the newest stable GitHub Release, unless that Release is younger than the
+# grace period (the repository is updated after the release is published).
+# The installed binary must resolve every shared library (`ldd`) and, from the
+# first main-line release (5.1), print its own version (`--version`).
+# scheduled-failure.yml opens one tracked issue for a failure and closes it on
+# the next green run.
+#
+# Not a pull_request check: it depends on apt.openastro.net and on a published
+# release, neither of which a PR changes. The `beta` component of the
+# repository is not checked.
+
+name: APT install check
+
+on:
+  schedule:
+    - cron: "17 7 * * *"   # daily, after the other scheduled workflows
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: apt-install-check
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: Install from apt.openastro.net
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    container: debian:trixie
+    permissions:
+      contents: read
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      GRACE_SECONDS: "86400"
+    steps:
+      # The image has none of these; the README's commands use sudo, curl and gpg.
+      - name: Install the tools the README commands need
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gpg jq sudo
+          # A container has no init system: keep the package from starting the service.
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod +x /usr/sbin/policy-rc.d
+          # The README's `apt install alpacabridge` has no -y and a step has no
+          # TTY, so apt would answer its prompt with EOF and abort.
+          echo 'APT::Get::Assume-Yes "true";' > /etc/apt/apt.conf.d/90assume-yes
+
+      - name: Extract the install commands from README.md
+        run: |
+          curl -fsSL -o README.md \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/README.md"
+          # The fenced ```sh blocks between "## Installation" and the first <details>.
+          awk '
+            /^## Installation/ { in_section = 1; next }
+            in_section && /^## / { exit }
+            in_section && /^<details>/ { exit }
+            in_section && /^```sh$/ { in_block = 1; blocks++; next }
+            in_section && /^```$/ { in_block = 0; next }
+            in_section && in_block { print }
+            END { if (blocks != 3) { print "README.md: expected 3 install blocks, found " blocks+0 > "/dev/stderr"; exit 1 } }
+          ' README.md > install.sh
+          grep -q 'apt\(-get\)\? install alpacabridge' install.sh || {
+            echo "::error::README.md install blocks do not install alpacabridge"; exit 1; }
+          grep -q 'apt.openastro.net' install.sh || {
+            echo "::error::README.md install blocks do not use apt.openastro.net"; exit 1; }
+          echo "Commands taken from README.md:"
+          cat install.sh
+
+      - name: Run the README commands
+        run: |
+          # pipefail: a failed curl inside the README's pipes must fail the step.
+          bash -eo pipefail install.sh
+
+      - name: Compare with the newest stable release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          tag="$(jq -er '.tag_name' <<<"$release")"
+          published="$(jq -er '.published_at' <<<"$release")"
+          # /releases/latest skips drafts and prereleases. A tag is vX.Y.Z; the
+          # package version is X.Y.Z, so the leading v is dropped to compare.
+          expected="${tag#v}"
+          installed="$(dpkg-query -W -f='${Version}' alpacabridge)"
+          echo "Installed: ${installed}; newest stable release: ${tag} (published ${published})"
+          if [ "$installed" = "$expected" ]; then
+            echo "Installed version matches release ${tag}."
+            exit 0
+          fi
+          age=$(( $(date +%s) - $(date -d "$published" +%s) ))
+          if [ "$age" -lt "$GRACE_SECONDS" ]; then
+            echo "::notice::Release ${tag} is ${age} s old (grace ${GRACE_SECONDS} s); the repository still serves ${installed}."
+            exit 0
+          fi
+          echo "::error::apt.openastro.net serves ${installed}, but release ${tag} was published ${age} s ago."
+          exit 1
+
+      - name: Check the installed binary
+        run: |
+          set -euo pipefail
+          # Every shared library the binary links against must resolve.
+          ldd /usr/bin/alpacabridge
+          if ldd /usr/bin/alpacabridge | grep -q 'not found'; then
+            echo "::error::alpacabridge has unresolved shared libraries"; exit 1
+          fi
+          installed="$(dpkg-query -W -f='${Version}' alpacabridge)"
+          # --version arrived with #1170 (commit ac35a4eb, 2026-10-15), on main only:
+          # it is not an ancestor of v5.0.0 or of stable/5.0. Without it, main()
+          # passes argv[1] to Config::load and starts the server, so the call
+          # would never return. A 5.0.x patch cut from stable/5.0 lacks it too,
+          # so the gate is the first main-line version, 5.1. The package version
+          # is the VERSION string (X.Y.Z, or X.Y.Z~betaN for a beta); the `~` in
+          # `5.1~` lets 5.1.0~beta1 through.
+          if dpkg --compare-versions "$installed" ge 5.1~; then
+            version="$(timeout 30 /usr/bin/alpacabridge --version)"
+            echo "alpacabridge --version: ${version}"
+            test "$version" = "$installed" || {
+              echo "::error::--version printed '${version}', installed package is ${installed}"; exit 1; }
+          else
+            echo "Package ${installed} has no --version (before 5.1); the ldd check above is the load check."
+          fi
