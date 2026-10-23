@@ -862,7 +862,7 @@ private:
         TimeInfo info;
         LocalTimeInfo tz;
         std::chrono::system_clock::time_point utc;
-        std::chrono::system_clock::duration client_minus_host;
+        std::chrono::system_clock::duration client_minus_host{};
     };
 
     static TimeWrite prepare_time_write(std::chrono::system_clock::time_point utc) {
@@ -1139,6 +1139,29 @@ public:
         return without_lock(lock, [] { return stop_park_slew_wire(); });
     }
 
+    // The stops of a failure found by the status poll or the slew-complete wait, which no initiator owns: they go out
+    // only while no newer initiator has taken the mount, so a client that saw the failure and sent a new motion
+    // never has it cut short by a stale stop. try_lock, never a blocking lock: set_connected joins the poll while it
+    // holds initiator_mutex_. A busy lock means an initiator is dispatching, and a changed generation means one
+    // has: either way the newer motion owns the mount and the stale stop is skipped (nullopt). `generation` is the
+    // motion generation the failure was found under.
+    std::optional<std::string> stop_park_slew_unless_superseded(std::uint64_t generation) const {
+        run_failure_stop_hook();
+        std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
+        if (!ilock.owns_lock()) {
+            ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command is being dispatched");
+            return std::nullopt;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (motion_generation_ != generation) {
+                ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command owns the mount");
+                return std::nullopt;
+            }
+        }
+        return stop_park_slew_wire();
+    }
+
     // The failure of a motion body is sticky from the moment it is known, before its stops go out with mutex_ free:
     // a client that polls Slewing in the window reads the failure, not a motion still in progress.
     void begin_motion_failure_locked(const std::string& message) const {
@@ -1202,10 +1225,13 @@ public:
 
     void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message) const {
         begin_motion_failure_locked(message);
-        const std::string stop_error = stop_park_slew(lock);
-        if (!still_owns_failure_locked()) {
-            return;
+        const std::uint64_t generation = motion_generation_;
+        const auto stopped_or_skipped =
+            without_lock(lock, [&] { return stop_park_slew_unless_superseded(generation); });
+        if (!stopped_or_skipped || !still_owns_failure_locked()) {
+            return;  // skipped: the newer motion owns the state
         }
+        const std::string& stop_error = *stopped_or_skipped;
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
@@ -2094,6 +2120,7 @@ private:
             // Determine if precise commands are available (v1.6+ for RA/Dec, v2.2+ for Alt/Az)
             // TODO: Parse firmware version to detect v1.6+ support; assume precise for now.
         } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "firmware version query failed; assuming precise commands");
         }
         // HC fw "0.0" means the hand controller isn't functional (e.g. WiFi-only connection).
         // In that case, HC-level commands ('E','e','R','r','S','s','L') don't work —
@@ -2115,6 +2142,7 @@ private:
             model_id = protocol.get_model_id();
             model_name = protocol.get_model_name();
         } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "model query failed; the model stays unknown");
         }
 
         // Probe the AUX bus to discover connected devices and capabilities.
@@ -2166,6 +2194,7 @@ private:
                 protocol.set_location(loc);
                 written_site = loc;
             } catch (...) {
+                ALPACA_LOG_WARN("Celestron", "site write at connect failed; the mount keeps its own site");
             }
         }
         std::optional<TimeWrite> time_write;
@@ -2212,6 +2241,7 @@ private:
         try {
             read_site = protocol.get_location();
         } catch (...) {
+            ALPACA_LOG_WARN("Celestron", "site read at connect failed; the site stays unread");
         }
         std::lock_guard<std::mutex> lock(mutex_);
         snapshot_.publish(token, seed);
@@ -2700,10 +2730,12 @@ private:
                 }
             }
             if (!failure.empty()) {
-                // A motion initiator that starts in this window is stopped too; the window is one exchange wide.
-                const std::string stop_error = stop_park_slew_wire();
-                std::lock_guard<std::mutex> lock(mutex_);
-                finish_home_failure_locked(home_generation, failure, stop_error);
+                // The three stop exchanges go out only while no newer initiator owns the mount.
+                const auto stop_error = stop_park_slew_unless_superseded(home_generation);
+                if (stop_error) {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    finish_home_failure_locked(home_generation, failure, *stop_error);
+                }
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (home_status_poll_failures_ != 0) {
@@ -2771,6 +2803,17 @@ private:
         return true;
     }
 
+    void run_failure_stop_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = failure_stop_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poll_after_sample_hook() {
         std::function<void()> hook;
         {
@@ -2819,6 +2862,11 @@ public:
     }
 
     bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
+
+    void set_failure_stop_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        failure_stop_hook_ = std::move(hook);
+    }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
@@ -3596,7 +3644,7 @@ private:
     // Serializes motion handoffs: sync/async slews, park, FindHome, PulseGuide,
     // MoveAxis, AbortSlew, Unpark, and disconnect. Never taken under mutex_; a
     // blocking slew releases it before waiting for motion completion.
-    std::mutex initiator_mutex_;
+    mutable std::mutex initiator_mutex_;
     // Serialises the connect, the disconnect and the setters that write the mount (tracking, guide rate, site, UTC)
     // end to end: wire write, then publish. No getter takes it. Lock order (decision 0016): transition_mutex_,
     // initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf), then the AsyncOperation slot and StateSnapshot
@@ -3623,6 +3671,7 @@ private:
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> failure_stop_hook_;  // guarded by status_poll_hook_mutex_
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
@@ -3670,6 +3719,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_failure_stop_hook_for_testing(std::move(hook));
     }
 }
 

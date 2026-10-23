@@ -782,6 +782,7 @@ struct SnapshotMount {
     std::atomic<int> m_count{0};          // goto cancels received
     std::atomic<int> t_delay_ms{0};       // the tracking-mode write answers after this long
     std::atomic<int> t_count{0};          // tracking-mode writes received
+    std::atomic<bool> h_mute{false};      // the time write goes unanswered
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -823,6 +824,9 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             st.t_count.fetch_add(1);
             if (st.t_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.t_delay_ms.load()));
             st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
+            return "#";
+        case 'H':
+            if (st.h_mute.load()) return "";
             return "#";
         case 'M':
             st.m_count.fetch_add(1);
@@ -1581,3 +1585,56 @@ TEST_CASE("Celestron site and time writes - the write exchange does not hold the
 }
 
 #endif  // _WIN32
+
+// The FindHome failure stops go out only while no newer initiator has taken the mount. The hook stands in for the
+// client that saw the sticky FindHome error and sent a new goto before the stops: the poll then skips them.
+TEST_CASE("Celestron FindHome - the failure stops are skipped when a new goto took the mount first",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    REQUIRE(st->m_count.load() == 0);
+
+    int m_after_goto = -1;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        driver->slew_to_coordinates_async(1.5, 20.0);
+        m_after_goto = st->m_count.load();
+    });
+    (void)cel::poll_status_now_for_testing(*driver);
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(m_after_goto >= 0);
+    CHECK(st->m_count.load() == m_after_goto);  // no stale goto cancel after the new goto
+    driver->set_connected(false);
+}
+
+// A connect whose post-open init throws (the time write goes unanswered) closes the link again and leaves
+// Connected false, so a retry opens it afresh.
+TEST_CASE("Celestron connect - a failed time write closes the link and leaves Connected false",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, true,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    st->h_mute = true;
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    st->h_mute = false;
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
