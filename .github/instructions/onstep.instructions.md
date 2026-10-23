@@ -99,8 +99,15 @@ it is never reachable through `router.cpp` or the web UI.
   after `GUIDE_TIME_LIMIT` (default 10 s; 1-120 s, or 0 for none, set at firmware build), and every
   repeat restarts that timer (`Guide::startAxis1`). A background task (`move_axis_resend_`, an
   `AsyncOperation`) re-sends the rate and direction of each running axis until `MoveAxis(axis, 0)`,
-  `AbortSlew`, a GOTO, park, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
-  itself fails. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
+  `AbortSlew`, a GOTO, `Park`, `FindHome`, disconnect, a lost link, or the mount ending the move (below); a stop request ends the re-send even when the stop
+  itself fails, and a `MoveAxis` whose command cannot be sent leaves the other axis's re-send
+  running (both tested over a dropped TCP link, which fails the write while the wrapper still reads
+  the link as alive, #1459). If the slot refuses the new body after the move went out (no thread,
+  or replaced bodies still finishing), `MoveAxis` stops that axis (both directions) and throws
+  `DriverException` (if those stops fail too, the message says so and `Slewing` stays true; a
+  newer `MoveAxis`, or an `AbortSlew`, GOTO, `Park`, `FindHome` or disconnect that ended the move
+  meanwhile, owns the motion, so the refusal is reported as it came and nothing is stopped); the other axis keeps moving without a re-send until the next `MoveAxis`
+  (#1458). The test seam is `set_move_axis_resend_spawn_for_testing()`. Each axis is due 7 s after its `MoveAxis`, then 7 s after the end of each tick
   that was due for it, whether that tick sent or skipped (OnStepX times each axis on its own), so a
   `MoveAxis` on the other axis, which replaces the body, never delays it, and `mutex_` is free
   between ticks. A skipped tick (a failed read, `G`, or near a limit) therefore puts the next
@@ -116,7 +123,8 @@ it is never reachable through `router.cpp` or the web UI.
     the driver hands its clock to the process-wide wrapper at connect
     (`OnStepProtocolWrapper::set_task_clock()`, put back to the default by `release_task_clock()`
     when the driver goes), so the wrapper's loss and last-alive stamps and the outage share one
-    clock. The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
+    clock. A change of clock forgets those stamps: one taken on another driver's clock is not timed
+    as an outage (#1460; production keeps one clock). The re-send, tracking-restore and relink-window tests inject a `FakeTaskClock` and
     `advance()` it (7 s per re-send tick, 2.1 s past a cache, 250 ms steps through a synchronous
     slew, 2 s past the relink window, 60 s past a UTCDate write).
   - **Only while the mount shows the move.** Each tick reads `:GU#` first and re-sends only when
@@ -129,7 +137,10 @@ it is never reachable through `router.cpp` or the web UI.
     `g` since this connect, a `:GU#` read taken after the move started with no `g` (and no `G`)
     means the move ended at the mount (a hand controller or another app sent a stop, or a limit):
     the re-send ends and `Slewing` reads false. Firmware that never sends `g` gets no re-send, and
-    `Slewing` stays true until the client stops the move, as before.
+    `Slewing` stays true until the client stops the move, as before. On such firmware, or for a
+    move that lapsed before the first tick, the body ends after the first `:GU#` read that shows
+    neither `g` nor `G` while no `g` has been seen since connect, instead of reading `:GU#` every
+    7 s (#1461).
   - **Braking (HM-17, OnStepX 10.23a, 2026-10-20):** after a stop `g` stays set while the axis
     brakes (`GA_BREAK`; about 0.4 s at 0.5 deg/s), and a move command in that time restarts the
     move at full rate (`Axis::autoSlew` "resum"). A stop at the mount is therefore undone when a
@@ -203,7 +214,8 @@ it is never reachable through `router.cpp` or the web UI.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
-  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s), and the router reads `Connected` before every Connect, so the first to notice
+  no poll thread (only a running `MoveAxis` re-send checks the link, every 7 s, and on firmware
+  without `g` only once, #1461), and the router reads `Connected` before every Connect, so the first to notice
   can be the reconnect itself. Tracking is left alone. The TCP test seam has no node and is never
   lost. `link_alive()` runs without `mutex_`, so it records a loss only while the node it checked is
   still the current link (a generation counter under `link_id_mutex_`): a Disconnect or a relink that
@@ -227,7 +239,8 @@ it is never reachable through `router.cpp` or the web UI.
   so `Connected` stays false while `Connecting` is true (the tier-2 contract sweep checks it). The
   internal `connected_` still flips at the old point, because the warm-up's own helpers check it.
 - **`Park()`/`FindHome()` must be fire-and-forget, not blocking**: send the command and return
-  immediately (optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
+  without waiting for the park or home to finish (a running motion is stopped first, #1430, below;
+  optimistically marking `is_parked=false`/`is_at_home=false` and `is_slewing=true`,
   letting the next status poll pick up real completion), matching iOptron's pattern. A first
   version blocked synchronously until the mount physically finished (`wait_for_condition_locked`)
   — functionally correct, but ConformU classifies `Park`/`FindHome` under the strict STANDARD
@@ -237,6 +250,46 @@ it is never reachable through `router.cpp` or the web UI.
   ConformU log, where `Park`/`FindHome` also take ~30s in wall-clock terms but show `0.001s ✓
   (EXTENDED)` in the timing table). Real GEM mounts physically cannot park/home in 1 second;
   fire-and-forget is the only way to pass this target with genuine hardware.
+- **Park and FindHome stop any motion first and read the answer** (#1430): OnStepX refuses a park
+  or a home while a guide move (a `MoveAxis`, or its braking), a pulse guide, a GOTO or a home runs
+  (`Park::request`, `Home::request`: `CE_SLEW_IN_MOTION`), and the driver used to send `:hP#` and
+  `:hC#` blind, so a `Park` right after `MoveAxis(axis, 0)` returned success and never parked
+  (HM-17, 2026-10-20). Both stay asynchronous initiators (the fire-and-forget rule above, the
+  contract sweep's 1 s bound):
+  - **On a still mount** the call sends `:hP#` (reads its bare `1`/`0`) or `:hC#` (no reply), then
+    `:GE#` right after a refused `:hP#` and after every `:hC#` (any later command replaces the code;
+    checked on the HM-17: `22` during braking, `25` after an accepted park, `00` after an accepted
+    home), and returns; a refusal a retry cannot change (no park position set, outside limits)
+    throws `InvalidOperation` with the reason from the call (HM-17: 0.15 s).
+  - **When the mount moves** (the driver's `MoveAxis` flags, or `:GU#` showing `g`, `G`, a GOTO or
+    `h`) the call sends AbortSlew's stops and returns (a stop that cannot be sent throws
+    `DriverException` and ends the `MoveAxis` re-send, as `AbortSlew` does). An `AsyncOperation`
+    (`park_home_`) then polls `:GU#` every 100 ms until the mount is still (at most 6 s) and sends
+    the park or home. `Slewing` reads true meanwhile.
+  - **Code 22 is retried** every 200 ms for 3 s in that task, also when the first try on a still mount
+    met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
+    `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
+    `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
+    sending anything (the shared rule "A failed async operation body keeps its error"). A
+    `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
+    (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
+    still ends it, and `Slewing` reads true from the call until the task ends.
+  - **`:GE#` details:** OnStep 4.x has `:GE#` too, per channel, with the same codes up to 23
+    (OnStep `Globals.h` `CommandErrors`; no 25), and its `:hC#` stops the mount when it refuses for
+    motion. A reply that is not a two-digit code (firmware without `:GE#`, 1 s timeout) leaves the
+    reason unknown: a refused park is retried, then reported as "no reason given", and a home
+    counts as started, as before. A `:hP#` answered `0` or garbled is taken as accepted when `:GE#`
+    then says 0 or 25. The code is kept per serial channel; a Smart Web Server page that shares
+    the channel can replace it between `:hP#` and `:GE#` (rare). A link lost between `:hC#` and
+    `:GE#` fails the read (`get_last_command_error()` rethrows); a mount that stops answering on a
+    link that stays up reads as firmware without `:GE#`, and the home counts as started, as before.
+    OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a `FindHome` there is never
+    taken as one already running.
+  - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with `mutex_`
+    released, so getters, `AbortSlew` and Disconnect answer meanwhile. The stops, the `:GU#` polls,
+    `:hP#` and `:GE#` (up to 1 s each without a reply; on firmware without `:GE#` a `FindHome` takes
+    about 1 s longer) and `:hC#` hold `mutex_`, as every OnStep exchange does (decision 0016 rule 1,
+    #1449). A `Park` while one runs (`I`), or a `FindHome` while one runs (`h`), is a no-op.
 - **A slow first post-Connect `DeviceState` means the connect did not run** (#1242). A
   ConformU-style preamble from one ClientID (`Connected=True` → `Connected=False` → `Connect()`,
   poll `Connecting`) gets its first `DeviceState` in 3-5 ms with no serial reads: the connect's

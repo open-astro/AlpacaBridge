@@ -27,7 +27,7 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { hostCheckSettings, settingsSaveError, HOST_CHECK_ALWAYS_ALLOWED } =
+const { hostCheckSettings, discoveryPortSetting, settingsSaveError, HOST_CHECK_ALWAYS_ALLOWED } =
     require(path.join(__dirname, '..', '..', 'web', 'format.js'));
 
 test('a description without the fields renders no Host check rows', () => {
@@ -93,4 +93,15 @@ test('the help line lists the names default.yaml says are always allowed', () =>
     const yaml = fs.readFileSync(path.join(__dirname, '..', '..', 'config', 'default.yaml'), 'utf8');
     assert.ok(yaml.includes('Always allowed: ' + HOST_CHECK_ALWAYS_ALLOWED + '.'),
               'HOST_CHECK_ALWAYS_ALLOWED differs from the allowed_hosts comment in default.yaml');
+});
+
+// #1509: the discovery port row shows only when the server reports a valid port.
+test('discoveryPortSetting reads the reported port and hides the row otherwise', () => {
+    assert.strictEqual(discoveryPortSetting({ DiscoveryPort: 32227 }), 32227);
+    assert.strictEqual(discoveryPortSetting({ DiscoveryPort: 40000 }), 40000);
+    assert.strictEqual(discoveryPortSetting({ ServerName: 'AlpacaBridge' }), null);
+    assert.strictEqual(discoveryPortSetting(null), null);
+    assert.strictEqual(discoveryPortSetting({ DiscoveryPort: '40000' }), null);
+    assert.strictEqual(discoveryPortSetting({ DiscoveryPort: 0 }), null);
+    assert.strictEqual(discoveryPortSetting({ DiscoveryPort: 65536 }), null);
 });

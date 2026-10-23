@@ -51,7 +51,7 @@ void Discovery::run_discovery() {
         return;
     }
 
-    // Share UDP 32227 with other Alpaca processes on this host: Linux and
+    // Share the discovery UDP port (default 32227) with other Alpaca processes on this host: Linux and
     // macOS need SO_REUSEPORT as well as SO_REUSEADDR for that. A failed
     // option is logged and the bind still tried; it may succeed alone.
     int reuse = 1;
@@ -72,13 +72,13 @@ void Discovery::run_discovery() {
     std::memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(ALPACA_DISCOVERY_PORT);
+    addr.sin_port = htons(config_.discovery_port());
 
     if (bind(socket_fd_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         // Read errno before socket_close() can overwrite it.
         const int err = util::socket_get_last_error();
-        util::log_error("Failed to bind discovery socket on UDP port " + std::to_string(ALPACA_DISCOVERY_PORT) + ": " +
-                        util::socket_error_message(err) + "; discovery is disabled");
+        util::log_error("Failed to bind discovery socket on UDP port " + std::to_string(config_.discovery_port()) +
+                        ": " + util::socket_error_message(err) + "; discovery is disabled");
         util::socket_close(socket_fd_);
         socket_fd_ = util::kInvalidSocket;
         running_ = false;
@@ -86,8 +86,8 @@ void Discovery::run_discovery() {
     }
 
     // Join multicast group. This is optional — the ASCOM Alpaca discovery
-    // protocol primarily uses UDP broadcast to 255.255.255.255:32227, which a
-    // socket bound to INADDR_ANY:32227 already receives. Multicast join can
+    // protocol primarily uses UDP broadcast to 255.255.255.255:<discovery port>, which a
+    // socket bound to INADDR_ANY:<discovery port> already receives. Multicast join can
     // fail on AP/hotspot interfaces that lack a default multicast route; in
     // that case we must NOT tear down the listener, or broadcast-based clients
     // (NINA, PHD2 auto-discover) will see no server.
@@ -101,7 +101,7 @@ void Discovery::run_discovery() {
                           " (continuing with broadcast/unicast discovery only)");
     }
 
-    util::log_info("Discovery service started on port " + std::to_string(ALPACA_DISCOVERY_PORT));
+    util::log_info("Discovery service started on port " + std::to_string(config_.discovery_port()));
 
     // Listen for probes.
     // Use a periodic select timeout so stop() can terminate quickly on all platforms.

@@ -1,0 +1,2 @@
+### Added (CI)
+- **Prune superseded GitHub Releases** (CI, issue #1543): a last `prune` job in `.github/workflows/release.yml` deletes the Releases a new tag supersedes, keeping every tag (beta N removes `beta.1` to `beta.(N-1)` of the same X.Y.Z; a stable removes all its betas). Selection is in `scripts/release_prune.py`, pinned by `--self-test` over `scripts/release_prune_cases.txt` (also run by `ci_preflight.sh` and the job). It is off until the repository variable `PRUNE_SUPERSEDED_RELEASES` is `true`, and a dry run never prunes. See docs/beta-channel.md.

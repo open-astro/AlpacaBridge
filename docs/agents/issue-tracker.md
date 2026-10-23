@@ -9,7 +9,7 @@ written, not the remote name from your own checkout.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --repo open-astro/AlpacaBridge --title "..." --label P<n> --body "..."`, with the priority label from the [Priority](#priority) scale below and a type label (`bug`, `enhancement` or `documentation`). Use a heredoc for multi-line bodies.
+- **Create an issue**: `gh issue create --repo open-astro/AlpacaBridge --title "..." --label P<n> --label <type> --label <size> --body "..."`, with the priority label from the [Priority](#priority) scale below, a type label and a size label. The type and size labels are `GROUPS` in `scripts/check_issue_labels.py`; an open issue missing any of the three gets a reminder comment until all are set ([Issue labels](../development.md#issue-labels)). Use a heredoc for multi-line bodies.
 - **Read an issue**: `gh issue view <number> --repo open-astro/AlpacaBridge --comments`, filtering comments by `jq` and also fetching labels.
 - **List issues**: `gh issue list --repo open-astro/AlpacaBridge --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
 - **Comment on an issue**: `gh issue comment <number> --repo open-astro/AlpacaBridge --body "..."`

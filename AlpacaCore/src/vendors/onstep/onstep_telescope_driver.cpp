@@ -30,6 +30,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <functional>
@@ -58,6 +59,55 @@ constexpr double kAltitudeLimitMarginDeg = 1.0;
 // open-astro#1378: how often a running MoveAxis is re-sent so OnStepX's guide
 // time limit (10 s by default) does not end it. Tests advance a FakeTaskClock.
 constexpr auto kMoveAxisResendInterval = std::chrono::seconds(7);
+// open-astro#1430: how long Park and FindHome wait for the motion they stopped
+// to end, and how long they retry a park or home OnStepX refuses as "in motion"
+// (an axis brakes for about 0.4 s at 0.5 deg/s on the HM-17; a home that just
+// ended keeps its guide state a moment longer).
+constexpr auto kStopSettleTimeout = std::chrono::seconds(6);
+constexpr auto kStopSettlePoll = std::chrono::milliseconds(100);
+constexpr auto kInMotionRetryWindow = std::chrono::seconds(3);
+constexpr auto kInMotionRetryPoll = std::chrono::milliseconds(200);
+// OnStepX :GE# codes (docs/COMMAND_REFERENCE.md, "Command Error Codes").
+constexpr int kCeNone = 0;
+constexpr int kCeSlewInMotion = 22;
+constexpr int kCeTrue = 25;
+
+std::string describe_onstepx_error(int code) {
+    switch (code) {
+        case 8:
+            return "not parked or at home";
+        case 9:
+            return "already parked";
+        case 10:
+            return "park failed";
+        case 11:
+            return "not parked";
+        case 12:
+            return "no park position set";
+        case 13:
+            return "goto failed";
+        case 15:
+            return "target below the horizon limit";
+        case 16:
+            return "target above the overhead limit";
+        case 17:
+            return "controller in standby";
+        case 18:
+            return "mount parked";
+        case 19:
+            return "goto already active";
+        case 20:
+            return "outside configured limits";
+        case 21:
+            return "hardware fault";
+        case 22:
+            return "mount still in motion";
+        case 23:
+            return "slew error";
+        default:
+            return "error code " + std::to_string(code);
+    }
+}
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
@@ -161,11 +211,12 @@ public:
 
     ~OnStepTelescopeDriver() override {
         // MUST be first, before members the async connection task touches
-        // are destroyed (AsyncConnectable base contract). The only other
-        // worker is the MoveAxis re-send (#1378), joined next without mutex_
-        // (it takes mutex_ to send).
+        // are destroyed (AsyncConnectable base contract). The other workers,
+        // the MoveAxis re-send (#1378) and the Park/FindHome tail (#1430),
+        // are joined next without mutex_ (they take mutex_ to send).
         shutdown_connection();
         move_axis_resend_.cancel_all_and_join();
+        park_home_.cancel_all_and_join();
         if (connected_) {
             try {
                 // OnStepTelescopeDriver is the most-derived class (no further
@@ -309,16 +360,21 @@ public:
             tracking_before_slew_ = false;
             last_site_info_attempt_ = std::chrono::steady_clock::time_point::min();
 
+            // The two reads run without firmware_mutex_: get_device_firmware()
+            // takes only that lock and must not wait for a serial round trip
+            // (decision 0016). Only the store is under it.
             std::string firmware_version;
+            std::string firmware;
+            try {
+                std::string product = protocol.get_product_name();
+                firmware_version = protocol.get_version_number();
+                firmware = product + (firmware_version.empty() ? "" : (" " + firmware_version));
+            } catch (...) {  // NOLINT(bugprone-empty-catch)
+                firmware.clear();
+            }
             {
                 std::lock_guard<std::mutex> fwlock(firmware_mutex_);
-                try {
-                    std::string product = protocol.get_product_name();
-                    firmware_version = protocol.get_version_number();
-                    firmware_cache_ = product + (firmware_version.empty() ? "" : (" " + firmware_version));
-                } catch (...) {  // NOLINT(bugprone-empty-catch)
-                    firmware_cache_.clear();
-                }
+                firmware_cache_ = firmware;
             }
 
             // OnStepX applies refraction to the RA/Dec it reports unless it was
@@ -494,6 +550,7 @@ public:
     bool get_at_home() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        raise_park_home_error_locked(true);
         refresh_status_cache_locked(false);
         return cached_status_.is_at_home;
     }
@@ -501,6 +558,7 @@ public:
     bool get_at_park() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        raise_park_home_error_locked(false);
         refresh_status_cache_locked(false);
         return cached_status_.is_parked;
     }
@@ -770,6 +828,10 @@ public:
     bool get_slewing() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        if (park_home_request_) {
+            return true;  // stopping, settling or retrying a Park or FindHome (#1430)
+        }
+        raise_park_home_error_locked(std::nullopt);
         return get_slewing_locked();
     }
 
@@ -855,39 +917,30 @@ public:
     // EXTENDED (600s) instead — confirmed against this project's iOptron
     // ConformU logs, where the real (tens-of-seconds) physical park/home
     // is entirely absorbed by the client's post-call AtPark/AtHome polling.
+    // Not waited for: the physical park or home, nor (#1430) the end of a
+    // motion the call had to stop first or a park or home the mount refuses
+    // as "in motion": those finish in the park_home_ body, and a refusal it
+    // meets is kept and raised by Slewing, AtPark or AtHome (the shared rule
+    // "A failed async operation body keeps its error").
     void find_home() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("FindHome");
         refresh_status_cache_locked(true);
-        if (cached_status_.is_at_home) {
-            return;
+        if (cached_status_.is_at_home || cached_status_.is_homing) {
+            return;  // there, or on its way
         }
-        OnStepProtocolWrapper::instance().find_home();
-        // OnStepX ends a home with tracking off; never restart it afterwards (#1218).
-        tracking_before_slew_ = false;
-        cached_status_.is_at_home = false;
-        cached_status_.is_slewing = true;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
+        start_park_or_home_locked(lock, "FindHome", true);
     }
 
     void park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         refresh_status_cache_locked(true);
-        if (cached_status_.is_parked) {
-            return;  // ASCOM: Park() on an already-parked mount is a no-op.
+        if (cached_status_.is_parked || cached_status_.is_parking) {
+            return;  // ASCOM: Park() on an already-parked mount is a no-op; one already parking too.
         }
-        OnStepProtocolWrapper::instance().park();
-        // A parked mount must not track; never restart it afterwards (#1218).
-        tracking_before_slew_ = false;
-        cached_status_.is_parked = false;
-        cached_status_.is_slewing = true;
-        cached_status_.is_at_home = false;
-        status_cache_valid_ = true;
-        last_status_update_ = clock_.now();
-        clear_manual_motion_locked();
+        start_park_or_home_locked(lock, "Park", false);
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -999,6 +1052,7 @@ public:
     void unpark() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         OnStepProtocolWrapper::instance().unpark();
         cached_status_.is_parked = false;
         status_cache_valid_ = true;
@@ -1026,6 +1080,7 @@ public:
             throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
 
+        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
@@ -1034,46 +1089,26 @@ public:
         const int positive_dir = (axis == 0) ? 2 : 0;
         const int negative_dir = (axis == 0) ? 3 : 1;
 
-        // Drop this axis's earlier move from the re-send first: a stop asks
-        // for none whatever its outcome, and a new move sets it again only
-        // once its own command went out. This only withdraws the old move,
-        // under mutex_ where no body runs; decision 0006 rule 3's bump still
-        // comes before the new move's flags below.
-        manual_axis_resend_[axis] = false;
         if (!moving) {
-            // Defensive dual-stop, matching the project's convention for
-            // fixed-direction (rather than signed-rate) motion protocols.
-            // Both stops are always tried. The driver cannot tell which
-            // direction the mount needed stopped, so any failed stop may be
-            // the one that mattered: report it and keep the axis moving
-            // (#742).
-            std::string stop_error;
-            const auto try_stop = [&](int dir) {
-                try {
-                    protocol.move_axis_stop(dir);
-                } catch (const std::exception& ex) {
-                    if (stop_error.empty()) {
-                        stop_error = ex.what();
-                    }
-                } catch (...) {
-                    if (stop_error.empty()) {
-                        stop_error = "unknown exception";
-                    }
-                }
-            };
-            try_stop(positive_dir);
-            try_stop(negative_dir);
+            const std::string stop_error = stop_axis_locked(axis);
             if (!stop_error.empty()) {
                 throw AlpacaException("MoveAxis stop failed: " + stop_error, AlpacaError::DriverException);
             }
-        } else {
+        }
+        std::uint64_t generation = 0;
+        if (moving) {
+            // Drop this axis's earlier move from the re-send first: the new
+            // move sets it again only once its own command went out. This
+            // only withdraws the old move, under mutex_ where no body runs;
+            // decision 0006 rule 3's bump still comes before the new flags.
+            manual_axis_resend_[axis] = false;
             const int dir = rate > 0.0 ? positive_dir : negative_dir;
             protocol.move_axis_start(dir, std::abs(rate));
             // Decision 0006 rule 3: supersede the running re-send under mutex_
             // before this move's flags change; start() below replaces it. Only
             // once the move went out: a failed send must leave the other
             // axis's re-send running.
-            move_axis_generation_.bump();
+            generation = move_axis_generation_.bump();
             manual_axis_dir_[axis] = dir;
             manual_axis_rate_[axis] = std::abs(rate);
             manual_axis_resend_[axis] = true;
@@ -1093,7 +1128,69 @@ public:
         // found nothing to re-send may still read as running while it exits.
         // The new one supersedes it.
         lock.unlock();  // start() without mutex_: decision 0006 rule 4, async_operation.h rule 10
-        start_move_axis_resend();
+        try {
+            start_move_axis_resend();
+        } catch (const AlpacaException& ex) {
+            lock.lock();
+            stop_move_without_resend_locked(axis, generation, ex);
+        }
+    }
+
+    // Stops `axis` as MoveAxis(axis, 0) does and drops its re-send first: a
+    // stop asks for none whatever its outcome. Defensive dual-stop, matching
+    // the project's convention for fixed-direction (rather than signed-rate)
+    // motion protocols. Both stops are always tried. The driver cannot tell
+    // which direction the mount needed stopped, so any failed stop may be the
+    // one that mattered: the first error is returned, and the caller keeps
+    // the axis moving (#742). Empty when both went out.
+    std::string stop_axis_locked(int axis) {
+        manual_axis_resend_[axis] = false;
+        auto& protocol = OnStepProtocolWrapper::instance();
+        std::string stop_error;
+        // Direction codes: 0=North(Dec+), 1=South(Dec-), 2=East(RA+), 3=West(RA-).
+        for (const int dir : {axis == 0 ? 2 : 0, axis == 0 ? 3 : 1}) {
+            try {
+                protocol.move_axis_stop(dir);
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) {
+                    stop_error = ex.what();
+                }
+            } catch (...) {
+                if (stop_error.empty()) {
+                    stop_error = "unknown exception";
+                }
+            }
+        }
+        return stop_error;
+    }
+
+    // #1458: the slot refused the re-send body (no thread, or replaced bodies
+    // still finishing) after the move went out. The bump above has already
+    // superseded the running body, so the move would end at the firmware's
+    // time limit while Slewing read true: stop this axis and report it, as a
+    // MoveAxis that did not happen. Nothing is stopped when a newer MoveAxis
+    // went out meanwhile (the generation moved on), or when AbortSlew, a GOTO,
+    // Park, FindHome or a disconnect ended the move meanwhile (the axis no
+    // longer reads as moving): its stops would end that newer command. After
+    // a link drop the stops fail and the message says so. The other axis keeps
+    // moving, without a re-send until the next MoveAxis.
+    void stop_move_without_resend_locked(int axis, std::uint64_t generation, const AlpacaException& refusal) {
+        if (move_axis_generation_.current() != generation || !manual_axis_slewing_[axis]) {
+            throw refusal;
+        }
+        std::string message = std::string("MoveAxis could not keep the move going (") + refusal.what() + ")";
+        const std::string stop_error = stop_axis_locked(axis);
+        if (stop_error.empty()) {
+            manual_axis_slewing_[axis] = false;
+            message += "; the axis was stopped";
+        } else {
+            message += "; stopping the axis failed too: " + stop_error;  // Slewing stays true (#742)
+        }
+        if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
+            clear_manual_motion_locked();
+        }
+        ALPACA_LOG_WARN("OnStep", message);
+        throw AlpacaException(message, AlpacaError::DriverException);
     }
 
     std::pair<double, double> get_axis_rate_range(int axis) const override {
@@ -1125,6 +1222,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked_locked("AbortSlew");
+        supersede_park_or_home_locked();  // also ends a Park or FindHome still finishing (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         // Try every stop on its own, so one lost command cannot skip the others (#781).
         std::string stop_error;
@@ -1198,6 +1296,15 @@ public:
         throw AlpacaException("SyncToAltAz not supported", AlpacaError::MethodNotImplemented);
     }
 
+    void set_park_home_before_start_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        park_home_before_start_ = std::move(hook);
+    }
+
+    void set_move_axis_resend_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        move_axis_resend_.set_spawn_for_testing(std::move(spawn));
+    }
+
 private:
     void check_connected() const {
         if (!connected_) {
@@ -1215,7 +1322,7 @@ private:
 
     // Ends the driver's record of a MoveAxis and its re-send (#1378).
     // cancel() may be called with mutex_ held (async_operation.h rule 10).
-    // Slews, Park and AbortSlew end the re-send here with cancel() rather
+    // Slews, Park, FindHome and AbortSlew end the re-send here with cancel() rather
     // than a supersede (decision 0006 rule 3): safe, because the body checks
     // ctx.stop_reason() under mutex_ before it sends anything, and these
     // callers hold mutex_.
@@ -1387,7 +1494,13 @@ private:
         // asks for a fresh command on purpose. Firmware without 'g' gets no
         // re-send, and a pulse guide ('G') skips the tick.
         if (!cached_status_.is_guide_active) {
-            return true;
+            // No 'g' since this connect and no pulse guide hiding it: firmware
+            // without the letter, or a move that lapsed before this tick. The
+            // body ends instead of reading :GU# every 7 s for nothing (#1461);
+            // Slewing stays true until the client stops.
+            // (After 'g' was seen, a read without it and without 'G' already
+            // ended the move above.)
+            return cached_status_.is_pulse_guide_active;
         }
         if (!resend_within_altitude_limits_locked(protocol)) {
             return true;  // the firmware ends the move; 'g' then ends it here
@@ -1405,8 +1518,233 @@ private:
         return true;
     }
 
+    // open-astro#1430: OnStepX refuses a park or a home while a guide move
+    // (a MoveAxis, or its braking), a pulse guide, a GOTO or a home runs
+    // (Park::request, Home::request: CE_SLEW_IN_MOTION). Park and FindHome
+    // are asynchronous initiators (the 1 s STANDARD target), so they only do
+    // what is quick here: when that motion runs they send AbortSlew's stops
+    // (a stop that cannot be sent throws), and on a still mount they send the
+    // park or home and read its answer at once, so a refusal a retry cannot
+    // change (no park position set, outside limits) throws from the call.
+    // The rest runs in park_home_ with mutex_ released between steps: wait
+    // until :GU# shows the mount still (no 'g', 'G', GOTO or 'h'; up to
+    // kStopSettleTimeout), then send and retry "in motion" refusals (up to
+    // kInMotionRetryWindow). A refusal there is kept and raised by Slewing,
+    // and by AtPark or AtHome, until the next motion command or a reconnect.
+    // A newer motion command (supersede_park_or_home_locked()) ends the body
+    // without sending anything. Park and home end with tracking off, so no
+    // tracking restore is kept (#1218). The stops, the :GU# polls, :hP# and
+    // :GE# (up to 1 s each without a reply) and :hC# hold mutex_, as every
+    // OnStep exchange does; decision 0016 rule 1 calls that a defect, and
+    // moving OnStep's I/O off mutex_ is #1449.
+    void start_park_or_home_locked(std::unique_lock<std::mutex>& lock, const char* who, bool home) {
+        supersede_park_or_home_locked();
+        const std::uint64_t claim = park_home_claim_;
+        const bool stopped = stop_motion_before_park_or_home_locked(who);
+        int code = -1;
+        if (!stopped && try_park_or_home_locked(who, home, code)) {
+            finish_park_or_home_locked(home);
+            return;
+        }
+        // Decision 0006 rule 3: claimed under mutex_ before the unlock, so a
+        // newer motion command in the gap before start() still ends this one,
+        // and Slewing reads true from here on. The body runs whatever request
+        // is current when it starts, so a newer Park or FindHome whose start()
+        // lands first is still carried out by the body started last.
+        park_home_request_ = ParkHomeRequest{claim, who, home, stopped, code};
+        // Test seam, read under mutex_.
+        const auto before_start = park_home_before_start_;
+        lock.unlock();  // start() without mutex_: decision 0006 rule 4
+        if (before_start) {
+            before_start();  // lands a call in the gap
+        }
+        try {
+            park_home_.start([this](util::OperationContext& ctx) { run_park_or_home(ctx); });
+        } catch (const AlpacaException&) {
+            lock.lock();
+            if (park_home_request_ && park_home_request_->claim == claim) {
+                park_home_request_.reset();  // no body will finish it
+            }
+            throw;
+        }
+    }
+
+    bool moving_locked() const {
+        return manual_axis_slewing_[0] || manual_axis_slewing_[1] || cached_status_.is_slewing ||
+               cached_status_.is_guide_active || cached_status_.is_pulse_guide_active || cached_status_.is_homing;
+    }
+
+    // Sends AbortSlew's stops when the mount moves: true when it did.
+    bool stop_motion_before_park_or_home_locked(const char* who) {
+        if (!moving_locked()) {
+            return false;
+        }
+        auto& protocol = OnStepProtocolWrapper::instance();
+        std::string stop_error;
+        const auto try_stop = [&stop_error](const std::function<void()>& stop) {
+            try {
+                stop();
+            } catch (const std::exception& ex) {
+                if (stop_error.empty()) {
+                    stop_error = ex.what();
+                }
+            }
+        };
+        try_stop([&protocol]() { protocol.abort_slew(); });
+        for (int dir = 0; dir < 4; ++dir) {
+            try_stop([&protocol, dir]() { protocol.move_axis_stop(dir); });
+        }
+        if (!stop_error.empty()) {
+            // The mount may still be moving: leave Slewing as it was, but stop
+            // re-sending a MoveAxis, as AbortSlew does (#781).
+            manual_axis_resend_[0] = false;
+            manual_axis_resend_[1] = false;
+            throw AlpacaException(std::string(who) + ": could not stop the running motion first: " + stop_error,
+                                  AlpacaError::DriverException);
+        }
+        clear_manual_motion_locked();
+        slewing_cached_ = false;
+        slew_force_until_ = std::chrono::steady_clock::time_point::min();
+        tracking_before_slew_ = false;
+        return true;
+    }
+
+    // One park (:hP#, '1' or '0') or home (:hC#, no reply) try, with :GE#
+    // read right after it, before any other command replaces the code
+    // (OnStepX and OnStep 4.x have it). True when the mount took it. A
+    // refusal a retry may change sets `code` (22 "in motion", or -1 for a
+    // park on firmware without :GE#, whose reason is unknown) and returns
+    // false; any other refusal throws InvalidOperation. Without a code a
+    // home counts as started, as before.
+    bool try_park_or_home_locked(const char* who, bool home, int& code) {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        if (home) {
+            protocol.find_home();
+            code = protocol.get_last_command_error().value_or(kCeNone);
+        } else {
+            if (protocol.park()) {
+                return true;
+            }
+            code = protocol.get_last_command_error().value_or(-1);
+        }
+        if (code == kCeNone || code == kCeTrue) {
+            return true;  // for a park: the reply was lost or garbled, but the mount took it
+        }
+        if (code != kCeSlewInMotion && !(code < 0 && !home)) {
+            throw park_or_home_refused(who, code);
+        }
+        return false;
+    }
+
+    static AlpacaException park_or_home_refused(const char* who, int code) {
+        return AlpacaException(std::string(who) + " refused by the mount (" +
+                                   (code < 0 ? std::string("no reason given") : describe_onstepx_error(code)) + ")",
+                               AlpacaError::InvalidOperation);
+    }
+
+    // The mount took the park or home: it now moves to it with tracking off.
+    void finish_park_or_home_locked(bool home) {
+        tracking_before_slew_ = false;  // never restart tracking afterwards (#1218)
+        cached_status_.is_at_home = false;
+        cached_status_.is_slewing = true;
+        if (!home) {
+            cached_status_.is_parked = false;
+            clear_manual_motion_locked();
+        }
+        status_cache_valid_ = true;
+        last_status_update_ = clock_.now();
+    }
+
+    // The park_home_ body: settle (when the call sent stops), then send and
+    // retry. Waits on the task clock with mutex_ released (decision 0005).
+    void run_park_or_home(util::OperationContext& ctx) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!park_home_request_) {
+            return;  // superseded, or carried out by an earlier body
+        }
+        const ParkHomeRequest request = *park_home_request_;
+        run_park_or_home_locked(lock, ctx, request.who, request.home, request.stopped, request.code, request.claim);
+        // Done, unless a newer start() superseded this body: the body it
+        // started runs the request. A newer claim already replaced it.
+        if (ctx.stop_reason() != util::StopReason::Superseded && park_home_request_ &&
+            park_home_request_->claim == request.claim) {
+            park_home_request_.reset();
+        }
+    }
+
+    // The steps of the body; returns with `lock` held.
+    void run_park_or_home_locked(std::unique_lock<std::mutex>& lock, util::OperationContext& ctx, const char* who,
+                                 bool home, bool settle, int code, std::uint64_t claim) {
+        const auto still_ours = [&] {
+            return ctx.stop_reason() == util::StopReason::None && connected_ && park_home_claim_ == claim;
+        };
+        const auto wait = [&](std::chrono::milliseconds d) {
+            lock.unlock();
+            const bool woke = ctx.wait_for(d);
+            lock.lock();
+            return woke && still_ours();
+        };
+        try {
+            if (!still_ours()) {
+                return;
+            }
+            if (settle) {
+                const auto settle_deadline = clock_.now() + kStopSettleTimeout;
+                for (;;) {
+                    refresh_status_cache_locked(true);
+                    if (!moving_locked() || clock_.now() >= settle_deadline) {
+                        break;  // still moving at the deadline: the refusal reports it
+                    }
+                    if (!wait(kStopSettlePoll)) {
+                        return;
+                    }
+                }
+            }
+            const auto deadline = clock_.now() + kInMotionRetryWindow;
+            bool try_now = settle;
+            for (;;) {
+                if (!try_now) {
+                    if (clock_.now() >= deadline) {
+                        throw park_or_home_refused(who, code);
+                    }
+                    if (!wait(kInMotionRetryPoll)) {
+                        return;
+                    }
+                }
+                try_now = false;
+                if (try_park_or_home_locked(who, home, code)) {
+                    finish_park_or_home_locked(home);
+                    return;
+                }
+            }
+        } catch (const AlpacaException& ex) {
+            if (still_ours()) {
+                park_home_error_ = KeptParkHomeError{home, ex.what(), ex.error_code()};
+            }
+        }
+    }
+
+    // A newer motion command or a reconnect: a Park or FindHome still
+    // finishing ends without sending anything, and its kept refusal is
+    // dropped. cancel() never blocks, so mutex_ may be held (rule 10).
+    void supersede_park_or_home_locked() {
+        park_home_error_.reset();
+        ++park_home_claim_;
+        park_home_request_.reset();
+        park_home_.cancel();
+    }
+
+    // Raises a refusal the park_home_ body kept: any for Slewing, only a
+    // park's for AtPark and a home's for AtHome.
+    void raise_park_home_error_locked(std::optional<bool> home) const {
+        if (park_home_error_ && (!home || *home == park_home_error_->home)) {
+            throw AlpacaException(park_home_error_->message, park_home_error_->code);
+        }
+    }
+
     // The per-session state a disconnect or a lost link leaves behind.
     void reset_session_state_locked() {
+        supersede_park_or_home_locked();
         refraction_from_firmware_.reset();
         {
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
@@ -1503,6 +1841,7 @@ private:
 
     void start_slew_locked(double ra, double dec, const char* context) {
         validate_ra_dec(ra, dec, context);
+        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
@@ -1843,6 +2182,34 @@ private:
     // body touches. The destructor joins it explicitly as well.
     util::OperationGeneration move_axis_generation_;
     mutable util::AsyncOperation move_axis_resend_{"OnStep MoveAxis re-send", move_axis_generation_, clock_};
+
+    // #1430: a refusal the park_home_ body met, raised by Slewing and by
+    // AtPark (a park's) or AtHome (a home's). Under mutex_.
+    struct KeptParkHomeError {
+        bool home;
+        std::string message;
+        int code;
+    };
+    std::optional<KeptParkHomeError> park_home_error_;
+    // The current Park/FindHome's claim (decision 0006 rule 3), bumped by
+    // every supersede, and the request its background part is still to
+    // finish. Under mutex_.
+    struct ParkHomeRequest {
+        std::uint64_t claim;
+        const char* who;
+        bool home;
+        bool stopped;
+        int code;
+    };
+    std::uint64_t park_home_claim_ = 0;
+    std::optional<ParkHomeRequest> park_home_request_;
+    // Test seam: runs between the unlock and park_home_.start(). Set only
+    // while no Park or FindHome is in flight.
+    std::function<void()> park_home_before_start_;
+    // The tail of a Park or FindHome that must first wait for motion to end
+    // (#1430). Declared last with the re-send slot, for the same reason.
+    util::OperationGeneration park_home_generation_;
+    mutable util::AsyncOperation park_home_{"OnStep Park/FindHome", park_home_generation_, clock_};
 };
 
 std::unique_ptr<TelescopeDriver> create_onstep_telescope(int device_number, const ConnectionInfo& connection_info,
@@ -1900,6 +2267,19 @@ std::unique_ptr<TelescopeDriver> create_onstep_telescope_auto(int device_number,
     return create_onstep_telescope_deferred(
         device_number, [mount_index] { return resolve_onstep_serial_auto(mount_index); }, site_latitude_deg,
         site_longitude_deg, site_elevation_m, sync_time_on_connect);
+}
+
+void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_park_home_before_start_for_testing(std::move(hook));
+    }
+}
+
+void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
+                                            std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_move_axis_resend_spawn_for_testing(std::move(spawn));
+    }
 }
 
 namespace detail {
