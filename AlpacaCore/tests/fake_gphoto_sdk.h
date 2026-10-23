@@ -170,6 +170,11 @@ public:
     // set it to drive the exposure and bulb loops.
     // Ownership (as fake_qhy_sdk.h): set before the driver exists, never changed while a connect is in flight.
     std::function<void(const std::string&)> before_call;
+    // The widget name of the has_widget / get_choices / set_choice_value call now running, set before before_call
+    // fires, so a hook can key a fault on the widget instead of counting calls (a call count shifts when a priming
+    // capture or another connect step adds calls). Other calls leave it unchanged, so a hook checks the call name
+    // first.
+    std::string current_widget;
     // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
     // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
     bool skip_sleeps{false};
@@ -255,12 +260,14 @@ public:
     }
 
     bool has_widget(int handle, const std::string& name) override {
+        current_widget = name;
         log_and_maybe_throw("has_widget");
         const auto& cam = camera_for(handle);
         return cam.choices.count(name) != 0 || cam.toggle_value.count(name) != 0 || cam.text_value.count(name) != 0;
     }
 
     std::vector<std::string> get_choices(int handle, const std::string& name) override {
+        current_widget = name;
         log_and_maybe_throw("get_choices");
         const auto& cam = camera_for(handle);
         auto it = cam.choices.find(name);
@@ -278,6 +285,7 @@ public:
     }
 
     void set_choice_value(int handle, const std::string& name, const std::string& value) override {
+        current_widget = name;
         log_and_maybe_throw("set_choice_value");
         auto& cam = camera_for(handle);
         for (const auto& refused : refuse_choice_writes) {
