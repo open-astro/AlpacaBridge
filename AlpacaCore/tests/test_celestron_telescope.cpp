@@ -2164,8 +2164,7 @@ TEST_CASE("Celestron snapshot - gps_status reports the GPS module's link and rea
     require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
 }
 
-TEST_CASE("Celestron snapshot - gps_status is not listed once the link is lost",
-          "[celestron][telescope][snapshot]") {
+TEST_CASE("Celestron snapshot - gps_status is not listed once the link is lost", "[celestron][telescope][snapshot]") {
     FakeTaskClock clock;
     auto st = std::make_shared<SnapshotMount>();
     alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
