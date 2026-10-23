@@ -283,7 +283,22 @@ bool raw_port_looks_like_flatpanel_candidate(const std::string& port_path) {
 }  // namespace
 #endif
 
+namespace {
+GeminiFlatPanelScanHooks& scan_hooks() {
+    static GeminiFlatPanelScanHooks hooks;
+    return hooks;
+}
+}  // namespace
+
+void set_gemini_flatpanel_scan_hooks_for_testing(GeminiFlatPanelScanHooks hooks) { scan_hooks() = std::move(hooks); }
+
+bool probe_gemini_flatpanel_port(const std::string& port_path) {
+    if (const auto& on_probe = scan_hooks().on_probe) on_probe(port_path);
+    return probe_port(port_path);
+}
+
 std::vector<GeminiFlatPanelPortInfo> enumerate_gemini_flatpanel_ports() {
+    if (const auto& enumerate = scan_hooks().enumerate) return enumerate();
     std::vector<GeminiFlatPanelPortInfo> results;
 
 #ifndef _WIN32

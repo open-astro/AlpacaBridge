@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/gemini/gemini_pdh_protocol_wrapper.h>
@@ -224,23 +225,34 @@ public:
         if (connected) {
             // Resolve auto-detect here (on the background connection thread),
             // not at registration. A local copy keeps config_ as the durable
-            // intent so a later reconnect re-scans.
+            // intent so a later reconnect resolves the port again (remembered port first, then the scan).
             PdhConnectionConfig effective = config_;
+            bool auto_detected = false;
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
-                auto ports = enumerate_gemini_pdh_ports();
-                if (ports.empty()) {
-                    throw AlpacaException(
-                        util::serial_auto_detect_failed_message("Gemini Power & Data Hubs Advanced 3"),
-                        AlpacaError::NotConnected);
+                // The port that worked last time goes first: one handshake instead of the full
+                // search, which takes about 8 s on a rig and outlasts a client's connect timeout.
+                if (const auto remembered = util::recall_serial_location(
+                        util::location_key(get_unique_id(), effective.auto_detect_index), probe_gemini_pdh_port)) {
+                    ALPACA_LOG_INFO("Gemini",
+                                    "Power & Data Hubs Advanced 3 answered on remembered port " + *remembered);
+                    effective.serial_port = *remembered;
+                } else {
+                    auto ports = enumerate_gemini_pdh_ports();
+                    if (ports.empty()) {
+                        throw AlpacaException(
+                            util::serial_auto_detect_failed_message("Gemini Power & Data Hubs Advanced 3"),
+                            AlpacaError::NotConnected);
+                    }
+                    if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
+                        throw AlpacaException("Hub index " + std::to_string(effective.auto_detect_index) +
+                                                  " out of range (detected " + std::to_string(ports.size()) + ")",
+                                              AlpacaError::NotConnected);
+                    }
+                    const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
+                    ALPACA_LOG_INFO("Gemini", "Auto-detected Power & Data Hubs Advanced 3 at " + port.port_path);
+                    effective.serial_port = port.port_path;
                 }
-                if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
-                    throw AlpacaException("Hub index " + std::to_string(effective.auto_detect_index) +
-                                              " out of range (detected " + std::to_string(ports.size()) + ")",
-                                          AlpacaError::NotConnected);
-                }
-                const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
-                ALPACA_LOG_INFO("Gemini", "Auto-detected Power & Data Hubs Advanced 3 at " + port.port_path);
-                effective.serial_port = port.port_path;
+                auto_detected = true;
             }
             // A saved serial entry with no port (#508 item 1) is registered so it stays listed;
             // refuse here, in words an operator can act on, instead of opening "".
@@ -251,6 +263,11 @@ public:
                     AlpacaError::NotConnected);
             }
             protocol_.connect(effective);
+            // Remember the port only after the handshake held: a port the user configured is never stored.
+            if (auto_detected) {
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
+            }
             {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 for (auto& c : commanded_) {
