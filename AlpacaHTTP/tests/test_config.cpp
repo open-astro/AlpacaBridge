@@ -387,6 +387,66 @@ int main() {
         ::unlink(path.c_str());
     }
 
+    // #1509: discovery.port defaults to 32227 (Alpaca API Reference s5.8.1),
+    // is read from the file and ALPACAHTTP_DISCOVERY_PORT, and a value outside
+    // 1-65535 keeps the default.
+    {
+        // case: discovery.port defaults to 32227, reads file and env, rejects out-of-range
+        alpacahttp::Config fresh;
+        EXPECT(fresh.discovery_port() == 32227);
+        EXPECT(alpacahttp::Config::kDefaultDiscoveryPort == 32227);
+
+        char path_template[] = "/tmp/alpacahttp_test_discovery_port_XXXXXX";
+        int fd = ::mkstemp(path_template);
+        EXPECT(fd >= 0);
+        const std::string path = path_template;
+        ::close(fd);
+        const auto write_file = [&path](const char* value) {
+            std::ofstream out(path);
+            out << "discovery:\n  enabled: true\n";
+            if (*value != '\0') {
+                out << "  port: " << value << "  # a comment\n";
+            }
+        };
+        const auto loaded_port = [&path]() {
+            alpacahttp::Config config;
+            EXPECT(config.load(path));
+            return config.discovery_port();
+        };
+        ::unsetenv("ALPACAHTTP_DISCOVERY_PORT");
+
+        write_file("");
+        EXPECT(loaded_port() == 32227);
+        write_file("40000");
+        EXPECT(loaded_port() == 40000);
+        write_file("1");
+        EXPECT(loaded_port() == 1);
+        write_file("65535");
+        EXPECT(loaded_port() == 65535);
+        for (const char* bad : {"0", "65536", "-5", "abc", "99999999999"}) {
+            write_file(bad);
+            EXPECT(loaded_port() == 32227);
+        }
+
+        // The environment overrides the file; an invalid value is ignored.
+        write_file("40000");
+        ::setenv("ALPACAHTTP_DISCOVERY_PORT", "41000", 1);
+        EXPECT(loaded_port() == 41000);
+        for (const char* bad : {"0", "65536", "-5", "abc", ""}) {
+            ::setenv("ALPACAHTTP_DISCOVERY_PORT", bad, 1);
+            EXPECT(loaded_port() == 40000);
+        }
+        ::unsetenv("ALPACAHTTP_DISCOVERY_PORT");
+
+        alpacahttp::Config setter;
+        setter.set_discovery_port(33000);
+        EXPECT(setter.discovery_port() == 33000);
+        setter.set_discovery_port(0);
+        EXPECT(setter.discovery_port() == 33000);
+
+        ::unlink(path.c_str());
+    }
+
     // open-astro#392: a '#' inside a double-quoted value is data; one outside
     // starts a comment.
     {

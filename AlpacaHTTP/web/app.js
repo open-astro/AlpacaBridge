@@ -1661,6 +1661,7 @@ async function loadServerInfo() {
         const syncFromClients = resolveDescriptionValue(desc, ['SyncSystemClockFromClients']);
         const clockText = clockStateText(desc);
         const hostCheck = hostCheckSettings(desc);
+        const discoveryPort = discoveryPortSetting(desc);
         // open-astro#354: adopt the host zone for the header clock. A missing
         // field (older server) or '' keeps the browser-zone rendering.
         serverTimeZone = String(resolveDescriptionValue(desc, ['TimeZone']) || '');
@@ -1705,6 +1706,15 @@ async function loadServerInfo() {
                     <span class="info-note">Comma-separated; a leading dot allows a domain and every name under it. Always allowed: ${escapeHtml(HOST_CHECK_ALWAYS_ALLOWED)}.</span>
                     <button id="server-allowed-hosts-save" class="btn btn-secondary btn-small" type="button">Save</button>
                 </div>` : ''}
+                ${discoveryPort !== null ? `
+                <div class="server-info-row">
+                    <span class="info-label">Discovery port</span>
+                    <div class="server-location">
+                        <input id="server-discovery-port-input" type="number" min="1" max="65535" step="1" value="${discoveryPort}">
+                    </div>
+                    <span class="info-note">UDP port the Alpaca discovery responder listens on (default 32227). Takes effect after restart.</span>
+                    <button id="server-discovery-port-save" class="btn btn-secondary btn-small" type="button">Save</button>
+                </div>` : ''}
                 <div class="server-info-row">
                     <span class="info-label">Profile Name</span>
                     <div class="server-location">
@@ -1740,6 +1750,18 @@ async function loadServerInfo() {
                 }
             });
             document.getElementById('server-allowed-hosts-save').addEventListener('click', saveAllowedHosts);
+        }
+
+        if (discoveryPort !== null) {
+            const discoveryPortInput = document.getElementById('server-discovery-port-input');
+            const saveDiscoveryPort = () => saveDiscoveryPortSetting(discoveryPortInput.value);
+            discoveryPortInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    saveDiscoveryPort();
+                }
+            });
+            document.getElementById('server-discovery-port-save').addEventListener('click', saveDiscoveryPort);
         }
 
         const locationInput = document.getElementById('server-location-input');
@@ -2038,6 +2060,31 @@ async function saveHostCheckSettings(values) {
     if (error) {
         document.getElementById('server-info-status')?.scrollIntoView({block: 'nearest'});
     }
+}
+
+// #1509: save the discovery port. The server validates 1-65535 and answers 400
+// with the reason; the responder binds the new port at the next restart.
+async function saveDiscoveryPortSetting(text) {
+    setServerInfoStatus('Saving discovery port...');
+    let error = '';
+    try {
+        const response = await fetch(API_BASE + '/management/v1/description', {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({DiscoveryPort: String(text).trim()})
+        });
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (e) {
+            data = null;
+        }
+        error = settingsSaveError(response.status, data);
+    } catch (e) {
+        error = e.message;
+    }
+    await loadServerInfo();
+    setServerInfoStatus(error ? 'Discovery port not saved: ' + error : 'Discovery port saved; it takes effect after restart.', !!error);
 }
 
 async function updateServerProfileName() {

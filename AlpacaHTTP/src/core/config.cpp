@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacahttp/config.h>
+#include <alpacahttp/util/logging_adapter.h>
 #include <alpacahttp/util/yaml_comment.h>
 
 #include <algorithm>
@@ -117,6 +118,21 @@ bool parse_uint16_value(const std::string& value, std::uint16_t& result) {
     }
 }
 
+// A UDP/TCP port, 1-65535 (0 is not a usable discovery port). Digits only:
+// stoul would take "-5" as a huge unsigned value.
+bool parse_port_value(const std::string& value, std::uint16_t& result) {
+    if (value.empty() || !std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); }) ||
+        value.size() > 5) {
+        return false;
+    }
+    const unsigned long parsed = std::stoul(value);
+    if (parsed < 1 || parsed > std::numeric_limits<std::uint16_t>::max()) {
+        return false;
+    }
+    result = static_cast<std::uint16_t>(parsed);
+    return true;
+}
+
 bool parse_size_value(const std::string& value, std::size_t& result) {
     try {
         auto parsed = std::stoull(value);
@@ -211,6 +227,11 @@ void Config::load_config_from_yaml(const std::string& config_path) {
                 bool enabled = discovery_enabled_;
                 if (parse_bool_value(value, enabled)) {
                     discovery_enabled_ = enabled;
+                }
+            } else if (key == "port") {
+                if (!parse_port_value(value, discovery_port_)) {
+                    util::log_warning("Ignoring discovery.port '" + value + "': expected 1-65535; keeping " +
+                                      std::to_string(discovery_port_));
                 }
             }
         } else if (current_section == "logging") {
@@ -336,6 +357,14 @@ void Config::apply_environment_overrides() {
         std::string discovery_str = discovery_env;
         std::transform(discovery_str.begin(), discovery_str.end(), discovery_str.begin(), ::tolower);
         discovery_enabled_ = (discovery_str == "true" || discovery_str == "1");
+    }
+
+    const char* discovery_port_env = std::getenv("ALPACAHTTP_DISCOVERY_PORT");
+    if (discovery_port_env) {
+        if (!parse_port_value(discovery_port_env, discovery_port_)) {
+            util::log_warning("Ignoring ALPACAHTTP_DISCOVERY_PORT: expected 1-65535; keeping " +
+                              std::to_string(discovery_port_));
+        }
     }
 
     const char* log_level_env = std::getenv("ALPACAHTTP_LOG_LEVEL");

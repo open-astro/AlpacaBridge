@@ -437,6 +437,13 @@ function hostCheckSettings(desc) {
     };
 }
 
+// #1509: the saved discovery port the description reports, or null when the
+// server does not report one (an older build) so the row is not shown.
+function discoveryPortSetting(desc) {
+    const port = desc && desc.DiscoveryPort;
+    return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
 // The message to show for a settings PUT, or '' when it saved. The server
 // refuses a lockout with HTTP 400 and the reason in ErrorMessage, so the body
 // is read before the status decides anything.
@@ -663,7 +670,7 @@ if (typeof module !== 'undefined' && module.exports) {
     module.exports = { isValidClockSeconds, serverClockError, localZoneLabel, formatServerClock, buildBadgeLabel,
                        updateStatusText, installerStateText, renderReleaseNotes,
                        channelSelectorState, channelDowngradeNotice, channelSwitchText,
-                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, settingsSaveError,
+                        HOST_CHECK_ALWAYS_ALLOWED, hostCheckSettings, discoveryPortSetting, settingsSaveError,
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
