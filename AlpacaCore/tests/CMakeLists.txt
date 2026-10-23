@@ -75,6 +75,8 @@ if(TARGET alpacacore_zwo)
     # Late reply after a timed-out command (issue #1527).
     list(APPEND TEST_SOURCES test_zwo_mount_reply_sync.cpp)
     list(APPEND TEST_SOURCES test_zwo_mount_network_isolation.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_identity.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_identity_claim.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)
