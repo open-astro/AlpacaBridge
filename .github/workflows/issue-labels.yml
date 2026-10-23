@@ -1,0 +1,49 @@
+# Comment on an open issue that lacks a type, priority or size label, and
+# remove the comment once all three are set (issue #1361). Nothing is
+# labelled or closed. The rules are in scripts/check_issue_labels.py.
+#
+# issues: the job checks out the default branch only and passes the issue
+# number and author to the script through the environment, never into the
+# shell text (issue titles and bodies are attacker-controlled). The script
+# reads the current labels itself.
+
+name: Issue labels
+
+on:
+  issues:
+    types: [opened, reopened, labeled, unlabeled]
+
+permissions: {}
+
+# One run per issue at a time, so a burst of label events cannot race on the
+# single comment; a pending run reads the labels when it starts.
+concurrency:
+  group: issue-labels-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the issue's labels
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write   # create, edit and delete the one label comment
+    steps:
+      - name: Checkout default branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Comment on or clear the label reminder
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          AUTHOR_LOGIN: ${{ github.event.issue.user.login }}
+          AUTHOR_TYPE: ${{ github.event.issue.user.type }}
+        # pipefail: the default `bash -e` would let tee hide a failed gh call.
+        run: |
+          set -o pipefail
+          python3 scripts/check_issue_labels.py | tee -a "${GITHUB_STEP_SUMMARY}"
