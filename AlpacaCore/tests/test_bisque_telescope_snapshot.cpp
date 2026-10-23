@@ -472,7 +472,8 @@ namespace {
 // Starts `initiator` on a thread, waits until its TheSkyX command (the `exchanges`-th transaction after the call) is
 // on the wire, calls AbortSlew, then checks that Slewing is false: the abort reached TheSkyX after the command, so the
 // mount is stopped and the driver must say so.
-void abort_during_initiator_exchange(int exchanges, const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+void abort_during_initiator_exchange(int exchanges,
+                                     const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
     Rig rig(5000);
     REQUIRE(rig.poll());
     rig.mount.latency_ms = 300;
