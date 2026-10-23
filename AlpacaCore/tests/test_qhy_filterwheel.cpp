@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -521,12 +522,38 @@ TEST_CASE("QHY Filter Wheel Driver - Getters do not wait behind a connect", "[qh
     driver->set_connected(false);
 }
 
-// Falsified by: set_connected(false) closing the shared handle without the I/O lock,
-// so a read in flight sees a closed handle (physical_closes/underflow_closes).
+// Forwards to LockedQHYSDK and records a close_camera() that arrives while a
+// get_cfw_position() is still inside the SDK. LockedQHYSDK serialises every
+// forward under one mutex, so it can never show this overlap itself: the
+// counter sits outside that mutex, in front of it.
+class CloseDuringReadSDK : public LockedQHYSDK {
+public:
+    explicit CloseDuringReadSDK(FakeQHYSDK& fake) : LockedQHYSDK(fake) {}
+    int get_cfw_position(const std::string& id) override {
+        reads_in_flight.fetch_add(1);
+        struct Done {
+            std::atomic<int>& n;
+            ~Done() { n.fetch_sub(1); }
+        } done{reads_in_flight};
+        return LockedQHYSDK::get_cfw_position(id);
+    }
+    void close_camera(const std::string& id) override {
+        if (reads_in_flight.load() > 0) {
+            closes_during_read.fetch_add(1);
+        }
+        LockedQHYSDK::close_camera(id);
+    }
+    std::atomic<int> reads_in_flight{0};
+    std::atomic<int> closes_during_read{0};
+};
+
+// Falsified by: qhy_filterwheel_driver.cpp set_connected(false) closing the
+// handle without taking io_mutex_, so close_camera() arrives while a
+// get_cfw_position() is still in the SDK (closes_during_read).
 TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in flight", "[qhy][filterwheel][unit]") {
     auto fake = make_fake();
     SlowCall slow(fake);
-    LockedQHYSDK sdk(fake);
+    CloseDuringReadSDK sdk(fake);
     auto driver = alpacacore::vendor::qhy::create_qhy_filterwheel(0, "fake-qhy-0", sdk);
     driver->set_connected(true);
     driver->set_position(3);
@@ -540,14 +567,15 @@ TEST_CASE("QHY Filter Wheel Driver - Disconnect returns with a Position read in 
         }
     });
     REQUIRE(slow.wait_inside());
-    const auto t0 = std::chrono::steady_clock::now();
-    driver->set_connected(false);
-    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    // A hang (for example mutex_ held across the I/O-locked close) becomes a
+    // failed CHECK instead of a runner timeout.
+    auto closer = std::async(std::launch::async, [&] { driver->set_connected(false); });
+    const bool returned = closer.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
     slow.disarm();
     reader.join();
-    CHECK(elapsed < std::chrono::seconds(5));
+    CHECK(returned);
     CHECK_FALSE(driver->get_connected());
-    // The read held the I/O lock, so the close came after it: no close under a live call.
+    CHECK(sdk.closes_during_read.load() == 0);
     CHECK(fake.physical_closes == 1);
     CHECK(fake.underflow_closes == 0);
 }

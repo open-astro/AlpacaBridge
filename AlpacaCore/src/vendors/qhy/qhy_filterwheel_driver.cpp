@@ -268,14 +268,13 @@ public:
         ensure_connected();
         validate_position(position);
         // Serialise the move against live reads and the close (I/O lock), then
-        // look again: a disconnect may have run while this waited.
+        // validate again under both locks: a disconnect and a reconnect to a
+        // wheel with fewer slots can run between the early check above and here.
         std::lock_guard<std::mutex> io(io_mutex_);
         std::string id;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!connected_.load()) {
-                throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
-            }
+            validate_position_locked(position);
             id = camera_id_.value();
             // Set BEFORE issuing the move (not after): if move_cfw throws mid-
             // call the catch below clears it again. Assumption: a failing
@@ -352,6 +351,11 @@ private:
 
     void validate_position(int position) const {
         std::lock_guard<std::mutex> lock(mutex_);
+        validate_position_locked(position);
+    }
+
+    // Caller holds mutex_.
+    void validate_position_locked(int position) const {
         // A disconnect since ensure_connected() clears the slot count: report it as
         // NotConnected, not as a missing slot count.
         if (!connected_.load() || !camera_id_.has_value()) {
