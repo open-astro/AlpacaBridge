@@ -1634,22 +1634,14 @@ TEST_CASE("GPhoto camera fake - a camera gone from the USB bus during the longex
     fake.cameras.push_back(cam);
     FakeRawDecoder decoder;
 
-    // A first connect with the default options learns the geometry, so the next connect ends right after
-    // configure_after_connect_locked and the longexpnr step is the last of its kind.
-    auto primer = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
-    primer->set_connected(true);
-    primer->set_connected(false);
-    fake.call_log.clear();
-    primer->set_connected(true);
-    const int baseline = count_calls(fake, call);
-    primer->set_connected(false);
-    fake.call_log.clear();
-    const int closed_before = fake.close_count;
+    // Keyed on the widget name, not on a call count: only the longexpnr step touches that widget, so the fault
+    // lands in it however many other calls (a priming capture, a lost sensor-cache line) a connect makes.
     const int opened_before = fake.open_count;
-
-    int seen = 0;
+    const int closed_before = fake.close_count;
+    int hits = 0;
     fake.before_call = [&](const std::string& name) {
-        if (name == call && ++seen == baseline + 1) {
+        if (name == call && fake.current_widget == "longexpnr") {
+            ++hits;
             throw alpacacore::vendor::gphoto::GPhotoDeviceGoneException("Could not find the requested device",
                                                                         alpacacore::AlpacaError::DriverException);
         }
@@ -1660,6 +1652,7 @@ TEST_CASE("GPhoto camera fake - a camera gone from the USB bus during the longex
                                                                    alpacacore::util::default_task_clock(), options);
     CHECK_THROWS(driver->set_connected(true));
 
+    CHECK(hits == 1);
     CHECK(driver->get_connected() == false);
     CHECK(fake.open_count - opened_before == 1);
     CHECK(fake.close_count - closed_before == 1);
