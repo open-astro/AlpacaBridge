@@ -44,6 +44,17 @@ namespace alpacacore::vendor::zwo {
 namespace {
 
 constexpr double kSiderealRateDegPerSec = 360.0 / 86164.0905;
+
+// A device reply quoted in an error or log line: control and non-ASCII bytes become '?', and it is cut at 48
+// characters, so a hostile reply cannot forge log lines (CWE-117).
+std::string sanitize_for_log(std::string_view text) {
+    std::string out;
+    for (const char ch : text) {
+        if (out.size() >= 48) break;
+        out.push_back(ch >= 0x20 && ch < 0x7f ? ch : '?');
+    }
+    return out;
+}
 constexpr double kMaxMoveAxisRateDegPerSec = kSiderealRateDegPerSec * 1440.0;
 constexpr double kHoursToDegrees = 15.0;
 constexpr double kMinSiteElevationMeters = -300.0;
@@ -659,12 +670,26 @@ public:
                 reset_session_state_for_connect();
                 connected_.store(true);
 
+                // Identity gate (decision 0017 rule 8): nothing is written to a device that has not answered :GVP
+                // as a ZWO AM mount. One attempt plus one retry, each under the command timeout.
                 std::string mount_info;
-                try {
-                    mount_info = protocol.get_mount_info();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                    mount_info.clear();
+                std::string refusal;
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    try {
+                        mount_info = protocol.get_mount_info();
+                        if (is_zwo_am_model_reply(mount_info)) {
+                            refusal.clear();
+                            break;
+                        }
+                        refusal = "the device answered :GVP with '" + sanitize_for_log(mount_info) +
+                                  "', which is not a ZWO AM mount";
+                    } catch (const std::exception& e) {
+                        refusal = std::string("the device gave no usable reply to :GVP (") +
+                                  sanitize_for_log(e.what()) + "), so it is not confirmed as a ZWO AM mount";
+                    }
+                }
+                if (!refusal.empty()) {
+                    throw AlpacaException("Refusing to connect: " + refusal, AlpacaError::NotConnected);
                 }
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
