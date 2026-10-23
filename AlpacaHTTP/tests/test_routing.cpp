@@ -125,9 +125,9 @@ bool is_host_refusal(const alpacahttp::Response& response, const std::string& ho
 // device is missing — callers EXPECT(!cfg.is_null()) first, then assert every
 // persisted field survived (the automated catch for sanitize_device_config
 // allowlist gaps and FormData-style key loss).
-// Decision 0018: every stored config carries the server's GUID in uniqueId.
-// The config helpers below check its shape and drop it, so the many exact
-// config comparisons stay about the vendor's own fields; a case about the GUID
+// Decision 0018: every stored config carries the stored ID (a minted GUID or a
+// kept ID) in uniqueId. The config helpers below check its shape and drop it, so the many exact
+// config comparisons stay about the vendor's own fields; a case about the ID
 // reads it through raw_listed_config().
 nlohmann::json without_unique_id(nlohmann::json config) {
     if (config.is_object() && config.contains("uniqueId")) {

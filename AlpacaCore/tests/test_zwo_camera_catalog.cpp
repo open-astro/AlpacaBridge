@@ -185,7 +185,7 @@ TEST_CASE("ZWO camera catalog - a serial-less entry skips the serials other entr
     const BindResult skipped = bind(rig, by_name, 6, Source::Persisted, {peer(5, std::string(kFakeSerial))});
     REQUIRE(skipped.driver != nullptr);
     CHECK_FALSE(learned(skipped, "serialNumber").has_value());
-    CHECK_FALSE(learned(skipped, "uniqueId").has_value());  // the router's GUID (decision 0018)
+    CHECK_FALSE(learned(skipped, "uniqueId").has_value());  // the router stored ID (decision 0018)
 
     // Without the claim the same entry binds the camera and learns its serial.
     const BindResult taken = bind(rig, by_name, 6, Source::Persisted, {});
