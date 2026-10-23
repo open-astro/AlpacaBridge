@@ -232,3 +232,25 @@ TEST_CASE("Gemini Focuser Snapshot - a temperature probe that fails keeps Positi
 
     driver->set_connected(false);
 }
+
+// Falsified by: gemini_focuser_driver.cpp: set_connected() drop the connect's first-frame check (a connect whose first
+// state poll was lost succeeds with no frame).
+TEST_CASE("Gemini Focuser Driver - a getter after a successful connect never throws DriverException",
+          "[gemini][focuser][snapshot][unit]") {
+    FakeGeminiFocuser fake;
+    fake.set_garbage_state_replies(true);
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    bool connected = true;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException&) {
+        connected = false;  // refusing the connect is allowed; a half-up session is not
+    }
+    if (connected) {
+        REQUIRE(driver->get_connected());
+        CHECK_NOTHROW(driver->get_position());
+        CHECK_NOTHROW(driver->get_is_moving());
+        driver->set_connected(false);
+    }
+}

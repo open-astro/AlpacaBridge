@@ -204,15 +204,29 @@ public:
                 firmware_.clear();
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns. A failure leaves the snapshot
-            // empty; the getters then report it and the poll fills it later.
+            // answer the moment Connect returns.
             snapshot_.reset();
             {
                 std::lock_guard<std::mutex> lock(health_mutex_);
                 health_.reset();
                 temperature_retry_at_.reset();
             }
+            // A lost or dropped first reply gets one retry. A connect whose
+            // retry also publishes nothing fails: Connected true means the
+            // getters have a frame to serve (decisions 0010 and 0016).
             poll_state_once();
+            if (!snapshot_.read().has_value()) {
+                poll_state_once();
+            }
+            if (!snapshot_.read().has_value()) {
+                {
+                    std::lock_guard<std::mutex> lock(health_mutex_);
+                    health_.reset();
+                }
+                protocol_.disconnect();
+                throw AlpacaException("Gemini focuser did not answer the first state poll",
+                                      AlpacaError::DriverException);
+            }
             connected_.store(true);
             start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");

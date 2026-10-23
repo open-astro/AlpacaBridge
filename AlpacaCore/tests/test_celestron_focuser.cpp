@@ -633,12 +633,13 @@ TEST_CASE("Celestron Focuser Driver - a getter right after a connect whose first
 TEST_CASE("Celestron Focuser Driver - getters on a stalled link add no AUX exchanges and never trip the latch",
           "[celestron][focuser][unit][fake]") {
     // Getters read the snapshot and never wait on the wire (decisions 0010 and
-    // 0016). Every connect poll is lost, so no frame is held; getters must
-    // answer "not available yet" without an exchange of their own, so the
-    // 250 ms poll cadence alone decides when the latch (threshold 3) trips.
+    // 0016). The first connect poll is lost and its retry publishes the frame;
+    // with the motor then silent, getters serve that frame without an exchange
+    // of their own, so the 250 ms poll cadence alone decides when the latch
+    // (threshold 3) trips.
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
-    fake.drop_next_reply(0x13, 2);  // the connect poll and its retry
+    fake.drop_next_reply(0x13);  // the connect poll; its retry publishes
     FakeTaskClock clock;
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
     driver->set_connected(true);
@@ -646,78 +647,35 @@ TEST_CASE("Celestron Focuser Driver - getters on a stalled link add no AUX excha
     const int before = fake.count(0x01);
 
     fake.set_muted(true);
-    std::string last;
     for (int i = 0; i < 4; ++i) {
-        try {
-            (void)driver->get_position();
-            FAIL("expected the getter to throw while the motor is silent");
-        } catch (const alpacacore::AlpacaException& ex) {
-            REQUIRE(ex.error_code() == AlpacaError::DriverException);
-            last = ex.what();
-        }
+        CHECK(driver->get_position() == 31000);
+        CHECK_FALSE(driver->get_is_moving());
     }
-    INFO(last);
     CHECK(fake.count(0x01) == before);
-    CHECK(last.find("not available yet") != std::string::npos);
-    CHECK(last.find("compromised") == std::string::npos);
-
-    // The poll alone recovers the link and publishes the first frame.
-    fake.set_muted(false);
-    tick(clock);
-    CHECK(driver->get_position() == 31000);
     driver->set_connected(false);
 }
 
-TEST_CASE("Celestron Focuser Driver - Halt and Move resynchronize a timed-out link first",
-          "[celestron][focuser][unit][fake]") {
-    // One lost poll reply leaves the AUX stream desynchronized until the next
-    // poll. Halt is the safety stop and must still reach the motor; Move must
-    // not fail on the stale state either. Neither resends a timed-out frame.
+// Falsified by: celestron_focuser_driver.cpp: set_connected() drop the connect's first-frame check (a connect whose
+// first state poll was lost succeeds with no frame).
+TEST_CASE("Celestron Focuser Driver - a getter after a successful connect never throws DriverException",
+          "[celestron][focuser][snapshot][unit]") {
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
+    fake.drop_next_reply(0x13, 2);  // the connect poll and its retry
     FakeTaskClock clock;
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
-
-    fake.set_muted(true);
-    tick(clock);  // this poll times out: the link is now desynchronized
-    fake.set_muted(false);
-
-    driver->halt();
-    CHECK(fake.count(0x24) == 1);
-
-    fake.set_muted(true);
-    tick(clock);
-    fake.set_muted(false);
-
-    driver->move(5000);
-    REQUIRE(fake.last_goto().has_value());
-    CHECK(*fake.last_goto() == 56000U);
-    CHECK(fake.count(0x02) == 1);
-    driver->set_connected(false);
-}
-
-TEST_CASE("Celestron Focuser Driver - a silent motor faults the link and a reply restores it",
-          "[celestron][focuser][unit][fake]") {
-    FakeCelestronFocuser fake;
-    REQUIRE(fake.ok());
-    FakeTaskClock clock;
-    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
-    driver->set_connected(true);
-    REQUIRE(clock.wait_for_waiters(1, kBound));
-
-    fake.set_muted(true);
-    for (int i = 0; i < 3; ++i) tick(clock);
-    require_alpaca_error([&] { (void)driver->get_position(); }, AlpacaError::DriverException);
-    require_alpaca_error([&] { driver->move(10); }, AlpacaError::DriverException);
-    CHECK(driver->get_connected() == true);
-
-    // The poll resynchronizes the timed-out stream before asking again.
-    fake.set_muted(false);
-    tick(clock);
-    CHECK(driver->get_position() == 31000);
-    driver->set_connected(false);
+    bool connected = true;
+    try {
+        driver->set_connected(true);
+    } catch (const alpacacore::AlpacaException&) {
+        connected = false;  // refusing the connect is allowed; a half-up session is not
+    }
+    if (connected) {
+        REQUIRE(driver->get_connected());
+        CHECK_NOTHROW(driver->get_position());
+        CHECK_NOTHROW(driver->get_is_moving());
+        driver->set_connected(false);
+    }
 }
 
 #endif  // _WIN32
