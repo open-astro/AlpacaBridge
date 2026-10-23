@@ -1,0 +1,3 @@
+### Changed
+
+- **README shows how much code the project authored** (docs, tooling, issue #1465): a new "Authored code" badge beside the existing ones shows the non-blank line count of tracked first-party C/C++, Python, shell and web UI files under `AlpacaCore/`, `AlpacaHTTP/` and `scripts/`, rounded to the nearest 1,000. Vendored SDKs and the bundled libgphoto2 (`AlpacaCore/external/`) are not counted. Docs-drift check 25 fails only when the badge is more than 5% from the computed count, so an ordinary PR never trips it; `python3 scripts/check_docs_drift.py --badge` prints the paste-ready line, and `/bump-release` Step 2.6 runs it. Self-test fixtures cover a stale, a missing and a renamed badge, the count floor, and the path filter.
