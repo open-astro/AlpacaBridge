@@ -1030,6 +1030,7 @@ public:
         bool prev_at_home = false;
         bool prev_manual[2] = {false, false};
         auto prev_override = util::TaskClock::clock::time_point::min();
+        uint64_t superseded = 0;
         uint64_t park_generation = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -1070,6 +1071,7 @@ public:
             // goto failed while it's parking.
             clear_motion_errors_locked();
             parking_ = true;
+            superseded = motion_generation_;
             park_generation = ++motion_generation_;
         }
 
@@ -1119,6 +1121,7 @@ public:
                 manual_axis_slewing_[1] = prev_manual[1];
                 position_override_until_ = prev_override;
                 slew_force_until_ = util::TaskClock::clock::time_point::min();
+                keep_pending_stop_locked(superseded);  // the park goto never went out
             });
     }
 
@@ -1203,7 +1206,9 @@ public:
         }
     }
 
-    // Poll tick: retries a stop that found an initiator busy. Dropped when the mount was taken or closed meanwhile.
+    // Poll tick: retries a stop that found an initiator busy. A disconnect drops it here; a newer motion drops it in
+    // send_failure_stop, once no initiator is busy, so an initiator that fails before it sends anything can hand it
+    // back first (keep_pending_stop_locked).
     void retry_pending_stop() const {
         PendingStop pending;
         {
@@ -1211,13 +1216,22 @@ public:
             if (!pending_stop_) {
                 return;
             }
-            if (!connected_ || pending_stop_->generation != motion_generation_) {
+            if (!connected_) {
                 pending_stop_.reset();
                 return;
             }
             pending = *pending_stop_;
         }
         send_failure_stop(pending.generation, pending.message, pending.home);
+    }
+
+    // An initiator that took the mount from generation `superseded` and then failed before it sent anything: a stop
+    // still pending under `superseded` stays due under the new generation (only a stop or a motion on the wire, or a
+    // disconnect, drops one).
+    void keep_pending_stop_locked(std::uint64_t superseded) const {
+        if (pending_stop_ && pending_stop_->generation == superseded) {
+            pending_stop_->generation = motion_generation_;
+        }
     }
 
     // The failure of a motion body is sticky from the moment it is known, before its stops go out with mutex_ free:
@@ -1576,6 +1590,7 @@ public:
         bool prev_at_home = false;
         bool prev_manual[2] = {false, false};
         auto prev_override = util::TaskClock::clock::time_point::min();
+        uint64_t superseded = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             check_connected();
@@ -1584,6 +1599,7 @@ public:
             validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
             check_slew_safety(lock, "SlewToCoordinatesAsync");
             slew_aborted_ = false;
+            superseded = motion_generation_;
             ++motion_generation_;
 
             use_passthrough = !hc_available_;
@@ -1594,7 +1610,12 @@ public:
             dec_raw = encode_angle(dec, bits);
             precise = use_precise_commands_;
 
-            do_flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+            try {
+                do_flip = compute_flip(lock, ra, dec, ra_biased, flip_ra, flip_dec);
+            } catch (...) {
+                keep_pending_stop_locked(superseded);  // the pier-side read failed before the goto went out
+                throw;
+            }
 
             {
                 char buf[256];
@@ -1804,6 +1825,7 @@ public:
                 position_override_until_ = prev_override;
                 slew_force_until_ = util::TaskClock::clock::time_point::min();
                 flip_in_progress_ = false;
+                keep_pending_stop_locked(superseded);  // the goto never went out
             });
     }
 
@@ -1932,8 +1954,9 @@ public:
                 flip_in_progress_ = false;
             }
             if (stop_error.empty()) {
+                // A deferred failure stop stays pending: only a stop or a motion on the wire, or a disconnect, drops
+                // one. An Unpark with no park in flight sends nothing, so the next poll tick still sends it.
                 clear_motion_errors_locked();
-                pending_stop_.reset();  // a deferred failure stop must not rewrite last_slew_error_ after Unpark
             } else {
                 last_home_error_.clear();
                 last_slew_error_ = "Unpark could not stop the park slew: " + stop_error;
@@ -2339,7 +2362,8 @@ private:
     // Call without mutex_ held. Starts `body` on the slew slot. The initiator
     // cancelled and joined the previous body and published its flags before
     // this; when the slot refuses (no thread), `rollback_locked` undoes the
-    // flags and the exception goes to the caller. `displaced` says a body was
+    // flags, hands back a pending failure stop (keep_pending_stop_locked) and
+    // the exception goes to the caller. `displaced` says a body was
     // in flight and has been cancelled: its motion may still be running with
     // nobody left to stop it, so the mount is stopped and the AbortSlew state
     // published (decision 0006, "Thread refusal"). A refusal that replaced

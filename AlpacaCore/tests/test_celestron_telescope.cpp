@@ -784,7 +784,8 @@ struct SnapshotMount {
     std::atomic<int> t_count{0};          // tracking-mode writes received
     std::atomic<bool> h_mute{false};      // the time write goes unanswered
     std::atomic<int> s_delay_ms{0};       // the sync reply arrives after this long
-    std::atomic<int> p_delay_ms{0};       // the pier-side query answers after this long
+    std::atomic<bool> p_mute{false};      // the pier-side query goes unanswered
+    std::atomic<int> p_count{0};          // pier-side queries received
     std::atomic<int> s_count{0};          // sync and time commands received
     std::atomic<int> order{0};            // arrival counter shared by the goto and cancel records below
     std::atomic<int> goto_last{0};        // arrival number of the last goto (0: none)
@@ -826,7 +827,8 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             return "1#";
         case 'p':
             st.slow_count.fetch_add(1);
-            if (st.p_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.p_delay_ms.load()));
+            st.p_count.fetch_add(1);
+            if (st.p_mute.load()) return "";
             return std::string(1, st.pier.load()) + "#";
         case 't':
             st.slow_count.fetch_add(1);
@@ -1664,6 +1666,144 @@ TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held 
     cel::set_failure_stop_hook_for_testing(*driver, nullptr);
     REQUIRE(syncer.joinable());
     syncer.join();
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// Unpark with no park in flight sends nothing to the mount and takes no motion generation, so a failure stop that a
+// sync deferred stays pending through it and still goes out on a later poll tick.
+TEST_CASE("Celestron FindHome - the failure stops still go out after an Unpark",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->s_delay_ms = 300;
+    std::thread syncer;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!syncer.joinable()) {
+            const int before = st->s_count.load();
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(syncer.joinable());
+    syncer.join();
+    REQUIRE(st->m_count.load() == 0);
+    driver->unpark();
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// SlewToCoordinatesAsync takes a motion generation before its pier-side read. When that read fails no goto went out,
+// so a failure stop deferred meanwhile stays pending, through a poll tick in the window too, and still goes out.
+TEST_CASE("Celestron FindHome - the failure stops still go out when an async goto fails before it is sent",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->p_mute = true;  // the pier-side read times out, before the goto
+    std::thread slewer;
+    std::atomic<bool> refused{false};
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!slewer.joinable()) {
+            const int before = st->p_count.load();
+            slewer = std::thread([&] {
+                try {
+                    driver->slew_to_coordinates_async(1.5, 20.0);
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return st->p_count.load() > before; }));  // the slew owns the mount
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    (void)cel::poll_status_now_for_testing(*driver);  // a tick while the read is out keeps it pending
+    REQUIRE(slewer.joinable());
+    slewer.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// Park takes a motion generation before its body starts. When the slot refuses the start and no body was displaced no
+// goto went out, so a failure stop deferred meanwhile stays pending, through a poll tick in the window too.
+TEST_CASE("Celestron FindHome - the failure stops still go out when Park cannot start its body",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    std::atomic<bool> in_spawn{false};
+    std::atomic<bool> release{false};
+    cel::set_slew_spawn_for_testing(*driver, [&](std::function<void()>) -> std::thread {
+        in_spawn = true;  // Park owns the mount
+        while (!release.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    std::thread parker;
+    std::atomic<bool> refused{false};
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!parker.joinable()) {
+            parker = std::thread([&] {
+                try {
+                    driver->park();
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return in_spawn.load(); }));
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    (void)cel::poll_status_now_for_testing(*driver);  // a tick while the start is held keeps it pending
+    release = true;
+    REQUIRE(parker.joinable());
+    parker.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
     for (int i = 0; i < 3; ++i) {
         (void)cel::poll_status_now_for_testing(*driver);
     }
