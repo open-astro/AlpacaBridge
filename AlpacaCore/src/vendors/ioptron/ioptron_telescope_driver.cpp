@@ -469,11 +469,14 @@ public:
             throw AlpacaException("Action not supported: " + std::string(action_name),
                                   AlpacaError::ActionNotImplemented);
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        {
+            // mutex_ guards state only; the wire has its own lock in the protocol wrapper (decision 0016).
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+        }
         // :GLS# digit 17 is 2 only for valid GPS data; the site in the same reply is then the receiver's
         // reading. Without a fix the reply holds the stored site, which must not be reported as GPS.
-        const SiteInfo site = iOptronProtocolWrapper::instance().get_site_info();
+        const SiteInfo site = iOptronProtocolWrapper::instance().get_site_location();
         const bool fix = (site.gps_status == 2);
         if (!fix) return util::format_gps_status(false, std::nullopt, std::nullopt);
         return util::format_gps_status(true, site.latitude_degrees, site.longitude_degrees);

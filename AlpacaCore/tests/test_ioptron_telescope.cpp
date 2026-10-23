@@ -1258,3 +1258,29 @@ TEST_CASE("iOptron Telescope Driver - gps_status reports the GPS fix from :GLS#"
     }
     driver->set_connected(false);
 }
+
+// Issue #1277, decision 0016: the gps_status action reads the wire without holding mutex_, so a mutex_ getter
+// answers at once while the :GLS# reply is held, and the action sends :GLS# only (no :GUT#).
+TEST_CASE("iOptron Telescope Driver - gps_status does not hold mutex_ across the :GLS# exchange",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_gps(2, -33.856784, 151.215297);
+    const int gut_before = mount.count(":GUT");
+
+    mount.hold_next_reply(std::chrono::milliseconds(1000));
+    auto reply = std::async(std::launch::async, [&] { return driver->action("gps_status", ""); });
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_connected());  // takes mutex_
+    CHECK(driver->can_action("gps_status"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
+
+    CHECK(reply.get().rfind("{\"fix\":true,", 0) == 0);
+    CHECK(mount.count(":GUT") == gut_before);
+    driver->set_connected(false);
+}

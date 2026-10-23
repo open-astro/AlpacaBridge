@@ -1795,24 +1795,20 @@ MountStatus iOptronProtocolWrapper::get_status() {
     return status;
 }
 
-SiteInfo iOptronProtocolWrapper::get_site_info() {
-    std::string gls_response = send_command(":GLS");
-    std::string gut_response = send_command(":GUT");
+SiteInfo iOptronProtocolWrapper::get_site_location() {
+    std::string gls_response = strip_status_prefix(send_command(":GLS"));
 
-    gls_response = strip_status_prefix(std::move(gls_response));
-    gut_response = strip_status_prefix(std::move(gut_response));
-    
-    if (gls_response.length() < 23 || gut_response.length() < 17) {
+    if (gls_response.length() < 23) {
         throw AlpacaException("Invalid site info response from mount");
     }
-    
+
     SiteInfo site;
-    
+
     // Parse longitude (first 8 digits after sign)
     std::string lon_str = gls_response.substr(0, 9);
     int64_t lon_value = pimpl_->parse_signed_int(lon_str);
     site.longitude_degrees = pimpl_->ioptron_format_to_dec(lon_value);
-    
+
     // Parse latitude (next 8 digits, but stored as lat + 90 degrees)
     std::string lat_str = gls_response.substr(9, 8);
     int64_t lat_offset = parse_int64_field(lat_str, ":GLS latitude");
@@ -1826,12 +1822,22 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
 
     // Hemisphere (22nd digit)
     site.is_northern_hemisphere = (gls_response[22] == '1');
-    
+    return site;
+}
+
+SiteInfo iOptronProtocolWrapper::get_site_info() {
+    SiteInfo site = get_site_location();
+    std::string gut_response = strip_status_prefix(send_command(":GUT"));
+
+    if (gut_response.length() < 17) {
+        throw AlpacaException("Invalid site info response from mount");
+    }
+
     // Timezone and DST from :GUT#
     std::string tz_str = gut_response.substr(0, 4);  // Sign + 3 digits
     site.timezone_offset_minutes = static_cast<int>(pimpl_->parse_signed_int(tz_str));
     site.dst_observed = (gut_response[4] == '1');
-    
+
     return site;
 }
 
