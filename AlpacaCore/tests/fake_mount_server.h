@@ -122,6 +122,14 @@ public:
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
 
+    /// Sends bytes to every live connection unprompted (a mount that keeps talking).
+    void push(const std::string& bytes) {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        for (const int fd : conn_fds_) {
+            (void)::send(fd, bytes.data(), bytes.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+        }
+    }
+
     /// Resets every accepted connection (an RST, not a FIN, so the client's next send fails at once) and returns
     /// once each handler has closed its socket, or after 2 s. The listener stays open, so a reconnect is served.
     void reset_connections() {

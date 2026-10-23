@@ -90,7 +90,7 @@ public:
     // Decision 0018: the router calls this at the upgrade start only. Before a
     // connect the fallback is the SDK-ID or device-number ID, the key a CAA
     // without a serial saved under; a serial-keyed offset waits for the connect.
-    // A client that connected first has read 0 from the GUID key, so a
+    // A client that connected first has read 0 from the stored-ID key, so a
     // connected driver takes the moved offset too. transition_mutex_ keeps a
     // connect or disconnect out of the window; the move and the write run under
     // mutex_, as sync() saves and writes, so a concurrent Sync cannot land
@@ -408,7 +408,7 @@ private:
     // Caller holds mutex_.
     std::string unique_id_locked() const { return unique_id_for(serial_number_, rotator_id_); }
 
-    // The offset-store key: the persisted GUID (decision 0018), or the
+    // The offset-store key: the stored ID (decision 0018), or the
     // serial-based ID when none was assigned. Takes no lock of its own beyond
     // the base accessor, so it is safe under mutex_.
     std::string store_key_locked() const {
@@ -506,7 +506,7 @@ private:
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "CAA type unavailable: " + std::string(e.what()));
         }
-        // Persisted Sync offset, keyed by the GUID (decision 0018). An offset
+        // Persisted Sync offset, keyed by the stored ID (decision 0018). An offset
         // saved under the serial-based ID moves here, since the serial read just
         // above names the body. One saved under an SDK-ID or device-number ID
         // names only a slot, so adopt_legacy_state() moves it at the upgrade

@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/auto_detect.h>
+#include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -131,29 +132,45 @@ public:
         if (connected) {
             // Resolve an auto-detect request here (on the background connection
             // thread), not at registration. A local copy keeps config_ as the
-            // durable intent so a later reconnect re-scans (robust to the
+            // durable intent so a later reconnect resolves the port again, remembered port first (robust to the
             // device moving ports).
             FlatPanelConnectionConfig effective = config_;
+            bool auto_detected = false;
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
-                auto ports = enumerate_gemini_flatpanel_ports();
-                if (ports.empty()) {
-                    throw AlpacaException(util::serial_auto_detect_failed_message("Gemini flat panel"),
-                                          AlpacaError::NotConnected);
+                // The port that worked last time goes first: one handshake instead of the full
+                // search (5-13 s on a rig, past a client's connect timeout).
+                if (const auto remembered =
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                     probe_gemini_flatpanel_port)) {
+                    ALPACA_LOG_INFO("Gemini", "Flat panel answered on remembered port " + *remembered);
+                    effective.serial_port = *remembered;
+                } else {
+                    auto ports = enumerate_gemini_flatpanel_ports();
+                    if (ports.empty()) {
+                        throw AlpacaException(util::serial_auto_detect_failed_message("Gemini flat panel"),
+                                              AlpacaError::NotConnected);
+                    }
+                    if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
+                        throw AlpacaException("Flat panel index " + std::to_string(effective.auto_detect_index) +
+                                                  " out of range (detected " + std::to_string(ports.size()) + ")",
+                                              AlpacaError::NotConnected);
+                    }
+                    const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
+                    ALPACA_LOG_INFO("Gemini", "Auto-detected flat panel at " + port.port_path);
+                    effective.serial_port = port.port_path;
                 }
-                if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
-                    throw AlpacaException("Flat panel index " + std::to_string(effective.auto_detect_index) +
-                                              " out of range (detected " + std::to_string(ports.size()) + ")",
-                                          AlpacaError::NotConnected);
-                }
-                const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
-                ALPACA_LOG_INFO("Gemini", "Auto-detected flat panel at " + port.port_path);
-                effective.serial_port = port.port_path;
+                auto_detected = true;
             }
 
             // I/O lock across the whole handshake + state seed (order:
             // transition_mutex_ -> io_mutex_ -> state_mutex_).
             std::lock_guard<std::mutex> io(io_mutex_);
             std::string firmware = protocol_.connect(effective);
+            // Remember the port only after the handshake held: a port the user configured is never stored.
+            if (auto_detected) {
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
+            }
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = firmware;
@@ -494,23 +511,39 @@ public:
 
         if (connected) {
             FlatPanelConnectionConfig effective = config_;
+            bool auto_detected = false;
             if (effective.serial_port.empty() && effective.auto_detect_index >= 0) {
-                auto ports = enumerate_gemini_flatpanel_ports();
-                if (ports.empty()) {
-                    throw AlpacaException(util::serial_auto_detect_failed_message("Gemini flat panel"),
-                                          AlpacaError::NotConnected);
+                // The port that worked last time goes first: one handshake instead of the full
+                // search (5-13 s on a rig, past a client's connect timeout).
+                if (const auto remembered =
+                        util::recall_serial_location(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                     probe_gemini_flatpanel_port)) {
+                    ALPACA_LOG_INFO("Gemini", "Flat panel v2 answered on remembered port " + *remembered);
+                    effective.serial_port = *remembered;
+                } else {
+                    auto ports = enumerate_gemini_flatpanel_ports();
+                    if (ports.empty()) {
+                        throw AlpacaException(util::serial_auto_detect_failed_message("Gemini flat panel"),
+                                              AlpacaError::NotConnected);
+                    }
+                    if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
+                        throw AlpacaException("Flat panel index " + std::to_string(effective.auto_detect_index) +
+                                                  " out of range (detected " + std::to_string(ports.size()) + ")",
+                                              AlpacaError::NotConnected);
+                    }
+                    const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
+                    ALPACA_LOG_INFO("Gemini", "Auto-detected flat panel v2 at " + port.port_path);
+                    effective.serial_port = port.port_path;
                 }
-                if (effective.auto_detect_index >= static_cast<int>(ports.size())) {
-                    throw AlpacaException("Flat panel index " + std::to_string(effective.auto_detect_index) +
-                                              " out of range (detected " + std::to_string(ports.size()) + ")",
-                                          AlpacaError::NotConnected);
-                }
-                const auto& port = ports[static_cast<std::size_t>(effective.auto_detect_index)];
-                ALPACA_LOG_INFO("Gemini", "Auto-detected flat panel v2 at " + port.port_path);
-                effective.serial_port = port.port_path;
+                auto_detected = true;
             }
 
             std::string firmware = protocol_.connect(effective);
+            // Remember the port only after the handshake held: a port the user configured is never stored.
+            if (auto_detected) {
+                util::DeviceLocationStore::save(util::location_key(get_unique_id(), effective.auto_detect_index),
+                                                util::serial_location_for(effective.serial_port));
+            }
             {
                 std::lock_guard<std::mutex> lock(firmware_mutex_);
                 firmware_ = firmware;

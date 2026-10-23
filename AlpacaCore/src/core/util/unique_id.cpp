@@ -54,4 +54,19 @@ bool is_unique_id(std::string_view text) {
     return text[14] == '4' && (variant == '8' || variant == '9' || variant == 'a' || variant == 'b');
 }
 
+bool is_keepable_unique_id(std::string_view text) {
+    if (is_unique_id(text)) return true;
+    if (text.size() < 12 || text.size() > 128) return false;
+    for (const char c : text) {
+        if (c < 0x20 || c > 0x7E) return false;
+    }
+    // A tail of at most 5 digits is a device number, so a client-sent `ZWO_SN_12345` is replaced.
+    const std::size_t underscore = text.rfind('_');
+    if (underscore == std::string_view::npos) return true;
+    const std::string_view tail = text.substr(underscore + 1);
+    const bool slot_id =
+        !tail.empty() && tail.size() <= 5 && tail.find_first_not_of("0123456789") == std::string_view::npos;
+    return !slot_id;
+}
+
 }  // namespace alpacacore::util
