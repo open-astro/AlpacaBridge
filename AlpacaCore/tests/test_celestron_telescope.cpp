@@ -784,6 +784,8 @@ struct SnapshotMount {
     std::atomic<int> t_count{0};          // tracking-mode writes received
     std::atomic<bool> h_mute{false};      // the time write goes unanswered
     std::atomic<int> s_delay_ms{0};       // the sync reply arrives after this long
+    std::atomic<int> l_delay_ms{0};       // the slewing query answers after this long
+    std::atomic<int> l_count{0};          // slewing queries received
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -811,6 +813,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             if (st.z_fail.load()) return "";
             return "20AB0500,10000500#";
         case 'L':
+            st.l_count.fetch_add(1);
+            if (st.l_delay_ms.load() > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(st.l_delay_ms.load()));
+            }
             if (st.l_fail.load()) return "";
             return st.slewing.load() ? "1#" : "0#";
         case 'J':
@@ -1586,8 +1592,6 @@ TEST_CASE("Celestron site and time writes - the write exchange does not hold the
     }
 }
 
-#endif  // _WIN32
-
 // The FindHome failure stops go out only while no newer initiator has taken the mount. The hook stands in for the
 // client that saw the sticky FindHome error and sent a new goto before the stops: the poll then skips them.
 TEST_CASE("Celestron FindHome - the failure stops are skipped when a new goto took the mount first",
@@ -1676,3 +1680,46 @@ TEST_CASE("Celestron connect - a failed time write closes the link and leaves Co
     CHECK(driver->get_connected());
     driver->set_connected(false);
 }
+
+// A slewing read taken with mutex_ free is not applied after a newer motion command took the mount. The hook stands in
+// for the client whose AbortSlew lands between the read and its publish: the read still says "slewing", and Slewing
+// must stay false.
+TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not applied",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    st->slewing = true;
+    bool aborted = false;
+    cel::set_slewing_read_hook_for_testing(*driver, [&] {
+        if (!aborted) {
+            aborted = true;
+            driver->abort_slew();
+        }
+    });
+    std::atomic<bool> done{false};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(1.5, 20.0);
+        } catch (const std::exception&) {
+            // superseded by the abort: the blocking slew ends with an error
+        }
+        done.store(true);
+    });
+    for (int i = 0; i < 400 && !done.load(); ++i) {  // past the forced-slewing window, to the first real read
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    slewer.join();
+    cel::set_slewing_read_hook_for_testing(*driver, nullptr);
+    REQUIRE(aborted);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+#endif  // _WIN32

@@ -1146,7 +1146,7 @@ public:
     // dropped (Superseded). A busy lock means an initiator is dispatching but may not have taken the mount (a sync,
     // a pulse guide, a motion command that fails validation bump no generation): the stop stays pending (Busy) and
     // the poll retries it. `generation` is the motion generation the failure was found under.
-    enum class StopOutcome { Sent, Busy, Superseded };
+    enum class StopOutcome : std::uint8_t { Sent, Busy, Superseded };
     struct FailureStop {
         StopOutcome outcome = StopOutcome::Superseded;
         std::string error;  // Sent only
@@ -1161,7 +1161,15 @@ public:
         run_failure_stop_hook();
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
         if (!ilock.owns_lock()) {
-            ALPACA_LOG_WARN("Celestron", "failure stop deferred: an initiator holds the mount; retried by the poll");
+            bool first_deferral = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                first_deferral = !pending_stop_ || pending_stop_->generation != generation;
+            }
+            if (first_deferral) {  // the poll retries every tick; one line per deferred stop
+                ALPACA_LOG_WARN("Celestron",
+                                "failure stop deferred: an initiator holds the mount; retried by the poll");
+            }
             return {StopOutcome::Busy, {}};
         }
         {
@@ -1183,7 +1191,9 @@ public:
             pending_stop_ = PendingStop{generation, message, home};
             return;
         }
-        pending_stop_.reset();
+        if (pending_stop_ && pending_stop_->generation == generation) {
+            pending_stop_.reset();
+        }
         if (stop.outcome == StopOutcome::Sent && connected_) {
             if (home) {
                 finish_home_failure_locked(generation, message, stop.error);
@@ -1271,9 +1281,10 @@ public:
         ALPACA_LOG_WARN("Celestron", message);
     }
 
-    void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message) const {
+    // `generation` is the motion generation the failing read was taken under.
+    void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message,
+                        std::uint64_t generation) const {
         begin_motion_failure_locked(message);
-        const std::uint64_t generation = motion_generation_;
         without_lock(lock, [&] { send_failure_stop(generation, message, false); });
     }
 
@@ -2847,6 +2858,17 @@ private:
         return true;
     }
 
+    void run_slewing_read_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = slewing_read_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_failure_stop_hook() const {
         std::function<void()> hook;
         {
@@ -2906,6 +2928,11 @@ public:
     }
 
     bool poll_status_now_for_testing() { return poll_status_once(nullptr, 0); }
+
+    void set_slewing_read_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slewing_read_hook_ = std::move(hook);
+    }
 
     void set_failure_stop_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
@@ -3009,6 +3036,9 @@ private:
         const bool hc_slewing = hc_available_ && !flip_in_progress_;
         std::optional<Measurement> landed;
         bool hardware_slewing = false;
+        // The read runs with mutex_ free: a newer motion command (AbortSlew, MoveAxis, Park, a new slew) may take the
+        // mount meanwhile, and its state is then not this read's to change.
+        const std::uint64_t generation = motion_generation_;
         try {
             const SamplePlan landed_plan = sample_plan_locked(true);
             std::tie(hardware_slewing, landed) = without_lock(lock, [&] {
@@ -3026,11 +3056,18 @@ private:
                 if (was_slewing && !slewing) {
                     measurement = take_measurement(landed_plan);
                 }
+                run_slewing_read_hook();  // test seam: a newer motion command lands before the read is applied
                 return std::make_tuple(slewing, measurement);
             });
+            if (motion_generation_ != generation) {
+                return slewing_cached_;  // superseded: the newer motion owns the published state
+            }
             note_slewing_read_locked(hardware_slewing);
             slew_status_poll_failures_ = 0;
         } catch (const std::exception& ex) {
+            if (motion_generation_ != generation) {
+                return slewing_cached_;
+            }
             const int failures = ++slew_status_poll_failures_;
             if (failures < kLinkFailureThreshold) {
                 ALPACA_LOG_WARN("Celestron", "Slew status poll failed (" + std::to_string(failures) + "/" +
@@ -3040,9 +3077,12 @@ private:
             const std::string message = "Slew completion polling failed after " + std::to_string(failures) +
                                         " consecutive failures: " + ex.what();
             if (parking_) throw AlpacaException(message, AlpacaError::DriverException);
-            if (slewing_cached_) fail_slew_poll(lock, message);
+            if (slewing_cached_) fail_slew_poll(lock, message, generation);
             throw AlpacaException(last_slew_error_.empty() ? message : last_slew_error_, AlpacaError::DriverException);
         } catch (...) {
+            if (motion_generation_ != generation) {
+                return slewing_cached_;
+            }
             const int failures = ++slew_status_poll_failures_;
             if (failures < kLinkFailureThreshold) {
                 ALPACA_LOG_WARN("Celestron", "Slew status poll failed (" + std::to_string(failures) + "/" +
@@ -3052,7 +3092,7 @@ private:
             const std::string message = "Slew completion polling failed after " + std::to_string(failures) +
                                         " consecutive failures: unknown exception";
             if (parking_) throw AlpacaException(message, AlpacaError::DriverException);
-            if (slewing_cached_) fail_slew_poll(lock, message);
+            if (slewing_cached_) fail_slew_poll(lock, message, generation);
             throw AlpacaException(last_slew_error_.empty() ? message : last_slew_error_, AlpacaError::DriverException);
         }
         if (was_slewing && !slewing_cached_) {
@@ -3716,6 +3756,7 @@ private:
     std::mutex status_poll_tick_mutex_;  // held across one poll-body tick
     mutable std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> slewing_read_hook_;  // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;  // guarded by status_poll_hook_mutex_
 };
 
@@ -3764,6 +3805,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slewing_read_hook_for_testing(std::move(hook));
     }
 }
 
