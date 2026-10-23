@@ -910,3 +910,63 @@ TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the
     CHECK(fake.underflow_closes == 0);
     CHECK(fake.physical_opens == fake.physical_closes);
 }
+
+// Falsified by: touptek_thermal_switch_driver.cpp read_value() reading the SDK directly instead of through
+// status_cache_ (get_heat is called again on the second read inside the 100 ms TTL).
+TEST_CASE("ToupTek thermal switch - reads inside the TTL share one cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    (void)thermal->get_switch_value(0);
+    const int base = fake.call_count("get_heat");
+    (void)thermal->get_switch_value(0);
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") == base);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") - base == 1);
+    thermal->set_connected(false);
+}
+
+// Falsified by: touptek_thermal_switch_driver.cpp write_element_value() dropping its
+// status_cache_.invalidate() (the read after a write serves the pre-write frame).
+TEST_CASE("ToupTek thermal switch - a write drops the cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_switch_value(0, 1.0);
+    CHECK(thermal->get_switch_value(0) == 1.0);  // inside the TTL: only a refill can show the write
+    thermal->set_connected(false);
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw, or read_value() bypassing the
+// cache (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ToupTek thermal switch - a dead link refuses reads after three failed refills",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    (void)thermal->get_switch_value(0);
+
+    fake.throw_from.insert("get_heat");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(thermal->get_switch_value(0));
+    }
+    try {
+        (void)thermal->get_switch_value(0);
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(thermal->get_connected());
+
+    fake.throw_from.clear();
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_connected(false);
+}
