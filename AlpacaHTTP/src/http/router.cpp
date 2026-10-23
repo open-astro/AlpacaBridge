@@ -7007,9 +7007,9 @@ T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
         // get<int>() would wrap 4294967299 to 3 and cut 3.5 to 3 (ADR 0007 rule 4).
         if (it->is_number()) {
             if (const auto v = whole_json_int(*it)) return *v;
-            throw alpacacore::AlpacaException(std::string("Device config field '") + key +
-                                                  "' must be a whole number inside int",
-                                              alpacacore::AlpacaError::InvalidValue);
+            throw alpacacore::AlpacaException(
+                std::string("Device config field '") + key + "' must be a whole number inside int",
+                alpacacore::AlpacaError::InvalidValue);
         }
     }
     try {

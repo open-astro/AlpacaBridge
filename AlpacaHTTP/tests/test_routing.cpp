@@ -7001,7 +7001,8 @@ int main() {
         // still fails later in NetworkManager, so the name is the signal.
         for (const auto& [path, body, field] : {
                  std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":4294967296}", "Priority"},
-                 std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":18446744073709551615}", "Priority"},
+                 std::tuple{"/management/v1/wifi/profiles", "{\"Ssid\":\"x\",\"Priority\":18446744073709551615}",
+                            "Priority"},
                  std::tuple{"/management/v1/wifi/ap", "{\"Ssid\":\"x\",\"Channel\":4294967297}", "Channel"},
              }) {
             const auto response = route_request(router, "PUT", path, body);
