@@ -841,7 +841,8 @@ private:
     // Waits for the reply a timed-out query still owes, then lets the line go quiet, so the next exchange starts
     // on a clean line (issue #1527). Bounded: it ends at the earlier of kOwedReplyBoundMs after the timeout and
     // `cap` (the exchange's own timeout, so a short best-effort query is never slower than its timeout), or
-    // kOwedReplyQuietMs after the reply's '#'. It waits in kReadPollDelay slices and throws NotConnected as soon
+    // kOwedReplyQuietMs after the reply's '#', and the earlier bound still holds after the '#': a line that keeps
+    // sending cannot hold the lock past it. It waits in kReadPollDelay slices and throws NotConnected as soon
     // as the link closes, before anything is written. An exchange with nothing owed pays nothing.
     // Returns true when the owed reply arrived. POSIX only; on Windows the plain input purge in
     // discard_pending_input() remains.
@@ -855,8 +856,8 @@ private:
         auto quiet_until = Clock::time_point{};
         while (!closing_.load()) {
             const auto now = Clock::now();
-            if (terminated ? now >= quiet_until : now >= deadline) break;
-            const auto end = terminated ? quiet_until : deadline;
+            if (now >= deadline || (terminated && now >= quiet_until)) break;
+            const auto end = terminated ? std::min(quiet_until, deadline) : deadline;
             const int slice_ms = static_cast<int>(std::max<std::chrono::milliseconds::rep>(
                 1,
                 std::min<std::chrono::milliseconds::rep>(

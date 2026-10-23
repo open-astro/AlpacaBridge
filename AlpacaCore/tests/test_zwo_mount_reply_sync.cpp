@@ -70,8 +70,11 @@ Responder slow_position_mount(bool mute_late = false) {
     };
 }
 
+using Push = std::function<void(const std::string&)>;
+
 // Runs `body` against a connected wrapper whose mount is `responder`, once over a pty and once over TCP.
-void on_both_transports(const Responder& responder, const std::function<void(ZWOMountProtocolWrapper&)>& body) {
+void on_both_transports(const Responder& responder,
+                        const std::function<void(ZWOMountProtocolWrapper&, const Push&)>& body) {
     SECTION("serial") {
         alpacacore::test::PtyResponder device(responder, "ZWO mount");
         ZWOMountProtocolWrapper wrapper;
@@ -79,7 +82,7 @@ void on_both_transports(const Responder& responder, const std::function<void(ZWO
         info.type = ConnectionType::Serial;
         info.port_path = device.slave_path();
         REQUIRE(wrapper.connect(info));
-        body(wrapper);
+        body(wrapper, [&device](const std::string& bytes) { device.push(bytes); });
         wrapper.disconnect();
     }
     SECTION("tcp") {
@@ -91,9 +94,14 @@ void on_both_transports(const Responder& responder, const std::function<void(ZWO
         info.host = "127.0.0.1";
         info.tcp_port = server.port();
         REQUIRE(wrapper.connect(info));
-        body(wrapper);
+        body(wrapper, [&server](const std::string& bytes) { server.push(bytes); });
         wrapper.disconnect();
     }
+}
+
+void on_both_transports(const Responder& responder, const std::function<void(ZWOMountProtocolWrapper&)>& body) {
+    on_both_transports(responder, std::function<void(ZWOMountProtocolWrapper&, const Push&)>(
+                                      [&body](ZWOMountProtocolWrapper& wrapper, const Push&) { body(wrapper); }));
 }
 
 long ms_since(Clock::time_point t) {
@@ -212,6 +220,33 @@ TEST_CASE("ZWO mount reply sync - a silent mount does not slow queued guide puls
         // Without the fence this loop takes 2.3 s (pty) and 3.4 s (tcp); the fence adds only a
         // margin because it spends the read's own timeout (a fence on the full bound took 4.1 s on the pty).
         CHECK(ms_since(start) < 3800);
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a line that keeps sending after the reply ends the fence at its cap",
+          "[zwo][reply-sync][issue1527]") {
+    on_both_transports(slow_position_mount(true), [](ZWOMountProtocolWrapper& wrapper, const Push& push) {
+        CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
+        // The reply ends with '#', then a byte every 10 ms (under the 30 ms quiet window) for 2 s.
+        std::atomic<bool> stop{false};
+        std::thread talker([&] {
+            push("+45*30:15#");
+            for (int i = 0; i < 200 && !stop; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                push("x");
+            }
+        });
+        const auto start = Clock::now();
+        // The cap is this exchange's own timeout (300 ms); without the cap after '#' the fence holds until 2 s.
+        try {
+            (void)wrapper.send_command(":GU", false, 300);
+        } catch (const std::exception&) {
+            // The noise may leave this exchange without a clean reply; only the time it took is asserted.
+        }
+        const long took = ms_since(start);
+        stop = true;
+        talker.join();
+        CHECK(took < 900);
     });
 }
 
