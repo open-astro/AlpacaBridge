@@ -1,0 +1,2 @@
+### Changed (docs)
+- **Celestron focus motor 94155 validated** (docs, issue #896): the earlier 94155 without the notch, firmware 7.15.8240, passes ConformU 4.5.2 with 0 errors, 0 warnings, 0 issues and no timing issues on a user's RASA 8 (report in `AlpacaCore/conformu/Celestron/Focus Motor 94155/`), so `SUPPORTED-DRIVERS.md` lists it beside the 94155-A. The driver notes now say that aborting a calibration erases the stored calibration and that a higher `Position` turns the focuser clockwise.
