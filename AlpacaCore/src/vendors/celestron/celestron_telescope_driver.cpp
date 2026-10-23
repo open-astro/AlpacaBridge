@@ -91,6 +91,7 @@ constexpr double kMaxMoveAxisRateDegPerSec = 4.0;
 constexpr double kDefaultGuideRateDegPerSec = 7.5 / 3600.0;
 constexpr double kSiderealDegPerSec = 15.0411 / 3600.0;
 constexpr auto kPulseGuideCompletionDelay = std::chrono::milliseconds(1000);
+constexpr int kMaxPulseGuideMs = 25500;
 constexpr auto kPulseGuideHoldGrace = std::chrono::milliseconds(200);
 constexpr auto kPulseGuideCorrectionGrace = std::chrono::milliseconds(5000);
 
@@ -184,7 +185,7 @@ public:
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
           site_info_valid_(false),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
@@ -688,7 +689,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        (void)dec;
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!site_info_valid_) {
@@ -704,12 +705,13 @@ public:
         return EquatorialSystem::J2000;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -729,7 +731,11 @@ public:
     }
 
     double get_site_elevation() const override {
-        return site_elevation_m_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -737,6 +743,7 @@ public:
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
     }
 
@@ -853,7 +860,10 @@ public:
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         ensure_utc_cached(lock);
-        return current_utc_time_locked();
+        if (const auto utc = utc_offset_.current(clock_.now())) {
+            return *utc;
+        }
+        throw AlpacaException("The mount clock could not be read", AlpacaError::InvalidOperation);
     }
 
 private:
@@ -891,6 +901,7 @@ private:
         timezone_offset_valid_ = true;
         dst_observed_ = write.tz.dst;
         utc_offset_.set(write.utc, clock_.now());
+        mount_clock_unreadable_ = false;
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("Celestron", write.client_minus_host,
@@ -920,10 +931,11 @@ private:
         }
     }
 
-    // Seeds the clock from the read, or from the host when the mount did not answer.
+    // Seeds the clock from the read. A mount that did not answer leaves it unset and remembers that: the host clock
+    // is not the mount's, so UTCDate throws InvalidOperation rather than answer with it, and no getter asks again.
     void publish_mount_clock_locked(const std::optional<MountClock>& mount_clock) const {
         if (!mount_clock) {
-            utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
+            mount_clock_unreadable_ = true;
             return;
         }
         timezone_offset_minutes_ = mount_clock->timezone_offset_minutes;
@@ -932,10 +944,11 @@ private:
         utc_offset_.set(mount_clock->utc, clock_.now());
     }
 
-    // The mount's clock, read once at connect so no getter reaches the mount for it; a getter that finds it unset
-    // (after a disconnect) reads it with mutex_ free, and a UTCDate write that landed meanwhile wins.
+    // The mount's clock, read once at connect so no getter reaches the mount for it; a connect-time read that failed
+    // is remembered (mount_clock_unreadable_), so the getter throws without I/O. A getter that finds the clock unset
+    // for another reason reads it with mutex_ free, and a UTCDate write that landed meanwhile wins.
     void ensure_utc_cached(std::unique_lock<std::mutex>& lock) const {
-        if (utc_offset_.valid()) {
+        if (utc_offset_.valid() || mount_clock_unreadable_) {
             return;
         }
         const auto mount_clock = without_lock(lock, [] { return read_mount_clock(); });
@@ -1360,6 +1373,11 @@ public:
     }
 
     void pulse_guide(int direction, int duration) override {
+        // The MC_AUX_GUIDE duration byte counts 10 ms steps, 255 per command, chained up to 25.5 s.
+        if (direction < 0 || direction > 3 || duration < 0 || duration > kMaxPulseGuideMs) {
+            throw AlpacaException("PulseGuide direction must be 0-3 and duration 0-25500 ms",
+                                  AlpacaError::InvalidValue);
+        }
         if (!has_autoguider_port_) {
             throw AlpacaException("PulseGuide not supported — no autoguider port detected",
                                   AlpacaError::MethodNotImplemented);
@@ -1413,7 +1431,7 @@ public:
             }
         }
 
-        int total_cs = std::clamp(duration / 10, 0, 2550);
+        int total_cs = duration / 10;
         int first_chunk_cs = std::min(total_cs, 255);
 
         // The pulse body never takes mutex_, but joining it waits out the serial transaction it is in: do it
@@ -2127,6 +2145,7 @@ private:
             firmware_cache_.clear();
         }
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
+        mount_clock_unreadable_ = false;
         target_ra_set_ = false;
         target_dec_set_ = false;
         parked_ = false;
@@ -2194,6 +2213,7 @@ private:
             slew_force_until_ = util::TaskClock::clock::time_point::min();
             position_override_until_ = util::TaskClock::clock::time_point::min();
             utc_offset_.clear();
+            mount_clock_unreadable_ = false;
             client_disagreement_warned_ = false;
             position_link_health_.reset();
             publish_link_fault_locked();
@@ -3596,18 +3616,6 @@ private:
         return motion_generation_ == owner_generation;
     }
 
-    // The lazy re-seed below can now also follow a disconnect, which clears
-    // utc_offset_. That is harmless: every caller is guarded by NotConnected.
-    std::chrono::system_clock::time_point current_utc_time_locked() const {
-        const auto now = clock_.now();
-        if (const auto utc = utc_offset_.current(now)) {
-            return *utc;
-        }
-        const auto seeded = std::chrono::system_clock::now();
-        utc_offset_.set(seeded, now);
-        return seeded;
-    }
-
     static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
                                                     double longitude_degrees) {
         using namespace std::chrono;
@@ -3668,12 +3676,13 @@ private:
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
     mutable util::TaskClock::clock::time_point last_site_info_attempt_;
-    double site_elevation_m_;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
     // The client's UTCDate (or the mount/host seed) and the task-clock time since (decision 0014); guarded by mutex_.
     mutable util::UtcOffset utc_offset_;
+    mutable bool mount_clock_unreadable_ = false;  // the connect-time clock read failed; guarded by mutex_
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
@@ -3712,7 +3721,6 @@ private:
     int mount_model_id_;
     std::string mount_model_name_;
     bool use_precise_commands_;
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;
