@@ -496,9 +496,23 @@ TEST_CASE("iOptron serial auto-detect - a changed mount index ignores the port r
     SerialScanStub stub(counts, old_mount.slave_path(), mount.slave_path());
     REQUIRE(alpacacore::util::DeviceLocationStore::save(kMountId, old_mount.slave_path()));
 
-    const auto info = ioptron::resolve_ioptron_serial_auto(
-        1, alpacacore::util::location_key("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948", 1));
-    CHECK(info.port_path == mount.slave_path());
+    // Through the factory, so the key the driver builds from its mount index is what is tested.
+    auto driver = ioptron::create_ioptron_telescope_auto(0, 1, -33.856784, 151.215297, 42.0);
+    driver->assign_unique_id("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948");
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
     CHECK(counts.probes == 0);
     CHECK(counts.scans == 1);
+    CHECK(alpacacore::util::DeviceLocationStore::load(
+              alpacacore::util::location_key("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948", 1)) == mount.slave_path());
+    driver->set_connected(false);
+
+    // A fresh driver at index 1 now finds its own remembered port.
+    auto again = ioptron::create_ioptron_telescope_auto(0, 1, -33.856784, 151.215297, 42.0);
+    again->assign_unique_id("3a9d6f10-82c4-4b57-b0e3-61f7c5a2d948");
+    again->set_connected(true);
+    REQUIRE(again->get_connected());
+    CHECK(counts.probes == 1);
+    CHECK(counts.scans == 1);
+    again->set_connected(false);
 }
