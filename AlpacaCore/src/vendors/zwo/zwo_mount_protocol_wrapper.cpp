@@ -59,6 +59,21 @@ constexpr int kOwedReplyBoundMs = 600;
 // Once the owed reply's terminator has arrived, the fence waits this long for the line to go quiet.
 constexpr int kOwedReplyQuietMs = 30;
 
+bool is_zwo_mount_model(std::string_view model) {
+    return model == "AM3" || model == "AM5" || model == "AM5N" || model == "AM7";
+}
+
+// A device reply quoted in a connect refusal: control and non-ASCII bytes become '?', and it is cut at 48
+// characters, so a hostile reply cannot forge log lines (CWE-117) or the client-facing error.
+std::string sanitize_for_log(std::string_view text) {
+    std::string out;
+    for (const char ch : text) {
+        if (out.size() >= 48) break;
+        out.push_back(ch >= 0x20 && ch < 0x7f ? ch : '?');
+    }
+    return out;
+}
+
 int map_mount_error_to_alpaca(int mount_error_code) {
     switch (mount_error_code) {
     case 2:
@@ -405,6 +420,7 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     }
 
     std::string response;
+    bool terminated = false;
     const auto start = std::chrono::steady_clock::now();
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
@@ -418,11 +434,10 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         const ssize_t n = util::tty_read(fd, &ch, 1, 100);
         if (n == 1) {
             if (ch == '#') {
+                terminated = true;
                 break;
             }
-            if (ch != '\r' && ch != '\n') {
-                response.push_back(ch);
-            }
+            response.push_back(ch);
         } else if (n < 0) {
             break;
         }
@@ -433,13 +448,8 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     }
     link.close();
 
-    // Trim whitespace; the model is the non-empty body (e.g. "AM5N").
-    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    response.erase(response.begin(),
-                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
-                   response.end());
-    return response;
+    response = trim_copy(std::move(response));
+    return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
 }
 
@@ -517,6 +527,7 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     }
 
     std::string response;
+    bool terminated = false;
     const auto start = std::chrono::steady_clock::now();
     while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
            timeout_ms) {
@@ -524,11 +535,10 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         const ssize_t n = ::recv(sock, &ch, 1, 0);
         if (n == 1) {
             if (ch == '#') {
+                terminated = true;
                 break;
             }
-            if (ch != '\r' && ch != '\n') {
-                response.push_back(ch);
-            }
+            response.push_back(ch);
         } else if (n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
             break;
         }
@@ -536,12 +546,8 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     }
     close(sock);
 
-    auto is_space = [](unsigned char c) { return std::isspace(c) != 0; };
-    response.erase(response.begin(),
-                   std::find_if(response.begin(), response.end(), [&](char c) { return !is_space(c); }));
-    response.erase(std::find_if(response.rbegin(), response.rend(), [&](char c) { return !is_space(c); }).base(),
-                   response.end());
-    return response;
+    response = trim_copy(std::move(response));
+    return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
 }
 
@@ -617,8 +623,9 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 class ZWOMountProtocolWrapper::Impl {
 public:
-    Impl()
-        : connected_(false),
+    explicit Impl(bool require_identity)
+        : require_identity_(require_identity),
+          connected_(false),
           connection_type_(ConnectionType::Serial)
 #ifdef _WIN32
           ,
@@ -711,6 +718,7 @@ public:
         connection_type_ = info.type;
         connection_info_ = info;
         last_connect_error_.clear();
+        identity_verified_ = false;
 
         bool ok = false;
         if (info.type == ConnectionType::Serial) {
@@ -753,6 +761,14 @@ public:
         return last_connect_error_;
     }
 
+    void finish_identity_check() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || closing_.load() || link_lost_.load()) {
+            throw AlpacaException("ZWO mount transport lost during identity check", AlpacaError::NotConnected);
+        }
+        identity_verified_ = true;
+    }
+
     std::string send_command(const std::string& command,
                              bool require_hash_terminator,
                              int timeout_ms_override) {
@@ -770,6 +786,12 @@ public:
         }
         if (full_command.back() != '#') {
             full_command.push_back('#');
+        }
+
+        // Recheck under the I/O lock: an older admitted caller may reach a replacement link.
+        const bool identity_read = full_command == ":GVP#" || full_command == ":GMA#";
+        if (require_identity_ && !identity_verified_ && !identity_read) {
+            throw AlpacaException("ZWO mount identity is not verified", AlpacaError::NotConnected);
         }
 
         int timeout_ms = timeout_ms_override;
@@ -798,7 +820,8 @@ public:
 
         // A getter (":G...") or a '#'-terminated exchange always has a reply; a silent timeout leaves one owed.
         const bool reply_expected = require_hash_terminator || (full_command.size() > 1 && full_command[1] == 'G');
-        std::string response = read_response(require_hash_terminator, timeout_ms, reply_expected);
+        std::string response =
+            read_response(require_hash_terminator, timeout_ms, reply_expected, nullptr, identity_read);
         ALPACA_LOG_TRACE("ZWO", "CMD " + full_command + " RESP " + response);
         return response;
     }
@@ -807,6 +830,9 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!connected_ || closing_.load()) {
             throw AlpacaException("Not connected to ZWO mount", AlpacaError::NotConnected);
+        }
+        if (require_identity_ && !identity_verified_) {
+            throw AlpacaException("ZWO mount identity is not verified", AlpacaError::NotConnected);
         }
 
         std::string full_command = command;
@@ -959,6 +985,7 @@ private:
     }
 
     void disconnect_locked() {
+        identity_verified_ = false;
         if (!connected_) {
             return;
         }
@@ -1209,7 +1236,7 @@ private:
     }
 
     std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
-                              bool* saw_hash = nullptr) {
+                              bool* saw_hash = nullptr, bool preserve_whitespace = false) {
         std::string response;
         const auto start = std::chrono::steady_clock::now();
         auto last_char_time = start;
@@ -1227,7 +1254,7 @@ private:
 
             if (got_char) {
                 last_char_time = std::chrono::steady_clock::now();
-                if (ch == '\r' || ch == '\n') {
+                if (!preserve_whitespace && (ch == '\r' || ch == '\n')) {
                     continue;
                 }
                 if (ch == '#') {
@@ -1315,6 +1342,8 @@ private:
 
 private:
     mutable std::mutex mutex_;
+    const bool require_identity_;
+    bool identity_verified_ = false;
     bool connected_;
     std::atomic<bool> link_lost_{false};
     std::atomic<bool> closing_{false};
@@ -1334,8 +1363,8 @@ private:
     std::string last_connect_error_;
 };
 
-ZWOMountProtocolWrapper::ZWOMountProtocolWrapper()
-    : pimpl_(std::make_unique<Impl>()) {}
+ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity)
+    : pimpl_(std::make_unique<Impl>(require_identity)) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
 
@@ -1367,18 +1396,35 @@ void ZWOMountProtocolWrapper::send_command_blind(const std::string& command) {
     pimpl_->send_command_blind(command);
 }
 
-bool is_zwo_am_model_reply(std::string_view reply) {
-    std::string body = trim_copy(std::string(reply));
-    if (!body.empty() && body.back() == '#') body.pop_back();
-    static const std::regex kPattern(R"(^AM[0-9]+[A-Z]?$)");
-    return std::regex_match(trim_copy(std::move(body)), kPattern);
-}
-
 std::string ZWOMountProtocolWrapper::get_mount_info() {
     std::string response = send_command(":GVP");
     throw_if_mount_error(response, ":GVP");
-    return trim_copy(std::move(response));
+    response = trim_copy(std::move(response));
+    if (!is_zwo_mount_model(response)) {
+        throw AlpacaException("Expected a ZWO AM3, AM5, AM5N or AM7 identity, but the device answered '" +
+                                  sanitize_for_log(response) +
+                                  "'; check the configured serial port or host and device type",
+                              AlpacaError::DriverException);
+    }
+    return response;
 }
+
+std::string ZWOMountProtocolWrapper::get_mount_serial_number() {
+    // ZWO ASCOM 6.5.37 GetMountSN uses :GMA# and validates twelve hexadecimal characters.
+    std::string response = trim_copy(send_command(":GMA"));
+    if (response.size() != 12 ||
+        !std::all_of(response.begin(), response.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
+        throw AlpacaException(
+            "Unable to verify ZWO mount serial number; check the configured serial port or host "
+            "and mount firmware support",
+            AlpacaError::DriverException);
+    }
+    std::transform(response.begin(), response.end(), response.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
+    return response;
+}
+
+void ZWOMountProtocolWrapper::finish_identity_check() { pimpl_->finish_identity_check(); }
 
 EquatorialCoordinates ZWOMountProtocolWrapper::get_current_equatorial(int timeout_ms_override) {
     EquatorialCoordinates out;

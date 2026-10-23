@@ -14,19 +14,17 @@
 
 // Minimal loopback TCP "mount" for the telescope [stress] tests (POSIX-only,
 // like the rest of the test suite's socket helpers). The telescope protocol
-// wrappers (ZWO / Celestron / SynScan / iOptron) treat a successful TCP
-// connect as a successful mount connect — every post-connect query is
-// individually fault-tolerant — so a server that accepts connections and
-// answers each read with a canned reply is enough to drive the drivers into
-// the CONNECTED state on a hardware-free host. That is the seam the stress
-// tests need: only a connected driver spawns its poll/pulse/GOTO/teardown
+// wrappers use vendor-specific handshakes: ZWO requires an AM-family :GVP#
+// identity, for example. A responder must supply the driver's mandatory
+// replies to reach the CONNECTED state on a hardware-free host. That is the
+// seam the stress tests need: only a connected driver spawns its poll/pulse/GOTO/teardown
 // threads, and those threads racing disconnect and destruction are exactly
 // where the audited detached-thread bugs lived.
 //
 // The responder callback receives each received chunk verbatim and returns
 // the bytes to send back (empty = no reply). Command framing/parsing is the
-// caller's business; per-command parse failures in the drivers are tolerated
-// by design, so a dumb default reply already exercises every thread path.
+// caller's business; the default reply is not sufficient for every driver's
+// handshake or operational thread path.
 
 #ifndef _WIN32
 
@@ -184,8 +182,9 @@ public:
     }
 
     /// Replies "0#" to anything: valid terminator for every '#'-framed
-    /// protocol in the family; per-command parse failures are tolerated by
-    /// the drivers (and swallowed by the stress harness).
+    /// protocol in the family, but not a valid identity or measurement.
+    /// ZWO driver fixtures must answer :GVP# with a supported AM model
+    /// and :GMA# with twelve hexadecimal characters, both hash-terminated.
     // Canned "0#" for everything, EXCEPT the SynScan/NexStar protocol echo
     // ("K" + byte -> byte + "#"): the SynScan driver's connect now gates on
     // that echo matching, so a fake that never answers it leaves the driver
