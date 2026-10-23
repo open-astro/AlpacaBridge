@@ -400,14 +400,15 @@ struct PersistedKey {
 };
 
 // Decision 0018: the persisted UniqueID of a configured device. A stored or
-// client-sent value is kept when it is a version 4 UUID that no other entry
-// holds (the web UI edits a device by removing and re-adding it, sending the
-// GUID back); anything else gets a fresh one.
+// client-sent value is kept when it is a keepable ID (a version 4 UUID or a
+// long non-slot string such as ZWO_UID_<hex>) that no other entry holds (the
+// web UI edits a device by removing and re-adding it, sending the ID back);
+// only an entry with none, a device-number ID or a duplicate gets a fresh GUID.
 std::string stored_unique_id(const nlohmann::json& entry) {
     const auto it = entry.find("uniqueId");
     if (it == entry.end() || !it->is_string()) return {};
     const std::string value = it->get<std::string>();
-    return alpacacore::util::is_unique_id(value) ? value : std::string();
+    return alpacacore::util::is_keepable_unique_id(value) ? value : std::string();
 }
 
 std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
@@ -7116,8 +7117,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a GUID the client sends back (the web UI's edit
-        // removes the entry first, so its own GUID is free again) unless another
+        // Decision 0018: keep a stored ID the client sends back (the web UI's edit
+        // removes the entry first, so its own ID is free again) unless another
         // entry holds it, or another configuredevice call chose it and has not
         // stored its entry yet; otherwise mint one. The entry this call replaces
         // (same vendor, type and number, as add_or_replace_persisted_device()
@@ -8479,7 +8480,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
-            // Decision 0018: the configured device's persisted GUID is its UniqueID.
+            // Decision 0018: the configured device's stored ID is its UniqueID.
             std::string unique_id = stored_unique_id(config);
             if (unique_id.empty()) {
                 unique_id = alpacacore::util::generate_unique_id();
@@ -8570,7 +8571,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("siteElevation");
     copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
-    // Decision 0018: the server-owned GUID, for every device type.
+    // Decision 0018: the server-owned stored ID, for every device type.
     if (const std::string unique_id = stored_unique_id(config); !unique_id.empty()) {
         sanitized["uniqueId"] = unique_id;
     }
@@ -8793,8 +8794,8 @@ void Router::load_persisted_devices() {
             }
 
             persisted_devices_.clear();
-            // Decision 0018: every stored entry gets a GUID once (the upgrade, or a
-            // hand-edited file), and a duplicated one is replaced in the later entry.
+            // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
+            // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
             std::set<std::string> taken;
             for (auto& entry : payload) {
                 nlohmann::json sanitized = sanitize_device_config(entry);
@@ -8824,7 +8825,7 @@ void Router::load_persisted_devices() {
         }
     }
     // A removed rotator's offset goes here, not at removal: the web UI's edit
-    // removes and re-adds the entry with the same GUID (decisions 0008, 0018).
+    // removes and re-adds the entry with the same stored ID (decisions 0008, 0018).
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
         pruned > 0) {
         util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");
