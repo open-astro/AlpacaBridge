@@ -20,11 +20,6 @@
 
 namespace alpacacore::vendor::zwo {
 
-/// True when a :GVP reply names a ZWO AM mount: after trimming white space and dropping one trailing '#', the
-/// body is "AM", digits and at most one capital letter (AM3, AM5, AM5N, AM7). Anything else (OnStep, LX200 GPS,
-/// "0", empty) is another device family.
-bool is_zwo_am_model_reply(std::string_view reply);
-
 enum class ConnectionType {
     Serial,
     Network,
@@ -33,8 +28,8 @@ enum class ConnectionType {
     Auto
 };
 
-// A ZWO mount discovered by enumerate_zwo_mounts(). Covers any model the
-// mount reports via :GVP (AM3, AM5, AM5N, AM7, ...) on either transport.
+// A ZWO mount discovered by enumerate_zwo_mounts(): AM3, AM5, AM5N or AM7,
+// verified by a hash-terminated :GVP reply on either transport.
 struct ZWODeviceInfo {
     ConnectionType type = ConnectionType::Serial;
     std::string port_path;   // serial transport
@@ -119,7 +114,8 @@ enum class ParkStatus {
 
 class ZWOMountProtocolWrapper {
 public:
-    ZWOMountProtocolWrapper();
+    // Driver links require identity admission under the I/O lock; raw transport users keep the default mode.
+    explicit ZWOMountProtocolWrapper(bool require_identity = false);
     ~ZWOMountProtocolWrapper();
     ZWOMountProtocolWrapper(const ZWOMountProtocolWrapper&) = delete;
     ZWOMountProtocolWrapper& operator=(const ZWOMountProtocolWrapper&) = delete;
@@ -140,6 +136,9 @@ public:
     void send_command_blind(const std::string& command);
 
     std::string get_mount_info();
+    std::string get_mount_serial_number();
+    // Call only after fresh model/serial verification and the driver's identity claim.
+    void finish_identity_check();
 
     EquatorialCoordinates get_current_equatorial(int timeout_ms_override = 0);
     HorizontalCoordinates get_current_horizontal();
