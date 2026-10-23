@@ -46,6 +46,23 @@ AUTHORIZING_PERMISSIONS = {"admin", "maintain", "write"}
 MAX_DESCRIPTION = 140
 
 
+def aged_description(sha, names, head):
+    """Name the records that differ since an authorization that no longer covers the head.
+
+    The instruction ends the text, so it is never cut: the names give way to a
+    count when they do not fit or when one holds a control or bidi character
+    (the names are PR-controlled and reach the job log).
+    """
+    prefix, suffix = "Authorized at %s; " % sha[:12], ": comment 'ADR authorized %s'" % head[:12]
+    forms = ["%d records changed since" % len(names)]
+    if all(n.isprintable() for n in names):
+        forms.insert(0, ", ".join(names) + " changed since")
+    for changed in forms:
+        if len(prefix + changed + suffix) <= MAX_DESCRIPTION:
+            return prefix + changed + suffix
+    return (prefix + suffix)[:MAX_DESCRIPTION]
+
+
 def decide(changed, head_sha, statements, permission_of, records_at=lambda _sha: None):
     """Return (state, description) for one PR.
 
@@ -60,6 +77,7 @@ def decide(changed, head_sha, statements, permission_of, records_at=lambda _sha:
         return "success", "No decision record changed"
     head = head_sha.lower()
     at_head = None
+    aged = None  # (sha, names of the records that differ at the head) of the last aged authorization in statement order (issue comments, then reviews)
     for login, body in statements:
         if not login or login.endswith("[bot]"):
             continue
@@ -74,6 +92,10 @@ def decide(changed, head_sha, statements, permission_of, records_at=lambda _sha:
             if at_head is not None and at_sha is not None and all(at_sha.get(r) == at_head.get(r) for r in records):
                 return "success", ("Authorized by @%s at %s; the changed records are the same at %s"
                                    % (login, sha.lower()[:12], head[:12]))[:MAX_DESCRIPTION]
+            if at_head is not None and at_sha is not None:
+                aged = (sha.lower(), [r.rsplit("/", 1)[-1] for r in records if at_sha.get(r) != at_head.get(r)])
+    if aged:
+        return "failure", aged_description(aged[0], aged[1], head)
     return "failure", ("%d decision record file(s) changed: a collaborator must comment 'ADR authorized %s'"
                        % (len(records), head[:12]))[:MAX_DESCRIPTION]
 
@@ -232,6 +254,55 @@ def self_test():
     expect(state == "failure", "an older authorization by a reader still does not count")
     state, _ = decide(rec, head, [("writer", "ADR authorized fedcba9")], permission_of, lambda sha: None)
     expect(state == "failure", "when the head's records cannot be read, only the head sha authorizes")
+
+    # A failure after an aged authorization names the records that differ since (#1520).
+    two = ["docs/decisions/0005-task-clock.md", "docs/decisions/0007-other.md"]
+    snaps = {head: {two[0]: "b2", two[1]: "o1"}, old: {two[0]: "b1", two[1]: "o1"}}
+    by_sha = lambda sha: next((v for k, v in snaps.items() if k.startswith(sha)), None)
+    want = "Authorized at fedcba9; 0005-task-clock.md changed since: comment 'ADR authorized 0123456789ab'"
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect(state == "failure" and desc == want, "an aged authorization failure must name the differing record: %r" % desc)
+    snaps[old] = {two[1]: "o1"}  # 0005 absent at the authorization: added since
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect("0005-task-clock.md changed since" in desc, "a record absent at the authorization counts as differing: %r" % desc)
+    snaps[old] = {two[0]: "b1", two[1]: "o1"}
+    snaps[head] = {two[0]: "b2"}  # 0007 deleted since
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect("0005-task-clock.md, 0007-other.md changed since" in desc, "a record absent at the head counts as differing: %r" % desc)
+    snaps[head] = {two[0]: "b2", two[1]: "o2"}
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9"), ("writer", "ADR authorized 0123456")],
+                         permission_of, by_sha)
+    expect(state == "success", "the head authorization still wins after an aged one")
+    state, desc = decide(two, head, [("reader", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect(desc.startswith("2 decision record file(s) changed"), "no valid authorization keeps the count text: %r" % desc)
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9")], permission_of, lambda sha: None)
+    expect(desc.startswith("2 decision record file(s) changed"), "an unresolvable lookup keeps the count text: %r" % desc)
+    # The last valid aged authorization in statement order is the one named.
+    mid = "5" * 40
+    snaps[mid] = {two[0]: "b2", two[1]: "o1"}
+    state, desc = decide(two, head, [("writer", "ADR authorized fedcba9"), ("writer", "ADR authorized 5555555")],
+                         permission_of, by_sha)
+    expect(desc.startswith("Authorized at 5555555; 0007-other.md changed since"), "the last aged authorization in statement order is named: %r" % desc)
+    del snaps[mid]
+    # Names that do not fit fall back to a count; the instruction is never cut.
+    long = ["docs/decisions/%04d-%s.md" % (i, "x" * 30) for i in range(5)]
+    snaps[head] = {r: "n" for r in long}
+    snaps[old] = {r: "o" for r in long}
+    state, desc = decide(long, head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect(desc == "Authorized at fedcba9; 5 records changed since: comment 'ADR authorized 0123456789ab'",
+           "names that do not fit fall back to a count: %r" % desc)
+    snaps[head] = {r: "n" for r in long[:3]}
+    snaps[old] = {r: "o" for r in long[:3]}
+    state, desc = decide(long[:3], head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+    expect(len(desc) <= MAX_DESCRIPTION and desc.endswith("'ADR authorized 0123456789ab'"), "the instruction must end the description: %r" % desc)
+    # A record name is PR-controlled text that reaches the job log: a control or bidi character
+    # sends the description to the count form.
+    for label, bad in (("newline", "docs/decisions/0009-a\n::error::x.md"), ("bidi", "docs/decisions/0009-a\u202eb.md")):
+        snaps[head] = {bad: "n"}
+        snaps[old] = {bad: "o"}
+        state, desc = decide([bad], head, [("writer", "ADR authorized fedcba9")], permission_of, by_sha)
+        expect(desc == "Authorized at fedcba9; 1 records changed since: comment 'ADR authorized 0123456789ab'"
+               and desc.isprintable(), "a %s in a record name must give the count text: %r" % (label, desc))
 
     # records_lookup over a fake GitHub API: a record added in a subdirectory after the
     # authorization must not read as unchanged (#1517 review).
