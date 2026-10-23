@@ -3,7 +3,7 @@
 
 The repository labels every issue with a type, a priority and a size, but
 nothing enforced it (issue #1361). The workflow .github/workflows/issue-labels.yml
-runs this script when an issue is opened, labeled or unlabeled.
+runs this script when an issue is opened, reopened, labeled or unlabeled.
 
 - An open issue missing one or more of the three label groups gets ONE comment
   naming the missing groups; a later run edits that comment in place.
@@ -192,7 +192,7 @@ def self_test():
     check("bot author is exempt", run([], login="dependabot[bot]", kind="Bot"), [])
     check("exempt label removes a stale comment", run(["dependencies"], [own]), [("delete", 11)])
 
-    ran = []
+    ran, stdins = [], []
     real_run = subprocess.run
 
     class Done:
@@ -200,6 +200,7 @@ def self_test():
 
     def record(cmd, **kwargs):
         ran.append(cmd)
+        stdins.append(kwargs.get("input"))
         return Done()
 
     subprocess.run = record
@@ -212,9 +213,18 @@ def self_test():
         check("dry run makes no write call", ran, [])
         check("dry run still reads", [c["id"] for c in dry.comments(5)], [1, 2])
         check("a read calls gh", [c[:2] for c in ran], [["gh", "api"]])
-        del ran[:]
-        GhIssues(dry_run=False).delete_comment(3)
-        check("a live write calls gh", [c[:3] for c in ran], [["gh", "api", "-X"]])
+        live = GhIssues(dry_run=False)
+        for name, write, want in [
+            ("create", lambda: live.create_comment(5, "text"),
+             (["gh", "issue", "comment", "5", "--body-file", "-"], "text")),
+            ("update", lambda: live.update_comment(3, "text"),
+             (["gh", "api", "-X", "PATCH", "repos/{owner}/{repo}/issues/comments/3", "-F", "body=@-"], "text")),
+            ("delete", lambda: live.delete_comment(3),
+             (["gh", "api", "-X", "DELETE", "repos/{owner}/{repo}/issues/comments/3"], None)),
+        ]:
+            del ran[:], stdins[:]
+            write()
+            check("live %s runs gh" % name, list(zip(ran, stdins)), [want])
     finally:
         subprocess.run = real_run
 

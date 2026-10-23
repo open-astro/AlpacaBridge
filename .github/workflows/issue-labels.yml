@@ -11,7 +11,7 @@ name: Issue labels
 
 on:
   issues:
-    types: [opened, labeled, unlabeled]
+    types: [opened, reopened, labeled, unlabeled]
 
 permissions: {}
 
