@@ -104,7 +104,7 @@ vendor-agnostic; do them in the driver from the start.
   an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
   a getter served from a snapshot already meets this rule.
   Identity, limits and capabilities (`Name`, `Max*`, `Can*`, names
-  lists) are published at the end of connect (the `UniqueID` is the router's GUID, decision 0018); `Connected` is lock-free. Lock order in
+  lists) are published at the end of connect (the `UniqueID` is the router's stored ID, decision 0018); `Connected` is lock-free. Lock order in
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`

@@ -111,11 +111,15 @@ or a reconnect clears it. Never log the failure and report done, and never answe
 read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
 site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
 
-### UniqueID is the router's persisted GUID (all drivers)
+### UniqueID is the router's stored ID (all drivers)
 
-A driver does not build its `UniqueID`. The router assigns each configured device the version 4
-UUID stored in its config entry (`uniqueId`) through `AlpacaDriver::assign_unique_id()` before it
-registers the driver, and the base class's non-virtual `get_unique_id()` returns it. A new driver
+A driver does not build its `UniqueID`. The router assigns each configured device the ID stored
+in its config entry (`uniqueId`; never changed once stored) through `AlpacaDriver::assign_unique_id()` before it
+registers the driver. The router keeps a stored or client-sent ID that `is_keepable_unique_id()` accepts
+(a version 4 UUID, or 12 to 128 printable ASCII characters that are not a device-number ID such as
+`SkyWatcher_0`; `ZWO_UID_<hex>` and `my-rig-focuser-A` pass) and that no other entry holds; only an entry
+with none, a device-number ID or a duplicate gets a minted UUID, once (decision 0018). The base
+class's non-virtual `get_unique_id()` returns the assigned ID. A new driver
 implements only `fallback_unique_id()`, which answers for a driver a unit test builds directly; never
 key persistent state on the fallback. A driver that keys state on its ID (the rotator Sync offset)
 reads `get_unique_id()`, or `assigned_unique_id()` while holding its own mutex. State saved under an

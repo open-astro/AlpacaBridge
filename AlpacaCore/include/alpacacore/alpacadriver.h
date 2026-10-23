@@ -58,7 +58,7 @@ public:
     /**
      * @brief The device's UniqueID, as the management API lists it.
      *
-     * Decision 0018: the router assigns the GUID persisted for this configured
+     * Decision 0018: the router assigns the stored ID persisted for this configured
      * device right after it builds the driver (assign_unique_id()). Until then,
      * which in practice means a driver a unit test builds directly, the driver's
      * own fallback_unique_id() answers. Not virtual: no driver builds its ID.
@@ -74,7 +74,7 @@ public:
     }
 
     /**
-     * @brief Assign the persisted GUID (decision 0018). The router calls this
+     * @brief Assign the stored ID (decision 0018). The router calls this
      * once, after construction and before the driver is registered.
      */
     void assign_unique_id(std::string unique_id) {
@@ -83,7 +83,7 @@ public:
     }
 
     /**
-     * @brief Move state saved under the driver-built ID to the assigned GUID
+     * @brief Move state saved under the driver-built ID to the assigned ID
      * (decision 0018). The router calls this once, after registration, at the
      * start that gives a stored entry its first GUID: the upgrade. Never at
      * connect and never for a device added later, so a device configured on a
@@ -263,14 +263,14 @@ public:
 
 protected:
     /**
-     * @brief The ID a driver reports when no GUID was assigned (decision 0018):
+     * @brief The ID a driver reports when no ID was assigned (decision 0018):
      * a driver a unit test builds directly. Production drivers are always
      * assigned one by the router.
      */
     virtual std::string fallback_unique_id() const = 0;
 
     /**
-     * @brief The GUID the router assigned, or empty when none was. Never calls
+     * @brief The stored ID the router assigned, or empty when none was. Never calls
      * fallback_unique_id(), so it is safe under the driver's own mutex.
      */
     std::string assigned_unique_id() const {

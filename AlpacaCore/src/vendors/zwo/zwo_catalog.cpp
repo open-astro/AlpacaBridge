@@ -145,7 +145,7 @@ std::unique_ptr<AlpacaDriver> create_switch(const DeviceConfig& config, int devi
 // refused from the API and cleared, to be relearned, in a stored entry. What
 // registration learns (serial, model name) is returned for the entry to store,
 // so the next start binds by it. The UniqueID is not the camera's: the router
-// gives every configured device a persisted GUID (decision 0018).
+// gives every configured device a stored ID (decision 0018).
 BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int device_number,
                        const BindContext& context) {
     BindResult result;
