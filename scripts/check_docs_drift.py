@@ -16,6 +16,10 @@ Counts (check 15's numbers): python3 scripts/check_docs_drift.py --counts
   word, the brand list and a paste-ready README headline, all computed by
   the same functions check 15 gates with, so the /bump-release recount step
   has one command and no second copy of the row filter (#689).
+Badge (check 25's number): python3 scripts/check_docs_drift.py --badge
+  -- prints the authored-line count, the rounded figure and the paste-ready
+  README badge line, computed by the functions check 25 gates with, so the
+  /bump-release badge step has one command (#1465).
 
 Checks:
   1. Every ALPACACORE_ENABLE_* CMake option is documented in the
@@ -195,6 +199,14 @@ Checks:
      defaults and the "N-minute budget" prose); the two skills agree with each
      other, and the poll budget is greater than the job timeout (a poll that
      ends first reports a healthy run as a stall).
+ 25. The README "Authored code" badge (`NNNk lines`) is within
+     AUTHORED_LINES_TOLERANCE (5%) of the authored-line count computed from
+     the git index (issue #1465). Which tracked files count, and why the
+     rest do not, is written at AUTHORED_LINES_ROOTS and
+     AUTHORED_LINES_EXCLUDED_PREFIXES. The badge shows the count rounded to the
+     nearest 1,000, so an ordinary PR that adds or removes lines never trips the
+     check; only a badge that has fallen behind (or a missing badge) does.
+     /bump-release regenerates it with --badge.
 """
 
 import glob
@@ -2564,6 +2576,91 @@ def check_review_budget_agrees(root=ROOT):
         return ["could not read %s: %s" % (e.filename, e.strerror)]
 
 
+# --- check 25: README authored-line badge vs the git index (issue #1465) ------
+
+# What counts as authored code. Tracked files only (`git ls-files`), so a local
+# build tree or an ignored file never moves the number. Roots: the two
+# components and scripts/, which hold every first-party source, test and the
+# web UI. Extensions: C/C++ sources and headers, Python, shell and the web UI's
+# JS/HTML/CSS. Blank lines are not counted, so reformatting does not move the
+# figure. Docs, CMake files, data (HEX, rules, yaml, conformu logs) are not code.
+AUTHORED_LINES_ROOTS = ("AlpacaCore/", "AlpacaHTTP/", "scripts/")
+AUTHORED_LINES_EXTENSIONS = frozenset((
+    ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx",
+    ".py", ".sh", ".js", ".html", ".css",
+))
+# Third-party trees: the vendored SDKs and the bundled libgphoto2 both live
+# under AlpacaCore/external/, and counting them would let vendor code dominate
+# the number. Build directories are untracked, so the index already skips them.
+AUTHORED_LINES_EXCLUDED_PREFIXES = ("AlpacaCore/external/",)
+AUTHORED_LINES_ROUND = 1000
+# Fail only when the badge is further than this fraction of the computed count
+# from it. 5% of ~247k lines is ~12k, i.e. months of ordinary churn.
+AUTHORED_LINES_TOLERANCE = 0.05
+MIN_AUTHORED_LINES = 1000  # floor: fewer means the path filter or git listing broke
+
+AUTHORED_BADGE_RE = re.compile(
+    r"\[!\[Authored code\]\(https://img\.shields\.io/badge/Authored%20code-(?P<k>\d+)k%20lines-[A-Za-z0-9]+\.svg\)\]\([^)]*\)")
+
+
+def is_authored_path(path):
+    """True when a tracked path counts toward the authored-line badge."""
+    if not path.startswith(AUTHORED_LINES_ROOTS) or path.startswith(AUTHORED_LINES_EXCLUDED_PREFIXES):
+        return False
+    return Path(path).suffix in AUTHORED_LINES_EXTENSIONS
+
+
+def count_authored_lines(files):
+    """Non-blank lines over {path: text}, for the paths is_authored_path accepts."""
+    return sum(1 for path, text in files.items() if is_authored_path(path)
+               for line in text.splitlines() if line.strip())
+
+
+def _authored_lines_from_index(root=ROOT):
+    tracked = _run_git(["-c", "core.quotePath=false", "ls-files"], root=root).stdout.splitlines()
+    files = {}
+    for path in tracked:
+        if is_authored_path(path) and (root / path).is_file():
+            files[path] = read(path, root)
+    return count_authored_lines(files)
+
+
+def authored_badge_line(count):
+    k = int(round(count / AUTHORED_LINES_ROUND))
+    return ("[![Authored code](https://img.shields.io/badge/Authored%%20code-%dk%%20lines-informational.svg)]"
+            "(docs/architecture.md#modules)" % k)
+
+
+def _authored_badge_findings(readme, count):
+    """Check 25 over the README text and the computed count. Pure, so --self-test can drive it."""
+    if count < MIN_AUTHORED_LINES:
+        return ["authored-line count is %d, below the floor %d: the path filter or `git ls-files` listing is broken"
+                % (count, MIN_AUTHORED_LINES)]
+    m = AUTHORED_BADGE_RE.search(readme)
+    if not m:
+        return ["could not find the Authored code badge in README.md; paste: %s" % authored_badge_line(count)]
+    shown = int(m.group("k")) * AUTHORED_LINES_ROUND
+    if abs(shown - count) > AUTHORED_LINES_TOLERANCE * count:
+        return ["README Authored code badge says %dk lines but %d lines are authored (more than %d%% apart); "
+                "run `python3 scripts/check_docs_drift.py --badge` and paste: %s"
+                % (shown // 1000, count, round(AUTHORED_LINES_TOLERANCE * 100), authored_badge_line(count))]
+    return []
+
+
+def check_authored_lines_badge(root=ROOT):
+    return _authored_badge_findings(read("README.md", root), _authored_lines_from_index(root))
+
+
+def print_badge(root=ROOT):
+    count = _authored_lines_from_index(root)
+    m = AUTHORED_BADGE_RE.search(read("README.md", root))
+    print("authored lines: %d" % count)
+    print("rounded: %dk" % int(round(count / AUTHORED_LINES_ROUND)))
+    print("README.md now: %s" % (m.group(0) if m else "(badge not found)"))
+    print("badge: %s" % authored_badge_line(count))
+    return 0
+
+
 CHECKS = [
     ("Instruction discovery and Claude adapters", check_instruction_structure),
     ("CMake options documented in docs/development.md", check_cmake_options_documented),
@@ -2591,6 +2688,7 @@ CHECKS = [
     ("Decision record Adoption tables match the code", check_decision_adoption),
     ("Review job timeout, wait and poll budgets agree across the workflow, ci-gates and skills",
      check_review_budget_agrees),
+    ("README Authored code badge is within tolerance of the tracked line count", check_authored_lines_badge),
 ]
 
 
@@ -3543,6 +3641,38 @@ def self_test():
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
     check("adoption: a planned row whose source names the symbol only in a comment is clean", f == [])
 
+    # check 25: README authored-line badge (issue #1465).
+    badge = authored_badge_line(150000)
+    ab_readme = "# T\n\n" + badge + "\n"
+    check("authored badge: the generated line is what the extractor reads",
+          AUTHORED_BADGE_RE.search(ab_readme) is not None and "150k%20lines" in badge)
+    check("authored badge: a badge equal to the count is clean", _authored_badge_findings(ab_readme, 150000) == [])
+    check("authored badge: an ordinary PR's churn inside the tolerance is clean",
+          _authored_badge_findings(ab_readme, 150000 + 3000) == [] and _authored_badge_findings(ab_readme, 150000 - 3000) == [])
+    f = _authored_badge_findings(ab_readme, 170000)
+    check("authored badge: a count beyond the tolerance is flagged with the paste-ready line",
+          len(f) == 1 and "says 150k" in f[0] and "170k%20lines" in f[0])
+    f = _authored_badge_findings(ab_readme, 130000)
+    check("authored badge: a count far below the badge is flagged too", len(f) == 1 and "130k%20lines" in f[0])
+    f = _authored_badge_findings("# T\n", 150000)
+    check("authored badge: a missing badge is a finding, not a pass", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme.replace("Authored%20code", "Code"), 150000)
+    check("authored badge: a renamed badge label is not found", len(f) == 1 and "could not find" in f[0])
+    f = _authored_badge_findings(ab_readme, 10)
+    check("authored badge: a near-zero count is a floor finding", len(f) == 1 and "floor" in f[0])
+    check("authored paths: first-party code counts",
+          all(is_authored_path(p) for p in ("AlpacaCore/src/a.cpp", "AlpacaHTTP/web/app.js", "scripts/x.py",
+                                            "AlpacaHTTP/tests/t.cpp", "AlpacaCore/include/alpacacore/a.h")))
+    check("authored paths: vendored SDKs and the bundled libgphoto2 do not count",
+          not is_authored_path("AlpacaCore/external/ZWO/inc/ASICamera2.h")
+          and not is_authored_path("AlpacaCore/external/libgphoto2/src/x.c"))
+    check("authored paths: docs, data and files outside the roots do not count",
+          not any(is_authored_path(p) for p in ("README.md", "docs/x.py", "AlpacaCore/CMakeLists.txt",
+                                                "AlpacaCore/conformu/a.txt", ".github/scripts/c.py")))
+    check("authored lines: blank lines and excluded files are not counted",
+          count_authored_lines({"scripts/a.py": "a\n\n  \nb\n", "AlpacaCore/external/x.h": "x\ny\n",
+                                "README.md": "z\n"}) == 2)
+
     from check_instruction_structure import self_test as instruction_self_test
     instruction_self_test()
 
@@ -3570,4 +3700,6 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--counts" in sys.argv:
         sys.exit(print_counts())
+    if "--badge" in sys.argv:
+        sys.exit(print_badge())
     sys.exit(main())
