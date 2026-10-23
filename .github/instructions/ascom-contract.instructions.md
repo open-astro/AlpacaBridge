@@ -182,7 +182,8 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   lacks `POA_EGAIN` or the read fails. A client such as Ara stores whatever it is told, so a missing value beats a false
   one. Restore a return only when a per-gain source turns up.
 - **`SensorName` is never a placeholder**: ICameraV4 makes it mandatory and says to "return an empty string if the name
-  is not known". It does not raise, and a literal such as `"<vendor> Sensor"` is a made-up name. Return `""`.
+  is not known". It never raises PropertyNotImplemented, and a literal such as `"<vendor> Sensor"` is a made-up
+  name. Return `""`.
 
 ### Mount `gps_status` action (iOptron, Celestron)
 
