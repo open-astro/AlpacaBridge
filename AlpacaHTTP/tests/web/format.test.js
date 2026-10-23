@@ -349,7 +349,7 @@ test('formatSiteCoordinate prints finite numbers at 6 decimals and defers other 
     }
 });
 
-// #1471: the saved config carries the device's GUID as `uniqueId`, which the
+// #1471: the saved config carries the device's stored ID as `uniqueId`, which the
 // card already shows in its Unique ID row; the settings list must not repeat it.
 test('deviceSettingShown hides the keys the card shows elsewhere', () => withFormat(({ deviceSettingShown }) => {
     for (const key of ['uniqueId', 'vendor', 'deviceType', 'deviceNumber']) {

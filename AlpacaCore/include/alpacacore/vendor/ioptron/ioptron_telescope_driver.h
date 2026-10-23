@@ -75,9 +75,12 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
     util::TaskClock& clock = util::default_task_clock());
 
 /// The serial scan behind create_ioptron_telescope_auto(); throws when nothing answers.
-ConnectionInfo resolve_ioptron_serial_auto(int mount_index);
+/// With a non-empty @p location_key (`util::location_key` of the unique id and mount index) it first tries the port
+/// remembered for that key with one :MountInfo# and scans only when that fails.
+ConnectionInfo resolve_ioptron_serial_auto(int mount_index, const std::string& location_key = {});
 /// The network sweep behind create_ioptron_telescope_auto_network(); throws when nothing answers.
-ConnectionInfo resolve_ioptron_network_auto(int mount_index);
+/// With a non-empty @p location_key it first tries the remembered host:port with one handshake.
+ConnectionInfo resolve_ioptron_network_auto(int mount_index, const std::string& location_key = {});
 
 // Auto-detect (serial). The scan runs at connect time, so construction
 // succeeds even while the mount is absent (#659).

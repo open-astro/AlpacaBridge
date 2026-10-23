@@ -34,6 +34,7 @@ set(TEST_SOURCES
     test_image_validation.cpp
     test_motion_limits.cpp
     test_poll_settle.cpp
+    test_device_location_store.cpp
     test_rotator_sync_offset_store.cpp
     test_unique_id.cpp
     test_state_snapshot.cpp
@@ -154,7 +155,7 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_telescope_deferred_connect.cpp
         test_ioptron_ieaf_focuser_deferred_connect.cpp)
     # Serial-port ownership of the mount, iEAF and iEFW links (issue #1202).
-    list(APPEND TEST_SOURCES test_ioptron_serial_ownership.cpp)
+    list(APPEND TEST_SOURCES test_ioptron_serial_ownership.cpp test_ioptron_remembered_location.cpp)
     # iGuider guide camera (UVC over V4L2) and its [stress] registration, over
     # FakeIGuiderV4L2.
     list(APPEND TEST_SOURCES test_ioptron_iguider_camera.cpp test_ioptron_iguider_concurrency_stress.cpp)
@@ -184,7 +185,7 @@ if(TARGET alpacacore_weewx)
 endif()
 if(TARGET alpacacore_gemini)
     list(APPEND TEST_SOURCES test_gemini_focuser.cpp test_gemini_flatpanel.cpp test_gemini_flatpanel_v2.cpp test_gemini_flatpanel_pro.cpp
-         test_gemini_pdh_switch.cpp)
+         test_gemini_pdh_switch.cpp test_gemini_remembered_location.cpp)
     # switch/covercalibrator over the pty fakes + fail-fast focuser [stress], #271
     list(APPEND TEST_SOURCES test_gemini_concurrency_stress.cpp)
     # Auto-detect resolves at connect time (issue #659).
