@@ -7,8 +7,9 @@
 # the newest stable GitHub Release, unless that Release is younger than the
 # grace period (the repository is updated after the release is published).
 # The installed binary must resolve every shared library (`ldd`) and, from the
-# first release after 5.0.0, print its own version (`--version`). scheduled-failure.yml opens one tracked issue for a failure
-# and closes it on the next green run.
+# first main-line release (5.1), print its own version (`--version`).
+# scheduled-failure.yml opens one tracked issue for a failure and closes it on
+# the next green run.
 #
 # Not a pull_request check: it depends on apt.openastro.net and on a published
 # release, neither of which a PR changes. The `beta` component of the
@@ -115,16 +116,18 @@ jobs:
             echo "::error::alpacabridge has unresolved shared libraries"; exit 1
           fi
           installed="$(dpkg-query -W -f='${Version}' alpacabridge)"
-          # --version arrived with #1170 (commit ac35a4eb, 2026-10-15). Release 5.0.0
-          # (tag v5.0.0, 2026-10-21) does not have it: its main() passes argv[1] to
-          # Config::load and starts the server, so the call would never return. No
-          # stable tag contains the commit yet, so the first release with it is the
-          # one after 5.0.0.
-          if dpkg --compare-versions "$installed" gt 5.0.0; then
+          # --version arrived with #1170 (commit ac35a4eb, 2026-10-15), on main only:
+          # it is not an ancestor of v5.0.0 or of stable/5.0. Without it, main()
+          # passes argv[1] to Config::load and starts the server, so the call
+          # would never return. A 5.0.x patch cut from stable/5.0 lacks it too,
+          # so the gate is the first main-line version, 5.1. The package version
+          # is the VERSION string (X.Y.Z, or X.Y.Z~betaN for a beta); the `~` in
+          # `5.1~` lets 5.1.0~beta1 through.
+          if dpkg --compare-versions "$installed" ge 5.1~; then
             version="$(timeout 30 /usr/bin/alpacabridge --version)"
             echo "alpacabridge --version: ${version}"
             test "$version" = "$installed" || {
               echo "::error::--version printed '${version}', installed package is ${installed}"; exit 1; }
           else
-            echo "Package ${installed} predates --version; the ldd check above is the load check."
+            echo "Package ${installed} has no --version (before 5.1); the ldd check above is the load check."
           fi
