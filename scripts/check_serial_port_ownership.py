@@ -108,7 +108,7 @@ def scan_text(text: str, allowed: frozenset[str] = frozenset()) -> list[tuple[in
 
     @p allowed names rule ids the file may break; see ALLOWLIST.
     """
-    return [(line, matched, reason) for _, line, matched, reason in scan_rules(text) if _ not in allowed]
+    return [(line, matched, reason) for rule_id, line, matched, reason in scan_rules(text) if rule_id not in allowed]
 
 
 def scan_rules(text: str) -> list[tuple[str, int, str, str]]:
@@ -122,10 +122,32 @@ def scan_rules(text: str) -> list[tuple[str, int, str, str]]:
     return sorted(findings, key=lambda f: (f[1], f[2]))
 
 
+def check_files(files: dict[str, str], allowlist: dict[str, dict[str, str]]) -> list[str]:
+    """Finding lines for the scanned @p files (path -> text), honouring @p allowlist.
+
+    An allowlist entry whose file is not in @p files, or whose rule never matches in it, is stale.
+    """
+    out = []
+    used: set[tuple[str, str]] = set()
+    for rel, text in files.items():
+        allowed = allowlist.get(rel, {})
+        for rule_id, line, matched, reason in scan_rules(text):
+            if rule_id in allowed:
+                used.add((rel, rule_id))
+                continue
+            out.append(f"{rel}:{line}: {matched}: {reason}")
+    for rel, rules in allowlist.items():
+        if rel not in files:
+            out.append(f"{rel}: stale ALLOWLIST entry (file does not exist)")
+            continue
+        for rule_id in rules:
+            if (rel, rule_id) not in used:
+                out.append(f"{rel}: stale ALLOWLIST entry (rule {rule_id} no longer matches in it)")
+    return out
+
+
 def main() -> int:
-    failures = 0
-    scanned = 0
-    used: dict[tuple[str, str], bool] = {}
+    files: dict[str, str] = {}
     for base in SCAN_DIRS:
         for glob in SOURCE_GLOBS:
             for path in sorted(base.rglob(glob)):
@@ -134,26 +156,12 @@ def main() -> int:
                     continue
                 if rel in HELPER_FILES:
                     continue
-                scanned += 1
-                found = scan_rules(path.read_text(encoding="utf-8", errors="replace"))
-                allowed = ALLOWLIST.get(rel, {})
-                for rule_id in allowed:
-                    used.setdefault((rel, rule_id), False)
-                for rule_id, line, text, reason in found:
-                    if rule_id in allowed:
-                        used[(rel, rule_id)] = True
-                        continue
-                    print(f"{rel}:{line}: {text}: {reason}")
-                    failures += 1
-    for rel, rules in ALLOWLIST.items():
-        if not (ROOT / rel).exists():
-            print(f"{rel}: stale ALLOWLIST entry (file does not exist)")
-            failures += 1
-            continue
-        for rule_id in rules:
-            if not used.get((rel, rule_id), False):
-                print(f"{rel}: stale ALLOWLIST entry (rule {rule_id} no longer matches in it)")
-                failures += 1
+                files[rel] = path.read_text(encoding="utf-8", errors="replace")
+    scanned = len(files)
+    findings = check_files(files, ALLOWLIST)
+    failures = len(findings)
+    for f in findings:
+        print(f)
     if failures:
         print(f"\nSerial port ownership check FAILED: {failures} finding(s). See issue #1202, decision 0017 "
               "and .github/instructions/serial-autodetect.instructions.md 'Serial / socket I/O'.")
@@ -206,6 +214,18 @@ def self_test() -> int:
         ("raw-io allowance keeps other rules", seam + " tcsetattr(fd, 0, &t);", frozenset({RAW_IO}), 1),
     ]:
         got = len(scan_text(text, allowed))
+        if got != expected:
+            print(f"  self-test: {label}: expected {expected} finding(s), got {got}")
+            failures += 1
+    allow = {"a.cpp": {RAW_IO: "why"}}
+    raw = "n = ::read(link_.fd(), buf, 1);"
+    for label, files, expected in [
+        ("allowance used gives no finding", {"a.cpp": raw}, 0),
+        ("allowance never matching is stale", {"a.cpp": "int x = 0;"}, 1),
+        ("allowance for a missing file is stale", {}, 1),
+        ("no allowance for another file", {"a.cpp": raw, "b.cpp": raw}, 1),
+    ]:
+        got = len(check_files(files, allow))
         if got != expected:
             print(f"  self-test: {label}: expected {expected} finding(s), got {got}")
             failures += 1
