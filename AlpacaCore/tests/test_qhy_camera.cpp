@@ -958,6 +958,19 @@ TEST_CASE("QHY Camera Driver - StopExposure is not supported and AbortExposure k
     driver->set_connected(false);
 }
 
+// Issue #1277: SensorName is "" when the chip info could not be read, never a "QHY Sensor" placeholder.
+TEST_CASE("QHY Camera Driver - SensorName is empty when chip info is unreadable", "[qhy][camera][unit]") {
+    auto fake = FakeQHYSDK::with_one_cooled_camera();
+    fake.chip_info_available = false;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(fake.call_count("get_chip_info") == 1);
+    CHECK(driver->get_sensor_name().empty());
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - HeatSinkTemperature, ElectronsPerADU and FullWellCapacity are not implemented",
           "[qhy][camera][unit]") {
     auto fake = FakeQHYSDK::with_one_cooled_camera();

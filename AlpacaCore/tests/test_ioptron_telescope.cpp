@@ -1284,3 +1284,26 @@ TEST_CASE("iOptron Telescope Driver - gps_status does not hold mutex_ across the
     CHECK(mount.count(":GUT") == gut_before);
     driver->set_connected(false);
 }
+
+// Issue #1277, decision 0016: SupportedActions and CanAction read the atomic connected_ without mutex_, so
+// a CommandString exchange (which holds mutex_ across the wire) does not stall them.
+TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait on a held command exchange",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.hold_next_reply(std::chrono::milliseconds(1000));
+    auto reply = std::async(std::launch::async, [&] { return driver->command_string(":GLS#", true); });
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
+
+    (void)reply.get();
+    driver->set_connected(false);
+}

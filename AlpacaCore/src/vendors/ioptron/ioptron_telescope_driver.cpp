@@ -458,8 +458,8 @@ public:
     static constexpr std::string_view kGpsStatusAction = "gps_status";
 
     std::vector<std::string> get_supported_actions() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!connected_) return {};
+        // connected_ is atomic: no mutex_, so a command_* exchange holding it cannot stall this getter.
+        if (!connected_.load()) return {};
         return {std::string(kGpsStatusAction)};
     }
 
@@ -483,8 +483,7 @@ public:
     }
 
     bool can_action(std::string_view action_name) const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_ && util::is_gps_status_action(action_name);
+        return connected_.load() && util::is_gps_status_action(action_name);
     }
     
     std::string command_blind(std::string_view command, bool raw) override {

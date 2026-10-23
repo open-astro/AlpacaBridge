@@ -155,6 +155,9 @@ public:
     /// single-threaded, and clear it after joining), never mid-[stress].
     std::function<void(const std::string&)> before_call;
     bool sdk_resource_available = true;
+    // false makes get_chip_info() return false (the wrapper's "chip info unreadable" result), so a
+    // connect finishes with camera_info_valid_ == false.
+    bool chip_info_available = true;
     // Set to "" to reach the empty-cache branch the driver special-cases in
     // get_driver_info()/get_device_sdk_version(): the real wrapper returns an
     // empty string until the SDK resource comes up, so a fake that always
@@ -436,6 +439,7 @@ public:
     bool get_chip_info(const std::string& camera_id, QHYCameraInfo& info) override {
         hit("get_chip_info");
         require_open(camera_id);
+        if (!chip_info_available) return false;
         // QHYSDKWrapper::get_chip_info() never writes info.model at all -- the
         // driver gets the model exclusively from the separate
         // get_camera_model() call, made earlier in the connect sequence.
