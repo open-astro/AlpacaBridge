@@ -861,6 +861,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
+            if (op == 0x02) {  // MC_GOTO_FAST: the GOTO a meridian flip sends instead of the HC's 'R'
+                st.goto_last.store(st.order.fetch_add(1) + 1);
+                return "#";
+            }
             if (op == 0x12) {                                                      // MC_LEVEL_DONE
                 st.level_count.fetch_add(1);
                 if (st.level_mute.load()) return "";
