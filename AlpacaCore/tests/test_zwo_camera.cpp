@@ -247,3 +247,32 @@ TEST_CASE("ZWO Camera Driver - cooler members work with the cooler capability", 
     CHECK(camera->get_cooler_on());
     CHECK(camera->get_cooler_power() >= 0.0);
 }
+
+// Issue #1277: the SDK's ElecPerADU is one static figure that does not follow gain, and ASCOM wants the value in
+// the current mode, so a client gets PropertyNotImplemented, never a number that is wrong at every other gain. An
+// unknown SensorName is the empty string (ICameraV4 SensorName), never a "ZWO Sensor" placeholder.
+TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not implemented, SensorName has no placeholder",
+          "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+
+    CHECK(driver->get_sensor_name().empty());
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_sensor_name() == "Fake ZWO Camera");
+    for (const int gain : {0, 300}) {
+        driver->set_gain(gain);
+        require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+    }
+    for (const auto& s : driver->get_device_state()) {
+        CHECK(s.name != "ElectronsPerADU");
+        CHECK(s.name != "FullWellCapacity");
+    }
+    driver->set_connected(false);
+}

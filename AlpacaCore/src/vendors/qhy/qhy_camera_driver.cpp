@@ -1200,7 +1200,7 @@ public:
     std::string get_sensor_name() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "QHY Sensor";
+        return camera_info_valid_ ? camera_info_.model : std::string();  // unknown: "" (ICameraV4 SensorName)
     }
 
     SensorType get_sensor_type() const override {
