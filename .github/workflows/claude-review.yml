@@ -410,17 +410,20 @@ jobs:
 
       # The checklist runs to dozens of lines, so it is folded under a
       # summary of its verdict counts after the check above has passed. The
-      # heading and the sign-off stay outside the fold, and every defect line
-      # is repeated under Defects. A missing section or "none in scope" is
+      # counts use the checker's own CHECKLIST_RE from the same extracted
+      # copy. The heading and the sign-off stay outside the fold, and every
+      # defect line is repeated under Defects. A missing section or "none in scope" is
       # left as written.
       - name: Fold the decision-record checklist
         run: |
           if [ ! -s review-comment.md ]; then
             exit 0
           fi
-          python3 -I - review-comment.md <<'EOF'
-          import re, sys
-          path = sys.argv[1]
+          python3 -I - "${RUNNER_TEMP}/adr-tools/scripts" review-comment.md <<'EOF'
+          import sys
+          sys.path.insert(0, sys.argv[1])
+          from check_adr_scope import CHECKLIST_RE  # count exactly the lines the gate accepted
+          path = sys.argv[2]
           lines = open(path, encoding="utf-8").read().split("\n")
           start = next((i for i, l in enumerate(lines) if l.strip() == "## Decision records"), None)
           if start is None:
@@ -429,8 +432,7 @@ jobs:
           last = max((i for i, l in enumerate(lines) if l.strip()), default=-1)
           if start < last < end:
               end = last  # the sign-off stays outside the fold
-          verdicts = [m.group(1).lower() for l in lines[start + 1:end]
-                      if (m := re.match(r"\s*- \S+\.md rule \d+: (pass|defect|n/a)\b", l, re.I))]
+          verdicts = [m.group(3).lower() for l in lines[start + 1:end] if (m := CHECKLIST_RE.match(l))]
           if not verdicts:
               sys.exit(0)
           counts = ", ".join("%d %s" % (verdicts.count(v), v) for v in ("defect", "pass", "n/a") if v in verdicts)
