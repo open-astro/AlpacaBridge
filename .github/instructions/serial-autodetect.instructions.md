@@ -35,9 +35,13 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
-  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment or a
-  pre-#1202 `mark_serial_port_*` call anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the
-  two helper headers. The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
+  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
+  pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
+  `serial_fd_`) anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the two helper headers.
+  Only the Sky-Watcher and Celestron CGX wrappers may use raw `read`/`write` (their `poll()`-bounded loops
+  behind test seams); the allowance is per rule, so the other rules still apply to them. `TIOCEXCL` is
+  best effort: a refusal logs a warning and the open goes on, unless the link opts in to
+  `SerialExclusive::Required` (decision 0017). The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
   non-tty fds only.
 - A by-id name does not identify a CH340 device (they carry no serial number): the connect-time handshake
   is what proves which device is on a port, so every serial driver must check its handshake reply.

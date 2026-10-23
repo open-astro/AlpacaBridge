@@ -8177,10 +8177,12 @@ int main() {
         // refuses one -- 405 with InvalidOperation (0x40B) in the envelope.
         const auto put = route_request(router, "PUT", "/management/v1/devicecatalog", "ClientTransactionID=77");
         EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
         const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
         EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
         const auto post = route_request(router, "POST", "/management/v1/devicecatalog", "{}");
         EXPECT(post.status_code() == 405);
+        EXPECT(post.get_header("Allow") == "GET");
     }
 
     // GET /management/v1/thermalcameras?vendor=<v> serves the catalog's camera
@@ -8239,6 +8241,7 @@ int main() {
         EXPECT(!empty.is_discarded() && empty.value("ErrorNumber", -1) == 0 && empty["Value"].empty());
         const auto put = route_request(router, "PUT", "/management/v1/thermalcameras", "vendor=zzz");
         EXPECT(put.status_code() == 405);
+        EXPECT(put.get_header("Allow") == "GET");
         const auto put_json = nlohmann::json::parse(put.body(), nullptr, false);
         EXPECT(!put_json.is_discarded() && put_json.value("ErrorNumber", 0) == 0x40B);
     }
@@ -9717,7 +9720,24 @@ int main() {
             EXPECT(row.value("UniqueID", std::string()) == row["Config"].value("uniqueId", std::string("x")));
             EXPECT(row["Config"].value("vendor", "") == "nosuchvendor");
         }
-        EXPECT(route_request(router, "PUT", "/management/v1/faileddevices", "{}").status_code() == 405);
+        const auto failed_put = route_request(router, "PUT", "/management/v1/faileddevices", "{}");
+        EXPECT(failed_put.status_code() == 405);
+        EXPECT(failed_put.get_header("Allow") == "GET");
+    }
+    {
+        // case: every AlpacaBridge-only 405 names the methods its handler accepts in Allow (RFC 9110 s15.5.6)
+        alpacahttp::Router router;
+        const auto expect_allow = [&](const std::string& method, const std::string& path, const std::string& allow) {
+            const auto resp = route_request(router, method, path, "");
+            EXPECT(resp.status_code() == 405);
+            EXPECT(resp.get_header("Allow") == allow);
+        };
+        expect_allow("DELETE", "/management/v1/configuredevice", "POST, PUT");
+        expect_allow("GET", "/management/v1/configuredevice", "POST, PUT");
+        expect_allow("GET", "/management/v1/removedevice", "POST, PUT");
+        expect_allow("GET", "/management/v1/shutdown", "POST, PUT");
+        expect_allow("GET", "/management/v1/restart", "POST, PUT");
+        expect_allow("DELETE", "/management/v1/synctime", "GET, POST, PUT");
     }
     {
         // case: routes outside the Alpaca schema are rejected (#576)
