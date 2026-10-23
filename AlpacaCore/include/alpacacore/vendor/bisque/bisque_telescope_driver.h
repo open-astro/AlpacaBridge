@@ -16,6 +16,7 @@
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -46,5 +47,8 @@ std::unique_ptr<TelescopeDriver> create_bisque_telescope_with_site(int device_nu
 /// ignored.
 void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 bool poll_status_now_for_testing(TelescopeDriver& driver);
+/// Runs `hook` on the SlewToCoordinates thread once IsSlewComplete has answered true and the position is published,
+/// before the wait applies Slewing false; no driver lock is held. An empty hook removes it.
+void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 } // namespace alpacacore::vendor::bisque
