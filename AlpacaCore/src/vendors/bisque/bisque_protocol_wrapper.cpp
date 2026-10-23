@@ -92,10 +92,10 @@ public:
             freeaddrinfo(result);
         }
 
-        // Non-blocking connect with a bounded poll timeout: this runs under the
-        // driver mutex, and a bare blocking connect() to an unreachable host
-        // would stall every GET (and disconnect) for the full OS TCP timeout
-        // (~127 s). Same pattern as the iOptron network prober.
+        // Non-blocking connect with a bounded poll timeout: this holds the wrapper
+        // lock, and a bare blocking connect() to an unreachable host would stall
+        // every exchange (and disconnect) for the full OS TCP timeout (~127 s). Same pattern as the iOptron network
+        // prober.
         bool conn_ok = util::set_nonblocking(socket_fd_);
         if (conn_ok) {
             int rc = ::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
