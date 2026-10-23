@@ -52,8 +52,36 @@ RECORD_NUMBER_RE = re.compile(r"(?<![#\d])\b(\d{4})\b")
 HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 SCOPE_LINE_RE = re.compile(r"^(\d{4}-[a-z0-9-]+\.md): rules (\d+(?:, \d+)*)$")
+# Consumers: the workflow step "Fold the decision-record checklist" in .github/workflows/claude-review.yml
+# imports fold_checklist (and through it CHECKLIST_RE, sign_off and the sign-off constants); rename them there too.
 CHECKLIST_RE = re.compile(r"^\s*[-*]\s*`?(\d{4}-[a-z0-9-]+\.md)`?\s+rule\s+(\d+)\s*:\s*(pass|defect|n/a)\s*:\s*\S", re.I)
 ISSUES_SIGN_OFF = "\u26a0\ufe0f Issues found"
+APPROVED_SIGN_OFF = "\u2705 Approved"
+
+
+def sign_off(line):
+    """The line without the Markdown emphasis or closing period a sign-off may carry."""
+    return line.strip().strip("*_ ").rstrip(".!").strip("*_ ")
+
+
+def fold_checklist(text):
+    """The review with its checklist folded into <details>, or the text unchanged when it has no checklist lines."""
+    lines = text.split("\n")
+    start = next((i for i, l in enumerate(lines) if l.strip().lower() == "## " + SECTION), None)
+    if start is None:
+        return text
+    end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
+    last = max((i for i, l in enumerate(lines) if l.strip()), default=-1)
+    if start < last < end and sign_off(lines[last]) in (APPROVED_SIGN_OFF, ISSUES_SIGN_OFF):
+        end = last  # a real sign-off stays outside the fold
+    verdicts = [m.group(3).lower() for l in lines[start + 1:end] if (m := CHECKLIST_RE.match(l))]
+    if not verdicts:
+        return text
+    counts = ", ".join("%d %s" % (verdicts.count(v), v) for v in ("defect", "pass", "n/a") if v in verdicts)
+    summary = "%d rule%s: %s" % (len(verdicts), "" if len(verdicts) == 1 else "s", counts)
+    body = "\n".join(lines[start + 1:end]).strip("\n")
+    folded = ["## Decision records", "", "<details><summary>%s</summary>" % summary, "", body, "", "</details>", ""]
+    return "\n".join(lines[:start] + folded + lines[end:])
 
 
 def record_rules(records):
@@ -137,7 +165,7 @@ def checklist_findings(scope, review):
     lines = [line.strip() for line in review.splitlines() if line.strip()]
     last = lines[-1] if lines else ""
     # Markdown emphasis or a closing period around the sign-off is still the sign-off.
-    bare = last.strip("*_ ").rstrip(".!").strip("*_ ")
+    bare = sign_off(last)
     findings += ["the review marks %s rule %d as a defect but its last line is %r, not the Issues-found sign-off"
                  % (key + (last,)) for key, v in sorted(verdicts.items()) if "defect" in v and bare != ISSUES_SIGN_OFF]
     return findings
@@ -244,7 +272,7 @@ def self_test():
     expect(body_findings("## Decision records\n\n- docs/decisions/README.md\n",
                          ["docs/decisions/README.md"]) == [], "the index is not a record")
 
-    ok = "\u2705 Approved"
+    ok = APPROVED_SIGN_OFF
     scope = "0003-docs-drift-gates.md: rules 3\n0005-task-clock.md: rules 1, 2\n"
     full = ("## Defects\nnone\n\n## Decision records\n"
             "- 0003-docs-drift-gates.md rule 3: pass: no gate text changed\n"
@@ -273,6 +301,19 @@ def self_test():
     expect(any("not `<record file>" in x for x in f), "a malformed scope line is reported")
     expect(checklist_findings(scope, "0005-task-clock.md rule 2 passes, and so do the rest\n" + ok) != [],
            "prose that mentions a rule is not a checklist line")
+
+    repro = ("## Defects\n\nnone\n\n## Decision records\n\n- 0003-docs-drift-gates.md rule 1: pass: a\n"
+             "- 0005-task-clock.md rule 2: n/a: b\n")
+    out = fold_checklist(repro)
+    expect("<summary>2 rules: 1 pass, 1 n/a</summary>" in out and out.rstrip("\n").endswith("</details>"),
+           "with no sign-off the last checklist line is folded and counted: %r" % out)
+    for decorated in ("%s", "**%s**", "%s.", "_%s_"):
+        for mark in (ok, ISSUES_SIGN_OFF):
+            out = fold_checklist(repro + "\n" + decorated % mark + "\n")
+            expect("<summary>2 rules: 1 pass, 1 n/a</summary>" in out and out.rstrip("\n").endswith(decorated % mark)
+                   and out.index("</details>") < out.index(mark), "a sign-off %r stays outside the fold: %r" % (decorated % mark, out))
+    expect(fold_checklist("## Decision records\n\nnone\n") == "## Decision records\n\nnone\n",
+           "a review with no checklist lines is unchanged")
 
     for f in failures:
         print("FAIL: " + f)
