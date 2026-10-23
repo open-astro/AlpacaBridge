@@ -17,11 +17,13 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <exception>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -31,6 +33,7 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -465,19 +468,20 @@ TEST_CASE(
 
 TEST_CASE("ZWO Telescope Driver - a same-value Tracking write does not drop the in-flight poll",
           "[zwo][telescope][unit][tracking]") {
-    // Each ":GR#" answers a later RA, so a published poll shows as a changed RightAscension.
-    std::atomic<int> ra_seconds{0};
-    alpacacore::test::FakeMountServer server([&ra_seconds](const std::string& chunk) -> std::string {
-        if (chunk.find(":GU#") != std::string::npos) return "NG#";
-        if (chunk.find(":GR#") != std::string::npos) {
-            char buf[32];
-            std::snprintf(buf, sizeof buf, "12:%02d:%02d#", (ra_seconds / 60) % 60, ra_seconds % 60);
-            ++ra_seconds;
-            return buf;
+    // The poll thread is held inside ":GU#" (its snapshot token already taken) while same-value Tracking writes
+    // arrive; the mandatory sample must still publish, so the DeviceState TimeStamp age stays within one poll.
+    alpacacore::test::FakeTaskClock clock;
+    std::atomic<bool> hold_status{false}, status_entered{false}, release_status{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.find(":GU#") != std::string::npos) {
+            if (hold_status.load()) {
+                status_entered.store(true);
+                while (!release_status.load()) std::this_thread::yield();
+            }
+            return "nN#";  // lowercase n: not tracking, so Tracking=false is the cached no-op value
         }
+        if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
-        if (chunk.find(":SMTI") != std::string::npos) return "1#";
-        if (chunk.find(":GAT") != std::string::npos) return "1#";
         if (chunk.find(":Ggr") != std::string::npos) return "0.50#";
         return "0#";
     });
@@ -487,22 +491,54 @@ TEST_CASE("ZWO Telescope Driver - a same-value Tracking write does not drop the 
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 250;
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope_with_site(0, conn, 30.0, -100.0, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    driver->set_tracking(false);  // seeds the tracking cache; the writes below are then no-ops
 
-    // One same-value write every 5 ms for 1.5 s, inside the 2 s fast-path window: every write is a no-op
-    // and must leave each poll that is in flight to publish.
-    const bool tracking = driver->get_tracking();
-    std::vector<double> seen{driver->get_right_ascension()};
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    while (std::chrono::steady_clock::now() < end) {
-        driver->set_tracking(tracking);
-        const double ra = driver->get_right_ascension();
-        if (ra != seen.back()) seen.push_back(ra);
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    auto timestamp_age_ms = [&driver] {
+        for (const auto& entry : driver->get_device_state()) {
+            if (entry.name != "TimeStamp") continue;
+            int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+            REQUIRE(std::sscanf(std::get<std::string>(entry.value).c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h,
+                                &mi, &s, &ms) == 7);
+            std::tm tm{};
+            tm.tm_year = y - 1900;
+            tm.tm_mon = mo - 1;
+            tm.tm_mday = d;
+            tm.tm_hour = h;
+            tm.tm_min = mi;
+            tm.tm_sec = s;
+            const auto stamp = std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+            return std::chrono::duration<double, std::milli>(std::chrono::system_clock::now() - stamp).count();
+        }
+        FAIL("no TimeStamp in DeviceState");
+        return 0.0;
+    };
+
+    clock.advance(std::chrono::milliseconds(250));  // one clean poll first, so a frame exists
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    hold_status.store(true);
+    for (int period = 0; period < 12; ++period) {
+        CAPTURE(period);
+        status_entered.store(false);
+        release_status.store(false);
+        clock.advance(std::chrono::milliseconds(250));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!status_entered.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        REQUIRE(status_entered.load());
+        driver->set_tracking(false);  // same value, poll in flight
+        release_status.store(true);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // poll finished, back in its wait
+        // A dropped poll leaves the sample a whole period older each time (250 ms, 500 ms, ...); real time
+        // elapsed between the two clock reads is microseconds.
+        const double age_ms = timestamp_age_ms();
+        INFO("TimeStamp age after the poll: " << age_ms << " ms");
+        CHECK(age_ms < 125.0);
     }
-    INFO("distinct RightAscension values served: " << seen.size());
-    CHECK(seen.size() >= 3);
+    release_status.store(true);
 
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
