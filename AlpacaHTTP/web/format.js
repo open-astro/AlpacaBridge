@@ -655,7 +655,7 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
 
 // Saved-config keys the device card's settings list leaves out: the card shows
 // them in its own rows (type, number, vendor, and the Unique ID row for the
-// GUID stored as `uniqueId`, decision 0018) or derives them (aperture area
+// stored ID in `uniqueId`, decision 0018) or derives them (aperture area
 // and focal length).
 const HIDDEN_DEVICE_SETTING_KEYS = new Set(['vendor', 'deviceType', 'deviceNumber', 'uniqueId',
     'apertureDiameter', 'focalLength']);

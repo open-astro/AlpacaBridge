@@ -116,7 +116,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   SDK-touching setter needs the same `exposure_lifecycle_mutex_` guard, not just `with_handle()`.
 - **`fallback_unique_id()` keys on `device_number_`, not the libgphoto2 USB port string** (review PR
   #485 round 4). Since [decision 0018](../../docs/decisions/0018-persisted-unique-id.md) the
-  `UniqueID` a client sees is the GUID the router stores for the configured device; this fallback
+  `UniqueID` a client sees is the ID the router stores for the configured device; this fallback
   answers only for a driver a unit test builds directly. The reasoning still holds for it:
   `camera_info_.port` (e.g. `usb:001,005`) looks like a natural per-camera identity, but it isn't stable: it changes across every unplug/replug (the bus device number
   increments) and even within one session, since a DSLR that was powered off when

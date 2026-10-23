@@ -125,13 +125,14 @@ bool is_host_refusal(const alpacahttp::Response& response, const std::string& ho
 // device is missing — callers EXPECT(!cfg.is_null()) first, then assert every
 // persisted field survived (the automated catch for sanitize_device_config
 // allowlist gaps and FormData-style key loss).
-// Decision 0018: every stored config carries the server's GUID in uniqueId.
-// The config helpers below check its shape and drop it, so the many exact
-// config comparisons stay about the vendor's own fields; a case about the GUID
+// Decision 0018: every stored config carries the stored ID (a minted GUID or a
+// kept ID) in uniqueId. The config helpers below check its shape and drop it, so the many exact
+// config comparisons stay about the vendor's own fields; a case about the ID
 // reads it through raw_listed_config().
 nlohmann::json without_unique_id(nlohmann::json config) {
     if (config.is_object() && config.contains("uniqueId")) {
-        EXPECT(config["uniqueId"].is_string() && alpacacore::util::is_unique_id(config["uniqueId"].get<std::string>()));
+        EXPECT(config["uniqueId"].is_string() &&
+               alpacacore::util::is_keepable_unique_id(config["uniqueId"].get<std::string>()));
         config.erase("uniqueId");
     }
     return config;
@@ -2906,10 +2907,12 @@ int main() {
                 first_ids.push_back(raw_listed_config(stored, "Camera", number).value("uniqueId", std::string()));
             }
             EXPECT(!listed_entry(stored, "Camera", 9712).is_null());
-            // Decision 0018: a stored ZWO_UID_ is not a GUID, so each entry gets its own
-            // GUID at load, written back.
-            EXPECT(alpacacore::util::is_unique_id(first_ids[0]));
+            // Decision 0018: a stored ZWO_UID_ is kept; the later entry holding the same value
+            // gets a minted GUID at load, written back.
+            EXPECT(first_ids[0] == "ZWO_UID_00112233445566ff");
             EXPECT(alpacacore::util::is_unique_id(first_ids[1]));
+            EXPECT(alpacacore::util::is_unique_id(
+                raw_listed_config(stored, "Camera", 9712).value("uniqueId", std::string())));
             EXPECT(first_ids[0] != first_ids[1]);
             // Two stored entries sharing a serial: the first drops it, the second keeps it.
             EXPECT(listed_config(stored, "Camera", 9713).value("serialNumber", std::string()).empty());
@@ -2940,7 +2943,7 @@ int main() {
             EXPECT(!listed.is_null());
             const std::string saved_id =
                 listed.value("Config", nlohmann::json::object()).value("uniqueId", std::string());
-            EXPECT(alpacacore::util::is_unique_id(saved_id));  // the old ZWO_UID_ was replaced once
+            EXPECT(saved_id == "ZWO_UID_0011223344556677");  // a stored ZWO_UID_ is kept (decision 0018)
             remove_device(unresolved, "zwo", "camera", 9715);
 
             const nlohmann::json body = {{"vendor", "zwo"},
@@ -8257,16 +8260,27 @@ int main() {
         };
         const std::string first_id = stored_id(9471);
         EXPECT(alpacacore::util::is_unique_id(first_id));
-        EXPECT(listed_unique_id(9471) == first_id);  // the driver reports the stored GUID
+        EXPECT(listed_unique_id(9471) == first_id);  // the driver reports the stored ID
 
-        // A GUID another entry holds, or a value that is not a GUID, is replaced.
+        // An ID another entry holds, or a device-number ID, is replaced.
         const auto copy = configure(9472, first_id);
         EXPECT(copy.ok);
         EXPECT(alpacacore::util::is_unique_id(stored_id(9472)));
         EXPECT(stored_id(9472) != first_id);
+        // A stored-form ID (ZWO_UID_) is kept; a second entry sending it, or a device-number ID, gets a GUID.
         const auto legacy = configure(9473, std::string("ZWO_UID_00112233445566ff"));
         EXPECT(legacy.ok);
-        EXPECT(alpacacore::util::is_unique_id(stored_id(9473)));
+        EXPECT(stored_id(9473) == "ZWO_UID_00112233445566ff");
+        const auto dup = configure(9475, std::string("ZWO_UID_00112233445566ff"));
+        EXPECT(dup.ok);
+        EXPECT(alpacacore::util::is_unique_id(stored_id(9475)));
+        const auto slot = configure(9474, std::string("SkyWatcher_0"));
+        EXPECT(slot.ok);
+        EXPECT(alpacacore::util::is_unique_id(stored_id(9474)));
+        // The web UI's edit of the ZWO_UID_ entry keeps it too.
+        remove_device(router, "zzz", "focuser", 9473);
+        EXPECT(configure(9473, std::string("ZWO_UID_00112233445566ff")).ok);
+        EXPECT(stored_id(9473) == "ZWO_UID_00112233445566ff");
 
         // The web UI's edit removes the entry and re-adds it with its GUID: it is kept.
         remove_device(router, "zzz", "focuser", 9471);
@@ -8274,7 +8288,7 @@ int main() {
         EXPECT(edited.ok);
         EXPECT(stored_id(9471) == first_id);
         EXPECT(listed_unique_id(9471) == first_id);
-        for (const int number : {9471, 9472, 9473}) remove_device(router, "zzz", "focuser", number);
+        for (const int number : {9471, 9472, 9473, 9474, 9475}) remove_device(router, "zzz", "focuser", number);
     }
     {
         // case: a stored entry gets a GUID once at load and keeps it across restarts (#1471)
@@ -8305,12 +8319,13 @@ int main() {
             std::set<std::string> distinct;
             for (const auto& entry : stored) {
                 const std::string id = entry.value("uniqueId", std::string());
-                EXPECT(alpacacore::util::is_unique_id(id));
+                EXPECT(alpacacore::util::is_keepable_unique_id(id));
                 first_ids.push_back(id);
                 distinct.insert(id);
             }
             EXPECT(distinct.size() == 4);  // the duplicated GUID is replaced in the later entry
-            EXPECT(first_ids[2] == held);  // the first holder keeps a valid GUID
+            EXPECT(first_ids[1] == "ZWO_UID_00112233445566ff");  // a stored ZWO_UID_ is kept
+            EXPECT(first_ids[2] == held);                        // the first holder keeps a valid GUID
             for (int i = 0; i < 4; ++i) {
                 const auto row = listed_failed_entry(first, "focuser", 9474 + i);
                 EXPECT(!row.is_null());
@@ -9602,7 +9617,7 @@ int main() {
             EXPECT(row.value("DeviceName", "") == "nosuchvendor (failed to load)");
             EXPECT(row.value("DeviceType", "") == "focuser");
             EXPECT(row.value("DeviceNumber", -1) == 9577);
-            // Decision 0018: a failed-to-load entry keeps the GUID stored for it.
+            // Decision 0018: a failed-to-load entry keeps the ID stored for it.
             EXPECT(alpacacore::util::is_unique_id(row.value("UniqueID", std::string())));
             EXPECT(row.value("UniqueID", std::string()) == row["Config"].value("uniqueId", std::string("x")));
             EXPECT(row["Config"].value("vendor", "") == "nosuchvendor");

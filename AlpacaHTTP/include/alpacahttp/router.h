@@ -467,8 +467,8 @@ private:
     mutable std::mutex persisted_file_mutex_;
     std::vector<nlohmann::json> persisted_devices_;
     bool persisted_devices_loaded_ = false;
-    // Decision 0018: GUIDs a configuredevice call has chosen and not stored yet,
-    // so two concurrent calls sending one GUID cannot both keep it. Guarded by
+    // Decision 0018: IDs a configuredevice call has chosen and not stored yet,
+    // so two concurrent calls sending one ID cannot both keep it. Guarded by
     // persisted_devices_mutex_.
     std::set<std::string> reserved_unique_ids_;
 
