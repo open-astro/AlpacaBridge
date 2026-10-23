@@ -248,7 +248,7 @@ inline void make_raw_8n1(struct termios& tty, speed_t baud) {
 /// Whether SerialLink::open() fails when the kernel refuses TIOCEXCL. Best
 /// effort logs a warning and keeps the port (the default); Required refuses
 /// it, for a link that must not share its tty (the Celestron CGX, decision
-/// 0011). The general rule is open on #1440.
+/// 0011). The general rule is best effort (decision 0017).
 enum class SerialExclusive : std::uint8_t {
     BestEffort,
     Required,
