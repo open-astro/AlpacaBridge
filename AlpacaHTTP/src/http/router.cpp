@@ -6420,7 +6420,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "SensorName")) {
             return *value;
         }
-        throw_bad_request("Missing parameter: PropertyName");
+        throw_bad_request("Missing parameter: SensorName");
     };
 
     try {
@@ -6587,6 +6587,8 @@ Response Router::dispatch_safetymonitor_method(
         );
         response.set_body(alpaca_response);
         return response;
+        // Unreachable today: no SafetyMonitor method reads a parameter. Kept so a
+        // method that adds one answers 400 text like the other dispatchers.
     } catch (const RequestNotInterpretable& e) {
         util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
         set_bad_request_text(response, e.what());

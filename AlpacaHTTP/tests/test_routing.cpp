@@ -9902,6 +9902,9 @@ int main() {
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kNum)));
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kNum)));
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::RotatorStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::DomeStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::ObservingConditionsStub>(kNum)));
         alpacahttp::Router router;
         struct Bad {
             const char* verb;
@@ -9933,6 +9936,10 @@ int main() {
             {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[\"x\"]}", "FocusOffsets"},
             {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[0.5]}", "FocusOffsets"},
             {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[4294967296]}", "FocusOffsets"},
+            {"PUT", "/api/v1/rotator/9477/moveabsolute", "Position=abc", "Position"},
+            {"PUT", "/api/v1/dome/9477/slewtoazimuth", "Azimuth=abc", "Azimuth"},
+            {"PUT", "/api/v1/observingconditions/9477/averageperiod", "AveragePeriod=abc", "AveragePeriod"},
+            {"GET", "/api/v1/observingconditions/9477/sensordescription", "", "SensorName"},  // missing
         };
         std::vector<std::string> wrong;
         for (const auto& bad : cases) {
@@ -9953,6 +9960,14 @@ int main() {
             route_request(router, "PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[1,2]}");
         EXPECT(offsets.status_code() == 200);
         EXPECT(nlohmann::json::parse(offsets.body(), nullptr, false).value("ErrorNumber", -1) == 0);
+        // A numeric string element parses like any JSON integer parameter (json_int_value).
+        const auto string_offsets =
+            route_request(router, "PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[\"5\",2]}");
+        EXPECT(string_offsets.status_code() == 200);
+        EXPECT(nlohmann::json::parse(string_offsets.body(), nullptr, false).value("ErrorNumber", -1) == 0);
+        const auto read_back = route_request(router, "GET", "/api/v1/filterwheel/9477/focusoffsets");
+        EXPECT(nlohmann::json::parse(read_back.body(), nullptr, false).value("Value", nlohmann::json()) ==
+               nlohmann::json::array({5, 2}));
 
         // A parsed value the driver range-checks stays 200 + InvalidValue (0x401).
         class RangeCheckedSwitch final : public route_table_stubs::SwitchStub {
@@ -9981,6 +9996,9 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
         registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
         registry.unregister_device(alpacacore::DeviceType::FilterWheel, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Rotator, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Dome, kNum);
+        registry.unregister_device(alpacacore::DeviceType::ObservingConditions, kNum);
     }
     {
         // case: every Device API 400 is text/plain with a non-empty message, no JSON envelope (#1476)
