@@ -14,11 +14,12 @@ The extracted `ASCOM.ASIMount.Server.exe` SHA-256 is
 `e5f4bc178246b3837ef0fbcb979f85403e04f738029d3671f063e0b8b369954a`.
 This is static vendor-code evidence, not a published protocol guarantee.
 
-Read-only AM5 firmware 1.8.6 checks on 2026-10-23 returned fresh, matching serials
-over USB and handset Wi-Fi. The serial itself remains private. Support on other
-models/firmware, persistence across firmware changes and factory uniqueness across
-two physical mounts were not verified. Do not copy the vendor getter's cached-value
-fallback when verifying a new connection.
+Read-only AM5 checks on 2026-10-23 returned fresh, matching serials over USB and
+handset Wi-Fi on firmware 1.8.6 and after this unit's update to 1.8.8. Its serial
+was unchanged across that observed update and remains private. Support on other
+models/firmware, stability across other firmware changes and factory uniqueness
+across two physical mounts were not verified. Do not copy the vendor getter's
+cached-value fallback when verifying a new connection.
 
 <!-- TODO: qualify :GMA# on AM3/AM5N/AM7 and establish its minimum supported firmware. -->
 
