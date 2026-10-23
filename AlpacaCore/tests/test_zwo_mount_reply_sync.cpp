@@ -250,4 +250,36 @@ TEST_CASE("ZWO mount reply sync - a line that keeps sending after the reply ends
     });
 }
 
+TEST_CASE("ZWO mount reply sync - a blind pulse that eats the owed reply leaves nothing owed",
+          "[zwo][reply-sync][issue1527]") {
+    // :GD answers 20 ms after its 250 ms timeout; every other command answers at once.
+    const Responder mount = [](const std::string& chunk) {
+        std::string out;
+        std::size_t pos = 0;
+        while (pos < chunk.size()) {
+            const std::size_t end = chunk.find('#', pos);
+            if (end == std::string::npos) break;
+            const std::string cmd = chunk.substr(pos, end - pos);
+            pos = end + 1;
+            if (cmd == ":GD") {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kQueryTimeoutMs + 20));
+                out += "+45*30:15#";
+            } else if (cmd == ":GR") {
+                out += "02:30:15#";
+            }
+        }
+        return out;
+    };
+    on_both_transports(mount, [](ZWOMountProtocolWrapper& wrapper) {
+        CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
+        // The pulse's own 40 ms drain reads and drops the late reply; the next query must not wait for it.
+        wrapper.pulse_guide(2, 10);
+        const auto start = Clock::now();
+        std::string ra;
+        CHECK_NOTHROW(ra = wrapper.send_command(":GR", true, kQueryTimeoutMs));
+        CHECK(ra == "02:30:15");
+        CHECK(ms_since(start) < 150);
+    });
+}
+
 #endif  // _WIN32

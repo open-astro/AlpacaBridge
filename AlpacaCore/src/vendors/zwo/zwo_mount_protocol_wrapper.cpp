@@ -821,8 +821,10 @@ public:
         }
 
         // A blind command never waits for an owed reply: a guide pulse or an abort (":Q") must not be delayed
-        // by the fence. The owed reply stays owed; the next query settles it.
-        discard_pending_input();
+        // by the fence. The owed reply stays owed for the next query to settle, unless this command's own input
+        // flush or 40 ms drain reads the reply's '#': then it is gone and nothing is owed any more.
+        bool saw_hash = false;
+        discard_pending_input(&saw_hash);
         if (!write_data(full_command)) {
             note_transport_error();
             throw AlpacaException("Failed to send command to ZWO mount");
@@ -831,10 +833,11 @@ public:
         ALPACA_LOG_TRACE("ZWO", "CMD " + full_command + " (blind)");
 
         try {
-            (void)read_response(false, 40, false);
+            (void)read_response(false, 40, false, &saw_hash);
         } catch (const std::exception&) {
             // Ignore best-effort drain failures for fire-and-forget commands.
         }
+        if (saw_hash) reply_owed_ = false;
     }
 
 private:
@@ -902,12 +905,22 @@ private:
     // sequence number. settle_owed_reply() narrows the window to a reply later than kOwedReplyBoundMs after its
     // timeout (or later than the next exchange's own timeout, when that is shorter), or to a reply owed by a command
     // that was never marked (a blind command); it does not close it.
-    void discard_pending_input() {
+    // `saw_hash` (optional) is set when the dropped input held a '#'.
+    void discard_pending_input(bool* saw_hash = nullptr) {
         if (connection_type_ == ConnectionType::Serial) {
 #ifdef _WIN32
             if (!PurgeComm(serial_handle_, PURGE_RXCLEAR))
                 throw AlpacaException("Failed to discard ZWO mount serial input");
 #else
+            if (saw_hash != nullptr) {
+                // Look at what is queued before it is flushed (non-blocking), so a consumed reply is noticed.
+                char peek[128];
+                ssize_t got;
+                int reads = 0;
+                while (reads++ < 16 && (got = util::tty_read(serial_fd_, peek, sizeof(peek), 0)) > 0) {
+                    if (std::memchr(peek, '#', static_cast<std::size_t>(got)) != nullptr) *saw_hash = true;
+                }
+            }
             if (tcflush(serial_fd_, TCIFLUSH) != 0) {
                 note_transport_error();
                 throw AlpacaException("Failed to discard ZWO mount serial input");
@@ -927,6 +940,9 @@ private:
         ssize_t count;
         do {
             count = recv(socket_fd_, discarded, sizeof(discarded), MSG_DONTWAIT);
+            if (count > 0 && saw_hash != nullptr &&
+                std::memchr(discarded, '#', static_cast<std::size_t>(count)) != nullptr)
+                *saw_hash = true;
         } while (count > 0 || (count < 0 && errno == EINTR));
         if (count == 0) link_lost_.store(true);
         if (count < 0) note_transport_error();
@@ -1192,7 +1208,8 @@ private:
 #endif
     }
 
-    std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected) {
+    std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
+                              bool* saw_hash = nullptr) {
         std::string response;
         const auto start = std::chrono::steady_clock::now();
         auto last_char_time = start;
@@ -1214,6 +1231,7 @@ private:
                     continue;
                 }
                 if (ch == '#') {
+                    if (saw_hash != nullptr) *saw_hash = true;
                     break;
                 }
                 response.push_back(ch);
