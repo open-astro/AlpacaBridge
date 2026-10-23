@@ -265,6 +265,7 @@ private:
     std::string held_reply_;
     std::atomic<bool> garbage_{false};
     std::atomic<bool> muted_{false};
+    std::atomic<bool> state_muted_{false};
     std::atomic<int> kicks_{0};
 };
 
