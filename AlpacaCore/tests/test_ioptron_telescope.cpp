@@ -31,6 +31,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -41,6 +42,7 @@
 #include "fake_ioptron_mount.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "gps_status_check.h"
 #include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
@@ -1210,4 +1212,49 @@ TEST_CASE("iOptron Telescope Driver spec audit - SiteElevation never set throws 
     require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
     driver->set_site_elevation(42.0);
     CHECK(driver->get_site_elevation() == 42.0);
+}
+
+// Issue #1277: Action("gps_status") reports whether the mount's GPS receiver holds a fix (:GLS# digit 2), with the
+// receiver's own latitude and longitude from the same reply. Without a fix the stored site in that reply is not
+// GPS data and is never reported.
+TEST_CASE("iOptron Telescope Driver - gps_status reports the GPS fix from :GLS#", "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+
+    // Not connected: not listed, not supported, and the call is NotConnected.
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&]() { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
+    CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
+    require_alpaca_error([&]() { (void)driver->action("other_action", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+
+    SECTION("valid GPS data is a fix with the receiver's site") {
+        mount.set_gps(2, -33.856784, 151.215297);
+        const std::string reply = driver->action("gps_status", "");
+        CHECK(reply.rfind("{\"fix\":true,", 0) == 0);
+        REQUIRE(alpacacore::test::gps_status_number(reply, "latitude").has_value());
+        CHECK(*alpacacore::test::gps_status_number(reply, "latitude") == Catch::Approx(-33.856784).margin(1e-6));
+        CHECK(*alpacacore::test::gps_status_number(reply, "longitude") == Catch::Approx(151.215297).margin(1e-6));
+        CHECK_FALSE(alpacacore::test::gps_status_number(reply, "elevation").has_value());
+        CHECK(reply.find("\"elevation\":null") != std::string::npos);
+    }
+    SECTION("a working receiver without valid data is no fix, and the stored site is withheld") {
+        mount.set_gps(1, 51.477833, -0.001500);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    SECTION("no or failed GPS module is no fix") {
+        mount.set_gps(0, 51.477833, -0.001500);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    driver->set_connected(false);
 }

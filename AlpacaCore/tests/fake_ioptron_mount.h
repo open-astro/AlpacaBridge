@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -61,6 +62,16 @@ public:
     /// Firmware system status the ":GLS" read reports: 1 = tracking (default), 2 = slewing. Lets a test make the
     /// firmware say "moving" with no GOTO issued, as during a pulse-guide or a slew started from the handset.
     void set_system_status(int status) { system_status_.store(status); }
+
+    /// GPS digit of the ":GLS" reply (0 no or failed GPS module, 1 GPS works but no valid data, 2 valid GPS data)
+    /// together with the site that reply carries: the receiver's own reading when the digit is 2, otherwise the
+    /// mount's stored site. Defaults: digit 0 and an all-zero site field.
+    void set_gps(int status, double latitude_degrees, double longitude_degrees) {
+        gps_status_.store(status);
+        // 0.01 arcsec units: longitude signed, latitude stored as latitude + 90 degrees.
+        longitude_units_.store(std::llround(longitude_degrees * 3600.0 * 100.0));
+        latitude_field_.store(std::llround((latitude_degrees + 90.0) * 3600.0 * 100.0));
+    }
 
     /// One shot, then spent: the reply to the next chunk received (one recv, which may carry several commands)
     /// is held for @p delay. A connect waiting on that reply stays open that long; used by the contract sweep to
@@ -138,10 +149,14 @@ private:
             return "0#";
         }
         if (cmd == ":GLS#") {
-            // sign + 16 digits (site), then 6 status digits: GPS, system
-            // status (1 = tracking, 2 = slewing), rate, speed, time source,
-            // hemisphere.
-            return std::string("+00000000000000000") + std::to_string(system_status_.load()) + "0001#";
+            // sign + 16 digits (site: longitude, then latitude + 90 degrees), then 6 status digits: GPS,
+            // system status (1 = tracking, 2 = slewing), rate, speed, time source, hemisphere.
+            char site[32];
+            const long long lon = longitude_units_.load();
+            std::snprintf(site, sizeof(site), "%c%08lld%08lld", lon < 0 ? '-' : '+', lon < 0 ? -lon : lon,
+                          latitude_field_.load());
+            return std::string(site) + std::to_string(gps_status_.load()) + std::to_string(system_status_.load()) +
+                   "0001#";
         }
         if (cmd == ":GUT#") {
             return "+00000000000000000#";
@@ -190,6 +205,9 @@ private:
     }
 
     std::atomic<int> system_status_{1};
+    std::atomic<int> gps_status_{0};
+    std::atomic<long long> longitude_units_{0};
+    std::atomic<long long> latitude_field_{0};
     std::string model_code_;
     double landing_error_arcsec_;
     std::atomic<int> hold_ms_{0};

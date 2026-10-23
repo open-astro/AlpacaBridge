@@ -1819,7 +1819,11 @@ SiteInfo iOptronProtocolWrapper::get_site_info() {
     // Convert back: stored value = lat + 90 degrees
     double lat_arcsec = (lat_offset / 100.0) - (90.0 * 3600.0);
     site.latitude_degrees = lat_arcsec / 3600.0;
-    
+
+    // GPS status (17th digit, 0-based offset 17 after the 17-character site block)
+    const char gps_digit = gls_response[17];
+    site.gps_status = (gps_digit >= '0' && gps_digit <= '9') ? gps_digit - '0' : 0;
+
     // Hemisphere (22nd digit)
     site.is_northern_hemisphere = (gls_response[22] == '1');
     
