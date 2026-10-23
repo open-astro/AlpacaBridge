@@ -87,7 +87,7 @@ TEST_CASE("Device location store - a corrupt file means no remembered location a
 TEST_CASE("Device location store - a failed save returns false and does not throw", "[device-location][unit]") {
     TempLocationDir dir;
     // The state directory cannot be created: its parent is a regular file.
-    { std::ofstream(dir.dir() / "state") << "in the way"; }
+    std::ofstream(dir.dir() / "state") << "in the way";
     CHECK_FALSE(DeviceLocationStore::save("A", "/dev/ttyUSB0"));
     CHECK_FALSE(DeviceLocationStore::load("A").has_value());
 }
