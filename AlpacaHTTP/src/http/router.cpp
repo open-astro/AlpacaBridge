@@ -4115,8 +4115,14 @@ Response Router::dispatch_telescope_method(
                     date_str = request.get_query_param("UTCDate");
                 } else if (auto json_opt = parse_json(request.body())) {
                     if (const auto* val = find_json_value(*json_opt, "UTCDate")) {
+                        if (!val->is_string()) {
+                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
+                        }
                         date_str = val->get<std::string>();
                     } else if (const auto* val = find_json_value(*json_opt, "Value")) {
+                        if (!val->is_string()) {
+                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
+                        }
                         date_str = val->get<std::string>();
                     }
                 }
@@ -5522,7 +5528,14 @@ Response Router::dispatch_filterwheel_method(
                 if (!offsets_val) {
                     throw_bad_request("Missing parameter: FocusOffsets");
                 }
-                std::vector<int> offsets = offsets_val->get<std::vector<int>>();
+                if (!offsets_val->is_array()) {
+                    throw_bad_request("FocusOffsets must be an array of integers");
+                }
+                std::vector<int> offsets;
+                offsets.reserve(offsets_val->size());
+                for (const auto& offset : *offsets_val) {
+                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
+                }
                 filterwheel->set_focus_offsets(offsets);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);

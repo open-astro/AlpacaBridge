@@ -7824,6 +7824,10 @@ int main() {
                 EXPECT(reply.value("ErrorMessage", "").find("beta;x") == std::string::npos);
             }
             EXPECT(scripted->switches.empty());
+            // An AlpacaBridge-only request: its 400 keeps the JSON envelope (#1476, ADR 0007).
+            const auto refused = route_request(router, "PUT", "/management/v1/update/channel", R"({"Channel":"nope"})");
+            EXPECT(refused.status_code() == 400);
+            EXPECT(refused.get_header("Content-Type").find("application/json") == 0);
             EXPECT(route_request(router, "GET", "/management/v1/update/channel").status_code() == 200);
             EXPECT(scripted->switches.empty());
             {
@@ -9804,6 +9808,7 @@ int main() {
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::FocuserStub>(kNum)));
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kNum)));
         EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FilterWheelStub>(kNum)));
         alpacahttp::Router router;
         struct Bad {
             const char* verb;
@@ -9828,6 +9833,13 @@ int main() {
             {"PUT", "/api/v1/camera/9477/gain?Gain=1.5", "", "Gain"},
             {"PUT", "/api/v1/camera/9477/startexposure?Duration=1", "", "Light"},
             {"PUT", "/api/v1/focuser/9477/connected?Connected=perhaps", "", "Connected"},
+            {"PUT", "/api/v1/telescope/9477/utcdate", "{\"UTCDate\":5}", "UTCDate"},  // JSON wrong type
+            {"PUT", "/api/v1/telescope/9477/utcdate", "{\"Value\":5}", "UTCDate"},    // JSON wrong type
+            {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":\"abc\"}", "FocusOffsets"},
+            {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":5}", "FocusOffsets"},
+            {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[\"x\"]}", "FocusOffsets"},
+            {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[0.5]}", "FocusOffsets"},
+            {"PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[4294967296]}", "FocusOffsets"},
         };
         std::vector<std::string> wrong;
         for (const auto& bad : cases) {
@@ -9844,6 +9856,10 @@ int main() {
         }
         for (const auto& line : wrong) std::cerr << "  " << line << "\n";
         EXPECT(wrong.empty());
+        const auto offsets =
+            route_request(router, "PUT", "/api/v1/filterwheel/9477/focusoffsets", "{\"FocusOffsets\":[1,2]}");
+        EXPECT(offsets.status_code() == 200);
+        EXPECT(nlohmann::json::parse(offsets.body(), nullptr, false).value("ErrorNumber", -1) == 0);
 
         // A parsed value the driver range-checks stays 200 + InvalidValue (0x401).
         class RangeCheckedSwitch final : public route_table_stubs::SwitchStub {
@@ -9871,6 +9887,7 @@ int main() {
         registry.unregister_device(alpacacore::DeviceType::Focuser, kNum);
         registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
         registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
+        registry.unregister_device(alpacacore::DeviceType::FilterWheel, kNum);
     }
     {
         // case: every Device API 400 is text/plain with a non-empty message, no JSON envelope (#1476)
@@ -9916,11 +9933,7 @@ int main() {
         EXPECT(description.status_code() == 400);
         EXPECT(description.get_header("Content-Type").find("application/json") == 0);
         EXPECT(nlohmann::json::parse(description.body(), nullptr, false).is_object());
-        const auto channel = route_request(router, "PUT", "/management/v1/update/channel", "{\"Channel\":\"nope\"}");
-        if (channel.status_code() == 400) {
-            EXPECT(channel.get_header("Content-Type").find("application/json") == 0);
-            EXPECT(nlohmann::json::parse(channel.body(), nullptr, false).is_object());
-        }
+        // The update/channel 400 envelope is pinned in "update channel route", whose router has a manager.
     }
 
     std::cout << "All routing tests passed!\n";
