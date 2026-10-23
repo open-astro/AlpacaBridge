@@ -236,7 +236,7 @@ TEST_CASE("QHY Q-Focuser Snapshot - DeviceState TimeStamp is when the frame was 
 
 // Falsified by: qhy_focuser_driver.cpp: set_connected() drop the connect's first-frame check (a connect whose first
 // state poll was lost succeeds with no frame).
-TEST_CASE("QHY Q- Focuser Driver - a getter after a successful connect never throws DriverException",
+TEST_CASE("QHY Q-Focuser Driver - a getter after a successful connect never throws DriverException",
           "[qhy][focuser][snapshot][unit]") {
     FakeQhyQFocuser fake;
     fake.set_muted(true);
