@@ -22,6 +22,8 @@ Usage:
   check_issue_labels.py --self-test
 """
 import argparse
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -190,21 +192,31 @@ def self_test():
     check("bot author is exempt", run([], login="dependabot[bot]", kind="Bot"), [])
     check("exempt label removes a stale comment", run(["dependencies"], [own]), [("delete", 11)])
 
-    class Recording(GhIssues):
-        def __init__(self, dry_run):
-            super().__init__(dry_run)
-            self.calls = []
+    ran = []
+    real_run = subprocess.run
 
-        def _gh(self, *args, stdin=None, write=False):
-            if self.dry_run and write:
-                return ""
-            self.calls.append(args)
-            return json.dumps([[{"id": 1}], [{"id": 2}]])
+    class Done:
+        stdout = json.dumps([[{"id": 1}], [{"id": 2}]])
 
-    r = Recording(dry_run=True)
-    r.delete_comment(3)
-    check("dry run makes no write call", r.calls, [])
-    check("comments flattens pages", [c["id"] for c in r.comments(5)], [1, 2])
+    def record(cmd, **kwargs):
+        ran.append(cmd)
+        return Done()
+
+    subprocess.run = record
+    try:
+        dry = GhIssues(dry_run=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            dry.create_comment(5, "text")
+            dry.update_comment(3, "text")
+            dry.delete_comment(3)
+        check("dry run makes no write call", ran, [])
+        check("dry run still reads", [c["id"] for c in dry.comments(5)], [1, 2])
+        check("a read calls gh", [c[:2] for c in ran], [["gh", "api"]])
+        del ran[:]
+        GhIssues(dry_run=False).delete_comment(3)
+        check("a live write calls gh", [c[:3] for c in ran], [["gh", "api", "-X"]])
+    finally:
+        subprocess.run = real_run
 
     for line in bad:
         print(line)
