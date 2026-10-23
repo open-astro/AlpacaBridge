@@ -1123,6 +1123,11 @@ public:
         return alive;
     }
 
+    void set_slew_complete_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        slew_complete_hook_ = std::move(hook);
+    }
+
 private:
     void check_connected() const {
         if (!connected_ || link_lost_) {
@@ -1502,7 +1507,6 @@ private:
             return true;
         }
         bool complete = false;
-        const uint64_t epoch = slew_epoch_;
         lock.unlock();
         try {
             complete = BisqueProtocolWrapper::instance().is_slew_complete();
@@ -1515,9 +1519,7 @@ private:
         if (!complete) {
             return true;
         }
-        if (epoch != slew_epoch_) {
-            return slewing_cached_;  // a slew start or abort wrote meanwhile: the answer is about an older slew
-        }
+        // No slew start or abort wrote meanwhile: both callers hold initiator_mutex_, as every slew_epoch_ writer does.
         // No measurement here: an initiator is timed against the 1 s target, and a retarget starts a new slew at
         // once. Drop the tick in flight; the next poll publishes the position.
         drop_poll_in_flight_locked();
@@ -1585,7 +1587,9 @@ private:
                 ++consecutive_failures;
             }
             if (complete) {
-                publish_measurement();  // the position read after the stop goes out with Slewing false
+                // The position read after the stop is published first; Slewing clears in the next mutex_ hold.
+                publish_measurement();
+                run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
                 lock.lock();
                 if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
                     slewing_cached_ = false;
@@ -1608,6 +1612,17 @@ private:
             lock.lock();
             // The mount may have been disconnected while the lock was released.
             check_connected();
+        }
+    }
+
+    void run_slew_complete_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = slew_complete_hook_;
+        }
+        if (hook) {
+            hook();
         }
     }
 
@@ -1650,6 +1665,8 @@ private:
     std::atomic<int> slew_waiters_{0};  // SlewToCoordinates waits polling by themselves; atomic: a wait that throws
                                         // leaves its guard without mutex_
     std::atomic<bool> status_poll_paused_for_testing_{false};
+    std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
+    std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
@@ -1701,6 +1718,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
         return bisque->poll_status_now_for_testing();
     }
     return false;
+}
+
+void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_slew_complete_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::bisque

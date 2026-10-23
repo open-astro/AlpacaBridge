@@ -38,8 +38,8 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
- * `find_home_ms`, `set_tracking_ms` and `position_ms` delay only the FindHome, SetTracking and GetRaDec replies by that
- * many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in one call.
+ * `find_home_ms`, `set_tracking_ms`, `position_ms` and `is_parked_ms` delay only the FindHome, SetTracking, GetRaDec
+ * and IsParked replies by that many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in one call.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by
@@ -74,6 +74,7 @@ public:
     std::atomic<int> find_home_ms{0};
     std::atomic<int> set_tracking_ms{0};
     std::atomic<int> position_ms{0};
+    std::atomic<int> is_parked_ms{0};
     std::atomic<bool> mute{false};
     std::atomic<bool> pier_west{false};
     std::atomic<double> ra_hours{5.5};
@@ -119,6 +120,7 @@ private:
             return "|No error. Error = 0.OK#";
         }
         if (has(command, "IsParked")) {
+            if (is_parked_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(is_parked_ms.load()));
             if (parking_ && ++park_polls > park_polls_needed.load()) {
                 parking_ = false;
                 parked = true;
