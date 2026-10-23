@@ -266,7 +266,7 @@ public:
           site_latitude_cached_(0.0),
           site_longitude_cached_(0.0),
           site_info_valid_(false),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
@@ -857,7 +857,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        (void)dec;
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         if (!site_info_valid_) {
@@ -875,12 +875,13 @@ public:
         return EquatorialSystem::J2000;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -901,7 +902,11 @@ public:
     }
 
     double get_site_elevation() const override {
-        return site_elevation_m_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -909,6 +914,7 @@ public:
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
     }
 
@@ -3732,7 +3738,7 @@ private:
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
     mutable util::TaskClock::clock::time_point last_site_info_attempt_;
-    double site_elevation_m_;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
@@ -3777,7 +3783,6 @@ private:
     // that read is not a data race (PR #281 review).
     std::atomic<int> mount_model_id_;
     bool use_precise_commands_;
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
 
     std::optional<double> pending_site_latitude_;

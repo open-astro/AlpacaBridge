@@ -193,7 +193,6 @@ TEST_CASE("SkyWatcher snapshot - a client write reads back before the next poll 
          [&] { return driver->get_site_elevation() == 250.0; }},
         {"SlewSettleTime", [&] { driver->set_slew_settle_time(3); },
          [&] { return driver->get_slew_settle_time() == 3; }},
-        {"DoesRefraction", [&] { driver->set_does_refraction(true); }, [&] { return driver->get_does_refraction(); }},
         {"ApertureDiameter", [&] { driver->set_aperture_diameter(0.2); },
          [&] { return driver->get_aperture_diameter() == 0.2; }},
         {"FocalLength", [&] { driver->set_focal_length(1.2); }, [&] { return driver->get_focal_length() == 1.2; }},
