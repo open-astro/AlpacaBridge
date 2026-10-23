@@ -101,7 +101,8 @@ author must do. Read the docstring before changing a gate.
 - **Daily APT install check** (`.github/workflows/apt-install-check.yml`, issue #1360): in a
   `debian:trixie` container it runs the install commands cut out of README.md's Installation
   section (never copied into the workflow), compares the installed version with the newest stable
-  Release (a Release under 24 h old may still be missing), and runs `alpacabridge --version`.
+  Release (a Release under 24 h old may still be missing), fails on any `not found` from `ldd`
+  and, from 5.1 on (`--version` is not on `stable/5.0`), runs `alpacabridge --version`.
   `scheduled-failure.yml` watches it by workflow name.
 - **Every job in every workflow has a `timeout-minutes` bound** (issue #363), sized from healthy
   green runtimes with wide headroom. A `[stress]` regression hangs rather than fails, and GitHub's
