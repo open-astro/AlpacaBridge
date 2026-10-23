@@ -1,0 +1,110 @@
+# Checks every day that the newest stable release installs from the OpenAstro
+# APT repository (issue #1360), the way README.md tells a user to do it.
+#
+# The install commands are cut out of README.md's Installation section at run
+# time and run as written, so a README that drifts from the real repository
+# fails here instead of on a user's machine. The installed version must equal
+# the newest stable GitHub Release, unless that Release is younger than the
+# grace period (the repository is updated after the release is published).
+# The installed binary must also start (`--version`), which proves it loads its
+# shared libraries. scheduled-failure.yml opens one tracked issue for a failure
+# and closes it on the next green run.
+#
+# Not a pull_request check: it depends on apt.openastro.net and on a published
+# release, neither of which a PR changes. The `beta` component of the
+# repository is not checked.
+
+name: APT install check
+
+on:
+  schedule:
+    - cron: "17 7 * * *"   # daily, after the other scheduled workflows
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: apt-install-check
+  cancel-in-progress: false
+
+jobs:
+  install:
+    name: Install from apt.openastro.net
+    if: github.repository == 'open-astro/AlpacaBridge'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    container: debian:trixie
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GRACE_SECONDS: "86400"
+    steps:
+      # The image has none of these; the README's commands use sudo, curl and gpg.
+      - name: Install the tools the README commands need
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl gpg jq sudo
+          # A container has no init system: keep the package from starting the service.
+          printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+          chmod +x /usr/sbin/policy-rc.d
+
+      - name: Extract the install commands from README.md
+        run: |
+          curl -fsSL -o README.md \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/README.md"
+          # The fenced ```sh blocks between "## Installation" and the first <details>.
+          awk '
+            /^## Installation/ { in_section = 1; next }
+            in_section && /^## / { exit }
+            in_section && /^<details>/ { exit }
+            in_section && /^```sh$/ { in_block = 1; blocks++; next }
+            in_section && /^```$/ { in_block = 0; next }
+            in_section && in_block { print }
+            END { if (blocks != 3) { print "README.md: expected 3 install blocks, found " blocks+0 > "/dev/stderr"; exit 1 } }
+          ' README.md > install.sh
+          grep -q 'apt\(-get\)\? install alpacabridge' install.sh || {
+            echo "::error::README.md install blocks do not install alpacabridge"; exit 1; }
+          grep -q 'apt.openastro.net' install.sh || {
+            echo "::error::README.md install blocks do not use apt.openastro.net"; exit 1; }
+          echo "Commands taken from README.md:"
+          cat install.sh
+
+      - name: Run the README commands
+        run: |
+          # pipefail: a failed curl inside the README's pipes must fail the step.
+          bash -eo pipefail install.sh
+
+      - name: Compare with the newest stable release
+        run: |
+          set -euo pipefail
+          release="$(curl -fsSL \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest")"
+          tag="$(jq -er '.tag_name' <<<"$release")"
+          published="$(jq -er '.published_at' <<<"$release")"
+          # /releases/latest skips drafts and prereleases. A tag is vX.Y.Z; the
+          # package version is X.Y.Z, so the leading v is dropped to compare.
+          expected="${tag#v}"
+          installed="$(dpkg-query -W -f='${Version}' alpacabridge)"
+          echo "Installed: ${installed}; newest stable release: ${tag} (published ${published})"
+          if [ "$installed" = "$expected" ]; then
+            echo "Installed version matches release ${tag}."
+            exit 0
+          fi
+          age=$(( $(date +%s) - $(date -d "$published" +%s) ))
+          if [ "$age" -lt "$GRACE_SECONDS" ]; then
+            echo "::notice::Release ${tag} is ${age} s old (grace ${GRACE_SECONDS} s); the repository still serves ${installed}."
+            exit 0
+          fi
+          echo "::error::apt.openastro.net serves ${installed}, but release ${tag} was published ${age} s ago."
+          exit 1
+
+      - name: Start the installed binary
+        run: |
+          set -euo pipefail
+          # --version loads every shared library the binary links against.
+          version="$(/usr/bin/alpacabridge --version)"
+          echo "alpacabridge --version: ${version}"
+          test -n "$version"
