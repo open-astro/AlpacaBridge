@@ -83,3 +83,6 @@ debian/changelog
 *.deb
 *.buildinfo
 *.changes
+
+# lychee link-check cache (.github/workflows/link-check.yml)
+.lycheecache
