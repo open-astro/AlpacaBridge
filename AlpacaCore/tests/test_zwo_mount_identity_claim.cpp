@@ -103,7 +103,8 @@ TEST_CASE("ZWO mount identity claim refusal names holder without serial", "[zwo]
     }
 }
 
-TEST_CASE("ZWO mount identity claim concurrent Auto collisions have one winner", "[zwo][identity][issue1523][stress]") {
+TEST_CASE("ZWO mount identity claim concurrent Auto collisions have one winner",
+          "[zwo][identity][issue1523][stress-guard]") {
     for (bool first_auto : {false, true}) {
         for (bool second_auto : {false, true}) {
             if (!first_auto && !second_auto) continue;

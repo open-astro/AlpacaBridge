@@ -310,7 +310,7 @@ TEST_CASE("ZWO blocked identity keeps operational calls offline and configuratio
 }
 
 TEST_CASE("ZWO disconnect racing a delayed identity cannot leave a connected telescope",
-          "[zwo][telescope][identity][issue1523][stress]") {
+          "[zwo][telescope][identity][issue1523]") {
     const bool async_connect = GENERATE(false, true);
     const bool async_disconnect = GENERATE(false, true);
     IdentityRig rig;
@@ -507,7 +507,7 @@ TEST_CASE("ZWO mount identity claims release on disconnect loss and destruction"
 }
 
 TEST_CASE("ZWO identity I/O fence rejects an older admitted call on an unverified replacement link",
-          "[zwo][telescope][identity][issue1523][stress]") {
+          "[zwo][telescope][identity][issue1523]") {
     IdentityRig rig;
     REQUIRE(rig.server.ok());
     ZWOMountProtocolWrapper protocol(true);
