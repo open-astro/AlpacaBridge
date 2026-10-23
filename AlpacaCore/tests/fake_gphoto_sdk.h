@@ -172,7 +172,8 @@ public:
     std::function<void(const std::string&)> before_call;
     // The widget name of the has_widget / get_choices / set_choice_value call now running, set before before_call
     // fires, so a hook can key a fault on the widget instead of counting calls (a call count shifts when a priming
-    // capture or another connect step adds calls). Other calls leave it unchanged, so a hook checks the call name first.
+    // capture or another connect step adds calls). Other calls leave it unchanged, so a hook checks the call name
+    // first.
     std::string current_widget;
     // When true, drain_events() and poll_bulb_file_and_download() return at once instead of sleeping their
     // budget, so a case drives the driver's bulb loops with a FakeTaskClock from before_call and spends no real time.
