@@ -4055,12 +4055,14 @@ int main() {
         // A NaN passes most drivers' range checks (both comparisons are
         // false), and nlohmann dumps a non-finite double as null, which the
         // next start reads as "absent". Since #574 the router rejects "nan"
-        // with InvalidValue before the setter runs, so over HTTP it can no
-        // longer reach the persistence hook; the surveyed value stays on disk.
+        // as unparsable (HTTP 400 text since #1476) before the setter runs, so
+        // over HTTP it can no longer reach the persistence hook; the surveyed
+        // value stays on disk.
         {
             const auto resp = route_request(router, "PUT", base + "/sitelatitude", "SiteLatitude=nan&ClientID=1");
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+            EXPECT(resp.status_code() == 400);
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
+            EXPECT(resp.body().find("SiteLatitude") != std::string::npos);
             const auto on_disk = persisted_file_entry(9640);
             EXPECT(on_disk.is_object() && on_disk.contains("siteLatitude") && on_disk["siteLatitude"].is_number());
             EXPECT(std::fabs(on_disk.value("siteLatitude", 0.0) - (-33.87)) < 1e-9);
