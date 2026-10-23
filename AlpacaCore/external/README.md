@@ -17,7 +17,7 @@ This directory contains vendor SDKs required to build vendor-specific drivers fo
    cmake --build . --parallel
    ```
 
-**For a comprehensive driver development guide, see [docs/development/driver-development.md](../docs/development/driver-development.md)**
+**For a comprehensive driver development guide, see [docs/development.md](../../docs/development.md#building-drivers)**
 
 ## Important Notes
 
@@ -57,7 +57,7 @@ for the rotator and focuser drivers.
 
 For complete instructions on building vendor-specific drivers:
 
-- **See [Driver Development Guide](../docs/development/driver-development.md)** for:
+- **See [Driver Development Guide](../../docs/development.md#building-drivers)** for:
   - Three-layer architecture overview
   - Step-by-step driver implementation
   - CMake configuration
@@ -103,6 +103,6 @@ vendor's driver will return to download-the-SDK-yourself builds.
 
 ## Additional Resources
 
-- [Driver Development Guide](../docs/development/driver-development.md) - Complete guide to building drivers
-- [Architecture Guide](../docs/development/architecture.md) - AlpacaCore architecture overview
-- [Building Guide](../docs/building/building.md) - Build instructions
+- [Driver Development Guide](../../docs/development.md#building-drivers) - Complete guide to building drivers
+- [Architecture Guide](../../docs/architecture.md) - AlpacaCore architecture overview
+- [Building Guide](../../docs/development.md#build-and-run) - Build instructions
