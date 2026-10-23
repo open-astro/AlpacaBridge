@@ -909,11 +909,11 @@ public:
             if (!tracking) {
                 goto_active_ = false;  // a commanded Tracking=false is off, GOTO or not
             }
-            snapshot_.write([](PolledFrame&) {});
             if (tracking_state_valid_ && (now - tracking_state_at_) <= kFastTrackingTtl &&
                 tracking_state_cached_ == tracking) {
-                return;
+                return;  // a no-op write changes nothing, so it must not drop the poll in flight
             }
+            snapshot_.write([](PolledFrame&) {});
         }
         auto wait_for_pulse_completion = [this](std::chrono::milliseconds max_wait) {
             const auto deadline = clock_.now() + max_wait;
