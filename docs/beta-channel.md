@@ -88,8 +88,8 @@ install one by hand. A maintainer can force a build with
 `gh workflow run nightly-build.yml --repo open-astro/AlpacaBridge -f force=true`.
 
 The same workflow also builds all vendors `Release` and runs the full test suite (job `test-optimized`),
-because CI's all-vendors job is instrumented and unoptimized; a failure fails the run but does not stop the
-`.deb` from publishing.
+because CI's all-vendors job is instrumented and unoptimized. The `.deb` is built only after that suite
+passes: a failure fails the run and publishes nothing, and the previous nightly stays up.
 
 ## Branch model
 

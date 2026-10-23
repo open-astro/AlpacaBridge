@@ -27,9 +27,10 @@
 #
 # The same run also builds all vendors optimized and runs the full suite
 # (issue #1313): CI's build-vendors job is instrumented (-O0 --coverage), so
-# nothing else tests optimized, NDEBUG code like the .deb's. The test job
-# runs beside the .deb build, not before it: a red suite fails the run but
-# does not stop the nightly from publishing.
+# nothing else tests optimized, NDEBUG code like the .deb's. The .deb build
+# waits for the test job: a red suite fails the run and nothing is published,
+# so the nightly-build tag stays on the last green commit and the next cron
+# tries the same commit again.
 #
 # Upstream builds main only (the cron, or `gh workflow run nightly-build.yml
 # -f force=true`), so the public nightly-build release always names a main
@@ -194,7 +195,8 @@ jobs:
 
   build:
     name: Build and publish the nightly .deb
-    needs: check
+    # Publishes only a commit whose optimized suite passed.
+    needs: [check, test-optimized]
     if: needs.check.outputs.build == 'true'
     permissions:
       contents: write       # move the nightly-build tag, gh release create/edit/upload
