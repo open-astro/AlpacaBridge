@@ -783,6 +783,7 @@ struct SnapshotMount {
     std::atomic<int> t_delay_ms{0};       // the tracking-mode write answers after this long
     std::atomic<int> t_count{0};          // tracking-mode writes received
     std::atomic<bool> h_mute{false};      // the time write goes unanswered
+    std::atomic<int> s_delay_ms{0};       // the sync reply arrives after this long
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -835,6 +836,7 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'W':
         case 's':
         case 'S':
+            if (st.s_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.s_delay_ms.load()));
             return "#";
         case 'P': {  // AUX passthrough: P len dev op ...
             const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
@@ -1612,6 +1614,42 @@ TEST_CASE("Celestron FindHome - the failure stops are skipped when a new goto to
     cel::set_failure_stop_hook_for_testing(*driver, nullptr);
     REQUIRE(m_after_goto >= 0);
     CHECK(st->m_count.load() == m_after_goto);  // no stale goto cancel after the new goto
+    driver->set_connected(false);
+}
+
+// A sync holds the initiator lock without taking a motion generation. The third-failure stops that find the lock busy
+// stay pending and go out on a later poll tick, once the sync is done.
+TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held the initiator lock",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    REQUIRE(st->m_count.load() == 0);
+
+    st->s_delay_ms = 300;
+    std::thread syncer;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!syncer.joinable()) {
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the sync owns initiator_mutex_
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(syncer.joinable());
+    syncer.join();
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
     driver->set_connected(false);
 }
 

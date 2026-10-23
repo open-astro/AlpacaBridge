@@ -1142,24 +1142,72 @@ public:
     // The stops of a failure found by the status poll or the slew-complete wait, which no initiator owns: they go out
     // only while no newer initiator has taken the mount, so a client that saw the failure and sent a new motion
     // never has it cut short by a stale stop. try_lock, never a blocking lock: set_connected joins the poll while it
-    // holds initiator_mutex_. A busy lock means an initiator is dispatching, and a changed generation means one
-    // has: either way the newer motion owns the mount and the stale stop is skipped (nullopt). `generation` is the
-    // motion generation the failure was found under.
-    std::optional<std::string> stop_park_slew_unless_superseded(std::uint64_t generation) const {
+    // holds initiator_mutex_. A changed generation means a newer motion owns the mount and the stale stop is
+    // dropped (Superseded). A busy lock means an initiator is dispatching but may not have taken the mount (a sync,
+    // a pulse guide, a motion command that fails validation bump no generation): the stop stays pending (Busy) and
+    // the poll retries it. `generation` is the motion generation the failure was found under.
+    enum class StopOutcome { Sent, Busy, Superseded };
+    struct FailureStop {
+        StopOutcome outcome = StopOutcome::Superseded;
+        std::string error;  // Sent only
+    };
+    struct PendingStop {
+        std::uint64_t generation = 0;
+        std::string message;
+        bool home = false;
+    };
+
+    FailureStop stop_park_slew_unless_superseded(std::uint64_t generation) const {
         run_failure_stop_hook();
         std::unique_lock<std::mutex> ilock(initiator_mutex_, std::try_to_lock);
         if (!ilock.owns_lock()) {
-            ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command is being dispatched");
-            return std::nullopt;
+            ALPACA_LOG_WARN("Celestron", "failure stop deferred: an initiator holds the mount; retried by the poll");
+            return {StopOutcome::Busy, {}};
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (motion_generation_ != generation) {
                 ALPACA_LOG_WARN("Celestron", "failure stop skipped: a new motion command owns the mount");
-                return std::nullopt;
+                return {StopOutcome::Superseded, {}};
             }
         }
-        return stop_park_slew_wire();
+        return {StopOutcome::Sent, stop_park_slew_wire()};
+    }
+
+    // Sends the failure stops with mutex_ free and publishes the outcome: Sent finishes the failure, Busy keeps the
+    // stop pending for the next poll tick, Superseded drops it.
+    void send_failure_stop(std::uint64_t generation, const std::string& message, bool home) const {
+        const FailureStop stop = stop_park_slew_unless_superseded(generation);
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stop.outcome == StopOutcome::Busy) {
+            pending_stop_ = PendingStop{generation, message, home};
+            return;
+        }
+        pending_stop_.reset();
+        if (stop.outcome == StopOutcome::Sent && connected_) {
+            if (home) {
+                finish_home_failure_locked(generation, message, stop.error);
+            } else {
+                finish_slew_poll_failure_locked(message, stop.error);
+            }
+        }
+    }
+
+    // Poll tick: retries a stop that found an initiator busy. Dropped when the mount was taken or closed meanwhile.
+    void retry_pending_stop() const {
+        PendingStop pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!pending_stop_) {
+                return;
+            }
+            if (!connected_ || pending_stop_->generation != motion_generation_) {
+                pending_stop_.reset();
+                return;
+            }
+            pending = *pending_stop_;
+        }
+        send_failure_stop(pending.generation, pending.message, pending.home);
     }
 
     // The failure of a motion body is sticky from the moment it is known, before its stops go out with mutex_ free:
@@ -1226,12 +1274,11 @@ public:
     void fail_slew_poll(std::unique_lock<std::mutex>& lock, const std::string& message) const {
         begin_motion_failure_locked(message);
         const std::uint64_t generation = motion_generation_;
-        const auto stopped_or_skipped =
-            without_lock(lock, [&] { return stop_park_slew_unless_superseded(generation); });
-        if (!stopped_or_skipped || !still_owns_failure_locked()) {
-            return;  // skipped: the newer motion owns the state
-        }
-        const std::string& stop_error = *stopped_or_skipped;
+        without_lock(lock, [&] { send_failure_stop(generation, message, false); });
+    }
+
+    // After the stops of a poll-found slew failure went out (`still_owns_failure_locked` already holds).
+    void finish_slew_poll_failure_locked(const std::string& message, const std::string& stop_error) const {
         if (stop_error.empty()) {
             set_slewing_locked(false);
         } else {
@@ -2707,6 +2754,7 @@ private:
             home_generation = motion_generation_;
             home_plan = sample_plan_locked(true);
         }
+        retry_pending_stop();
         if (check_home) {
             // A FindHome in flight is completed here, not by a getter. The exchanges (the completion check, the
             // position read when it is done, and the stops of a third failure) run with mutex_ free; the result is
@@ -2731,11 +2779,7 @@ private:
             }
             if (!failure.empty()) {
                 // The three stop exchanges go out only while no newer initiator owns the mount.
-                const auto stop_error = stop_park_slew_unless_superseded(home_generation);
-                if (stop_error) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    finish_home_failure_locked(home_generation, failure, *stop_error);
-                }
+                send_failure_stop(home_generation, failure, true);
             }
             std::lock_guard<std::mutex> lock(mutex_);
             if (home_status_poll_failures_ != 0) {
@@ -3638,6 +3682,7 @@ private:
     // Bumped under mutex_ by every motion initiator; a sync slew waiting with the lock
     // released compares it to learn it was superseded (Sky-Watcher shape, #832).
     uint64_t motion_generation_ = 0;
+    mutable std::optional<PendingStop> pending_stop_;  // a failure stop that found an initiator busy; mutex_
     bool skip_next_ra_learn_ = false;
     mutable bool flip_in_progress_ = false;
 
