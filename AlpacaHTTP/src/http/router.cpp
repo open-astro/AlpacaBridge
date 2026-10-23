@@ -2695,6 +2695,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
                                 "Unsupported HTTP method for faileddevices endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -6745,6 +6746,7 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
                                 "Unsupported HTTP method for devicecatalog endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -6781,6 +6783,7 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
                                 "Unsupported HTTP method for thermalcameras endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -7152,6 +7155,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -7308,6 +7312,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -7891,6 +7896,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -8038,6 +8044,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
                                 "Method not allowed. GET reads the server time; POST or PUT sets it.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, POST, PUT");
         return response;
     }
 
@@ -8354,6 +8361,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
 
