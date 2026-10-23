@@ -2883,6 +2883,17 @@ private:
         }
     }
 
+    void run_slew_dispatch_hook() const {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = slew_dispatch_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poll_after_sample_hook() {
         std::function<void()> hook;
         {
@@ -2940,6 +2951,11 @@ public:
     void set_failure_stop_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         failure_stop_hook_ = std::move(hook);
+    }
+
+    void set_slew_dispatch_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slew_dispatch_hook_ = std::move(hook);
     }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
@@ -3473,6 +3489,7 @@ private:
         const bool hc = hc_available_;
         const bool precise = use_precise_commands_;
         without_lock(lock, [&] {
+            run_slew_dispatch_hook();  // test seam: an initiator lands between the flip decision and the GOTO
             auto& protocol = CelestronProtocolWrapper::instance();
             if (flip) {
                 protocol.mc_goto_fast(0, flip_ra);
@@ -3762,6 +3779,7 @@ private:
     std::function<void()> status_poll_after_sample_hook_;
     std::function<void()> slewing_read_hook_;  // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;  // guarded by status_poll_hook_mutex_
+    std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
@@ -3821,6 +3839,12 @@ void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<vo
 void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_failure_stop_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slew_dispatch_hook_for_testing(std::move(hook));
     }
 }
 

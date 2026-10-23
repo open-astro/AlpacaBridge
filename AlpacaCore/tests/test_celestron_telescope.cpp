@@ -1737,25 +1737,28 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
 }
 
 // AbortSlew joins the slew body before its stops go out: the park body sends its GOTO with mutex_ free, so a stop sent
-// first could be followed by a GOTO that starts the mount again.
+// first could be followed by a GOTO that starts the mount again. The hook holds the park body past its last supersede
+// check, before its GOTO, until the cancel reaches the mount or 500 ms pass: with the join, AbortSlew sends nothing
+// until the body is done, so the GOTO lands first.
 TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of a park in flight",
           "[celestron][telescope][snapshot][iolock]") {
     SlowMountDriver mount;
-    mount.st->p_delay_ms = 300;  // the park body is in a slow pier-side read, past its last supersede check
-    const int before = mount.st->slow_count.load();
-    std::thread slewer([&] {
-        try {
-            mount.driver->park();
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
+    std::atomic<bool> in_dispatch{false};
+    cel::set_slew_dispatch_hook_for_testing(*mount.driver, [&] {
+        in_dispatch = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (mount.st->m_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     });
-    REQUIRE(snapshot_wait_for([&] { return mount.st->slow_count.load() > before; }));
+    mount.driver->park();
+    REQUIRE(snapshot_wait_for([&] { return in_dispatch.load(); }));
     try {
         mount.driver->abort_slew();
     } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
     }
-    slewer.join();
-    mount.st->p_delay_ms = 0;
+    REQUIRE(snapshot_wait_for([&] { return mount.st->goto_last.load() > 0; }));
+    cel::set_slew_dispatch_hook_for_testing(*mount.driver, nullptr);
     REQUIRE(mount.st->cancel_first.load() > 0);
     CHECK(mount.st->goto_last.load() < mount.st->cancel_first.load());  // no goto after the first cancel
 }
