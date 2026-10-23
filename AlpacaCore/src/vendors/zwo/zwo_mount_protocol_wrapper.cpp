@@ -846,9 +846,7 @@ private:
                                    : std::chrono::duration_cast<std::chrono::milliseconds>(owed_until_ - now);
             wait = std::min(wait, std::chrono::duration_cast<std::chrono::milliseconds>(hard_stop - now));
             if (wait.count() <= 0) break;
-            struct pollfd pfd{};
-            pfd.fd = fd;
-            pfd.events = POLLIN;
+            pollfd pfd = {fd, POLLIN, 0};
             const int ready = ::poll(&pfd, 1, static_cast<int>(wait.count()));
             if (ready < 0 && errno == EINTR) continue;
             if (ready <= 0) break;
