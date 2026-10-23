@@ -582,6 +582,7 @@ TEST_CASE("ZWO serial transport removal is immediate loss rather than a timeout 
           "[zwo][telescope][telemetry][serial]") {
     test::FakeTaskClock clock;
     auto serial = std::make_unique<test::PtyResponder>([](const std::string& command) -> std::string {
+        if (command.find(":GVP#") != std::string::npos) return "AM5#";
         if (command.find(":GU#") != std::string::npos) return "NG#";
         if (command.find(":GR#") != std::string::npos) return "12:00:00#";
         if (command.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -764,7 +765,9 @@ TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo
     if (sever_transport) {
         // shutdown takes effect immediately; the held responder cannot leave until released below.
         (void)rig.server.drop_connections();
-        CHECK_FALSE(rig.driver->get_link_fault().empty());
+        // The identity gate now ends the connect as soon as the lost link fails the :GVP exchange, and its cleanup
+        // clears the fault; so the loss is seen either as a fault or as the connect already over.
+        CHECK(eventually([&] { return !rig.driver->get_link_fault().empty() || !rig.driver->get_connecting(); }));
     }
     rig.release_identity.store(true);
     // Also release the failed-handshake retry timer on the red path before joining the async connect.

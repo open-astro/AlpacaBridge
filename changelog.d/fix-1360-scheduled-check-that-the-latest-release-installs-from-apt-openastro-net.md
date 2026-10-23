@@ -1,0 +1,2 @@
+### Added (CI)
+- **Daily check that the newest stable release installs from apt.openastro.net** (`.github/workflows/apt-install-check.yml`, issue #1360): in a `debian:trixie` container it runs the install commands cut out of README.md's Installation section, compares the installed version with the newest stable GitHub Release (a mismatch fails once the Release is 24 hours old) and checks that the binary loads its libraries (`ldd`, plus `--version` from 5.1 on). `scheduled-failure.yml` watches it, so a failing run opens one tracked issue. See `docs/development.md`.
