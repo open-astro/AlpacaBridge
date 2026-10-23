@@ -272,7 +272,40 @@ TEST_CASE("ZWO mount reply sync - a blind pulse that eats the owed reply leaves 
     };
     on_both_transports(mount, [](ZWOMountProtocolWrapper& wrapper) {
         CHECK_THROWS(wrapper.send_command(":GD", true, kQueryTimeoutMs));
-        // The pulse's own 40 ms drain reads and drops the late reply; the next query must not wait for it.
+        // The reply is already queued when the pulse flushes, so the flush peek eats it; the next query must
+        // not wait for it.
+        wrapper.pulse_guide(2, 10);
+        const auto start = Clock::now();
+        std::string ra;
+        CHECK_NOTHROW(ra = wrapper.send_command(":GR", true, kQueryTimeoutMs));
+        CHECK(ra == "02:30:15");
+        CHECK(ms_since(start) < 150);
+    });
+}
+
+TEST_CASE("ZWO mount reply sync - a reply that arrives during the blind drain leaves nothing owed",
+          "[zwo][reply-sync][issue1527]") {
+    // :GU never answers on its own; the owed reply is emitted only once the pulse command (:Mg..) is seen,
+    // so it arrives after the pulse's flush, inside its 40 ms drain. It is short (3 bytes) so the drain
+    // reads all of it within its window.
+    const Responder mount = [](const std::string& chunk) {
+        std::string out;
+        std::size_t pos = 0;
+        while (pos < chunk.size()) {
+            const std::size_t end = chunk.find('#', pos);
+            if (end == std::string::npos) break;
+            const std::string cmd = chunk.substr(pos, end - pos);
+            pos = end + 1;
+            if (cmd.rfind(":Mg", 0) == 0) {
+                out += "GN#";
+            } else if (cmd == ":GR") {
+                out += "02:30:15#";
+            }
+        }
+        return out;
+    };
+    on_both_transports(mount, [](ZWOMountProtocolWrapper& wrapper) {
+        CHECK_THROWS(wrapper.send_command(":GU", true, kQueryTimeoutMs));
         wrapper.pulse_guide(2, 10);
         const auto start = Clock::now();
         std::string ra;
