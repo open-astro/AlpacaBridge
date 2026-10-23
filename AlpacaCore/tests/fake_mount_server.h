@@ -183,7 +183,8 @@ public:
 
     /// Replies "0#" to anything: valid terminator for every '#'-framed
     /// protocol in the family, but not a valid identity or measurement.
-    /// ZWO driver fixtures must override :GVP# with a supported AM model.
+    /// ZWO driver fixtures must answer :GVP# with a supported AM model
+    /// and :GMA# with twelve hexadecimal characters, both hash-terminated.
     // Canned "0#" for everything, EXCEPT the SynScan/NexStar protocol echo
     // ("K" + byte -> byte + "#"): the SynScan driver's connect now gates on
     // that echo matching, so a fake that never answers it leaves the driver

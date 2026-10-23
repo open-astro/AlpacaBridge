@@ -28,8 +28,8 @@ enum class ConnectionType {
     Auto
 };
 
-// A ZWO mount discovered by enumerate_zwo_mounts(). Covers any model the
-// mount reports via :GVP (AM3, AM5, AM5N, AM7, ...) on either transport.
+// A ZWO mount discovered by enumerate_zwo_mounts(): AM3, AM5, AM5N or AM7,
+// verified by a hash-terminated :GVP reply on either transport.
 struct ZWODeviceInfo {
     ConnectionType type = ConnectionType::Serial;
     std::string port_path;   // serial transport
