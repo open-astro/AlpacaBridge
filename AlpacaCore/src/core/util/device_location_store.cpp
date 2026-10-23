@@ -223,7 +223,7 @@ bool parse_network_location(const std::string& location, std::string& host, int&
 
 std::optional<std::string> recall_serial_location(const std::string& key,
                                                   const std::function<bool(const std::string&)>& handshake) {
-    const auto remembered = DeviceLocationStore::load(key);
+    auto remembered = DeviceLocationStore::load(key);
     if (!remembered || remembered->front() != '/') return std::nullopt;
     const auto holder = serial_port_holder(*remembered);
     if (holder && holder->kind == SerialClaimKind::Link) {
