@@ -38,8 +38,8 @@ namespace alpacacore::test {
  * makes the fake drop every command after the handshake with no reply, as a TheSkyX that stopped answering.
  * `pier_west` is what the Pier Side query answers (1 = west of the pier).
  *
- * `find_home_ms`, `set_tracking_ms` and `position_ms` delay only the FindHome, SetTracking and GetRaDec replies by that many
- * real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in one call.
+ * `find_home_ms`, `set_tracking_ms` and `position_ms` delay only the FindHome, SetTracking and GetRaDec replies by that
+ * many real milliseconds (on top of `latency_ms`), as a TheSkyX stuck in one call.
  *
  * Sync(ra, dec) moves the position the fake reports to the synced coordinates. With `land_on_target` set, a
  * SlewToRaDec also moves it there once the slew reports complete, as a mount arriving on its target does (off by

@@ -455,7 +455,8 @@ TEST_CASE("Bisque snapshot - RightAscension answers while the read at the end of
 }
 
 // Falsified by: bisque_telescope_driver.cpp, set_tracking: hold mutex_ across protocol.set_tracking().
-TEST_CASE("Bisque snapshot - Name, Connected and Tracking answer while a SetTracking exchange is slow", "[bisque][telescope][snapshot]") {
+TEST_CASE("Bisque snapshot - Name, Connected and Tracking answer while a SetTracking exchange is slow",
+          "[bisque][telescope][snapshot]") {
     Rig rig(5000);
     REQUIRE(rig.poll());
     rig.mount.set_tracking_ms = 1000;

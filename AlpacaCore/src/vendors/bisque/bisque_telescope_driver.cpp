@@ -1235,9 +1235,7 @@ private:
 
     // Publishes the first frame, sampled by the connect before it took mutex_, so the getters have an answer the
     // moment Connect returns.
-    void seed_snapshot_locked(const PolledFrame& frame) {
-        snapshot_.publish(snapshot_.begin_poll(), frame);
-    }
+    void seed_snapshot_locked(const PolledFrame& frame) { snapshot_.publish(snapshot_.begin_poll(), frame); }
 
     // Where the control path ends or lands a move (sync, slew complete, home, park): reads the mount now and
     // publishes the frame, so a read right after sees the new position, not one from before the move. A failed
