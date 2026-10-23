@@ -2026,9 +2026,11 @@ TEST_CASE("Celestron spec audit - UTCDate throws InvalidOperation when the mount
           "[celestron][telescope][unit][spec-audit]") {
     // Only the position queries get the canned pair. Every other reply is a bare terminator, so no leftover bytes
     // of a longer reply sit in the socket and answer the clock read ('h') as a time; the clock read gets no time.
-    alpacacore::test::FakeMountServer server([](const std::string& command) {
+    std::atomic<int> clock_reads{0};
+    alpacacore::test::FakeMountServer server([&clock_reads](const std::string& command) {
         if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
         if (command == "e" || command == "z") return std::string("00000000,00000000#");
+        if (command == "h") ++clock_reads;
         return std::string("#");
     });
     REQUIRE(server.ok());
@@ -2041,6 +2043,12 @@ TEST_CASE("Celestron spec audit - UTCDate throws InvalidOperation when the mount
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     // Decision 0014 item 4 leaves seeding in the driver; the host clock must not stand in for the mount's.
     require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    // Getters never wait on device I/O: the failed connect-time read is remembered, so a poll sends no further 'h'.
+    const int reads_after_first = clock_reads.load();
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    INFO("h reads " << reads_after_first << " -> " << clock_reads.load());
+    CHECK(clock_reads.load() == reads_after_first);
     driver->set_connected(false);
 }
 

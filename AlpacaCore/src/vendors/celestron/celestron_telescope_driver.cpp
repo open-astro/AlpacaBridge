@@ -901,6 +901,7 @@ private:
         timezone_offset_valid_ = true;
         dst_observed_ = write.tz.dst;
         utc_offset_.set(write.utc, clock_.now());
+        mount_clock_unreadable_ = false;
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("Celestron", write.client_minus_host,
@@ -930,10 +931,11 @@ private:
         }
     }
 
-    // Seeds the clock from the read. A mount that did not answer leaves it unset: the host clock is not the
-    // mount's, so UTCDate throws InvalidOperation rather than answer with it.
+    // Seeds the clock from the read. A mount that did not answer leaves it unset and remembers that: the host clock
+    // is not the mount's, so UTCDate throws InvalidOperation rather than answer with it, and no getter asks again.
     void publish_mount_clock_locked(const std::optional<MountClock>& mount_clock) const {
         if (!mount_clock) {
+            mount_clock_unreadable_ = true;
             return;
         }
         timezone_offset_minutes_ = mount_clock->timezone_offset_minutes;
@@ -942,10 +944,11 @@ private:
         utc_offset_.set(mount_clock->utc, clock_.now());
     }
 
-    // The mount's clock, read once at connect so no getter reaches the mount for it; a getter that finds it unset
-    // (after a disconnect) reads it with mutex_ free, and a UTCDate write that landed meanwhile wins.
+    // The mount's clock, read once at connect so no getter reaches the mount for it; a connect-time read that failed
+    // is remembered (mount_clock_unreadable_), so the getter throws without I/O. A getter that finds the clock unset
+    // for another reason reads it with mutex_ free, and a UTCDate write that landed meanwhile wins.
     void ensure_utc_cached(std::unique_lock<std::mutex>& lock) const {
-        if (utc_offset_.valid()) {
+        if (utc_offset_.valid() || mount_clock_unreadable_) {
             return;
         }
         const auto mount_clock = without_lock(lock, [] { return read_mount_clock(); });
@@ -2142,6 +2145,7 @@ private:
             firmware_cache_.clear();
         }
         utc_offset_.clear();  // decision 0014: the written UTCDate lives until the next connect or disconnect
+        mount_clock_unreadable_ = false;
         target_ra_set_ = false;
         target_dec_set_ = false;
         parked_ = false;
@@ -2209,6 +2213,7 @@ private:
             slew_force_until_ = util::TaskClock::clock::time_point::min();
             position_override_until_ = util::TaskClock::clock::time_point::min();
             utc_offset_.clear();
+            mount_clock_unreadable_ = false;
             client_disagreement_warned_ = false;
             position_link_health_.reset();
             publish_link_fault_locked();
@@ -3677,6 +3682,7 @@ private:
     mutable bool dst_observed_;
     // The client's UTCDate (or the mount/host seed) and the task-clock time since (decision 0014); guarded by mutex_.
     mutable util::UtcOffset utc_offset_;
+    mutable bool mount_clock_unreadable_ = false;  // the connect-time clock read failed; guarded by mutex_
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
