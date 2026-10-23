@@ -40,6 +40,11 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
       GRACE_SECONDS: "86400"
+    # In a container job a step's default shell is `sh -e`, which is dash in
+    # debian:trixie; the steps use bash syntax (`<<<`).
+    defaults:
+      run:
+        shell: bash
     steps:
       # The image has none of these; the README's commands use sudo, curl and gpg.
       - name: Install the tools the README commands need
