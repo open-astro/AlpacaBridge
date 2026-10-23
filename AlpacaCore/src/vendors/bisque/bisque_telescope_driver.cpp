@@ -300,7 +300,7 @@ public:
             bool parked_now = false;
             try {
                 parked_now = protocol.is_parked();
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch): no answer reads as not parked
             }
             // The first frame, so the first property reads are served from memory. A TheSkyX that does not
             // answer leaves a frame with nothing known; the poll fills it in.
@@ -353,7 +353,7 @@ public:
             // flight finishes before the socket closes and no getter waits for it.
             try {
                 protocol.disconnect();
-            } catch (...) {
+            } catch (...) {  // NOLINT(bugprone-empty-catch): state is already cleared
             }
             status_poll_.cancel_all_and_join();
             pulse_guide_op_.cancel_all_and_join();
