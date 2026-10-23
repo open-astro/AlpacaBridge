@@ -41,10 +41,10 @@ namespace {
 
 constexpr std::uint16_t kDiscoveryPort = 32227;
 
-// Send one datagram to the responder on 127.0.0.1:32227 from a fresh
+// Send one datagram to the responder on 127.0.0.1:<port> (default 32227) from a fresh
 // ephemeral socket and wait up to `timeout_ms` for its reply. nullopt means
 // no reply arrived in that time.
-std::optional<std::string> send_probe(const std::string& payload, int timeout_ms) {
+std::optional<std::string> send_probe(const std::string& payload, int timeout_ms, std::uint16_t port = kDiscoveryPort) {
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     EXPECT(fd >= 0);
     timeval tv{};
@@ -53,7 +53,7 @@ std::optional<std::string> send_probe(const std::string& payload, int timeout_ms
     EXPECT(::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(kDiscoveryPort);
+    addr.sin_port = htons(port);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
     const ssize_t sent =
         ::sendto(fd, payload.data(), payload.size(), 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
@@ -164,6 +164,30 @@ int main() {
 
         discovery.stop();
         EXPECT(!discovery.is_running());
+    }
+
+    // #1509: the responder binds discovery.port, not a fixed 32227. A probe
+    // to the configured port is answered; one to 32227 is not. The 32227 half
+    // is skipped when another Alpaca process on this host already answers
+    // there before the responder under test starts.
+    {
+        // case: the responder binds the configured discovery port and not 32227
+        constexpr std::uint16_t kConfiguredPort = 40123;
+        const bool port_32227_taken = send_probe("alpacadiscovery1", 300).has_value();
+        alpacahttp::Config configured = config;
+        configured.set_discovery_port(kConfiguredPort);
+        alpacahttp::Discovery discovery(configured);
+        if (!start_and_wait(discovery)) {
+            std::cerr << "Discovery configured-port case skipped: unable to bind discovery socket.\n";
+        } else {
+            const auto reply = send_probe("alpacadiscovery1", 2000, kConfiguredPort);
+            EXPECT(reply.has_value());
+            EXPECT(*reply == port_reply(11111));
+            if (!port_32227_taken) {
+                EXPECT(!send_probe("alpacadiscovery1", 500, kDiscoveryPort).has_value());
+            }
+            discovery.stop();
+        }
     }
 
     // http_port 0: the responder advertises the port the server actually

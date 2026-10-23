@@ -10,6 +10,7 @@ http:
 # Discovery settings
 discovery:
   enabled: true
+  port: 32227  # UDP; 1-65535, applied on restart (ALPACAHTTP_DISCOVERY_PORT overrides)
 
 # Logging settings
 logging:

@@ -54,7 +54,6 @@ private:
     std::string build_response() const;
     static bool is_discovery_probe(const std::string& datagram);
 
-    static constexpr std::uint16_t ALPACA_DISCOVERY_PORT = 32227;
     static constexpr const char* ALPACA_DISCOVERY_MULTICAST_GROUP = "239.12.255.254";
 };
 

@@ -46,6 +46,7 @@ void print_usage(std::ostream& out) {
            "Environment overrides (applied over the configuration):\n"
            "  ALPACAHTTP_PORT\n"
            "  ALPACAHTTP_DISCOVERY\n"
+           "  ALPACAHTTP_DISCOVERY_PORT\n"
            "  ALPACAHTTP_LOG_LEVEL\n"
            "  ALPACAHTTP_SERVER_NAME\n"
            "  ALPACAHTTP_MANUFACTURER\n"
