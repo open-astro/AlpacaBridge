@@ -204,7 +204,7 @@ The printed version line must read `Conform Universal 4.5.3 (Build 56334.33d9e18
 4.5.2 (build 56139), 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted after a
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
 `conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
-A release that changes only a fix and not the build line (4.5.3 over 4.5.2) may be pinned provisionally before that check; record the
+A release that only adds a fix on the same ReadyToRun (`PublishReadyToRun`) publish build as the current standard (4.5.3 over 4.5.2) may be pinned provisionally before that check; record the
 camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards.
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
