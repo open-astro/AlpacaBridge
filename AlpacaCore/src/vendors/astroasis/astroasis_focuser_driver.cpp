@@ -393,7 +393,7 @@ private:
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

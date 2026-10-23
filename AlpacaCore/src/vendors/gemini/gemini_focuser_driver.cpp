@@ -223,6 +223,10 @@ public:
                     std::lock_guard<std::mutex> lock(health_mutex_);
                     health_.reset();
                 }
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
                 protocol_.disconnect();
                 throw AlpacaException("Gemini focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
@@ -390,7 +394,7 @@ private:
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

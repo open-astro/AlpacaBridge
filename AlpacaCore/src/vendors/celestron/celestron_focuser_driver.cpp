@@ -218,6 +218,10 @@ public:
                     std::lock_guard<std::mutex> lock(health_mutex_);
                     health_.reset();
                 }
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
                 protocol_.disconnect();
                 throw AlpacaException("Celestron focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
@@ -630,7 +634,7 @@ private:
             // and 0016).
             ensure_connected();
             throw_if_faulted();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

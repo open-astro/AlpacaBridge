@@ -196,8 +196,12 @@ public:
             }
             if (!snapshot_.read().has_value()) {
                 reset_state();
+                {
+                    std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
+                    firmware_.clear();
+                }
                 protocol_.disconnect();
-                throw AlpacaException("QHY Q- focuser did not answer the first state poll",
+                throw AlpacaException("QHY Q-Focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
             }
             connected_.store(true);
@@ -373,7 +377,7 @@ private:
         if (!reading.has_value()) {
             // A disconnect between the check and the read dropped the frame.
             ensure_connected();
-            throw AlpacaException("Focuser state not available yet", AlpacaError::DriverException);
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
         return reading->value;
     }

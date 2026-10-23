@@ -716,18 +716,16 @@ TEST_CASE("Celestron Focuser Driver - a getter after a successful connect never 
     fake.drop_next_reply(0x13, 2);  // the connect poll and its retry
     FakeTaskClock clock;
     auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
-    bool connected = true;
-    try {
-        driver->set_connected(true);
-    } catch (const alpacacore::AlpacaException&) {
-        connected = false;  // refusing the connect is allowed; a half-up session is not
-    }
-    if (connected) {
-        REQUIRE(driver->get_connected());
-        CHECK_NOTHROW(driver->get_position());
-        CHECK_NOTHROW(driver->get_is_moving());
-        driver->set_connected(false);
-    }
+    // Both first polls are lost: the connect is refused, so no getter can run on a
+    // session without a frame, and the refused connect leaves nothing behind.
+    CHECK_THROWS_AS(driver->set_connected(true), alpacacore::AlpacaException);
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(driver->get_device_firmware().has_value());
+    // The port was released: a connect with replies back succeeds and serves a frame.
+    REQUIRE_NOTHROW(driver->set_connected(true));
+    CHECK_NOTHROW(driver->get_position());
+    CHECK_NOTHROW(driver->get_is_moving());
+    driver->set_connected(false);
 }
 
 #endif  // _WIN32
