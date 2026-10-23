@@ -8794,8 +8794,8 @@ void Router::load_persisted_devices() {
             }
 
             persisted_devices_.clear();
-            // Decision 0018: every stored entry gets a GUID once (the upgrade, or a
-            // hand-edited file), and a duplicated one is replaced in the later entry.
+            // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
+            // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
             std::set<std::string> taken;
             for (auto& entry : payload) {
                 nlohmann::json sanitized = sanitize_device_config(entry);

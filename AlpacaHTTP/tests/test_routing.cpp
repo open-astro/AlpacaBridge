@@ -2908,7 +2908,7 @@ int main() {
             }
             EXPECT(!listed_entry(stored, "Camera", 9712).is_null());
             // Decision 0018: a stored ZWO_UID_ is kept; the later entry holding the same value
-            // gets a GUID at load, written back.
+            // gets a minted GUID at load, written back.
             EXPECT(first_ids[0] == "ZWO_UID_00112233445566ff");
             EXPECT(alpacacore::util::is_unique_id(first_ids[1]));
             EXPECT(alpacacore::util::is_unique_id(
@@ -8260,7 +8260,7 @@ int main() {
         };
         const std::string first_id = stored_id(9471);
         EXPECT(alpacacore::util::is_unique_id(first_id));
-        EXPECT(listed_unique_id(9471) == first_id);  // the driver reports the stored GUID
+        EXPECT(listed_unique_id(9471) == first_id);  // the driver reports the stored ID
 
         // An ID another entry holds, or a device-number ID, is replaced.
         const auto copy = configure(9472, first_id);
@@ -9617,7 +9617,7 @@ int main() {
             EXPECT(row.value("DeviceName", "") == "nosuchvendor (failed to load)");
             EXPECT(row.value("DeviceType", "") == "focuser");
             EXPECT(row.value("DeviceNumber", -1) == 9577);
-            // Decision 0018: a failed-to-load entry keeps the GUID stored for it.
+            // Decision 0018: a failed-to-load entry keeps the ID stored for it.
             EXPECT(alpacacore::util::is_unique_id(row.value("UniqueID", std::string())));
             EXPECT(row.value("UniqueID", std::string()) == row["Config"].value("uniqueId", std::string("x")));
             EXPECT(row["Config"].value("vendor", "") == "nosuchvendor");
