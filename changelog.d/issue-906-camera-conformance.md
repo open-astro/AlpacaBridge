@@ -3,3 +3,4 @@
 
 ### Fixed
 - **Camera ImageArrayVariant follows the Alpaca contract** (AlpacaHTTP, issue #906): returns PropertyNotImplemented before image retrieval or serialization, regardless of the Accept header; disconnected cameras return NotConnected. For affected clients, see Breaking changes.
+- **ASI6200MM Pro camera validation**: added the full ConformU 4.5.3 report for clean code commit `cae4b7ff` on Orange Pi 6, Armbian trixie arm64, USB 3, ASI SDK 1.41.0.0: no errors, warnings, issues or timing violations; Disconnect took 0.001 seconds.
