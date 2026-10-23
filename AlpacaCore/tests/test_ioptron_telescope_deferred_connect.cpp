@@ -26,6 +26,7 @@
 
 #include "catch2_compat.h"
 #include "deferred_connect_cases.h"
+#include "device_location_test_dir.h"
 #include "fake_ioptron_mount.h"
 
 namespace {
@@ -66,11 +67,13 @@ TEST_CASE("iOptron telescope auto-detect - a failed scan refuses the connect, no
 }
 
 TEST_CASE("iOptron telescope auto-detect - resolves at connect and reuses the endpoint", "[ioptron][telescope][unit]") {
+    alpacacore::test::TempLocationDir store;  // a connect saves the found address (#1452)
     std::unique_ptr<Fake> fake;
     alpacacore::test::check_deferred_connect_reuses_endpoint<Info>(make_driver(), [&fake] { return spawn(fake); });
 }
 
 TEST_CASE("iOptron telescope auto-detect - re-scans when the resolved endpoint dies", "[ioptron][telescope][unit]") {
+    alpacacore::test::TempLocationDir store;  // a connect saves the found address (#1452)
     std::unique_ptr<Fake> fake;
     alpacacore::test::check_deferred_connect_re_resolves<Info>(make_driver(), [&fake] { return spawn(fake); });
 }
