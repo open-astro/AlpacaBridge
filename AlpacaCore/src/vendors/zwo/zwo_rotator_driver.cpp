@@ -90,7 +90,7 @@ public:
     // Decision 0018: the router calls this at the upgrade start only. Before a
     // connect the fallback is the SDK-ID or device-number ID, the key a CAA
     // without a serial saved under; a serial-keyed offset waits for the connect.
-    // A client that connected first has read 0 from the GUID key, so a
+    // A client that connected first has read 0 from the stored-ID key, so a
     // connected driver takes the moved offset too. transition_mutex_ keeps a
     // connect or disconnect out of the window; the move and the write run under
     // mutex_, as sync() saves and writes, so a concurrent Sync cannot land
