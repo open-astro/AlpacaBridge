@@ -49,8 +49,9 @@ The URL names `binary-arm64` on purpose: AlpacaBridge ships for arm64 only.
 file with `sha256sum -c alpacabridge_X.Y.Z-beta.N_arm64.deb.sha256`, then run
 `sudo apt install ./alpacabridge_X.Y.Z-beta.N_arm64.deb`. apt does not offer the next beta to a
 build installed this way; repeat the download for each beta, or opt in as above. Once pruning is on (it is off until
-`PRUNE_SUPERSEDED_RELEASES` is set), older betas are tags only, with no Release or `.deb`; rebuild
-one from its tag by running `release.yml` with `workflow_dispatch` on that tag.
+`PRUNE_SUPERSEDED_RELEASES` is set), older betas are tags only, with no Release or `.deb`. A pruned
+release can be recreated, `.deb` attached, by re-running that tag's original push-triggered `Release`
+run (`gh run rerun <run id>`); GitHub allows a re-run only within 30 days of the run.
 
 To check the file was built by this repository's release workflow from the beta's tag, and not
 just that it matches its `.sha256`, run on any machine with the GitHub CLI signed in:
