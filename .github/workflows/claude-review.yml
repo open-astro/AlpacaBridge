@@ -422,25 +422,10 @@ jobs:
           python3 -I - "${RUNNER_TEMP}/adr-tools/scripts" review-comment.md <<'EOF'
           import sys
           sys.path.insert(0, sys.argv[1])
-          from check_adr_scope import CHECKLIST_RE  # count exactly the lines the gate accepted
+          from check_adr_scope import fold_checklist  # same checklist and sign-off rules as the gate
           path = sys.argv[2]
-          lines = open(path, encoding="utf-8").read().split("\n")
-          start = next((i for i, l in enumerate(lines) if l.strip() == "## Decision records"), None)
-          if start is None:
-              sys.exit(0)
-          end = next((i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")), len(lines))
-          last = max((i for i, l in enumerate(lines) if l.strip()), default=-1)
-          if start < last < end:
-              end = last  # the sign-off stays outside the fold
-          verdicts = [m.group(3).lower() for l in lines[start + 1:end] if (m := CHECKLIST_RE.match(l))]
-          if not verdicts:
-              sys.exit(0)
-          counts = ", ".join("%d %s" % (verdicts.count(v), v) for v in ("defect", "pass", "n/a") if v in verdicts)
-          summary = "%d rule%s: %s" % (len(verdicts), "" if len(verdicts) == 1 else "s", counts)
-          body = "\n".join(lines[start + 1:end]).strip("\n")
-          folded = ["## Decision records", "", "<details><summary>%s</summary>" % summary, "",
-                    body, "", "</details>", ""]
-          open(path, "w", encoding="utf-8").write("\n".join(lines[:start] + folded + lines[end:]))
+          text = open(path, encoding="utf-8").read()
+          open(path, "w", encoding="utf-8").write(fold_checklist(text))
           EOF
 
       # Posting is a deterministic step: the agent only writes the file.
