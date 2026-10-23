@@ -1,0 +1,87 @@
+11:43:30.244 ASCOM Universal Device Conformance Checker Version 4.5.2.56139, Build time: Sat 17 October 2026 12:11:34
+11:43:30.248 
+11:43:30.249 Operating system is Windows 11 (26H2), Processor is Intel/AMD 64bit, Application is 64bit.
+11:43:30.250 
+11:43:30.251 Alpaca device: Celestron Focus Motor (172.18.1.31:6800 Focuser/0)
+11:43:30.251 
+11:43:30.253 CreateDevice                        INFO     Creating Alpaca device: IP address: 172.18.1.31, IP Port: 6800, Alpaca device number: 0
+11:43:30.260 CreateDevice                        INFO     Alpaca device created OK
+11:43:30.260 CreateDevice                        INFO     Successfully created driver
+11:43:31.329 CreateDevice                        OK       Found a valid interface version: 4
+11:43:31.329 CreateDevice                        OK       Driver instance created successfully
+11:43:31.330 
+11:43:31.330 Connect to device
+11:43:31.371 Connected                           OK       Connected to device successfully using Connected = True
+11:43:31.893 Connected                           OK       Disconnected from device successfully using Connected = False
+11:43:31.908 Connect                             OK       Connected to device successfully using Connect()
+11:43:31.909 
+11:43:31.919 Common Driver Methods
+11:43:31.920 InterfaceVersion                    OK       4
+11:43:31.923 Connected                           OK       True
+11:43:31.930 Description                         OK       Celestron Focus Motor (USB)
+11:43:31.934 DriverInfo                          OK       AlpacaCore Celestron Focuser Driver
+11:43:31.937 DriverVersion                       OK       4.2.0
+11:43:31.941 Name                                OK       Celestron Focus Motor
+11:43:31.941 
+11:43:31.948 SupportedActions                    OK       Found action: Calibrate
+11:43:31.948 SupportedActions                    OK       Found action: AbortCalibration
+11:43:31.949 SupportedActions                    OK       Found action: CalibrationStatus
+11:43:31.949 
+11:43:31.950 Action                              INFO     Conform cannot test the Action method
+11:43:31.950 
+11:43:31.965 DeviceState                         OK       Received 3 operational state properties.
+11:43:31.966 DeviceState                         OK         IsMoving = False
+11:43:31.967 DeviceState                         OK         Position = 19000
+11:43:31.967 DeviceState                         OK         TimeStamp = 21/10/2026 09:43:31
+11:43:31.974 DeviceState                         INFO     Operational property Temperature was not included in the DeviceState response.
+11:43:31.975 
+11:43:31.975 Properties
+11:43:31.980 Absolute                            OK       True
+11:43:31.983 IsMoving                            OK       False
+11:43:32.006 MaxStep                             OK       28033
+11:43:32.009 MaxIncrement                        OK       28033
+11:43:32.011 Position                            OK       19000
+11:43:32.061 StepSize                            OK       Optional member returned a NotImplementedException error.
+11:43:32.081 TempCompAvailable                   OK       False
+11:43:32.083 TempComp Read                       OK       False
+11:43:32.087 TempComp Write                      OK       Temperature compensation is not available and a NotImplementedException error was generated as expected
+11:43:32.092 Temperature                         OK       Optional member returned a NotImplementedException error.
+11:43:32.093 
+11:43:32.094 Methods
+11:43:32.100 Halt                                OK       Focuser halted OK
+11:43:41.634 Move - TempComp False               OK       Absolute move OK
+11:43:51.161 
+11:43:51.162 Disconnect from device
+11:43:51.175 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+11:43:51.176 
+11:43:51.177 Conformance test has finished
+11:43:51.178 
+11:43:51.180 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!
+11:43:51.182  
+11:43:51.182 Timing Summary                               See Help for further information.
+11:43:51.183 Timing Summary                               FAST target response time: 0,1 seconds, (configuration and state reporting members).
+11:43:51.184 Timing Summary                               STANDARD target response time: 1,0 second, (property write and asynchronous initiators).
+11:43:51.184 Timing Summary                               EXTENDED target response time: 600,0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+11:43:51.184 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+11:43:51.185 
+11:43:51.187 Connect                                      At 11:43:31.900 Connect                  0,004 seconds. ✓ (STANDARD)
+11:43:51.187 InterfaceVersion                             At 11:43:31.920 InterfaceVersion         0,000 seconds. ✓ (FAST)
+11:43:51.188 Connected                                    At 11:43:31.923 Connected                0,002 seconds. ✓ (FAST)
+11:43:51.190 Description                                  At 11:43:31.930 Description              0,005 seconds. ✓ (FAST)
+11:43:51.190 DriverInfo                                   At 11:43:31.933 DriverInfo               0,002 seconds. ✓ (FAST)
+11:43:51.190 DriverVersion                                At 11:43:31.937 DriverVersion            0,003 seconds. ✓ (FAST)
+11:43:51.190 Name                                         At 11:43:31.940 Name                     0,003 seconds. ✓ (FAST)
+11:43:51.191 SupportedActions                             At 11:43:31.947 SupportedActions         0,006 seconds. ✓ (FAST)
+11:43:51.191 DeviceState                                  At 11:43:31.965 DeviceState              0,015 seconds. ✓ (FAST)
+11:43:51.191 Absolute                                     At 11:43:31.980 Absolute                 0,003 seconds. ✓ (FAST)
+11:43:51.192 IsMoving                                     At 11:43:31.983 IsMoving                 0,002 seconds. ✓ (FAST)
+11:43:51.192 MaxStep                                      At 11:43:32.006 MaxStep                  0,022 seconds. ✓ (FAST)
+11:43:51.192 MaxIncrement                                 At 11:43:32.009 MaxIncrement             0,002 seconds. ✓ (FAST)
+11:43:51.192 Position                                     At 11:43:32.011 Position                 0,002 seconds. ✓ (FAST)
+11:43:51.193 TempCompAvailable                            At 11:43:32.081 TempCompAvailable        0,003 seconds. ✓ (FAST)
+11:43:51.193 TempComp Read                                At 11:43:32.083 TempComp Read            0,002 seconds. ✓ (FAST)
+11:43:51.193 Halt                                         At 11:43:32.100 Halt                     0,003 seconds. ✓ (STANDARD)
+11:43:51.193 Move to 21803                                At 11:43:32.110 Move to 21803            0,004 seconds. ✓ (STANDARD)
+11:43:51.193 Disconnect                                   At 11:43:51.169 Disconnect               0,003 seconds. ✓ (STANDARD)
+11:43:51.193 
+11:43:51.194 Congratulations, all members returned within their target response times!!
