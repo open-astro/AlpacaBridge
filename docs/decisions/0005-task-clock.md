@@ -16,6 +16,8 @@ Once a driver is on the clock, every wait in it goes through the clock: the task
 
 Pointing time and clock-step detection stay on the seams of [decision 0001](0001-skywatcher-pointing-clock.md). This clock is for waits and deadlines, never for the LST or UTCDate value; [decision 0014](0014-utc-offset.md) splits the two: the UTC value stays on `system_clock`, and only the host time elapsed since the write reads this clock.
 
+A protocol wrapper stays on the real clock for wire timing (rule 6). The kernel read timeout inside the same poll loop is real time, and `FakeTaskClock::sleep_for` blocks until `advance()`, so a fake clock in a wire loop would stall every protocol command in a test while the read stays real.
+
 ## Rules
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
@@ -25,10 +27,11 @@ The rules a change is checked against. Each names where it applies and what chec
 3. The task clock never supplies a UTC or LST value; only the elapsed time since a UTCDate write reads it ([decision 0014](0014-utc-offset.md)). Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
 4. `StreamLinkHealth` callers pass `now()` from the clock; `ConsecutiveSettle` and `PolledLinkHealth` take no clock. Scope: `AlpacaCore/include/alpacacore/util/*.h`, `AlpacaCore/src/vendors/**`. Checked by: review.
 5. The fake's `advance()` takes each due waiter's mutex before it notifies it. Scope: `AlpacaCore/tests/fake_task_clock.h`. Checked by: `AlpacaCore/tests/test_task_clock.cpp`.
+6. In a protocol wrapper, wire I/O deadlines, the poll sleeps between reads and drain windows stay on `std::chrono::steady_clock`. A time stamp or deadline the wrapper hands to a driver's link health (link-loss, last-alive, a silence deadline checked with `check_silence`) is not a wire deadline: it reads the driver's `TaskClock` (rule 4), and only a wrapper that stamps one needs the clock. The clock comes from the driver, through `set_task_clock` (the OnStep wrapper, #1429, and the SkyWatcher wrapper) or the wrapper constructor (the three WandererAstro wrappers, #730). A wrapper that keeps a plain `link_lost_` flag and stamps nothing takes no clock. Scope: `AlpacaCore/src/vendors/*/*_protocol_wrapper.cpp`. Checked by: review.
 
 ## Alternatives rejected
 
-Keep wall-clock waits and shorten the test timeouts: that trades a slow suite for a flaky one, which #535 already is. A per-driver clock parameter or template: the `task_wait_for` bodies would stay one copy per driver and each driver's tests would build their own fake. Put pointing time on the same clock: pointing time is wall time with a client-offset policy and a step detector, which is a different contract from a monotonic deadline; merging them would reopen decision 0001.
+Keep wall-clock waits and shorten the test timeouts: that trades a slow suite for a flaky one, which #535 already is. A per-driver clock parameter or template: the `task_wait_for` bodies would stay one copy per driver and each driver's tests would build their own fake. Put pointing time on the same clock: pointing time is wall time with a client-offset policy and a step detector, which is a different contract from a monotonic deadline; merging them would reopen decision 0001. Wrappers take the clock for every wait, or a clock seam in the transport: rejected for the reason in the Decision (the kernel read timeout stays real time, so a fake clock stalls the wire loop).
 
 ## Consequences
 
@@ -36,7 +39,7 @@ The Adoption table below is the current roster; this paragraph is the history of
 
 ## Adoption
 
-The roster of drivers on the clock. It covers driver files; a protocol wrapper's I/O timeouts are not driver waits. `scripts/check_docs_drift.py` check 23 fails when a driver names `TaskClock` without a row, or a row disagrees with its source.
+The roster of drivers on the clock. It covers driver files; a protocol wrapper's I/O timeouts are not driver waits (rule 6). `scripts/check_docs_drift.py` check 23 fails when a driver names `TaskClock` without a row, or a row disagrees with its source.
 
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `TaskClock`
@@ -72,6 +75,6 @@ Symbol: `TaskClock`
 
 ## Links
 
-- Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584); issues [#535](https://github.com/open-astro/AlpacaBridge/issues/535), [#547](https://github.com/open-astro/AlpacaBridge/issues/547), [#608](https://github.com/open-astro/AlpacaBridge/issues/608).
+- Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584); issues [#535](https://github.com/open-astro/AlpacaBridge/issues/535), [#547](https://github.com/open-astro/AlpacaBridge/issues/547), [#608](https://github.com/open-astro/AlpacaBridge/issues/608), [#1463](https://github.com/open-astro/AlpacaBridge/issues/1463).
 - Current waits this replaces: `task_wait_for` in `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`, `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` and `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp`.
 - Related: [decision 0001](0001-skywatcher-pointing-clock.md) (pointing time); module overview in [architecture](../architecture.md#modules).
