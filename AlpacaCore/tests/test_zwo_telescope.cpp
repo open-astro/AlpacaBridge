@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <exception>
 #include <mutex>
 #include <string>
@@ -458,6 +459,50 @@ TEST_CASE(
     }
     CHECK(cleared);
     CHECK(driver->get_connected());
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
+TEST_CASE("ZWO Telescope Driver - a same-value Tracking write does not drop the in-flight poll",
+          "[zwo][telescope][unit][tracking]") {
+    // Each ":GR#" answers a later RA, so a published poll shows as a changed RightAscension.
+    std::atomic<int> ra_seconds{0};
+    alpacacore::test::FakeMountServer server([&ra_seconds](const std::string& chunk) -> std::string {
+        if (chunk.find(":GU#") != std::string::npos) return "NG#";
+        if (chunk.find(":GR#") != std::string::npos) {
+            char buf[32];
+            std::snprintf(buf, sizeof buf, "12:%02d:%02d#", (ra_seconds / 60) % 60, ra_seconds % 60);
+            ++ra_seconds;
+            return buf;
+        }
+        if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
+        if (chunk.find(":SMTI") != std::string::npos) return "1#";
+        if (chunk.find(":GAT") != std::string::npos) return "1#";
+        if (chunk.find(":Ggr") != std::string::npos) return "0.50#";
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 250;
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    // One same-value write every 5 ms for 1.5 s, inside the 2 s fast-path window: every write is a no-op
+    // and must leave each poll that is in flight to publish.
+    const bool tracking = driver->get_tracking();
+    std::vector<double> seen{driver->get_right_ascension()};
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
+    while (std::chrono::steady_clock::now() < end) {
+        driver->set_tracking(tracking);
+        const double ra = driver->get_right_ascension();
+        if (ra != seen.back()) seen.push_back(ra);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    INFO("distinct RightAscension values served: " << seen.size());
+    CHECK(seen.size() >= 3);
 
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
