@@ -85,13 +85,14 @@ int count_command(const std::string& chunk, const std::string& command) {
 
 // LX200-style AM5 dialect: ":Sr"/":Sd"/":SMTI" are acked with a bare "1",
 // ":MS" answers "0" (accepted) or a non-zero code (rejected), ":GAT" reports
-// tracking, and "0#" is a validly terminated reply for everything else.
+// tracking, ":GVP" identifies AM5, and "0#" terminates the remaining replies.
 alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr<FakeZwoState>& st) {
     return [st](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         st->park_count.fetch_add(count_command(chunk, ":hP#"));
         st->home_count.fetch_add(count_command(chunk, ":hC#"));
         st->stop_count.fetch_add(count_command(chunk, ":Q#"));
-        if (chunk.find(":GVP") != std::string::npos) return "AM5#";  // the connect gate needs a ZWO AM identity
         for (const char* jog : {":Me#", ":Mw#", ":Mn#", ":Ms#"}) {
             st->jog_count.fetch_add(count_command(chunk, jog));
         }
