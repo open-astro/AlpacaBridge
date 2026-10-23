@@ -91,6 +91,7 @@ alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr
         st->park_count.fetch_add(count_command(chunk, ":hP#"));
         st->home_count.fetch_add(count_command(chunk, ":hC#"));
         st->stop_count.fetch_add(count_command(chunk, ":Q#"));
+        if (chunk.find(":GVP") != std::string::npos) return "AM5#";  // the connect gate needs a ZWO AM identity
         for (const char* jog : {":Me#", ":Mw#", ":Mn#", ":Ms#"}) {
             st->jog_count.fetch_add(count_command(chunk, jog));
         }
