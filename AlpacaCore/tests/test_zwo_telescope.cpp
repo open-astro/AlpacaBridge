@@ -476,6 +476,7 @@ TEST_CASE("ZWO Telescope Driver - a same-value Tracking write does not drop the 
     alpacacore::test::FakeTaskClock clock;
     std::atomic<bool> hold_status{false}, status_entered{false}, release_status{false};
     alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk.find(":GVP") != std::string::npos) return "AM5#";
         if (chunk.find(":GU#") != std::string::npos) {
             if (hold_status.load()) {
                 status_entered.store(true);
