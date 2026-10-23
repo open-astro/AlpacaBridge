@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -777,4 +778,99 @@ TEST_CASE("ToupTek AFW - DeviceState is one device read and static members cost 
     }
     CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
     driver->set_connected(false);
+}
+
+namespace {
+
+// Blocks the named SDK call for `delay` once armed; `entered` is set while it is in flight.
+void delay_sdk_call(FakeToupTekSDK& fake, const std::string& name, std::chrono::milliseconds delay,
+                    std::atomic<bool>& entered) {
+    fake.before_call = [name, delay, &entered](const std::string& call) {
+        if (call == name) {
+            entered.store(true);
+            std::this_thread::sleep_for(delay);
+        }
+    };
+}
+
+void wait_for_entered(const std::atomic<bool>& entered) {
+    for (int i = 0; i < 400 && !entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(entered.load());
+}
+
+template <typename Fn>
+std::chrono::milliseconds time_of(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        fn();
+    } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        // Only the latency matters here.
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+constexpr std::chrono::milliseconds kSlowDevice{300};
+constexpr std::chrono::milliseconds kNoIoBound{20};
+
+}  // namespace
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a heater read",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::thread read([&] { (void)time_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_switch_name(0); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    read.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a connect",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat_max", kSlowDevice, entered);
+
+    std::thread connect([&] { (void)time_of([&] { thermal->set_connected(true); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    connect.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and closes after it",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::thread read([&] { (void)time_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    read.join();
+    fake.before_call = nullptr;
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
 }
