@@ -889,18 +889,16 @@ int main() {
     // open-astro#711: libstdc++ std::regex recurses once per repeated
     // character, so a ~60,000-byte path segment overflowed the worker stack
     // and killed the server. route() refuses a path over 2048 bytes with 400
-    // + InvalidValue before any regex, and never echoes the path back.
+    // + a text/plain message before any regex, and never echoes the path back.
     {
         const auto length_refusal = [&](const std::string& path) {
             const auto resp = route_request(router, "GET", path + "?ClientTransactionID=711");
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded());
-            const std::string message = json.value("ErrorMessage", std::string());
+            // #1476: text/plain, no JSON envelope (and so no ClientTransactionID echo).
+            const std::string message = resp.body();
             const bool refused = message.find("the limit is 2048 bytes") != std::string::npos;
             if (refused) {
                 EXPECT(resp.status_code() == 400);
-                EXPECT(json.value("ErrorNumber", 0) == 0x401);
-                EXPECT(json.value("ClientTransactionID", 0) == 711);
+                EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
                 EXPECT(message.find(std::to_string(path.size())) != std::string::npos);
                 EXPECT(message.find("aaaa") == std::string::npos);
             }
@@ -928,7 +926,8 @@ int main() {
         EXPECT(!length_refusal("/api/v1/telescope/0/connected"));
         const auto resp = route_request(router, "GET", "/api/v1/telescope/0/connected");
         EXPECT(resp.status_code() == 400);
-        EXPECT(nlohmann::json::parse(resp.body()).value("ErrorNumber", 0) != 0);
+        EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
+        EXPECT(!resp.body().empty());
     }
 
     // open-astro#740: a setup path the regex rejects is client input, so its
@@ -1058,7 +1057,7 @@ int main() {
                      "/utcdate HTTP/1.1\r\nHost: localhost\r\n"
                      "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
                      std::to_string(utc_body.size()) + "\r\n\r\n" + utc_body);
-            EXPECT(count_logged("AlpacaException in telescope method 'utcdate': Invalid UTC date format: "
+            EXPECT(count_logged("Unparsable request parameter: Invalid UTC date format: "
                                 "nope\\x0aHTTP GET /forged") == 1);
             EXPECT(!raw_byte_logged('\n'));
         }
@@ -1320,27 +1319,27 @@ int main() {
 
     // Conformance: HTTP 400 "indicates that the device could not interpret the
     // request e.g. an invalid device number or misspelt device type". These
-    // must be 400 (Bad Request), not 404, and carry a non-zero ErrorNumber.
+    // must be 400 (Bad Request), not 404, with a text/plain message (#1476).
     {
         // Misspelt / unknown device type.
         const auto resp = route_request(router, "GET", "/api/v1/wibble/0/connected");
         EXPECT(resp.status_code() == 400);
-        const auto json = nlohmann::json::parse(resp.body());
-        EXPECT(json.value("ErrorNumber", 0) != 0);
+        EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);  // #1476
+        EXPECT(!resp.body().empty());
     }
     {
         // Valid device type, unknown method.
         const auto resp = route_request(router, "GET", "/api/v1/telescope/0/notarealmethod");
         EXPECT(resp.status_code() == 400);
-        const auto json = nlohmann::json::parse(resp.body());
-        EXPECT(json.value("ErrorNumber", 0) != 0);
+        EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);  // #1476
+        EXPECT(!resp.body().empty());
     }
     {
         // Valid type and method, but no device registered at that number.
         const auto resp = route_request(router, "GET", "/api/v1/telescope/4242/connected");
         EXPECT(resp.status_code() == 400);
-        const auto json = nlohmann::json::parse(resp.body());
-        EXPECT(json.value("ErrorNumber", 0) != 0);
+        EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);  // #1476
+        EXPECT(!resp.body().empty());
     }
 
     {
@@ -1388,13 +1387,13 @@ int main() {
 
         {
             const auto resp = route_request(router, "GET", base + "/canmoveaxis");
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(resp.status_code() == 400);  // #1476: Axis missing is not interpretable
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
         }
         {
             const auto resp = route_request(router, "GET", base + "/axisrates");
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(resp.status_code() == 400);  // #1476: Axis missing is not interpretable
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
         }
         // With Axis explicitly supplied, both succeed.
         {
@@ -1453,14 +1452,15 @@ int main() {
         EXPECT(registry.register_device(scope));
         const std::string base = "/api/v1/telescope/9574";
 
-        // 1. Non-finite / hex-float doubles are rejected with InvalidValue
+        // 1. Non-finite / hex-float doubles are rejected (HTTP 400 text, #1476)
         // before reaching the driver's setter.
         for (const std::string& raw : {"nan", "inf", "-infinity", "0x1p3"}) {
             const auto resp =
                 route_request(router, "PUT", base + "/targetdeclination", "TargetDeclination=" + raw + "&ClientID=1");
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(resp.status_code() == 200);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) == 0x401);
+            // #1476: it does not parse as an Alpaca number, so HTTP 400 text.
+            EXPECT(resp.status_code() == 400);
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
+            EXPECT(resp.body().find("TargetDeclination") != std::string::npos);
         }
 
         // 2. A valid method on the wrong verb is rejected with 400 before the
@@ -1535,8 +1535,8 @@ int main() {
         {
             const auto resp = route_request(router, "GET", "/api/v1/telescope/99999999999999999999/connected");
             EXPECT(resp.status_code() == 400);
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
+            EXPECT(!resp.body().empty());
         }
 
         // 4. #627: a valid uint32 device number above INT_MAX names no device
@@ -1552,10 +1552,8 @@ int main() {
         for (const std::string number : {"4294967295", "2147483648"}) {
             const auto resp = route_request(router, "GET", "/api/v1/telescope/" + number + "/connected");
             EXPECT(resp.status_code() == 400);
-            const auto json = nlohmann::json::parse(resp.body(), nullptr, false);
-            EXPECT(!json.is_discarded() && json.value("ErrorNumber", 0) != 0);
-            EXPECT(!json.is_discarded() &&
-                   json.value("ErrorMessage", std::string()) == "Device not found: telescope #" + number);
+            EXPECT(resp.get_header("Content-Type").find("text/plain") == 0);
+            EXPECT(resp.body() == "Device not found: telescope #" + number);
         }
         registry.unregister_device(alpacacore::DeviceType::Telescope, -1);
         registry.unregister_device(alpacacore::DeviceType::Telescope, std::numeric_limits<int>::min());
@@ -9647,7 +9645,10 @@ int main() {
         const std::string n = std::to_string(kSchemaDevice);
         auto body_of = [&](const std::string& verb, const std::string& path) {
             const auto response = route_request(router, verb, path, verb == "PUT" ? "ClientID=1" : "");
-            return std::make_pair(response.status_code(), nlohmann::json::parse(response.body()));
+            // A Device API 400 is text/plain, not JSON (#1476): carry its text as ErrorMessage.
+            const auto parsed = nlohmann::json::parse(response.body(), nullptr, false);
+            return std::make_pair(response.status_code(),
+                                  parsed.is_object() ? parsed : nlohmann::json{{"ErrorMessage", response.body()}});
         };
 
         for (const std::string path :
@@ -9686,7 +9687,7 @@ int main() {
     }
 
     {
-        // case: a JSON integer parameter that is not a whole int is InvalidValue in every dispatcher (#1476)
+        // case: a JSON integer parameter that is not a whole int is HTTP 400 text in every dispatcher (#1476)
         // The query and form paths already refuse "0.5" and values outside int
         // (parse_int_value); the JSON-body path truncated 0.5 to 0 and wrapped
         // 2^32 to 0, so a stub that accepts 0 answered success.
@@ -9716,11 +9717,11 @@ int main() {
             for (const char* bad : {"0.5", "4294967296", "-2147483649"}) {
                 const std::string body = std::string("{\"") + probe.param + "\":" + bad + ",\"Value\":0}";
                 const auto response = route_request(router, "PUT", probe.path, body);
-                const auto json = nlohmann::json::parse(response.body(), nullptr, false);
-                const int error = json.is_discarded() ? -2 : json.value("ErrorNumber", -1);
-                if (response.status_code() != 200 || error != 0x401) {
+                // Not a whole int: the request is not interpretable, HTTP 400 text (Alpaca API Reference s2.5).
+                if (response.status_code() != 400 || response.get_header("Content-Type").find("text/plain") != 0 ||
+                    response.body().find(probe.param) == std::string::npos) {
                     wrong.push_back(std::string(probe.path) + " " + probe.param + "=" + bad + " -> HTTP " +
-                                    std::to_string(response.status_code()) + " ErrorNumber " + std::to_string(error));
+                                    std::to_string(response.status_code()) + " body '" + response.body() + "'");
                 }
             }
             // A whole number written as 0.0 stays accepted, as the query path accepts "0".
@@ -9734,12 +9735,11 @@ int main() {
         }
         for (const auto& line : wrong) std::cerr << "  " << line << "\n";
         EXPECT(wrong.empty());
-        // A known method with its parameter missing is the same answer: 200 + InvalidValue (#1476).
+        // A known method with its parameter missing is HTTP 400 text naming it (#1476).
         const auto missing = route_request(router, "PUT", "/api/v1/focuser/9476/move", "{\"ClientID\":1}");
-        EXPECT(missing.status_code() == 200);
-        const auto missing_json = nlohmann::json::parse(missing.body(), nullptr, false);
-        EXPECT(!missing_json.is_discarded() && missing_json.value("ErrorNumber", -1) == 0x401);
-        EXPECT(missing_json.value("ErrorMessage", "").find("Missing parameter: Position") != std::string::npos);
+        EXPECT(missing.status_code() == 400);
+        EXPECT(missing.get_header("Content-Type").find("text/plain") == 0);
+        EXPECT(missing.body().find("Missing parameter: Position") != std::string::npos);
         registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
         registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
         registry.unregister_device(alpacacore::DeviceType::Switch, kNum);
@@ -9793,6 +9793,134 @@ int main() {
             }
         }
         EXPECT(route_request(router, "GET", path).status_code() == 200);
+    }
+
+    {
+        // case: a missing or unparsable parameter is HTTP 400 text/plain naming it, never a driver call (#1476)
+        // Alpaca API Reference s2.5: "All information required present?" NO -> 400. A parsed value
+        // the device refuses (out of range) stays 200 + InvalidValue.
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        constexpr int kNum = 9477;
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::FocuserStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::TelescopeStub>(kNum)));
+        EXPECT(registry.register_device(std::make_shared<route_table_stubs::CameraStub>(kNum)));
+        alpacahttp::Router router;
+        struct Bad {
+            const char* verb;
+            const char* path;
+            const char* body;
+            const char* param;
+        };
+        const Bad cases[] = {
+            {"PUT", "/api/v1/focuser/9477/move", "", "Position"},                           // missing
+            {"PUT", "/api/v1/focuser/9477/move", "{\"ClientID\":1}", "Position"},           // missing, JSON
+            {"PUT", "/api/v1/focuser/9477/move?Position=abc", "", "Position"},              // query
+            {"PUT", "/api/v1/focuser/9477/move", "Position=abc", "Position"},               // form
+            {"PUT", "/api/v1/focuser/9477/move", "{\"Position\":\"abc\"}", "Position"},     // JSON string
+            {"PUT", "/api/v1/focuser/9477/move", "{\"Position\":[1]}", "Position"},         // JSON wrong type
+            {"PUT", "/api/v1/focuser/9477/move", "{\"Position\":0.5}", "Position"},         // not whole
+            {"PUT", "/api/v1/focuser/9477/move", "{\"Position\":4294967296}", "Position"},  // outside int
+            {"PUT", "/api/v1/focuser/9477/move?Position=4294967296", "", "Position"},       // outside int
+            {"PUT", "/api/v1/focuser/9477/tempcomp?TempComp=maybe", "", "TempComp"},        // bool
+            {"PUT", "/api/v1/telescope/9477/slewtocoordinatesasync?RightAscension=x&Declination=1", "",
+             "RightAscension"},
+            {"PUT", "/api/v1/telescope/9477/synctocoordinates?RightAscension=1", "", "Declination"},
+            {"PUT", "/api/v1/camera/9477/gain?Gain=1.5", "", "Gain"},
+            {"PUT", "/api/v1/camera/9477/startexposure?Duration=1", "", "Light"},
+            {"PUT", "/api/v1/focuser/9477/connected?Connected=perhaps", "", "Connected"},
+        };
+        std::vector<std::string> wrong;
+        for (const auto& bad : cases) {
+            const auto response = route_request(router, bad.verb, bad.path, bad.body);
+            const bool text = response.get_header("Content-Type").find("text/plain") == 0;
+            const bool json = !nlohmann::json::parse(response.body(), nullptr, false).is_discarded() &&
+                              nlohmann::json::parse(response.body(), nullptr, false).is_object();
+            if (response.status_code() != 400 || !text || json || response.body().empty() ||
+                response.body().find(bad.param) == std::string::npos) {
+                wrong.push_back(std::string(bad.path) + " [" + bad.body + "] -> HTTP " +
+                                std::to_string(response.status_code()) + " type '" +
+                                response.get_header("Content-Type") + "' body '" + response.body() + "'");
+            }
+        }
+        for (const auto& line : wrong) std::cerr << "  " << line << "\n";
+        EXPECT(wrong.empty());
+
+        // A parsed value the driver range-checks stays 200 + InvalidValue (0x401).
+        class RangeCheckedSwitch final : public route_table_stubs::SwitchStub {
+        public:
+            using SwitchStub::SwitchStub;
+            int get_max_switch() const override { return 1; }
+            bool get_can_async(int id) const override {
+                if (id < 0 || id >= get_max_switch()) {
+                    throw alpacacore::AlpacaException("Switch id out of range", alpacacore::AlpacaError::InvalidValue);
+                }
+                return true;
+            }
+        };
+        EXPECT(registry.register_device(std::make_shared<RangeCheckedSwitch>(kNum)));
+        const auto range = route_request(router, "GET", "/api/v1/switch/9477/canasync?Id=7");
+        EXPECT(range.status_code() == 200);
+        EXPECT(nlohmann::json::parse(range.body(), nullptr, false).value("ErrorNumber", -1) == 0x401);
+        const auto in_range = route_request(router, "GET", "/api/v1/switch/9477/canasync?Id=0");
+        EXPECT(in_range.status_code() == 200);
+        EXPECT(nlohmann::json::parse(in_range.body(), nullptr, false).value("ErrorNumber", -1) == 0);
+        const auto unparsable = route_request(router, "GET", "/api/v1/switch/9477/canasync?Id=seven");
+        EXPECT(unparsable.status_code() == 400);
+        registry.unregister_device(alpacacore::DeviceType::Switch, kNum);
+
+        registry.unregister_device(alpacacore::DeviceType::Focuser, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Telescope, kNum);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kNum);
+    }
+    {
+        // case: every Device API 400 is text/plain with a non-empty message, no JSON envelope (#1476)
+        alpacahttp::Router router;
+        struct Site {
+            const char* verb;
+            const char* path;
+            const char* needle;
+        };
+        const Site sites[] = {
+            {"GET", "/api/v1/widget/0/name", "device type"},               // unknown device type
+            {"GET", "/api/v1/focuser/99999999999/name", "device number"},  // invalid device number
+            {"GET", "/api/v1/focuser/0/nosuchmethod", "method"},           // unknown method
+            {"PUT", "/api/v1/focuser/0/name", "name"},                     // wrong verb
+            {"GET", "/api/v1/focuser/4242/name", "4242"},                  // unregistered device
+        };
+        std::vector<std::string> wrong;
+        for (const auto& site : sites) {
+            const auto response = route_request(router, site.verb, site.path, "");
+            const auto parsed = nlohmann::json::parse(response.body(), nullptr, false);
+            if (response.status_code() != 400 || response.get_header("Content-Type").find("text/plain") != 0 ||
+                response.body().empty() || parsed.is_object() ||
+                response.body().find(site.needle) == std::string::npos) {
+                wrong.push_back(std::string(site.path) + " -> HTTP " + std::to_string(response.status_code()) +
+                                " type '" + response.get_header("Content-Type") + "' body '" + response.body() + "'");
+            }
+        }
+        // The over-long path is answered before routing, text/plain on every path.
+        const auto long_path = route_request(router, "GET", "/" + std::string(70000, 'a'));
+        if (long_path.status_code() != 400 || long_path.get_header("Content-Type").find("text/plain") != 0 ||
+            nlohmann::json::parse(long_path.body(), nullptr, false).is_object()) {
+            wrong.push_back("over-long path -> HTTP " + std::to_string(long_path.status_code()) + " type '" +
+                            long_path.get_header("Content-Type") + "'");
+        }
+        for (const auto& line : wrong) std::cerr << "  " << line << "\n";
+        EXPECT(wrong.empty());
+    }
+    {
+        // case: the AlpacaBridge-only management 400s keep the JSON envelope (#1476, ADR 0007)
+        const ScopedCwd scratch;
+        alpacahttp::Router router;
+        const auto description = route_request(router, "PUT", "/management/v1/description", "{}");
+        EXPECT(description.status_code() == 400);
+        EXPECT(description.get_header("Content-Type").find("application/json") == 0);
+        EXPECT(nlohmann::json::parse(description.body(), nullptr, false).is_object());
+        const auto channel = route_request(router, "PUT", "/management/v1/update/channel", "{\"Channel\":\"nope\"}");
+        if (channel.status_code() == 400) {
+            EXPECT(channel.get_header("Content-Type").find("application/json") == 0);
+            EXPECT(nlohmann::json::parse(channel.body(), nullptr, false).is_object());
+        }
     }
 
     std::cout << "All routing tests passed!\n";
