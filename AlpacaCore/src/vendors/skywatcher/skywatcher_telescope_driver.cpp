@@ -1085,7 +1085,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        (void)dec;
+        validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         require_site_locked();
@@ -1100,8 +1100,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
-    bool get_does_refraction() const override { return does_refraction_; }
-    void set_does_refraction(bool does_refraction) override { does_refraction_ = does_refraction; }
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
+    bool get_does_refraction() const override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
+    }
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
+    }
 
     int get_slew_settle_time() const override { return slew_settle_time_seconds_; }
 
@@ -6269,7 +6274,6 @@ private:
     mutable std::chrono::steady_clock::time_point slew_force_until_ = std::chrono::steady_clock::time_point::min();
     mutable bool manual_axis_slewing_[2] = {false, false};
 
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
     GuideRate guide_rate_{};
     // open-astro#620: one pulse task per axis (index = axis - 1, 0=RA,

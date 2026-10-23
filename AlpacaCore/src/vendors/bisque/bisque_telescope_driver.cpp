@@ -160,7 +160,7 @@ public:
           connection_info_(connection_info),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           site_info_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
@@ -535,7 +535,8 @@ public:
         throw AlpacaException("SetSideOfPier not supported", AlpacaError::PropertyNotImplemented);
     }
 
-    int get_destination_side_of_pier(double ra, double /*dec*/) const override {
+    int get_destination_side_of_pier(double ra, double dec) const override {
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double lst_hours = compute_local_sidereal_time_hours(
@@ -549,12 +550,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -574,7 +576,11 @@ public:
     }
 
     double get_site_elevation() const override {
-        return site_elevation_m_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -582,6 +588,7 @@ public:
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
     }
 
@@ -1582,7 +1589,7 @@ private:
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
-    double site_elevation_m_ = 0.0;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
@@ -1599,7 +1606,6 @@ private:
     util::OperationGeneration poll_generation_;
     util::AsyncOperation status_poll_{"Bisque status poll", poll_generation_, clock_};
 
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
 
     GuideRate guide_rate_{};
