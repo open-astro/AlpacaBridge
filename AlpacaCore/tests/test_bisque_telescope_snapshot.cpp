@@ -191,8 +191,6 @@ TEST_CASE("Bisque snapshot - a setter's value is read back at once and a stale p
     CHECK(rig.driver->get_guide_rate().dec == 0.001);
     rig.driver->set_slew_settle_time(3);
     CHECK(rig.driver->get_slew_settle_time() == 3);
-    rig.driver->set_does_refraction(true);
-    CHECK(rig.driver->get_does_refraction());
     rig.driver->set_tracking_rate(0);
     CHECK(rig.driver->get_tracking_rate() == 0);
     rig.driver->set_site_latitude(-33.856784);

@@ -788,7 +788,7 @@ struct SnapshotMount {
     std::atomic<int> p_count{0};          // pier-side queries received
     std::atomic<int> s_count{0};          // sync and time commands received
     std::atomic<int> order{0};            // arrival counter shared by the goto and cancel records below
-    std::atomic<int> goto_last{0};        // arrival number of the last goto (0: none)
+    std::atomic<int> goto_last{0};        // arrival number of the last goto, GOTO or axis goto-fast (0: none)
     std::atomic<int> cancel_first{0};     // arrival number of the first goto cancel (0: none)
 };
 
@@ -838,6 +838,17 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             if (st.t_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.t_delay_ms.load()));
             st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
             return "#";
+        case 'h': {  // the mount's clock: the host's UTC with a zero zone, so UTCDate has a mount time to seed from
+            const std::time_t now = std::time(nullptr);
+            std::tm utc{};
+            gmtime_r(&now, &utc);
+            std::string reply;
+            for (const int field :
+                 {utc.tm_hour, utc.tm_min, utc.tm_sec, utc.tm_mon + 1, utc.tm_mday, utc.tm_year % 100, 0, 0}) {
+                reply.push_back(static_cast<char>(field));
+            }
+            return reply + "#";
+        }
         case 'H':
             if (st.h_mute.load()) return "";
             return "#";
@@ -861,6 +872,11 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
+            // MC_GOTO_FAST: a park whose target lies across the meridian (host-clock LST) flips with it
+            if (op == 0x02) {
+                st.goto_last.store(st.order.fetch_add(1) + 1);
+                return "#";
+            }
             if (op == 0x12) {                                                      // MC_LEVEL_DONE
                 st.level_count.fetch_add(1);
                 if (st.level_mute.load()) return "";
@@ -1967,6 +1983,116 @@ TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of 
     cel::set_slew_dispatch_hook_for_testing(*mount.driver, nullptr);
     REQUIRE(mount.st->cancel_first.load() > 0);
     CHECK(mount.st->goto_last.load() < mount.st->cancel_first.load());  // no goto after the first cancel
+}
+
+#endif  // _WIN32
+
+#ifndef _WIN32
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("Celestron spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // ITelescopeV4.DestinationSideOfPier: InvalidValueException for RA outside 0..24 h or Dec outside -90..90.
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(-1.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, 91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - SiteElevation never set throws InvalidOperation",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // ASCOM time-and-place FAQ: reading a site value that was never set throws InvalidOperationException.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - UTCDate throws InvalidOperation when the mount clock cannot be read",
+          "[celestron][telescope][unit][spec-audit]") {
+    // Only the position queries get the canned pair. Every other reply is a bare terminator, so no leftover bytes
+    // of a longer reply sit in the socket and answer the clock read ('h') as a time; the clock read gets no time.
+    std::atomic<int> clock_reads{0};
+    alpacacore::test::FakeMountServer server([&clock_reads](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        if (command == "e" || command == "z") return std::string("00000000,00000000#");
+        if (command == "h") ++clock_reads;
+        return std::string("#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 100;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // Decision 0014 item 4 leaves seeding in the driver; the host clock must not stand in for the mount's.
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    // Getters never wait on device I/O: the failed connect-time read is remembered, so a poll sends no further 'h'.
+    const int reads_after_first = clock_reads.load();
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    INFO("h reads " << reads_after_first << " -> " << clock_reads.load());
+    CHECK(clock_reads.load() == reads_after_first);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - PulseGuide rejects a negative duration", "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    require_alpaca_error([&] { driver->pulse_guide(0, -5); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - DoesRefraction is not implemented", "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - PulseGuide rejects a bad direction or duration before the connection check",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // MC_AUX_GUIDE chains 255 cs commands up to 2550 cs: a longer duration used to be cut to 25.5 s silently.
+    require_alpaca_error([&] { driver->pulse_guide(0, 25501); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(4, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+    // The range check precedes the connected check: a disconnected driver says InvalidValue, not NotConnected.
+    require_alpaca_error([&] { driver->pulse_guide(0, -5); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(0, 25501); }, alpacacore::AlpacaError::InvalidValue);
 }
 
 #endif  // _WIN32

@@ -84,7 +84,7 @@ public:
           site_longitude_cached_(0.0),
           site_info_valid_(false),
           hemisphere_north_(true),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
@@ -872,12 +872,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -912,7 +913,10 @@ public:
     
     double get_site_elevation() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return site_elevation_m_;
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
     
     void set_site_elevation(double elevation) override {
@@ -2834,7 +2838,6 @@ private:
     double focal_length_m_ = 0.0;
     int slew_settle_time_seconds_ = 0;
     double custom_tracking_rate_ = 1.0;
-    bool does_refraction_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
@@ -2871,7 +2874,7 @@ private:
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
     mutable bool hemisphere_north_;
-    mutable double site_elevation_m_;
+    mutable std::optional<double> site_elevation_m_;  // nullopt until set or configured
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;

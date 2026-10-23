@@ -1261,7 +1261,8 @@ TEST_CASE("Celestron PulseGuide - an operation that reaps the pulse clears IsPul
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         REQUIRE(driver->get_can_pulse_guide());
 
-        driver->pulse_guide(0, 60000);  // outlasts the sync slew, so only the reap can clear it
+        // The longest pulse the driver takes; it outlasts the sync slew, so only the reap can clear it.
+        driver->pulse_guide(0, 25500);
         REQUIRE(driver->get_is_pulse_guiding());
         switch (op) {
             case Op::SlewToCoordinates:
