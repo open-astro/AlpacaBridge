@@ -177,9 +177,9 @@ public:
     // may be flipped while requests run; the next request sees the new value.
     void set_host_check_enabled(bool enabled) { host_check_enabled_.store(enabled, std::memory_order_release); }
 
-    // discovery.port as the server read it at start (#1509). The description
-    // reports it and the web UI edits it; the responder binds it only at
-    // start, so a saved change shows after the next restart.
+    // discovery.port as saved (#1509): the server's value at start, then the
+    // value a PUT saved. The description reports it and the web UI edits it;
+    // the responder binds the saved port only at the next restart.
     void set_discovery_port(std::uint16_t port) { discovery_port_.store(port, std::memory_order_release); }
 
     // open-astro#547: check every registered telescope for client silence

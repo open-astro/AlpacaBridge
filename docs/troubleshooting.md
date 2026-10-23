@@ -92,7 +92,7 @@ On a package install the file is `/var/lib/alpacabridge/config/default.yaml`; ed
 
 **Why**: the discovery responder listens on UDP port 32227, the port the Alpaca API Reference (section 5.8.1) fixes as the default. If another program on the host holds that port without sharing it, or a client probes a different port, discovery fails while the web UI and the API still work.
 
-**Fix**: set `discovery.port` (1-65535) in the server config file, or `ALPACAHTTP_DISCOVERY_PORT` in the environment (it overrides the file), or use the "Discovery port" field in the web UI server settings (saved through `PUT /management/v1/description`, `DiscoveryPort`), then restart the service; the responder binds the port only at start. A value outside 1-65535 is ignored with a log warning and the default stays. Point the client at the same port.
+**Fix**: set `discovery.port` (1-65535) in the server config file, or `ALPACAHTTP_DISCOVERY_PORT` in the environment (it overrides the file), or use the "Discovery port" field in the web UI server settings (saved through `PUT /management/v1/description`, `DiscoveryPort`), then restart the service; the responder binds the port only at start. A value outside 1-65535 is ignored with a log warning and keeps the earlier value (the file value, else the default). Point the client at the same port.
 
 ```yaml
 discovery:

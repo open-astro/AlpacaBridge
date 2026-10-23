@@ -293,7 +293,7 @@ client that switches on `ClockSource` should treat any unknown value as
 ### Host check (`HostCheckEnabled`, `AllowedHosts`) and `DiscoveryPort`
 
 `GET /management/v1/description` also carries `DiscoveryPort` (integer, default
-32227), the UDP port of the discovery responder, and the two settings of the Host
+32227), the saved UDP port of the discovery responder (the responder binds it at the next restart), and the two settings of the Host
 header check, a guard against DNS rebinding. The two Host check settings are persisted under `http:` in
 the config file (`host_check_enabled`, `allowed_hosts`) and have no environment
 override; `DiscoveryPort` is persisted as `discovery.port` and also has
