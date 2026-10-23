@@ -289,6 +289,8 @@ TEST_CASE("ZWO Telescope Driver - a far-off client UTCDate is logged once per co
     // before the driver caches the instant; :GAT "1#" reports tracking on,
     // and "0#" is a validly terminated reply for everything else.
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -360,6 +362,8 @@ TEST_CASE(
     // so the wrapper's idle-break wait does not add 100 ms to every refresh),
     // and "0#" is a validly terminated reply for everything else.
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -475,6 +479,8 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
     for (const int stopped_axis : {0, 1}) {
         auto counts = std::make_shared<Counts>();
         alpacacore::test::FakeMountServer server([counts](const std::string& chunk) -> std::string {
+            if (chunk == ":GVP#") return "AM5#";
+            if (chunk == ":GMA#") return "012345ABCDEF#";
             if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
             if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
             const auto count = [&chunk](const std::string& command) {
@@ -597,6 +603,8 @@ TEST_CASE("ZWO mount site longitude converts between east-positive API and west-
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under a second", "[zwo][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -646,6 +654,7 @@ struct SlowMount {
 
     alpacacore::test::FakeMountServer::Responder responder() {
         return [this](const std::string& chunk) -> std::string {
+            if (chunk == ":GMA#") return "012345ABCDEF#";
             if (chunk.find(":GU#") != std::string::npos) return "NG#";
             if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
             if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";

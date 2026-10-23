@@ -1,0 +1,5 @@
+### Fixed
+- **ZWO AM connection identity is mandatory** (AlpacaCore, issue #1523): verify the model and fresh mount serial on the live connection before enabling device writes or publishing Connected; release failed connections for explicit retry and apply the same family check to USB/Wi-Fi discovery. Atomically refuse duplicate mount serials when either entry uses Auto, including USB/Wi-Fi aliases and simultaneous connects. Verified mounts may still connect with initially unavailable telemetry; for newly refused endpoints, see Breaking changes.
+
+### Breaking changes
+- **Unverified ZWO AM endpoints now refuse connection** (AlpacaCore, issue #1523): endpoints previously accepted without a successful AM3, AM5, AM5N or AM7 model reply and fresh twelve-hex mount serial are no longer reported connected; an Auto entry also refuses a mount a sibling already claims. **After upgrading:** select the correct telescope driver and serial port or host, confirm firmware supports the mount serial query, and use distinct endpoints for distinct mounts. No persisted configuration format changes.

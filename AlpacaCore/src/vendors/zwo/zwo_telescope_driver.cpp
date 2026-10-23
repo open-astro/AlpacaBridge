@@ -18,6 +18,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/vendor/zwo/zwo_mount_identity.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/version.h>
 
@@ -378,6 +379,7 @@ public:
                 snapshot_.reset();
                 health_.reset();
                 loss_reason_.clear();
+                mount_identity_.reset();
             }
             poll_stop_.store(true);
             pulse_thread_stop_.store(true);
@@ -654,22 +656,18 @@ public:
                     AlpacaError::NotConnected);
             }
             try {
-                // Publish the open link internally; getters wait for the end of the initial telemetry attempt.
+                // Verify identity before even offline-capable setters may write to the open link.
                 caches_ready_.store(false);
                 reset_session_state_for_connect();
-                connected_.store(true);
-
-                std::string mount_info;
-                try {
-                    mount_info = protocol.get_mount_info();
-                } catch (const std::exception& e) {
-                    ALPACA_LOG_WARN("ZWO", "Unable to query mount info: " + std::string(e.what()));
-                    mount_info.clear();
-                }
+                const std::string mount_info = protocol.get_mount_info();
+                const std::string mount_serial = protocol.get_mount_serial_number();
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
+                    mount_identity_.claim(mount_serial, connection_info_.type == ConnectionType::Auto, device_number_);
                     mount_info_ = mount_info;
                 }
+                protocol.finish_identity_check();
+                connected_.store(true);
 
                 apply_or_load_site_info();
                 apply_pending_elevation();
@@ -739,6 +737,7 @@ public:
                     snapshot_.reset();
                     health_.reset();
                     loss_reason_.clear();
+                    mount_identity_.reset();
                 }
                 protocol.cancel_pending_io();
                 stop_poll_thread();
@@ -2491,6 +2490,7 @@ private:
             loss_reason_ = transport_lost ? "ZWO mount transport lost" : "ZWO mount telemetry stalled for 30 s";
         connected_.store(false);
         caches_ready_.store(false);
+        mount_identity_.reset();
         link_lost_at_.note(now);
         snapshot_.reset();
         poll_stop_.store(true);
@@ -2921,8 +2921,9 @@ private:
     const int device_number_;
     const ConnectionInfo connection_info_;
 
+    MountIdentityClaim mount_identity_;
     // Outlives every worker; the destructor joins them before closing this entry's link.
-    mutable ZWOMountProtocolWrapper protocol_;
+    mutable ZWOMountProtocolWrapper protocol_{true};
     util::TaskClock& clock_;
     mutable util::StateSnapshot<PolledFrame> snapshot_;
     util::OperationGeneration poll_generation_;

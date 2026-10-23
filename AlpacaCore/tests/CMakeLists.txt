@@ -72,6 +72,8 @@ if(TARGET alpacacore_zwo)
     # AM mount serial-port ownership over a pty (issue #1202).
     list(APPEND TEST_SOURCES test_zwo_mount_serial_ownership.cpp)
     list(APPEND TEST_SOURCES test_zwo_mount_network_isolation.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_identity.cpp)
+    list(APPEND TEST_SOURCES test_zwo_mount_identity_claim.cpp)
 endif()
 
 if(TARGET alpacacore_qhy)

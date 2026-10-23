@@ -1,5 +1,27 @@
 # ZWO AM5 Undocumented Commands
 
+## Mount serial number
+
+### **:GMA#**
+Get the mount serial number. Returns twelve hexadecimal characters followed by `#`.
+
+Evidence: the [official ZWO ASCOM driver](https://www.zwoastro.com/software/ascom-driver/)
+package 6.5.37 maps action 31 to `:GMA#` with a hash-terminated response.
+`DataProc.GetMountSN` sends that action through serial or TCP;
+`TelescopeHardware.IsValidMountSNResponse` requires twelve hexadecimal characters.
+The getter runs before time/location synchronization, with no configuration or motion write.
+The extracted `ASCOM.ASIMount.Server.exe` SHA-256 is
+`e5f4bc178246b3837ef0fbcb979f85403e04f738029d3671f063e0b8b369954a`.
+This is static vendor-code evidence, not a published protocol guarantee.
+
+Read-only AM5 firmware 1.8.6 checks on 2026-10-23 returned fresh, matching serials
+over USB and handset Wi-Fi. The serial itself remains private. Support on other
+models/firmware, persistence across firmware changes and factory uniqueness across
+two physical mounts were not verified. Do not copy the vendor getter's cached-value
+fallback when verifying a new connection.
+
+<!-- TODO: qualify :GMA# on AM3/AM5N/AM7 and establish its minimum supported firmware. -->
+
 ## Altitude limits
 Limits are preserved after power cycle.
 
