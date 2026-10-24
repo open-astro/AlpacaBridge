@@ -5429,35 +5429,27 @@ int main() {
             const char* vendor;
             const char* bad_type_message;  // the arm's own literal, they differ
             const char* site;              // mandatory from the API for this vendor (#274)
-            // open-astro#744: registered through the device catalog rather than
-            // a router arm. Two observable differences, pinned per case below:
-            // sanitize keeps every declared field (ADR 0004: portPath / host
-            // survive whatever the connection type), and a saved config's
-            // cross-field refusal is logged through the catalog's "config
-            // normalized" wrapper, not the deleted reject_invalid_config()'s
-            // "will refuse to connect" text.
-            bool catalog;
         };
         std::vector<Mount> mounts;
         const char* const kSite = R"("siteLatitude":51.477833,"siteLongitude":-0.0015)";
         const char* const kAutoOrSerialOrNetwork = "Invalid connection type. Use 'auto', 'serial', or 'network'";
 #ifdef ALPACACORE_ENABLE_IOPTRON
-        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"ioptron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"synscan", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
-        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite, true});
+        mounts.push_back({"skywatcher", kAutoOrSerialOrNetwork, kSite});
 #endif
 #ifdef ALPACACORE_ENABLE_CELESTRON
-        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, "", true});
+        mounts.push_back({"celestron", kAutoOrSerialOrNetwork, ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ONSTEP
-        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", "", true});
+        mounts.push_back({"onstep", "Invalid connection type. Use 'auto' or 'serial'", ""});
 #endif
 #ifdef ALPACACORE_ENABLE_ZWO
-        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", "", true});
+        mounts.push_back({"zwo", "Invalid connection type. Use 'serial', 'network', or 'auto'", ""});
 #endif
         for (const auto& m : mounts) {
             const std::string site = m.site;
@@ -5474,9 +5466,7 @@ int main() {
             // open-astro#744): sanitize no longer tests == "serial".
             pin("connectionType \"carrier-pigeon\" (#380/#353)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}), m.bad_type_message, "{}",
-                true,
-                m.catalog ? obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site})
-                          : obj({R"("connectionType":"carrier-pigeon")", site}),
+                true, obj({R"("connectionType":"carrier-pigeon","portPath":"/dev/ttyUSB9")", site}),
                 {"has connectionType \"carrier-pigeon\"", warned_serial}, {"Skipping persisted device"});
 
             // #508 item 2: connectionType is folded to lower case once, on the
@@ -5509,10 +5499,8 @@ int main() {
             pin("serial with empty portPath (#508 item 1, mount arm)", vendor, "telescope", "Telescope",
                 obj({R"("connectionType":"serial","portPath":"")", site}), "Serial port path is required", "{}", true,
                 obj({R"("connectionType":"serial","portPath":"")", site}),
-                m.catalog ? std::vector<std::string>{"config normalized: Serial port path is required"}
-                          : std::vector<std::string>{"will refuse to connect: Serial port path is required"},
-                m.catalog ? std::vector<std::string>{"Skipping persisted device", "will refuse to connect"}
-                          : std::vector<std::string>{"Skipping persisted device"});
+                std::vector<std::string>{"config normalized: Serial port path is required"},
+                std::vector<std::string>{"Skipping persisted device", "will refuse to connect"});
 
             // #508 item 3: an empty connectionType is "auto" for every mount,
             // zwo included. Its normalize reads "" as auto for both sources, so
@@ -7512,6 +7500,12 @@ int main() {
                             R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299})",
                             "deviceNumber"},
                  std::tuple{"/management/v1/configuredevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":true})",
+                            "'deviceNumber' has the wrong type (got boolean)"},
+                 std::tuple{"/management/v1/removedevice",
+                            R"({"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":true})",
+                            "'deviceNumber' has the wrong type (got boolean)"},
+                 std::tuple{"/management/v1/configuredevice",
                             R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
                  std::tuple{"/management/v1/removedevice",
                             R"({"vendor":"nosuchvendor","deviceType":5,"deviceNumber":1})", "deviceType"},
@@ -7579,13 +7573,13 @@ int main() {
         // Issue #388, the other half: a config field of a genuinely wrong TYPE
         // is still an error -- silently falling back would accept a typo'd
         // config and register a device with defaults nobody asked for -- but
-        // config_get() reports it as an AlpacaException naming the field
-        // rather than letting nlohmann's type_error reach the outer catch.
+        // config_from_json() (the catalog bridge) reports it as an AlpacaException naming
+        // the field rather than letting nlohmann's type_error reach the outer catch.
         //
         // The null case above does NOT cover this: it asserts only the absence
         // of "json.exception" text, and passes with or without the try/catch,
-        // because a null never reaches get<T>() at all. Deleting the catch in
-        // config_get() must fail HERE.
+        // because a null never reaches get<T>() at all. Deleting the wrong-type
+        // check in config_from_json() (the Double arm) must fail HERE.
         alpacahttp::Router router;
         nlohmann::json config = {{"vendor", "skywatcher"},  {"deviceType", "telescope"},
                                  {"deviceNumber", 50},      {"connectionType", "serial"},
@@ -7658,7 +7652,7 @@ int main() {
     // open-astro#744: an Int field takes an integer or a whole-number float
     // (9600 or 9600.0); a fractional value is a wrong-type refusal naming the
     // field, as for every catalog vendor (catalog_json.cpp whole_number()).
-    // The arm's config_get<int>() read 9600.5 as 9600 without a word. The
+    // The deleted arm's get<int>() read 9600.5 as 9600 without a word. The
     // catalog rule wins; the PR body quotes the change.
     {
         alpacahttp::Router router;
@@ -8686,7 +8680,7 @@ int main() {
         remove_device(router, "zzz", "focuser", 9255);
 
         // API, wrong type: the bridge's InvalidValue is reported as a
-        // config_get() failure is today, and nothing registers.
+        // wrong-type refusal, and nothing registers.
         const auto wrong = api_attempt(
             router,
             nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9255,"count":"seven"})"),
@@ -8743,8 +8737,8 @@ int main() {
     }
     {
         // Persisted, wrong JSON type: the bridge's InvalidValue is thrown before
-        // normalize() runs, so the entry fails to load as a config_get() failure
-        // did through the deleted arm. It is not normalized to the default.
+        // normalize() runs, so the entry fails to load as a wrong-type refusal.
+        // It is not normalized to the default.
         const auto persisted = persisted_attempt(
             nlohmann::json::parse(R"({"vendor":"zzz","deviceType":"focuser","deviceNumber":9258,"count":"seven"})"),
             "Focuser", alpacahttp::test_catalog::add_schema_and_factory);
@@ -9578,7 +9572,7 @@ int main() {
     }
 
 #ifdef ALPACACORE_ENABLE_SVBONY
-    // The catalog's Int field refuses what the deleted arm's config_get<int>()
+    // The catalog's Int field refuses what the deleted arm's get<int>()
     // truncated (1.5) or coerced (true): not registered, InvalidValue.
     {
         const char* const kBadIndexes[] = {"1.5", "true"};

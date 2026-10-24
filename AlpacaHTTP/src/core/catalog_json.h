@@ -24,15 +24,15 @@
 //   2. A JSON null or an absent key produces no entry in the resulting
 //      DeviceConfig -- the #388 rule -- including inside a nested record.
 //   3. A value of the wrong JSON kind throws AlpacaException(InvalidValue).
-//      The message is byte-identical in shape to config_get()'s: "Device
+//      The message is byte-identical in shape to get_string()'s: "Device
 //      config field '<name>' has the wrong type (got <nlohmann type_name>)".
 //      The check is on the JSON kind, not on nlohmann's get<>(): a JSON bool
 //      converts to int64 there, so `true` in an int field must still be
 //      refused. A JSON float with no fractional part that fits an int64
 //      (e.g. 1.0) in an Int field is accepted and stored as that integer,
-//      as config_get<int>() accepted it. An Int field given a JSON bool or
+//      as get_int() accepts it. An Int field given a JSON bool or
 //      a finite fractional number (1.5) is refused, a narrowing:
-//      config_get<int>() took them as 1, 1 and 0. The message then is
+//      the old router read took them as 1, 1 and 0. The message then is
 //      "Device config field '<name>' must be a whole number (got <value>)",
 //      <value> being the JSON dump. Every other wrong kind, and an
 //      out-of-range float (e.g. 1e300), keeps the "has the wrong type" text.
@@ -58,7 +58,9 @@
 #include <alpacacore/catalog/device_catalog.h>
 
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <span>
+#include <string>
 
 namespace alpacahttp::catalog_json {
 
@@ -73,6 +75,30 @@ alpacacore::catalog::DeviceConfig config_from_json(const nlohmann::json& json,
 // to the overload above instead).
 alpacacore::catalog::DeviceConfig config_from_json(const nlohmann::json& json,
                                                    const alpacacore::catalog::Schema& schema);
+
+// A JSON number as an int: a JSON integer inside int, or a finite float with
+// no fraction (a hand-written 3.0) inside int. nullopt for anything else, so
+// no caller narrows with get<int>(), which wraps 2^32 to 0 and cuts 3.5 to 3
+// (ADR 0007 rule 4).
+std::optional<int> whole_json_int(const nlohmann::json& value);
+
+// Typed reads of one key of a raw device config, for the keys read before a
+// descriptor (and so a field list) exists: vendor, deviceType, deviceNumber.
+// An absent key and an explicit JSON null both read as absent (#388): a client
+// that serialised "unset" meant no value. has_value() is true only when the
+// key holds a non-null value.
+bool has_value(const nlohmann::json& config, const char* key);
+
+// The string at `key`, or "" when absent or null. Any other JSON kind throws
+// AlpacaException(InvalidValue), "Device config field '<key>' has the wrong
+// type (got <type>)".
+std::string get_string(const nlohmann::json& config, const char* key);
+
+// The whole number at `key` (whole_json_int), or `fallback` when absent or
+// null. A number outside int or with a fraction throws AlpacaException
+// (InvalidValue), "Device config field '<key>' must be a whole number inside
+// int"; any non-number throws the "has the wrong type" text of get_string().
+int get_int(const nlohmann::json& config, const char* key, int fallback);
 
 // The inverse of config_from_json: every entry in `config` becomes a JSON key,
 // converted by the ConfigValue alternative it actually holds.

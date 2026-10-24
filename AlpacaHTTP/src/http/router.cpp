@@ -420,31 +420,7 @@ std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::st
     return value;
 }
 
-// A JSON number as an int: a JSON integer inside int, or a finite float with
-// no fraction (a hand-written 3.0) inside int. nullopt for anything else, so
-// no caller narrows with get<int>(), which wraps 2^32 to 0 and cuts 3.5 to 3
-// (ADR 0007 rule 4).
-std::optional<int> whole_json_int(const nlohmann::json& value) {
-    if (value.is_number_unsigned()) {
-        const auto v = value.get<std::uint64_t>();
-        if (!std::in_range<int>(v)) return std::nullopt;
-        return static_cast<int>(v);
-    }
-    if (value.is_number_integer()) {
-        const auto v = value.get<std::int64_t>();
-        if (!std::in_range<int>(v)) return std::nullopt;
-        return static_cast<int>(v);
-    }
-    if (value.is_number_float()) {
-        const double d = value.get<double>();
-        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(std::numeric_limits<int>::min()) ||
-            d > static_cast<double>(std::numeric_limits<int>::max())) {
-            return std::nullopt;
-        }
-        return static_cast<int>(d);
-    }
-    return std::nullopt;
-}
+using alpacahttp::catalog_json::whole_json_int;
 
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
@@ -452,7 +428,7 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     }
     const auto type_it = entry.find("deviceType");
     const auto number_it = entry.find("deviceNumber");
-    // The numbers config_get<int>() accepts at registration (whole_json_int):
+    // The numbers catalog_json::get_int() accepts at registration (whole_json_int):
     // a hand-written 3.0 registers as device 3, so the walks over the
     // persisted list must find that same entry or removedevice would drop it
     // from the registry and leave it in the file. A number registration
@@ -6915,72 +6891,12 @@ Response Router::handle_setup(const Request& request, std::uint32_t server_tx_id
 
 namespace {
 
-// Reading an optional device-config field, with an explicit JSON `null`
-// treated as absence (issue #388).
-//
-// The old shape was `config.contains(k)` followed by `config.value(k, dflt)`.
-// `contains()` is true for an explicit null, and `nlohmann::json::value()`
-// THROWS `type_error` rather than returning the default when the stored value
-// is not convertible -- so `{"siteLatitude": null}` threw out of whichever
-// vendor branch read it, was caught by the handler's outer catch, and came
-// back as a generic nlohmann message instead of the specific one the field
-// has. Since the site fields became mandatory for Sky-Watcher (#274/#353),
-// that is the difference between "siteLatitude is required" and a JSON
-// library's type complaint on the one field that decides whether the device
-// connects at all. A null is easy to produce from any client that serialises
-// an unset value rather than omitting the key.
-
-// True when `key` is present AND carries an actual value. An explicit null
-// reads as absent, which is what a client that serialised "unset" meant.
-bool config_has(const nlohmann::json& config, const char* key) {
-    const auto it = config.find(key);
-    return it != config.end() && !it->is_null();
-}
-
-// `config[key]`, or `fallback` when the key is absent or explicitly null. A
-// value of a genuinely incompatible type is still an error -- silently
-// falling back there would accept a typo'd config and register a device with
-// defaults nobody asked for -- but it is reported as an AlpacaException
-// naming the field, which the handler's outer catch surfaces verbatim,
-// instead of an nlohmann type_error that names nothing.
-template <typename T>
-T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
-    const auto it = config.find(key);
-    if (it == config.end() || it->is_null()) {
-        return fallback;
-    }
-    if constexpr (std::is_same_v<T, int>) {
-        // get<int>() would wrap 4294967299 to 3 and cut 3.5 to 3 (ADR 0007 rule 4).
-        if (it->is_number()) {
-            if (const auto v = whole_json_int(*it)) return *v;
-            throw alpacacore::AlpacaException(
-                std::string("Device config field '") + key + "' must be a whole number inside int",
-                alpacacore::AlpacaError::InvalidValue);
-        }
-    }
-    try {
-        return it->template get<T>();
-    } catch (const nlohmann::json::exception&) {
-        throw alpacacore::AlpacaException(
-            std::string("Device config field '") + key + "' has the wrong type (got " + it->type_name() + ")",
-            alpacacore::AlpacaError::InvalidValue);
-    }
-}
-
-// String-literal defaults deduce `const char*`, which nlohmann cannot `get<>`.
-// A null fallback becomes an empty string rather than std::string(nullptr),
-// which is undefined behaviour -- cppcheck's whole-program pass flags the
-// unguarded construction, and "" is what every caller means by "no default".
-std::string config_get(const nlohmann::json& config, const char* key, const char* fallback) {
-    return config_get<std::string>(config, key, fallback != nullptr ? std::string(fallback) : std::string());
-}
-
 // Issue #860: `alignmentMode` ("auto", "altaz" or "equatorial") tells the
 // SynScan and Celestron drivers the geometry of a mount whose handset does not
 // report it. Returns the value when it is one of those three, nullopt when it
 // is absent or unknown; an unknown value reads as "auto" and is not persisted.
 std::optional<std::string> known_alignment_mode(const nlohmann::json& config) {
-    if (!config_has(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
+    if (!catalog_json::has_value(config, "alignmentMode") || !config.at("alignmentMode").is_string()) {
         return std::nullopt;
     }
     std::string mode = config.at("alignmentMode").get<std::string>();
@@ -7117,8 +7033,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        std::string vendor = config_get(config, "vendor", "");
-        std::string device_type_str = config_get(config, "deviceType", "");
+        std::string vendor = catalog_json::get_string(config, "vendor");
+        std::string device_type_str = catalog_json::get_string(config, "deviceType");
 
         if (vendor.empty() || device_type_str.empty()) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -7131,11 +7047,11 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         }
 
         // open-astro#444: the opt-out flag is vendor-agnostic and consumed by
-        // the router alone, so no register_device_from_config() arm types it.
+        // the router alone, so no catalog descriptor declares it.
         // Refuse a non-boolean here (the #388 rule: a wrong-typed field is
         // named to the caller, never left to throw from a later read) rather
         // than let sanitize_device_config() copy it verbatim into the file.
-        if (config_has(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
+        if (catalog_json::has_value(config, "learnSiteFromClient") && !config["learnSiteFromClient"].is_boolean()) {
             AlpacaResponse alpaca_response =
                 make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
                                     std::string("Device config field 'learnSiteFromClient' must be a boolean (got ") +
@@ -7274,9 +7190,9 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
             return response;
         }
 
-        std::string device_type_str = config_get(config, "deviceType", "");
-        std::string vendor = config_get(config, "vendor", "");
-        int device_number = config_get(config, "deviceNumber", -1);
+        std::string device_type_str = catalog_json::get_string(config, "deviceType");
+        std::string vendor = catalog_json::get_string(config, "vendor");
+        int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
         if (device_type_str.empty() || device_number < 0) {
             AlpacaResponse alpaca_response = make_error_response(
@@ -8374,9 +8290,9 @@ nlohmann::json with_folded_connection_type(const nlohmann::json& config) {
 bool Router::register_device_from_config(const nlohmann::json& raw_config, std::string& error_message,
                                          ConfigSource source, nlohmann::json* learned_config) {
     const nlohmann::json config = with_folded_connection_type(raw_config);
-    std::string device_type_str = config_get(config, "deviceType", "");
-    std::string vendor = config_get(config, "vendor", "");
-    int device_number = config_get(config, "deviceNumber", -1);
+    std::string device_type_str = catalog_json::get_string(config, "deviceType");
+    std::string vendor = catalog_json::get_string(config, "vendor");
+    int device_number = catalog_json::get_int(config, "deviceNumber", -1);
 
     if (device_type_str.empty() || vendor.empty() || device_number < 0) {
         error_message = "Missing required fields: deviceType, vendor, and deviceNumber";
@@ -8390,7 +8306,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
     // throws) just skips the consult -- the final "not yet
     // supported" message still answers, unchanged. Only that lookup is
     // guarded: an AlpacaException out of config_from_json below must
-    // propagate like a config_get() failure does today, not be swallowed here.
+    // propagate like a catalog_json::get_string() failure does today, not be swallowed here.
     std::optional<alpacacore::DeviceType> device_type_key;
     try {
         device_type_key = string_to_device_type(device_type_str);
@@ -8582,7 +8498,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     nlohmann::json sanitized = nlohmann::json::object();
 
     auto copy_if_present = [&](const char* key) {
-        if (config_has(config, key)) {
+        if (catalog_json::has_value(config, key)) {
             sanitized[key] = config.at(key);
         }
     };
@@ -8591,8 +8507,8 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("deviceType");
     copy_if_present("deviceNumber");
 
-    std::string vendor = config_get(config, "vendor", "");
-    std::string device_type = config_get(config, "deviceType", "");
+    std::string vendor = catalog_json::get_string(config, "vendor");
+    std::string device_type = catalog_json::get_string(config, "deviceType");
 
     // open-astro#664: a vendor/type is sanitized from its catalog descriptor's own
     // field list (every vendor is one now). The vendor-agnostic keys at the end are
@@ -8706,14 +8622,15 @@ void Router::persist_client_site(const alpacacore::AlpacaDriver& device, const c
 }
 
 void Router::add_or_replace_persisted_device(const nlohmann::json& config) {
-    if (!config_has(config, "deviceType") || !config_has(config, "vendor") || !config_has(config, "deviceNumber")) {
+    if (!catalog_json::has_value(config, "deviceType") || !catalog_json::has_value(config, "vendor") ||
+        !catalog_json::has_value(config, "deviceNumber")) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(persisted_devices_mutex_);
-    const std::string vendor = config_get(config, "vendor", "");
-    const std::string device_type = to_lower_copy(config_get(config, "deviceType", ""));
-    const int device_number = config_get(config, "deviceNumber", -1);
+    const std::string vendor = catalog_json::get_string(config, "vendor");
+    const std::string device_type = to_lower_copy(catalog_json::get_string(config, "deviceType"));
+    const int device_number = catalog_json::get_int(config, "deviceNumber", -1);
     for (auto& existing : persisted_devices_) {
         const auto key = persisted_key(existing);
         if (key && key->vendor == vendor && key->device_type == device_type && key->device_number == device_number) {
