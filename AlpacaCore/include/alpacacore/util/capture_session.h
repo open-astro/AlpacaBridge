@@ -421,9 +421,6 @@ inline bool CaptureControl::wait_for(std::chrono::nanoseconds d) {
     std::chrono::nanoseconds wait = d;
     {
         std::unique_lock<std::mutex> lock(session_.mutex_);
-        if (!session_.owns_locked(token_)) {
-            return false;
-        }
         session_.apply_watchdog(lock);
         if (!session_.owns_locked(token_)) {
             return false;
