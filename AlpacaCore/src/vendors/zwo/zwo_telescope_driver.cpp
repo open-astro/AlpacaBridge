@@ -18,6 +18,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/zwo/zwo_mount_identity.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -243,9 +244,6 @@ public:
           park_state_at_(std::chrono::steady_clock::time_point{}),
           poll_stop_(false),
           poll_pause_(false),
-          last_utc_set_(std::chrono::system_clock::time_point{}),
-          last_utc_set_monotonic_(std::chrono::steady_clock::time_point{}),
-          last_utc_valid_(false),
           timezone_offset_minutes_(0),
           timezone_valid_(false),
           manual_axis_slewing_({false, false}),
@@ -380,6 +378,8 @@ public:
                 health_.reset();
                 loss_reason_.clear();
                 mount_identity_.reset();
+                utc_offset_.clear();
+                ++utc_session_;
             }
             poll_stop_.store(true);
             pulse_thread_stop_.store(true);
@@ -457,6 +457,8 @@ public:
             ra_offset_hours_ = 0.0;
             dec_offset_deg_ = 0.0;
             if (!keep_telemetry_caches) {
+                utc_offset_.clear();
+                ++utc_session_;
                 snapshot_.reset();
                 health_.reset();
                 (void)link_lost_at_.consume();
@@ -608,9 +610,7 @@ public:
             TimeInfo info = from_utc_time_point(now, offset_minutes);
             protocol.set_time_info(info);
             std::lock_guard<std::mutex> lock(mutex_);
-            last_utc_set_ = now;
-            last_utc_set_monotonic_ = clock_.now();
-            last_utc_valid_ = true;
+            utc_offset_.set(now, clock_.now());
             timezone_offset_minutes_ = offset_minutes;
             timezone_valid_ = true;
         };
@@ -647,6 +647,7 @@ public:
             stop_poll_thread();
             stop_pulse_thread();
             cancel_and_join_goto_thread();
+            reset_session_state_for_connect();
             if (!protocol.connect(connection_info_)) {
                 // The wrapper's reason (a port another device holds, #1202)
                 // goes to the operator.
@@ -658,7 +659,6 @@ public:
             try {
                 // Verify identity before even offline-capable setters may write to the open link.
                 caches_ready_.store(false);
-                reset_session_state_for_connect();
                 const std::string mount_info = protocol.get_mount_info();
                 const std::string mount_serial = protocol.get_mount_serial_number();
                 {
@@ -738,6 +738,8 @@ public:
                     health_.reset();
                     loss_reason_.clear();
                     mount_identity_.reset();
+                    utc_offset_.clear();
+                    ++utc_session_;
                 }
                 protocol.cancel_pending_io();
                 stop_poll_thread();
@@ -1503,11 +1505,7 @@ public:
         check_writable_state();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (last_utc_valid_) {
-                const auto elapsed = clock_.now() - last_utc_set_monotonic_;
-                return last_utc_set_ +
-                    std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
-            }
+            if (const auto utc = utc_offset_.current(clock_.now())) return *utc;
         }
 
         return std::chrono::system_clock::now();
@@ -1515,6 +1513,11 @@ public:
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         check_writable_state();
+        std::uint64_t session;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            session = utc_session_;
+        }
         // Use UTC timezone on mount time sync to avoid timezone-sign ambiguities.
         const int offset_minutes = 0;
         TimeInfo info = from_utc_time_point(utc, offset_minutes);
@@ -1525,9 +1528,9 @@ public:
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = clock_.now();
-        last_utc_valid_ = true;
+        // A completed write to an old link must not replace a new session's or offline client's anchor.
+        if (session != utc_session_) return;
+        utc_offset_.set(utc, clock_.now());
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
         if (connected_.load()) {
@@ -2437,9 +2440,8 @@ private:
         protocol.set_time_info(info);
 
         std::lock_guard<std::mutex> lock(mutex_);
-        last_utc_set_ = now;
-        last_utc_set_monotonic_ = clock_.now();
-        last_utc_valid_ = true;
+        if (!connected_.load() || goto_cancel_.load()) return false;
+        utc_offset_.set(now, clock_.now());
         timezone_offset_minutes_ = offset_minutes;
         timezone_valid_ = true;
         return true;
@@ -2493,6 +2495,8 @@ private:
         connected_.store(false);
         caches_ready_.store(false);
         mount_identity_.reset();
+        utc_offset_.clear();
+        ++utc_session_;
         link_lost_at_.note(now);
         snapshot_.reset();
         poll_stop_.store(true);
@@ -2708,9 +2712,8 @@ private:
                         const TimeInfo mount_time = protocol_.get_time_info();
                         const auto utc = to_utc_time_point(mount_time);
                         std::lock_guard<std::mutex> lock(mutex_);
-                        last_utc_set_ = utc;
-                        last_utc_set_monotonic_ = clock_.now();
-                        last_utc_valid_ = true;
+                        if (!connected_.load() || poll_stop_.load()) break;
+                        utc_offset_.set(utc, clock_.now());
                         timezone_offset_minutes_ = mount_time.timezone_offset_minutes;
                         timezone_valid_ = true;
                     } catch (const std::exception&) {
@@ -2982,9 +2985,8 @@ private:
     mutable std::atomic<bool> poll_stop_;
     std::atomic<bool> poll_pause_;
 
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_;
+    mutable util::UtcOffset utc_offset_;
+    mutable std::uint64_t utc_session_ = 0;
 
     mutable int timezone_offset_minutes_;
     mutable bool timezone_valid_;

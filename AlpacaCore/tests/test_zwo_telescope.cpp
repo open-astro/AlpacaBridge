@@ -359,6 +359,7 @@ TEST_CASE(
     "ZWO Telescope Driver - pulse guiding racing a redundant Connected=true neither deadlocks nor "
     "survives the reconnect",
     "[zwo][telescope][unit][pulseguide]") {
+    alpacacore::test::FakeTaskClock clock;
     // :Ggr must answer a non-zero guide rate or pulse_guide() returns before
     // it touches pulse_mutex_ and the inversion is never exercised (the same
     // gap hid it from the [stress] case). :GAT "1#" passes the tracking gate,
@@ -388,7 +389,7 @@ TEST_CASE(
     conn.host = "127.0.0.1";
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 250;
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     // The race: PHD2-style pulses from two threads against Connected=true
@@ -447,24 +448,15 @@ TEST_CASE(
         worker.join();
     }
 
-    // Rule 3: a pulse queued before a redundant Connected=true does not
-    // survive it. Queue one more, refresh, and IsPulseGuiding must drop
-    // within one pulse duration plus the 500 ms hold (a task the pulse
-    // thread had already dequeued still runs its remaining 500 ms; a
-    // QUEUED one is dropped, so nothing follows it).
+    // The real-time storm above exercises scheduling, not a driver deadline.
+    // Rule 3: the redundant refresh drops queued pulses; expire any dequeued pulse and its hold virtually.
     driver->pulse_guide(0, 500);
     CHECK(driver->get_is_pulse_guiding());
     driver->set_connected(true);
-    const auto clear_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    bool cleared = false;
-    while (std::chrono::steady_clock::now() < clear_deadline) {
-        if (!driver->get_is_pulse_guiding()) {
-            cleared = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    CHECK(cleared);
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    clock.advance(std::chrono::milliseconds(1500));
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    CHECK_FALSE(driver->get_is_pulse_guiding());
     CHECK(driver->get_connected());
 
     CHECK(alpacacore::test::settle_connected(*driver, false));
@@ -560,6 +552,7 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
         std::atomic<bool> tracking{true};
     };
     for (const int stopped_axis : {0, 1}) {
+        alpacacore::test::FakeTaskClock clock;
         auto counts = std::make_shared<Counts>();
         alpacacore::test::FakeMountServer server([counts](const std::string& chunk) -> std::string {
             if (chunk == ":GVP#") return "AM5#";
@@ -604,7 +597,7 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
         conn.host = "127.0.0.1";
         conn.tcp_port = server.port();
         conn.response_timeout_ms = 250;
-        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
         driver->move_axis(0, 1.0);
@@ -612,12 +605,13 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
         REQUIRE(driver->get_slewing());
         // Outlast the driver's 2 s fast-tracking cache so the restore asks the
         // mount (tracking now off) instead of returning early.
-        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        clock.advance(std::chrono::milliseconds(2500));
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
 
         const int tracking_on_before_stop = counts->tracking_on.load();
         driver->move_axis(stopped_axis, 0.0);
-        // Let the fake see the blind command before counting.
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        REQUIRE_NOTHROW(driver->command_string(":GVP", false));  // Drain the preceding blind commands.
         CHECK(counts->stop_all.load() == 0);
         CHECK((stopped_axis == 0 ? counts->stop_ew : counts->stop_ns).load() > 0);
         CHECK((stopped_axis == 0 ? counts->stop_ns : counts->stop_ew).load() == 0);
@@ -627,7 +621,7 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
         CHECK(counts->tracking_on.load() == tracking_on_before_stop);
 
         driver->move_axis(1 - stopped_axis, 0.0);
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        REQUIRE_NOTHROW(driver->command_string(":GVP", false));
         CHECK(counts->tracking_on.load() > tracking_on_before_stop);
         // The other axis is idle now, so the generic stop is sent.
         CHECK(counts->stop_all.load() > 0);
