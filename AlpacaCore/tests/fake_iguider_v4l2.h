@@ -46,6 +46,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <set>
 #include <string>
 #include <thread>
@@ -88,6 +89,8 @@ public:
     /// Atomic: this many reads return no frame at once, as the wrapper does for
     /// an incomplete or error-flagged buffer (it drops it without waiting).
     std::atomic<int> drop_frames{0};
+    /// Explicit blocking hook, set before connecting: the selected frame is complete but not yet returned.
+    std::function<void(std::int32_t)> before_frame_return;
 
     // ---- Counters (atomic, safe to read while the driver runs) -------------
 
@@ -96,6 +99,7 @@ public:
     std::atomic<int> stream_starts{0};
     std::atomic<int> stream_stops{0};
     std::atomic<int> frames{0};
+    std::atomic<int> stalled_reads{0};  // rendezvous: previous on_frame() has finished
     std::array<std::atomic<std::int32_t>, 3> last_control{};
     std::atomic<int> control_writes{0};
 
@@ -181,7 +185,10 @@ public:
             return false;
         }
         std::this_thread::sleep_for(std::min(timeout, frame_interval));
-        if (stalled) return false;
+        if (stalled) {
+            ++stalled_reads;
+            return false;
+        }
         if (luma.size() != static_cast<std::size_t>(kWidth) * kHeight) {
             luma.resize(static_cast<std::size_t>(kWidth) * kHeight);
             for (int y = 0; y < kHeight; ++y) {
@@ -194,6 +201,7 @@ public:
             effective_ticks_ = pending_ticks_;
         }
         luma[0] = exposure_marker(effective_ticks_);
+        if (before_frame_return) before_frame_return(effective_ticks_);
         ++frames;
         return true;
     }

@@ -680,12 +680,14 @@ public:
     double get_last_exposure_duration() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         return published_exposure_.start_time();
     }
 
@@ -763,11 +765,10 @@ public:
         if (capture_stop_failed_) return 0.0;
         ensure_capture_stop_confirmed_locked();
         if (!exposure_active_.load()) return image_ready_ ? 100.0 : 0.0;
-        if (last_exposure_duration_ <= 0.0) {
+        if (last_exposure_duration_ <= 0.0 || !exposure_integration_start_) {
             return 0.0;
         }
-        auto now = std::chrono::system_clock::now();
-        auto elapsed = std::chrono::duration<double>(now - last_exposure_start_).count();
+        auto elapsed = std::chrono::duration<double>(clock_.now() - *exposure_integration_start_).count();
         double percent = (elapsed / last_exposure_duration_) * 100.0;
         if (percent < 0.0) {
             return 0.0;
@@ -1023,9 +1024,9 @@ public:
             sdk_.set_control_value(active_camera_id, SVBControlType::Exposure, exposure_us, false);
 
             frame_config = frame_config_locked();
-            last_exposure_duration_ = duration;
-            // Provisional: the worker re-stamps it when capture actually starts, after the deferred writes.
-            last_exposure_start_ = std::chrono::system_clock::now();
+            last_exposure_duration_ = static_cast<double>(exposure_us) / 1'000'000.0;
+            last_exposure_start_ = {};
+            exposure_integration_start_.reset();
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
@@ -1152,6 +1153,7 @@ public:
                         // ICameraV4: the time the camera started to collect photons, not the StartExposure call;
                         // the deferred FrameSpeedMode write above can take about a second (issue #1477).
                         last_exposure_start_ = std::chrono::system_clock::now();
+                        exposure_integration_start_ = clock_.now();
                         sdk.start_video_capture(active_camera_id);
                     }
 
@@ -1160,6 +1162,8 @@ public:
                     // SVBGetVideoData reports no image before its finite wait as
                     // TIMEOUT; retry that result while the sensor integrates and
                     // surface every other SDK error without spinning.
+                    // TODO: verify on hardware that start/stop flushes queued video frames; the SDK exposes
+                    // neither a frame timestamp nor a sequence here, and documents no queue-reset guarantee.
                     const long exposure_wait_ms = exposure_us / 1000;
                     const int total_wait_ms = exposure_wait_ms > std::numeric_limits<int>::max() - 10000L
                                                   ? std::numeric_limits<int>::max()
@@ -1337,8 +1341,8 @@ private:
     double last_exposure_duration_;
     std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
-    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
-    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    std::optional<std::chrono::steady_clock::time_point> exposure_integration_start_;
+    // The fields above describe the candidate; only an accepted image replaces the published pair.
     util::LastExposure published_exposure_;
 
     bool roi_dirty_{true};
@@ -1388,6 +1392,7 @@ private:
         exposure_failure_.clear();
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
+        exposure_integration_start_.reset();
         last_exposure_valid_ = false;
         published_exposure_.clear();
         exposure_active_.store(false);

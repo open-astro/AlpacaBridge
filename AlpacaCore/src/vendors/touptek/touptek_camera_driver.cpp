@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/touptek/touptek_camera_driver.h>
@@ -95,9 +96,6 @@ public:
           image_ready_(false),
           image_cached_(false),
           last_image_(),
-          last_exposure_duration_(0.0),
-          last_exposure_start_(),
-          last_exposure_valid_(false),
           exposure_active_(false),
           pulse_guiding_(false) {
         preload_camera_info();
@@ -192,7 +190,7 @@ public:
             // exposure (CameraState flips to Idle mid-frame, and a concurrent
             // set_gain/set_readout_mode could then pass ensure_not_exposing and
             // write registers into the live frame) or discard a just-completed image
-            // (ImageReady/last_exposure_valid_ cleared, frame unretrievable). Matches
+            // (ImageReady/LastExposure cleared, frame unretrievable). Matches
             // the QHY driver, which already returns here without resetting.
             return;
         }
@@ -594,7 +592,7 @@ public:
         if (!exposure_failure_.empty()) {
             throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
         }
-        if (!last_exposure_valid_ || !image_ready_ || !image_cached_) {
+        if (!image_ready_ || !image_cached_) {
             throw AlpacaException::asked_too_early("Image not ready");
         }
         return last_image_;
@@ -607,7 +605,7 @@ public:
         if (!exposure_failure_.empty()) {
             throw AlpacaException(exposure_failure_, AlpacaError::DriverException);
         }
-        return last_exposure_valid_ && image_ready_ && image_cached_;
+        return image_ready_ && image_cached_;
     }
 
     bool get_is_pulse_guiding() const override {
@@ -624,18 +622,16 @@ public:
     }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        ensure_connected();
+        return last_exposure_.duration();
     }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        ensure_connected();
+        return last_exposure_.start_time();
     }
 
     int get_max_adu() const override {
@@ -723,10 +719,9 @@ public:
             return image_ready_ ? 100.0 : 0.0;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (last_exposure_duration_ <= 0.0) return 0.0;
-        auto now = std::chrono::system_clock::now();
-        double elapsed = std::chrono::duration<double>(now - last_exposure_start_).count();
-        double pct = (elapsed / last_exposure_duration_) * 100.0;
+        if (pending_exposure_duration_ <= 0.0 || !exposure_triggered_) return 0.0;
+        double elapsed = std::chrono::duration<double>(clock_.now() - exposure_start_steady_).count();
+        double pct = (elapsed / pending_exposure_duration_) * 100.0;
         if (pct < 0.0) return 0.0;
         if (pct > 100.0) return 100.0;
         return pct;
@@ -1059,12 +1054,12 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        ensure_connected();
         (void)light;
 
-        if (duration < 0.0) {
+        if (!std::isfinite(duration) || duration < 0.0) {
             throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
         }
+        ensure_connected();
 
         // Held for the whole function, through the thread spawn at the end: a
         // disconnect holds this same mutex from its exposure-thread join through
@@ -1086,16 +1081,18 @@ public:
         HToupcam handle = handle_copy();
         auto range = with_handle([&](HToupcam h) { return sdk.get_exposure_range(h); });
 
-        long exposure_us_long = static_cast<long>(std::lround(duration * 1'000'000.0));
-        if (exposure_us_long < static_cast<long>(range.min_us)) exposure_us_long = range.min_us;
-        if (exposure_us_long > static_cast<long>(range.max_us)) {
+        const double rounded_us = std::max(std::round(duration * 1'000'000.0), static_cast<double>(range.min_us));
+        if (rounded_us > range.max_us) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
-        unsigned exposure_us = static_cast<unsigned>(exposure_us_long);
+        const unsigned exposure_us = static_cast<unsigned>(rounded_us);
 
-        // Stop any still-running prior exposure BEFORE snapshotting state: it may
-        // force format_dirty_ (see stop_exposure_thread) to restart the stream it
-        // had to stop, and we want that reflected in this exposure's snapshot.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            validate_exposure_roi_locked();
+        }
+        // Validate before cancelling anything; snapshot after the join because
+        // stopping the previous worker dirties the stream configuration.
         stop_exposure_thread();
 
         int active_bin = 0;
@@ -1143,19 +1140,7 @@ public:
             // column). Deriving max from the even size makes that unreachable.
             const int even_max_w = camera_info_.max_width & ~1;
             const int even_max_h = camera_info_.max_height & ~1;
-            int max_w = even_max_w / active_bin;
-            int max_h = even_max_h / active_bin;
-            if (active_num_x <= 0 || active_num_y <= 0) {
-                throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
-            }
-            if (active_num_x > max_w || active_num_y > max_h) {
-                throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
-            }
-            if (active_start_x < 0 || active_start_y < 0 ||
-                active_start_x + active_num_x > max_w ||
-                active_start_y + active_num_y > max_h) {
-                throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-            }
+            validate_exposure_roi_locked();
 
             // Toupcam_put_Roi requires an even sensor-coordinate offset, width,
             // and height, and the ROI must fit the sensor. The binned span is
@@ -1225,22 +1210,14 @@ public:
             roi_w = static_cast<unsigned>(span_w);
             roi_h = static_cast<unsigned>(span_h);
 
-            // Clear the dirty flags here — AFTER all validation that can throw, but
-            // still under the same lock as the snapshot above. Clearing before the
-            // validation would lose the flags if an invalid ROI threw (the thread
-            // that restores them on failure is never spawned). Because snapshot and
-            // clear share this lock, a concurrent set_num_x/set_roi cannot interleave
-            // between them; one that lands after the lock releases re-dirties the
-            // flag for the NEXT exposure. The catch below re-marks on SDK failure.
             format_dirty_ = false;
             roi_dirty_ = false;
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            last_exposure_duration_ = duration;
-            last_exposure_start_ = std::chrono::system_clock::now();
-            last_exposure_valid_ = true;
+            pending_exposure_duration_ = exposure_us / 1'000'000.0;
+            exposure_triggered_ = false;
             exposure_failure_.clear();
             image_ready_ = false;
             image_cached_ = false;
@@ -1268,6 +1245,7 @@ public:
             bool format_applied = false;
             bool roi_applied = false;
             bool frame_ready = false;
+            std::chrono::system_clock::time_point candidate_start;
             try {
                 // Reconfiguring bitdepth / pixel format / binning requires the
                 // stream to be stopped (SDK returns E_WRONG_THREAD otherwise).
@@ -1306,8 +1284,10 @@ public:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     if (abort_generation_.load() != abort_generation) throw ExposureAborted{};
-                    last_exposure_start_ = std::chrono::system_clock::now();
+                    candidate_start = std::chrono::system_clock::now();
+                    exposure_start_steady_ = clock_.now();
                     sdk_local.trigger(handle, 1);
+                    exposure_triggered_ = true;
                 }
 
                 unsigned timeout_ms = (exposure_us / 1000) + 10000;
@@ -1424,11 +1404,16 @@ public:
             }
             if (frame_ready) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (abort_generation_.load() == abort_generation) {
+                if (abort_generation_.load() == abort_generation && exposure_deadline_valid_ &&
+                    clock_.now() < exposure_deadline_) {
+                    last_exposure_.commit(exposure_us / 1'000'000.0, candidate_start);
                     image_ready_ = true;
                 } else {
                     image_cached_ = false;
                     last_image_ = {};
+                    if (abort_generation_.load() == abort_generation) {
+                        exposure_failure_ = "Exposure deadline exceeded before frame publication";
+                    }
                 }
             }
         });
@@ -1524,9 +1509,10 @@ private:
     mutable bool image_ready_;
     mutable bool image_cached_;
     mutable ImageArray last_image_;
-    double last_exposure_duration_;
-    std::chrono::system_clock::time_point last_exposure_start_;
-    bool last_exposure_valid_;
+    util::LastExposure last_exposure_;
+    double pending_exposure_duration_{0.0};
+    util::TaskClock::clock::time_point exposure_start_steady_{};
+    bool exposure_triggered_{false};
     std::string exposure_failure_;
 
     mutable std::atomic<bool> exposure_active_;
@@ -1619,6 +1605,20 @@ private:
         }
     }
 
+    void validate_exposure_roi_locked() const {
+        const int max_w = (camera_info_.max_width & ~1) / bin_;
+        const int max_h = (camera_info_.max_height & ~1) / bin_;
+        if (num_x_ <= 0 || num_y_ <= 0) {
+            throw AlpacaException("ROI not valid", AlpacaError::InvalidValue);
+        }
+        if (num_x_ > max_w || num_y_ > max_h) {
+            throw AlpacaException("ROI size exceeds sensor dimensions", AlpacaError::InvalidValue);
+        }
+        if (start_x_ < 0 || start_y_ < 0 || start_x_ > max_w - num_x_ || start_y_ > max_h - num_y_) {
+            throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
+        }
+    }
+
     bool supports_cooler_locked_copy() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return camera_info_valid_ && camera_info_.supports_cooler;
@@ -1703,9 +1703,9 @@ private:
         tec_cache_valid_ = false;
         tec_voltage_max_valid_ = false;
         image_cached_ = false;
-        last_exposure_duration_ = 0.0;
-        last_exposure_start_ = std::chrono::system_clock::time_point{};
-        last_exposure_valid_ = false;
+        last_exposure_.clear();
+        pending_exposure_duration_ = 0.0;
+        exposure_triggered_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
     }

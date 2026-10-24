@@ -234,6 +234,7 @@ no prebuilt binary under `external/`, so Step 4's SDK cleanup checklist does not
   `imgdata.makernotes.common.SensorTemperature` after each decoded exposure (populated mainly for
   Canon RAW files per LibRaw's own docs/INDI precedent); throws `PropertyNotImplemented` when
   absent. Do not expect Nikon NEF files to populate this.
+- **Exposure metadata timing** (issue #1477): native duration comes from the selected parsed shutter choice. Native UTC is stamped after setup; MLU uses the second press, not mirror settling. Driver-timed bulb duration uses monotonic open/close command boundaries, excluding file wait, LENR and decode. Publish only after accepted decode; connect priming never publishes metadata. Host command boundaries do not establish physical shutter latency, and RAW/EXIF timestamps have no verified UTC/accuracy contract here.
 - **No pulse guiding** — a plain USB libgphoto2 camera has no ST-4/autoguider port; `PulseGuide`
   throws `NotImplemented` once connected (matches `CanPulseGuide=false`).
 - **`HasShutter=true`** — the one camera vendor in this project where that's actually true (every
