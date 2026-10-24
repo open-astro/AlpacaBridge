@@ -12,7 +12,7 @@ Several telescope drivers keep the same anchor pair for UTCDate readback: the UT
 2. **A clock-free value type.** `util::UtcOffset` (`AlpacaCore/include/alpacacore/util/utc_offset.h`) has `set(utc, now)`, `current(now)`, `valid()` and `clear()`. It holds no clock; every method that needs the time takes `now`, the shape of `util::StreamLinkHealth`. It is copyable, has no virtuals, is not a base class, and is guarded by the driver's `mutex_`. Overflow of the duration cast in `current()` is not guarded.
 3. **Lifetime.** The stored value lives until the next connect or disconnect; a driver calls `clear()` on both. Each driver that adopts the type states in its PR what changed for it. Celestron changes from clearing on connect only to connect and disconnect.
 4. **Seeding stays in the driver.** Reading the mount clock on the first `get_utc_date`, the connect-time host sync and `util::ClientUtcWarning::warn_once` call `set()` or stay as they are; the type does not know where a value came from.
-5. **Adoption.** Celestron is the pilot. SynScan and iOptron are already on the task clock ([decision 0005](0005-task-clock.md)), so when they adopt they pass `clock_.now()`. OnStep and the ZWO mount adopt in their task-clock tickets and pass `std::chrono::steady_clock::now()` until their driver is on the clock. Sky-Watcher is out.
+5. **Adoption.** Celestron is the pilot. SynScan and iOptron are already on the task clock ([decision 0005](0005-task-clock.md)), so when they adopt they pass `clock_.now()`. OnStep and the ZWO mount adopt in their task-clock tickets and pass `std::chrono::steady_clock::now()` until their driver is on the clock. Sky-Watcher and Celestron CGX are out: both keep the [decision 0001](0001-skywatcher-pointing-clock.md) host-clock offset model (step detection through `util::HostClock`), which the Alternatives section rejects for `UtcOffset`.
 
 This refines one sentence of 0005. "Never for LST or UTCDate" means the value: LST and the UTC a client wrote stay off the task clock. The elapsed time since a UTCDate write is a deadline-style duration and reads the task clock through `UtcOffset`. 0001 is not changed.
 
@@ -50,8 +50,7 @@ Symbol: `UtcOffset`
 | Driver | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1385 | pilot |
-| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | planned | #1409 | |
-| Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | planned | #1409 | |
+| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1409 | TaskClock elapsed time; clears on connect and now on disconnect too |
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | with its clock ticket |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | with its clock ticket; clears on disconnect too |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1522 | TaskClock elapsed time; clears on fresh connect, disconnect and failed initialization |

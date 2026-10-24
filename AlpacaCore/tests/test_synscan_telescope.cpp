@@ -34,6 +34,7 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 using alpacacore::DeviceType;
@@ -392,6 +393,41 @@ TEST_CASE("SynScan Telescope Driver - a far-off client UTCDate is logged once pe
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+TEST_CASE(
+    "SynScan Telescope Driver - UTCDate readback advances with the task clock and clears on connect and disconnect",
+    "[synscan][telescope][unit]") {
+    // Decision 0014: the written UTC value stays on system_clock, the elapsed
+    // time since the write is measured on the driver's task clock, so a fake
+    // clock moves the readback without a sleep.
+    alpacacore::test::FakeTaskClock clock;
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::V4, std::nullopt, std::nullopt, std::nullopt,
+        std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const std::chrono::system_clock::time_point written{std::chrono::seconds(4102444800)};
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() == written);
+    clock.advance(std::chrono::seconds(90));
+    CHECK(driver->get_utc_date() == written + std::chrono::seconds(90));
+
+    // Disconnect and reconnect forget the written value: the readback is the
+    // mount's clock, not the stale client instant.
+    driver->set_connected(false);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    const auto after = driver->get_utc_date();
+    CHECK(after != written + std::chrono::seconds(90));
+    CHECK(after < written);  // the host/mount clock, not the year-2100 client write
     driver->set_connected(false);
 }
 

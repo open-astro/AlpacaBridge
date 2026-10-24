@@ -27,6 +27,12 @@
 //
 // Motion completes on the poll after the move, which is enough for the
 // lifecycle tests this fake exists for (issue #528).
+//
+// The same fake answers the iEFW filter wheel (model 99 or 98) with its own commands, so the wheel
+// driver can run over it: :FW1# -> "<12 chars>#" firmware, :WP# -> "n#" slot or "-1#" while moving,
+// :WM<2d># -> "1" move, :WF<2d># -> "+00000#" stored offset. A move reads -1 for wheel_moving_polls()
+// :WP# polls, then the target. fail_wheel_position(true) makes :WP# answer "ERR#" (a reply the
+// wrapper cannot parse, so the read throws at once rather than after the serial timeout).
 
 #include <poll.h>
 #include <unistd.h>
@@ -84,6 +90,18 @@ public:
     /// silent on) is held for @p delay. A connect waiting on that reply stays open that long; used by the contract
     /// sweep to make Connecting observable.
     void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+    /// The slot :WP# reports once the wheel has settled.
+    int wheel_slot() const { return wheel_slot_.load(); }
+    void set_wheel_slot(int slot) { wheel_slot_.store(slot); }
+    /// :WP# polls that answer -1 after a :WM move to a different slot (default 0: the move settles at once).
+    void set_wheel_moving_polls(int polls) { wheel_moving_polls_.store(polls); }
+    void fail_wheel_position(bool fail) { fail_wp_.store(fail); }
+    /// A USB unplug: every driver write fails with EIO from here on, so a move throws. Not reversible.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) reader_.join();
+        pty_.sever();
+    }
     /// Model code answered in the handshake: 2 = iEAF (default), 3 = iAFS2/3.
     void set_model(int m) { model_.store(m); }
 
@@ -127,6 +145,28 @@ private:
         } else if (cmd.rfind(":FM", 0) == 0) {
             position_.store(std::atoi(cmd.c_str() + 3));
             std::snprintf(reply, sizeof(reply), "1");
+        } else if (cmd == ":FW1#") {
+            std::snprintf(reply, sizeof(reply), "FAKEFW000001#");
+        } else if (cmd == ":WP#") {
+            if (fail_wp_.load()) {
+                std::snprintf(reply, sizeof(reply), "ERR#");
+            } else if (moving_left_.load() > 0) {
+                if (moving_left_.fetch_sub(1) == 1) wheel_slot_.store(wheel_target_.load());
+                std::snprintf(reply, sizeof(reply), "-1#");
+            } else {
+                std::snprintf(reply, sizeof(reply), "%d#", wheel_slot_.load());
+            }
+        } else if (cmd.rfind(":WM", 0) == 0) {
+            const int target = std::atoi(cmd.c_str() + 3);
+            wheel_target_.store(target);
+            if (wheel_moving_polls_.load() > 0 && target != wheel_slot_.load()) {
+                moving_left_.store(wheel_moving_polls_.load());
+            } else {
+                wheel_slot_.store(target);
+            }
+            std::snprintf(reply, sizeof(reply), "1");
+        } else if (cmd.rfind(":WF", 0) == 0) {
+            std::snprintf(reply, sizeof(reply), "+00000#");
         } else if (cmd == ":FQ#") {
             std::snprintf(reply, sizeof(reply), "1");
         } else if (cmd == ":FZ#") {
@@ -148,6 +188,11 @@ private:
 
     std::atomic<int> position_{1000};
     std::atomic<int> model_{2};
+    std::atomic<int> wheel_slot_{0};
+    std::atomic<int> wheel_target_{0};
+    std::atomic<int> wheel_moving_polls_{0};
+    std::atomic<int> moving_left_{0};
+    std::atomic<bool> fail_wp_{false};
 };
 
 }  // namespace alpacacore::test
