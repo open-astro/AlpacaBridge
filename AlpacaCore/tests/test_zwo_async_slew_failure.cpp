@@ -22,7 +22,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
 
-#include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -34,111 +34,14 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"  // settle_connected
-#include "fake_mount_server.h"
 #include "fake_task_clock.h"
+#include "fake_zwo_mount.h"
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
-
-struct FakeZwoState {
-    std::atomic<bool> reject_goto{false};
-    std::atomic<int> goto_count{0};
-    // Delay the ":Sr" ack (still inside the 250 ms reply timeout) so a test
-    // can land AbortSlew while the GOTO setup thread is mid-setup.
-    std::atomic<int> sr_delay_ms{0};
-    // Answer ":Sr" with "0" (rejected) instead of the "1" ack.
-    std::atomic<bool> reject_sr{false};
-    std::atomic<int> sr_count{0};  // ":Sr" received (counted before the delay)
-    // Delay the ":SMTI" ack the same way, to land a cancel inside the
-    // site/time sync that precedes the target write.
-    std::atomic<int> smti_delay_ms{0};
-    std::atomic<int> smti_count{0};  // ":SMTI" received (counted before the delay)
-    std::atomic<int> sd_count{0};    // ":Sd" received
-    // Every command only the GOTO setup thread sends (site read, site/time
-    // write, target write), counted on receipt: open-astro#720 requires that
-    // none arrives after the call that fences the GOTO has returned.
-    std::atomic<int> setup_count{0};
-    // open-astro#720: what the initiators that must fence a pending GOTO put
-    // on the wire. The mount's own traffic (poll thread) sends none of these.
-    std::atomic<int> park_count{0};  // ":hP#"
-    std::atomic<int> home_count{0};  // ":hC#"
-    std::atomic<int> stop_count{0};  // ":Q#" (not the per-direction ":Qe#" etc.)
-    std::atomic<int> jog_count{0};   // ":Me#" / ":Mw#" / ":Mn#" / ":Ms#"
-    // Answer ":GU" as a stopped mount and ":GR"/":GD" with a fixed position
-    // (12h, +45 deg), so Slewing and RA/Dec reads reach the mount's answer.
-    std::atomic<bool> serve_position{true};
-    // What ":GAT" answers: tracking on (the default) or off.
-    std::atomic<bool> tracking_on{true};
-    // A GOTO in flight that reports no tracking: ":GU" answers "n#" (not
-    // tracking, no 'N': slewing) and ":GAT" "0#".
-    std::atomic<bool> goto_not_tracking{false};
-};
-
-// A chunk can carry more than one command, so count occurrences.
-int count_command(const std::string& chunk, const std::string& command) {
-    int count = 0;
-    for (auto pos = chunk.find(command); pos != std::string::npos; pos = chunk.find(command, pos + command.size())) {
-        ++count;
-    }
-    return count;
-}
-
-// LX200-style AM5 dialect: ":Sr"/":Sd"/":SMTI" are acked with a bare "1",
-// ":MS" answers "0" (accepted) or a non-zero code (rejected), ":GAT" reports
-// tracking, ":GVP" identifies AM5, and "0#" terminates the remaining replies.
-alpacacore::test::FakeMountServer::Responder zwo_responder(const std::shared_ptr<FakeZwoState>& st) {
-    return [st](const std::string& chunk) -> std::string {
-        if (chunk == ":GVP#") return "AM5#";
-        if (chunk == ":GMA#") return "012345ABCDEF#";
-        st->park_count.fetch_add(count_command(chunk, ":hP#"));
-        st->home_count.fetch_add(count_command(chunk, ":hC#"));
-        st->stop_count.fetch_add(count_command(chunk, ":Q#"));
-        for (const char* jog : {":Me#", ":Mw#", ":Mn#", ":Ms#"}) {
-            st->jog_count.fetch_add(count_command(chunk, jog));
-        }
-        if (chunk.find(":MS") != std::string::npos) {
-            st->goto_count.fetch_add(1);
-            return st->reject_goto.load() ? "2" : "0";
-        }
-        for (const char* setup : {":GMGE", ":SMGE", ":SMTI", ":Sr", ":Sd"}) {
-            st->setup_count.fetch_add(count_command(chunk, setup));
-        }
-        st->sr_count.fetch_add(count_command(chunk, ":Sr"));
-        st->sd_count.fetch_add(count_command(chunk, ":Sd"));
-        st->smti_count.fetch_add(count_command(chunk, ":SMTI"));
-        if (chunk.find(":SMTI") != std::string::npos && st->smti_delay_ms.load() > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(st->smti_delay_ms.load()));
-        }
-        if (chunk.find(":Sr") != std::string::npos && st->sr_delay_ms.load() > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(st->sr_delay_ms.load()));
-        }
-        if (chunk.find(":Sr") != std::string::npos && st->reject_sr.load()) {
-            return "0";
-        }
-        if (chunk.find(":Sr") != std::string::npos || chunk.find(":Sd") != std::string::npos ||
-            chunk.find(":SMTI") != std::string::npos) {
-            return "1";
-        }
-        if (chunk.find(":GAT") != std::string::npos) {
-            return st->tracking_on.load() && !st->goto_not_tracking.load() ? "1#" : "0#";
-        }
-        if (st->goto_not_tracking.load() && chunk.find(":GU") != std::string::npos) {
-            return "n#";
-        }
-        // ":GU" carries the tracking flag too: 'n' is "not tracking", 'N' "not slewing". The status poll
-        // refreshes the cached Tracking state from it, so the fake must agree with ":GAT".
-        if (!st->tracking_on.load() && chunk.find(":GU") != std::string::npos) {
-            return "nN#";
-        }
-        if (st->serve_position.load()) {
-            if (chunk.find(":GU") != std::string::npos) return "N#";
-            if (chunk.find(":GR") != std::string::npos) return "12:00:00#";
-            if (chunk.find(":GD") != std::string::npos) return "+45*00:00#";
-        }
-        return "0#";
-    };
-}
+using alpacacore::test::FakeTaskClock;
+using alpacacore::test::FakeZwoMount;
 
 alpacacore::vendor::zwo::ConnectionInfo endpoint(int port) {
     alpacacore::vendor::zwo::ConnectionInfo conn;
@@ -149,13 +52,65 @@ alpacacore::vendor::zwo::ConnectionInfo endpoint(int port) {
     return conn;
 }
 
+// Real-time bound on a wire event (a command reaching the mount, a driver thread storing its error), never a driver
+// timer: those advance the FakeTaskClock.
 bool wait_until(const std::function<bool()>& pred, int timeout_ms) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     while (Clock::now() < deadline) {
         if (pred()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::yield();
     }
     return pred();
+}
+
+// The AM5 under test, on the clock the driver reads: GOTO, park and the status flags are the mount's, so a test
+// advances the clock instead of sleeping.
+struct Rig {
+    FakeTaskClock clock;
+    FakeZwoMount mount{clock, "AM5"};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    Rig() { driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(mount.port()), clock); }
+    void connect(std::chrono::milliseconds budget = std::chrono::seconds(10)) {
+        REQUIRE(mount.ok());
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, budget));
+    }
+    // One poll step: wait for the poll loop to park on the clock, advance, let the woken waiters finish.
+    void tick(std::chrono::nanoseconds duration = std::chrono::milliseconds(250)) {
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        clock.advance(duration);
+        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    }
+    // A GOTO's setup pauses the poll loop until the mount has answered ":MS" or the GOTO is cancelled; the paused
+    // loop re-checks every 50 ms of clock time. Step it until it has read status again.
+    void await_poll_resumed() {
+        const int base = mount.count(":GU");
+        for (int i = 0; i < 2000 && !mount.wait_for_count(":GU", base + 1, std::chrono::milliseconds(1)); ++i) {
+            tick(std::chrono::milliseconds(50));
+        }
+        REQUIRE(mount.count(":GU") > base);
+    }
+};
+
+// A command received exactly as written ("" prefix matching would also count ":Qe" for ":Q").
+int count_exact(const FakeZwoMount& mount, const std::string& command) {
+    const auto all = mount.commands();
+    return static_cast<int>(std::count(all.begin(), all.end(), command));
+}
+
+// Every command only the GOTO setup thread sends (site read, site/time write, target write): open-astro#720
+// requires that none arrives after the call that fences the GOTO has returned.
+int setup_count(const FakeZwoMount& mount) {
+    int total = 0;
+    for (const char* setup : {":GMGE", ":SMGE", ":SMTI", ":Sr", ":Sd"}) total += mount.count(setup);
+    return total;
+}
+
+// The jog commands ":Me" / ":Mw" / ":Mn" / ":Ms".
+int jog_count(const FakeZwoMount& mount) {
+    int total = 0;
+    for (const char* jog : {":Me", ":Mw", ":Mn", ":Ms"}) total += mount.count(jog);
+    return total;
 }
 
 // Threw only for the driver-specific DriverException (0x500) the #575 contract
@@ -181,31 +136,28 @@ std::chrono::milliseconds timed(const std::function<void()>& call) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - start);
 }
 
-// Longer than the whole GOTO setup (site sync + delayed ":Sr" + ":Sd" +
-// ":MS"), so a ":MS" that was going to follow the initiator has gone out.
-bool goto_sent_within_setup_window(const FakeZwoState& st) {
-    return wait_until([&] { return st.goto_count.load() > 0; }, 2000);
+// Whether a ":MS" followed the initiator: the setup is a straight run of wire exchanges, so a GOTO that was going to
+// go out does within this real-time bound.
+bool goto_sent_within_setup_window(const FakeZwoMount& mount) {
+    return wait_until([&] { return mount.count(":MS") > 0; }, 500);
 }
 
-// open-astro#720: the setup commands received once the fencing call returned.
-// Waits out the whole setup window, so a setup thread the call did not join
-// has had time to send whatever it was going to send.
-int setup_sent_after_return(const FakeZwoState& st, int at_return) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
-    return st.setup_count.load() - at_return;
+// open-astro#720: the setup commands received once the fencing call returned, after the same bound, so a setup
+// thread the call did not join has had time to send whatever it was going to send.
+int setup_sent_after_return(const FakeZwoMount& mount, int at_return) {
+    static_cast<void>(wait_until([&] { return setup_count(mount) > at_return; }, 500));
+    return setup_count(mount) - at_return;
 }
 
 }  // namespace
 
 TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking is false",
           "[zwo][telescope][async][tracking-guard]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeZwoState>();
-    st->tracking_on.store(false);
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    mount.set_tracking(false);
+    rig.connect();
     REQUIRE_FALSE(driver->get_tracking());
 
     const auto require_code = [](const std::function<void()>& call, int code) {
@@ -222,7 +174,7 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
 
     driver->set_target_right_ascension(5.5);  // the target forms need one; the setters write it to the mount
     driver->set_target_declination(20.0);
-    const int targets_before = st->sr_count.load() + st->sd_count.load();
+    const int targets_before = mount.count(":Sr") + mount.count(":Sd");
     require_code([&] { driver->slew_to_coordinates(5.5, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
     require_code([&] { driver->slew_to_coordinates_async(5.5, 20.0); }, alpacacore::AlpacaError::InvalidOperation);
     require_code([&] { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
@@ -230,18 +182,15 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
 
     // Neither a target write nor a GOTO reached the mount, and the driver is not slewing.
     CHECK_FALSE(wait_until(
-        [&] { return st->goto_count.load() != 0 || st->sr_count.load() + st->sd_count.load() != targets_before; },
-        500));
+        [&] { return mount.count(":MS") != 0 || mount.count(":Sr") + mount.count(":Sd") != targets_before; }, 500));
     CHECK(read_slewing(*driver) == SlewingRead::False);
 
     // With the mount tracking the same call goes through.
-    st->tracking_on.store(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    mount.set_tracking(true);
+    rig.tick();
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    CHECK(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    CHECK(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));
     driver->set_connected(false);
 }
 
@@ -249,26 +198,23 @@ TEST_CASE("ZWO telescope - all four equatorial slews are refused while Tracking 
 // it, past the 5 s force window too. A commanded Tracking=false is still off.
 TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused for Tracking",
           "[zwo][telescope][async][tracking-guard]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
     REQUIRE(driver->get_tracking());
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));  // Finish the setup exchange before advancing.
-    st->goto_not_tracking.store(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(5500));  // past the 5 s Slewing force window
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    mount.hold_running(true);                                // a GOTO that reports no tracking and never settles
+    mount.set_tracking(false);
+    rig.tick(std::chrono::milliseconds(5500));  // past the 5 s Slewing force window
     REQUIRE_FALSE(driver->get_tracking());
     CHECK(read_slewing(*driver) == SlewingRead::True);
 
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
-    CHECK(wait_until([&] { return st->goto_count.load() >= 2; }, 5000));
+    CHECK(wait_until([&] { return mount.count(":MS") >= 2; }, 5000));
 
     // Tracking=false during the GOTO is a commanded off: the next slew is refused, nothing more sent.
     driver->set_tracking(false);
@@ -278,7 +224,7 @@ TEST_CASE("ZWO telescope - a retarget of its own GOTO in flight is not refused f
     } catch (const alpacacore::AlpacaException& ex) {
         CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
     }
-    CHECK_FALSE(wait_until([&] { return st->goto_count.load() > 2; }, 500));
+    CHECK_FALSE(wait_until([&] { return mount.count(":MS") > 2; }, 500));
     driver->set_connected(false);
 }
 
@@ -286,65 +232,36 @@ TEST_CASE("ZWO slew completion waits for the final coordinate pair", "[zwo][tele
     const bool reject_final = GENERATE(false, true);
     CAPTURE(reject_final);
     for (const bool delay_ra : {true, false}) {
-        alpacacore::test::FakeTaskClock clock;
         CAPTURE(delay_ra);
-        struct State {
-            std::atomic<bool> arrived{false};
-            std::atomic<bool> stopped_status_sent{false};
-            std::atomic<bool> coordinate_read_started{false};
-            std::atomic<bool> reject_coordinate{false};
-            std::atomic<int> stopped_status_count{0};
-        };
-        auto state = std::make_shared<State>();
-        const auto fallback = zwo_responder(std::make_shared<FakeZwoState>());
-        alpacacore::test::FakeMountServer server([state, delay_ra, fallback](const std::string& command) {
-            if (command.find(":GU") != std::string::npos) {
-                const bool arrived = state->arrived.load();
-                if (arrived) {
-                    state->stopped_status_sent.store(true);
-                    state->stopped_status_count.fetch_add(1);
-                }
-                return std::string(arrived ? "NG#" : "G#");
-            }
-            const bool ra = command.find(":GR") != std::string::npos;
-            const bool dec = command.find(":GD") != std::string::npos;
-            if (ra || dec) {
-                const bool arrived = state->arrived.load();
-                if (arrived && state->stopped_status_sent.load() && ra == delay_ra) {
-                    state->coordinate_read_started.store(true);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                    if (state->reject_coordinate.load()) return std::string("bad#");
-                }
-                return std::string(ra ? (arrived ? "20:47:56#" : "20:47:00#")
-                                      : (arrived ? "+65*00:00#" : "+64*59:00#"));
-            }
-            return fallback(command);
-        });
-        REQUIRE(server.ok());
-        auto conn = endpoint(server.port());
-        conn.response_timeout_ms = 2000;
-        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn, clock);
-        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        Rig rig;
+        auto& mount = rig.mount;
+        auto& driver = rig.driver;
+        const std::string delayed = delay_ra ? ":GR" : ":GD";
+        mount.set_position(20.0 + 47.0 / 60.0, 64.0 + 59.0 / 60.0);
+        mount.set_moving(true);  // under way before the connect, as from the hand controller
+        rig.connect(std::chrono::seconds(5));
         REQUIRE(driver->get_slewing());
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-        state->reject_coordinate.store(reject_final);
-        state->arrived.store(true);
-        clock.advance(std::chrono::milliseconds(250));
-        REQUIRE(wait_until([&] { return state->coordinate_read_started.load(); }, 5000));
+        REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+        // The mount arrives. The delayed coordinate read stays in flight until released, and may then be refused.
+        const int gu_at_arrival = mount.count(":GU");
+        mount.hold_reply(delayed);
+        if (reject_final) mount.override_reply(delayed, "bad");
+        mount.set_position(20.0 + 47.0 / 60.0 + 56.0 / 3600.0, 65.0);
+        mount.set_moving(false);
+        rig.clock.advance(std::chrono::milliseconds(250));
+        REQUIRE(mount.wait_until_held(std::chrono::seconds(5)));
         // GU says stopped, but GR/GD are still in flight: completion must stay hidden.
+        CHECK(mount.count(":GU") == gu_at_arrival + 1);
         CHECK(driver->get_slewing());
-        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        mount.release();
+        REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
         if (reject_final) {
             // The next GU proves the previous coordinate read failed and the poll retried.
-            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-            clock.advance(std::chrono::milliseconds(250));
-            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-            REQUIRE(state->stopped_status_count.load() >= 2);
+            rig.tick();
+            REQUIRE(mount.count(":GU") >= gu_at_arrival + 2);
             CHECK(driver->get_slewing());
-            state->reject_coordinate.store(false);
-            REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-            clock.advance(std::chrono::milliseconds(250));
-            REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+            mount.override_reply(delayed, "", 0);
+            rig.tick();
         }
         REQUIRE_FALSE(driver->get_slewing());
         CHECK(std::abs(driver->get_right_ascension() - (20.0 + 47.0 / 60.0 + 56.0 / 3600.0)) < 1e-9);
@@ -357,72 +274,36 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
           "[zwo][telescope][async][arrival][goto-ownership]") {
     const bool reject_ra = GENERATE(false, true);
     const bool command_tracking_off = GENERATE(false, true);
-    alpacacore::test::FakeTaskClock clock;
     CAPTURE(reject_ra, command_tracking_off);
-    struct State {
-        std::atomic<bool> moving{false};
-        std::atomic<bool> stopped{false};
-        std::atomic<bool> reject_coordinate{true};
-        std::atomic<int> moving_pairs{0};
-        std::atomic<int> stopped_polls{0};
-    };
-    auto state = std::make_shared<State>();
-    auto counts = std::make_shared<FakeZwoState>();
-    const auto fallback = zwo_responder(counts);
-    alpacacore::test::FakeMountServer server([state, reject_ra, fallback,
-                                              pending = std::string{}](const std::string& chunk) mutable {
-        pending += chunk;
-        std::string response;
-        for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
-            const auto command = pending.substr(0, end + 1);
-            pending.erase(0, end + 1);
-            const bool stopped = state->stopped.load();
-            if (command == ":GU#") {
-                if (stopped) state->stopped_polls.fetch_add(1);
-                response += stopped ? "nN#" : (state->moving.load() ? "n#" : "N#");
-            } else if (command == ":GAT#") {
-                response += state->moving.load() ? "0#" : "1#";
-            } else if (command == ":GR#" || command == ":GD#") {
-                const bool ra = command == ":GR#";
-                if (stopped && state->reject_coordinate.load() && ra == reject_ra) {
-                    response += "bad#";
-                } else {
-                    if (!ra && state->moving.load() && !stopped) state->moving_pairs.fetch_add(1);
-                    response += ra ? (stopped ? "13:00:00#" : "12:00:00#") : (stopped ? "+46*00:00#" : "+45*00:00#");
-                }
-            } else {
-                response += fallback(command);
-            }
-        }
-        return response;
-    });
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    const std::string rejected = reject_ra ? ":GR" : ":GD";
+    rig.connect(std::chrono::seconds(5));
     REQUIRE(driver->get_tracking());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return counts->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
     // Drain the setup exchange before advancing the poll clock; MS receipt precedes its reply completion.
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));
-    state->moving.store(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    REQUIRE(wait_until([&] { return state->moving_pairs.load() > 0; }, 5000));
+    mount.hold_running(true);  // the GOTO keeps reporting motion, and no tracking
+    mount.set_tracking(false);
+    const int pairs_before = mount.count(":GD");
+    rig.tick();
+    REQUIRE(wait_until([&] { return mount.count(":GD") > pairs_before; }, 5000));  // a complete pair while moving
     // The force window alone would permit a retarget even if GU cleared ownership too early.
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(5500));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    state->stopped.store(true);
-    clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    REQUIRE(state->stopped_polls.load() > 0);
+    rig.tick(std::chrono::milliseconds(5500));
+    mount.override_reply(rejected, "bad");  // the final pair of the stop is refused
+    mount.hold_running(false);              // the GOTO lands at the next status read
+    const int gu_before_stop = mount.count(":GU");
+    rig.clock.advance(std::chrono::milliseconds(250));
+    REQUIRE(rig.clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(mount.count(":GU") > gu_before_stop);
     REQUIRE_FALSE(driver->get_tracking());
     REQUIRE(driver->get_slewing());
 
     const auto require_refused_without_writes = [&] {
-        const int gotos = counts->goto_count.load();
-        const int targets = counts->sr_count.load() + counts->sd_count.load();
+        const int gotos = mount.count(":MS");
+        const int targets = mount.count(":Sr") + mount.count(":Sd");
         try {
             driver->slew_to_coordinates_async(6.5, 25.0);
             FAIL("Expected Tracking-off retarget to be refused");
@@ -430,11 +311,7 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
             CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidOperation);
         }
         CHECK_FALSE(wait_until(
-            [&] {
-                return counts->goto_count.load() != gotos ||
-                       counts->sr_count.load() + counts->sd_count.load() != targets;
-            },
-            500));
+            [&] { return mount.count(":MS") != gotos || mount.count(":Sr") + mount.count(":Sd") != targets; }, 500));
     };
 
     if (command_tracking_off) {
@@ -443,16 +320,14 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
         require_refused_without_writes();
     } else {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 25.0));
-        REQUIRE(wait_until([&] { return counts->goto_count.load() == 2; }, 5000));
+        REQUIRE(wait_until([&] { return mount.count(":MS") == 2; }, 5000));
         REQUIRE_NOTHROW(driver->command_string(":GVP", false));
         CHECK(driver->get_slewing());
-        state->reject_coordinate.store(false);
-        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-        clock.advance(std::chrono::milliseconds(5500));
-        REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+        mount.override_reply(rejected, "", 0);
+        rig.tick(std::chrono::milliseconds(5500));
         REQUIRE(wait_until([&] { return !driver->get_slewing(); }, 8000));
-        CHECK(std::abs(driver->get_right_ascension() - 13.0) < 1e-9);
-        CHECK(std::abs(driver->get_declination() - 46.0) < 1e-9);
+        CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-9);  // the retarget's landing, as the mount reports
+        CHECK(std::abs(driver->get_declination() - 25.0) < 1e-9);
         REQUIRE_FALSE(driver->get_tracking());
         require_refused_without_writes();
     }
@@ -460,28 +335,14 @@ TEST_CASE("ZWO own GOTO remains retargetable until arrival is published unless T
 }
 
 TEST_CASE("ZWO moving status remains visible when coordinate reads fail", "[zwo][telescope][async][arrival]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto moving = std::make_shared<std::atomic<bool>>(false);
-    auto state = std::make_shared<FakeZwoState>();
-    state->serve_position.store(true);
-    const auto fallback = zwo_responder(state);
-    alpacacore::test::FakeMountServer server([moving, fallback](const std::string& command) {
-        if (moving->load()) {
-            if (command.find(":GU") != std::string::npos) return std::string("G#");
-            if (command.find(":GR") != std::string::npos) return std::string("bad#");
-        }
-        return fallback(command);
-    });
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
-    REQUIRE_FALSE(driver->get_slewing());
-    moving->store(true);
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(250));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
-    CHECK(driver->get_slewing());
-    CHECK(alpacacore::test::settle_connected(*driver, false));
+    Rig rig;
+    rig.connect(std::chrono::seconds(5));
+    REQUIRE_FALSE(rig.driver->get_slewing());
+    rig.mount.set_moving(true);
+    rig.mount.override_reply(":GR", "bad");
+    rig.tick();
+    CHECK(rig.driver->get_slewing());
+    CHECK(alpacacore::test::settle_connected(*rig.driver, false));
 }
 
 TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][telescope][async][longitude]") {
@@ -489,65 +350,42 @@ TEST_CASE("ZWO horizon rejection never retries with mirrored longitude", "[zwo][
     CAPTURE(west);
     const double longitude = west ? -100.5 : 100.5;
     const std::string wire_site = west ? "+30*00:00&+100*30:00" : "+30*00:00&-100*30:00";
-    struct Counts {
-        std::atomic<int> attempts{0};
-        std::atomic<int> site_writes{0};
-        std::atomic<int> wrong_site_writes{0};
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    mount.override_reply(":GMGE", wire_site);  // the mount keeps reporting this site, whatever is written to it
+    mount.reject_goto("e5");
+    rig.connect();
+    const auto site_writes = [&](bool wrong_only) {
+        int total = 0;
+        for (const auto& command : mount.commands()) {
+            if (!command.starts_with(":SMGE")) continue;
+            if (!wrong_only || command != ":SMGE" + wire_site) ++total;
+        }
+        return total;
     };
-    auto counts = std::make_shared<Counts>();
-    auto state = std::make_shared<FakeZwoState>();
-    state->serve_position.store(true);
-    const auto fallback = zwo_responder(state);
-    alpacacore::test::FakeMountServer server(
-        [counts, wire_site, fallback, pending = std::string{}](const std::string& chunk) mutable {
-            pending += chunk;
-            std::string response;
-            for (auto end = pending.find('#'); end != std::string::npos; end = pending.find('#')) {
-                const auto command = pending.substr(0, end + 1);
-                pending.erase(0, end + 1);
-                if (command == ":MS#") {
-                    counts->attempts.fetch_add(1);
-                    response += "e5#";
-                } else if (command == ":GMGE#") {
-                    response += wire_site + "#";
-                } else if (command.starts_with(":SMGE")) {
-                    counts->site_writes.fetch_add(1);
-                    if (command != ":SMGE" + wire_site + "#") counts->wrong_site_writes.fetch_add(1);
-                    response += "1#";
-                } else if (command.starts_with(":SMTI")) {
-                    response += "1#";
-                } else {
-                    response += fallback(command);
-                }
-            }
-            return response;
-        });
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
-    const int writes_before = counts->site_writes.load();
+    const int writes_before = site_writes(false);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     std::string error;
     REQUIRE(wait_until([&] { return read_slewing(*driver, &error) == SlewingRead::Threw; }, 10000));
     CHECK(error.find("e5") != std::string::npos);
-    CHECK(counts->attempts.load() == 2);
-    CHECK(counts->site_writes.load() >= writes_before + 2);
-    CHECK(counts->wrong_site_writes.load() == 0);
+    CHECK(mount.count(":MS") == 2);
+    CHECK(site_writes(false) >= writes_before + 2);
+    CHECK(site_writes(true) == 0);
     CHECK(std::abs(driver->get_site_longitude() - longitude) < 1e-9);
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
 
 TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->reject_goto.store(true);
+    mount.reject_goto("2");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() >= 1; }, 5000));  // ":MS" went out on the GOTO thread
+    REQUIRE(wait_until([&] { return mount.count(":MS") >= 1; }, 5000));  // ":MS" went out on the GOTO thread
 
     // Today: "GOTO failed: Mount rejected GOTO request" in the log, then
     // Slewing=false after the 5 s force window. Must read as an error.
@@ -559,7 +397,6 @@ TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)"
 
     // Only Slewing reports the failure: a rejected GOTO must not turn a
     // position read into that error.
-    // (This fake serves no :GR/:GD, so the read may still fail to parse.)
     const auto position_read_error = [&](const std::function<void()>& read) {
         try {
             read();
@@ -582,54 +419,52 @@ TEST_CASE("ZWO async - a GOTO the mount rejects surfaces through Slewing (#575)"
 
 TEST_CASE("ZWO async - AbortSlew during GOTO setup is not reported as a slew failure (#575)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
     // The mount would reject the GOTO, but the client aborts while the setup
     // thread is still writing the target: the abort cancels the setup, so the
     // rejection that would have followed must never be recorded.
-    st->reject_goto.store(true);
-    st->sr_delay_ms.store(150);
+    mount.reject_goto("2");
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // open-astro#720: abort while the ":Sr" is in flight. The fence lets that
     // one round trip finish and nothing after it, and nothing at all once
     // AbortSlew has returned.
-    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
     REQUIRE_NOTHROW(driver->abort_slew());
-    const int setup_at_return = st->setup_count.load();
+    const int setup_at_return = setup_count(mount);
     // Outlast the setup (site sync + delayed ":Sr" + ":Sd" + ":MS").
-    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 2000));
-    CHECK(st->goto_count.load() == 0);  // the aborted GOTO was never sent
-    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
-    CHECK(st->sd_count.load() == 0);
+    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500));
+    CHECK(mount.count(":MS") == 0);  // the aborted GOTO was never sent
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+    CHECK(mount.count(":Sd") == 0);
     driver->set_connected(false);
 }
 
 TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
     // A newer initiator (here MoveAxis) lands while the GOTO setup thread is
     // still writing the target; the superseded GOTO's later rejection is not
     // the jog's failure and must not make Slewing throw during the jog.
-    st->reject_goto.store(true);
-    st->sr_delay_ms.store(150);
+    mount.reject_goto("2");
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 1.0); }));
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 2000));
+    CHECK_FALSE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 500));
     // open-astro#720: the jog fences the pending GOTO, so its ":MS" never
     // lands on top of the jog.
-    CHECK(st->goto_count.load() == 0);
-    CHECK(st->jog_count.load() == 1);
+    CHECK(mount.count(":MS") == 0);
+    CHECK(jog_count(mount) == 1);
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
     driver->set_connected(false);
 }
@@ -640,62 +475,59 @@ TEST_CASE("ZWO async - a MoveAxis during GOTO setup owns the error slot (#575)",
 // the stale GOTO overriding the newer command.
 TEST_CASE("ZWO async - Park during GOTO setup cancels the pending GOTO (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->park(); }));
-    const int setup_at_return = st->setup_count.load();
+    const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
-    CHECK(st->goto_count.load() == 0);
-    CHECK(st->park_count.load() == 1);
-    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
-    CHECK(st->sd_count.load() == 0);
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    CHECK(mount.count(":MS") == 0);
+    CHECK(mount.count(":hP") == 1);
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+    CHECK(mount.count(":Sd") == 0);
     driver->set_connected(false);
 }
 
 TEST_CASE("ZWO async - FindHome during GOTO setup cancels the pending GOTO (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->find_home(); }));
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
-    CHECK(st->goto_count.load() == 0);
-    CHECK(st->home_count.load() == 1);
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    CHECK(mount.count(":MS") == 0);
+    CHECK(mount.count(":hC") == 1);
     driver->set_connected(false);
 }
 
 TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->move_axis(0, 0.0); }));
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
-    CHECK(st->goto_count.load() == 0);
-    CHECK(st->stop_count.load() == 1);
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    CHECK(mount.count(":MS") == 0);
+    CHECK(count_exact(mount, ":Q") == 1);
     driver->set_connected(false);
 }
 
@@ -703,20 +535,20 @@ TEST_CASE("ZWO async - MoveAxis stop during GOTO setup cancels the pending GOTO 
 // 5 s Slewing force window behind or report the abandoned target as position.
 TEST_CASE("ZWO async - a GOTO cancelled during setup leaves no slew bookkeeping (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    st->serve_position.store(true);
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
     // Still inside the GOTO's force window, but nothing is moving.
+    rig.await_poll_resumed();
     CHECK(read_slewing(*driver) == SlewingRead::False);
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 6000));
+    rig.tick(std::chrono::milliseconds(5500));  // past the force window
+    CHECK(read_slewing(*driver) == SlewingRead::False);
     CHECK(std::fabs(driver->get_right_ascension() - 12.0) < 1e-6);
     CHECK(std::fabs(driver->get_declination() - 45.0) < 1e-6);
     driver->set_connected(false);
@@ -726,22 +558,22 @@ TEST_CASE("ZWO async - a GOTO cancelled during setup leaves no slew bookkeeping 
 // cancelled GOTO leaves through its outer catch; that exit abandons it too.
 TEST_CASE("ZWO async - a cancelled GOTO whose setup then fails leaves no slew bookkeeping (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    st->serve_position.store(true);
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
-    st->reject_sr.store(true);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
+    mount.override_reply(":Sr", "0");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     // Cancel while the ":Sr" is in flight, not at an earlier checkpoint.
-    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
     REQUIRE_NOTHROW(driver->move_axis(0, 0.0));
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    rig.await_poll_resumed();
     CHECK(read_slewing(*driver) == SlewingRead::False);
-    REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 6000));
+    rig.tick(std::chrono::milliseconds(5500));  // past the force window
+    CHECK(read_slewing(*driver) == SlewingRead::False);
     CHECK(std::fabs(driver->get_right_ascension() - 12.0) < 1e-6);
     CHECK(std::fabs(driver->get_declination() - 45.0) < 1e-6);
     driver->set_connected(false);
@@ -749,23 +581,22 @@ TEST_CASE("ZWO async - a cancelled GOTO whose setup then fails leaves no slew bo
 
 TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->sr_delay_ms.store(150);
+    mount.delay_next(":Sr", std::chrono::milliseconds(150));
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->sr_count.load() > 0; }, 1000));
+    REQUIRE(wait_until([&] { return mount.count(":Sr") > 0; }, 5000));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
-    const int setup_at_return = st->setup_count.load();
+    const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);
-    CHECK_FALSE(goto_sent_within_setup_window(*st));
-    CHECK(st->goto_count.load() == 0);
-    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
-    CHECK(st->sd_count.load() == 0);
+    CHECK_FALSE(goto_sent_within_setup_window(mount));
+    CHECK(mount.count(":MS") == 0);
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+    CHECK(mount.count(":Sd") == 0);
 }
 
 // open-astro#720: the cancel lands while the site/time sync's ":SMTI" is in
@@ -773,63 +604,56 @@ TEST_CASE("ZWO async - Disconnect during GOTO setup cancels the pending GOTO (#7
 // before or after Connected=false returns.
 TEST_CASE("ZWO async - Disconnect during the GOTO's site/time sync sends no target (#720)",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->smti_delay_ms.store(150);
-    const int smti_before = st->smti_count.load();
+    mount.delay_next(":SMTI", std::chrono::milliseconds(150));
+    const int smti_before = mount.count(":SMTI");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
-    REQUIRE(wait_until([&] { return st->smti_count.load() > smti_before; }, 1000));
+    REQUIRE(wait_until([&] { return mount.count(":SMTI") > smti_before; }, 5000));
     std::chrono::milliseconds elapsed{0};
     REQUIRE_NOTHROW(elapsed = timed([&] { driver->set_connected(false); }));
-    const int setup_at_return = st->setup_count.load();
+    const int setup_at_return = setup_count(mount);
     CHECK(elapsed < kInitiatorBudget);
-    CHECK(setup_sent_after_return(*st, setup_at_return) == 0);
-    CHECK(st->sr_count.load() == 0);
-    CHECK(st->sd_count.load() == 0);
-    CHECK(st->goto_count.load() == 0);
+    CHECK(setup_sent_after_return(mount, setup_at_return) == 0);
+    CHECK(mount.count(":Sr") == 0);
+    CHECK(mount.count(":Sd") == 0);
+    CHECK(mount.count(":MS") == 0);
 }
 
 TEST_CASE("ZWO async - position reports mount feedback after GOTO", "[zwo][telescope][async][position]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeZwoState>();
-    st->serve_position.store(true);
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    const double mount_ra = driver->get_right_ascension();
-    const double mount_dec = driver->get_declination();
+    // The mount lands 1 degree short in Dec: the driver reports where the mount is, not the target it was given.
+    mount.set_land_short_by(3600.0);
+    CHECK(std::abs(driver->get_right_ascension() - 12.0) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - 45.0) < 1e-6);
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(6.0, 22.0));
-    REQUIRE(wait_until([&] { return st->goto_count.load() == 1; }, 5000));
+    REQUIRE(wait_until([&] { return mount.count(":MS") == 1; }, 5000));
     REQUIRE_NOTHROW(driver->command_string(":GVP", false));
-    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
-    clock.advance(std::chrono::milliseconds(5500));
-    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    rig.tick(std::chrono::milliseconds(5500));
     REQUIRE_FALSE(driver->get_slewing());
 
-    CHECK(std::abs(driver->get_right_ascension() - mount_ra) < 1e-6);
-    CHECK(std::abs(driver->get_declination() - mount_dec) < 1e-6);
+    CHECK(std::abs(driver->get_right_ascension() - 6.0) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - 21.0) < 1e-6);
     driver->set_connected(false);
 }
 
 TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zwo][telescope][position]") {
-    alpacacore::test::FakeTaskClock clock;
-    auto st = std::make_shared<FakeZwoState>();
-    st->serve_position.store(true);
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()), clock);
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    auto& clock = rig.clock;
+    rig.connect();
 
-    const double mount_ra = driver->get_right_ascension();
-    const double mount_dec = driver->get_declination();
+    mount.set_land_short_by(3600.0);
     auto slew = std::async(std::launch::async, [&] { driver->slew_to_coordinates(4.0, -12.0); });
-    const bool sent = wait_until([&] { return st->goto_count.load() == 1; }, 5000);
+    const bool sent = wait_until([&] { return mount.count(":MS") == 1; }, 5000);
     CHECK(sent);
     CHECK_NOTHROW(driver->command_string(":GVP", false));  // Finish GOTO setup before moving its deadlines.
     bool settled = true;
@@ -856,20 +680,19 @@ TEST_CASE("ZWO blocking slew - position reports mount feedback after GOTO", "[zw
     CHECK(completed);
     REQUIRE_NOTHROW(slew.get());
 
-    CHECK(std::abs(driver->get_right_ascension() - mount_ra) < 1e-6);
-    CHECK(std::abs(driver->get_declination() - mount_dec) < 1e-6);
+    CHECK(std::abs(driver->get_right_ascension() - 4.0) < 1e-6);
+    CHECK(std::abs(driver->get_declination() - -13.0) < 1e-6);
     driver->set_connected(false);
 }
 
 TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure",
           "[zwo][telescope][async][slewfailure]") {
-    auto st = std::make_shared<FakeZwoState>();
-    alpacacore::test::FakeMountServer server(zwo_responder(st));
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, endpoint(server.port()));
-    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    Rig rig;
+    auto& mount = rig.mount;
+    auto& driver = rig.driver;
+    rig.connect();
 
-    st->reject_sr.store(true);
+    mount.override_reply(":Sr", "0");
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.5, 20.0));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 5000));
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
@@ -880,7 +703,7 @@ TEST_CASE("ZWO async - redundant Connected=true preserves a stored slew failure"
     CHECK(read_slewing(*driver) == SlewingRead::Threw);
 
     // A full successful reconnect is a valid recovery and clears the old error.
-    st->reject_sr.store(false);
+    mount.override_reply(":Sr", "", 0);
     driver->set_connected(false);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
     const SlewingRead after_reconnect = read_slewing(*driver);
