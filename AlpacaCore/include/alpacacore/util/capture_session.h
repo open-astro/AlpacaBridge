@@ -74,16 +74,25 @@ public:
     CaptureSession& operator=(const CaptureSession&) = delete;
 
     /// Starts `body` for an exposure of `duration_seconds`. Throws
-    /// InvalidOperation while exposing, or when the previous body has not
-    /// returned within kStartTimeout; a refused start changes nothing.
+    /// NotConnected on a closed session (after disconnect_and_join(), until
+    /// open()), and InvalidOperation while exposing, or when the previous body
+    /// or an abort's join has not finished within kStartTimeout; a refused
+    /// start changes nothing.
     // NOLINTNEXTLINE(performance-unnecessary-value-param): stub; the implementation moves it.
     void start(double /*duration_seconds*/, Body /*body*/) {}
     /// Cancels the exposure in flight and joins its body; the frame is
-    /// discarded. A no-op when nothing is exposing.
+    /// discarded. A no-op when nothing is exposing. A start() that begins
+    /// during the join waits for it, so the join never cancels that start's
+    /// body.
     void abort() {}
-    /// Cancels and joins every body, then clears the image, the failure and
-    /// the last exposure.
+    /// Closes the session, cancels and joins every body, then clears the
+    /// image, the failure and the last exposure. A closed session refuses
+    /// start() with NotConnected, a start() waiting for an old body included,
+    /// so no body runs against a camera the driver is closing.
     void disconnect_and_join() {}
+    /// Reopens the session that disconnect_and_join() closed (the driver's
+    /// connect); waits for a disconnect_and_join() in flight. A no-op when open.
+    void open() {}
     /// Drops a ready frame (a geometry change); keeps the last exposure.
     void discard_image() {}
     /// The driver fails the exposure in flight (an SDK stop that failed):

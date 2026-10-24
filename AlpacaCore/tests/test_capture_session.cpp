@@ -182,6 +182,34 @@ CaptureSession::Body instant_body(const ProbePtr& p, std::int32_t pixel) {
     };
 }
 
+// Waits 1 s on the clock once, then offers its frame.
+CaptureSession::Body one_wait_body(const ProbePtr& p, std::int32_t pixel) {
+    return [p, pixel](CaptureControl& c) {
+        c.exposure_started();
+        p->entered = true;
+        p->wait_result = c.wait_for(1s) ? 1 : 0;
+        p->reason = c.stop_reason();
+        p->accepted = c.image_ready(frame(pixel)) ? 1 : 0;
+        p->exited = true;
+    };
+}
+
+// Captured by a body that arms it as its last step, it holds that body's
+// thread after the body has returned, while the body's captures are dropped,
+// until its gate opens. Unarmed (the body never ran) it holds nothing.
+struct HoldOnDestroy {
+    explicit HoldOnDestroy(GatePtr g) : gate(std::move(g)) {}
+    HoldOnDestroy(const HoldOnDestroy&) = delete;
+    HoldOnDestroy& operator=(const HoldOnDestroy&) = delete;
+    ~HoldOnDestroy() {
+        if (armed) {
+            gate->wait();
+        }
+    }
+    GatePtr gate;
+    std::atomic<bool> armed{false};
+};
+
 // One fake clock and one session on it. The destructor opens every gate and
 // only then destroys the session, so a failed case still tears down.
 struct Harness {
@@ -540,6 +568,7 @@ TEST_CASE("CaptureSession - disconnect_and_join cancels the body and clears the 
     CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
 
     SECTION("a kept failure is cleared too") {
+        h.session->open();  // the next connect
         h.session->start(1.0, [](CaptureControl&) { throw std::runtime_error("scripted SDK failure"); });
         REQUIRE(eventually([&] { return h.session->failure().has_value(); }));
         h.session->disconnect_and_join();
@@ -581,6 +610,160 @@ TEST_CASE("CaptureSession - fail ends the exposure with the driver's failure and
 
     h.session->fail("a later failure");  // not exposing: a no-op
     CHECK(*h.session->failure() == "scripted stop failure");
+}
+
+TEST_CASE("CaptureSession - a start during an abort's join waits for it and its body is not cancelled",
+          "[util][capture-session]") {
+    Harness h;
+    auto a = std::make_shared<Probe>();
+    auto held = h.gate();
+    auto hold = std::make_shared<HoldOnDestroy>(held);
+    h.session->start(10.0, [a, hold](CaptureControl& c) {
+        c.exposure_started();
+        a->entered = true;
+        while (c.wait_for(50ms)) {
+        }
+        a->reason = c.stop_reason();
+        hold->armed = true;
+        a->exited = true;
+    });
+    hold.reset();  // the body holds the only reference
+    REQUIRE(eventually([&] { return a->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+
+    auto aborting = std::async(std::launch::async, [&] { h.session->abort(); });
+    // The cancel wakes the body and it returns; its thread then waits while
+    // its captures are dropped, so abort's join has not returned.
+    REQUIRE(eventually([&] { return a->exited.load(); }));
+    CHECK(a->reason == StopReason::Cancelled);
+    CHECK(aborting.wait_for(0s) == std::future_status::timeout);
+
+    auto b = std::make_shared<Probe>();
+    auto starting =
+        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, one_wait_body(b, 11)); }); });
+    // An abort counts as pending until its join returns: the start waits on
+    // the clock instead of starting a body that join could still cancel.
+    CHECK(h.clock.wait_for_waiters(1, kBound));
+    CHECK_FALSE(b->entered);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+
+    held->open();
+    REQUIRE(aborting.wait_for(kBound) == std::future_status::ready);
+    aborting.get();
+    REQUIRE(starting.wait_for(kBound) == std::future_status::ready);
+    CHECK(starting.get() == -1);
+    REQUIRE(eventually([&] { return b->entered.load(); }));
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    h.clock.advance(1s);
+    REQUIRE(eventually([&] { return b->exited.load(); }));
+    CHECK(b->wait_result == 1);
+    CHECK(b->reason == StopReason::None);  // the earlier abort never reached it
+    CHECK(b->accepted == 1);
+    CHECK(h.session->image_ready());
+    CHECK(h.session->image()->data.front() == 11);
+}
+
+TEST_CASE("CaptureSession - disconnect_and_join closes the session: start raises NotConnected until open",
+          "[util][capture-session]") {
+    Harness h;
+    auto first = std::make_shared<Probe>();
+    h.session->start(0.5, instant_body(first, 5));
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+    h.session->disconnect_and_join();
+
+    auto late = std::make_shared<Probe>();
+    std::string message;
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }, &message) == AlpacaError::NotConnected);
+    CHECK_FALSE(message.empty());
+    // A refused start publishes nothing and runs no body.
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK_FALSE(h.session->busy());
+    CHECK_FALSE(h.session->image_ready());
+    CHECK_FALSE(late->entered);
+    h.session->abort();                // closed and idle: a no-op
+    h.session->disconnect_and_join();  // already closed: stays closed
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == AlpacaError::NotConnected);
+    CHECK_FALSE(late->entered);
+
+    h.session->open();
+    h.session->open();  // already open: a no-op
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == -1);
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    CHECK(late->accepted == 1);
+    CHECK(h.session->image()->data.front() == 6);
+}
+
+TEST_CASE("CaptureSession - disconnect_and_join during an abort's join returns only once that body has returned",
+          "[util][capture-session]") {
+    Harness h;
+    auto a = std::make_shared<Probe>();
+    auto after_stop = h.gate();  // the SDK call the body makes after the stop
+    h.session->start(10.0, [a, after_stop](CaptureControl& c) {
+        c.exposure_started();
+        a->entered = true;
+        while (c.wait_for(50ms)) {
+        }
+        a->reason = c.stop_reason();
+        a->wait_result = 0;
+        after_stop->wait();
+        a->exited = true;
+    });
+    REQUIRE(eventually([&] { return a->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+
+    auto aborting = std::async(std::launch::async, [&] { h.session->abort(); });
+    REQUIRE(eventually([&] { return a->wait_result.load() == 0; }));  // abort's join now waits for it
+    auto disconnecting = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
+    // A disconnect that saw the slot already emptied by abort() must still
+    // wait for that join: the driver closes the camera when it returns
+    // (docs/failures/0011).
+    CHECK(disconnecting.wait_for(100ms) == std::future_status::timeout);
+    CHECK_FALSE(a->exited);
+
+    after_stop->open();
+    REQUIRE(aborting.wait_for(kBound) == std::future_status::ready);
+    aborting.get();
+    REQUIRE(disconnecting.wait_for(kBound) == std::future_status::ready);
+    disconnecting.get();
+    CHECK(a->exited);
+    CHECK(a->reason == StopReason::Cancelled);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK_FALSE(h.session->busy());
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(a, 1)); }) == AlpacaError::NotConnected);
+}
+
+TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is refused and never runs after the clear",
+          "[util][capture-session]") {
+    Harness h;
+    auto stale = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(stale, sdk));
+    REQUIRE(eventually([&] { return stale->entered.load(); }));
+    h.clock.advance(3s);  // the watchdog fails it; the body stays in the SDK
+    REQUIRE(h.session->failure().has_value());
+
+    auto next = std::make_shared<Probe>();
+    auto starting =
+        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(next)); }); });
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));  // start's bounded wait
+    auto disconnecting = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
+    // The close ends that wait at once, while the old body is still in the
+    // SDK and the disconnect still joins it.
+    CHECK(starting.wait_for(kBound) == std::future_status::ready);
+    CHECK(disconnecting.wait_for(0s) == std::future_status::timeout);
+
+    sdk->open();  // the old body returns; the join ends
+    REQUIRE(disconnecting.wait_for(kBound) == std::future_status::ready);
+    disconnecting.get();
+    REQUIRE(starting.wait_for(kBound) == std::future_status::ready);
+    CHECK(starting.get() == AlpacaError::NotConnected);
+    CHECK_FALSE(next->entered);  // no body after the clear: the driver closes the camera next
+    CHECK(stale->accepted == 0);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK_FALSE(h.session->busy());
+    CHECK_FALSE(h.session->failure().has_value());
 }
 
 TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][capture-session]") {
@@ -667,8 +850,10 @@ TEST_CASE("CaptureSession - destruction joins a body blocked in the SDK once it 
 // which reports a data race, or a lock-order inversion between `driver` (a
 // test mutex standing in for the driver's mutex_), the session mutex and the
 // slot mutex. Getters, fail() and discard_image() run under `driver`, and so
-// does a body's publish, as the driver calls them; start(), abort() and
-// disconnect_and_join() run without it (decision 0006 rule 4).
+// does a body's publish, as the driver calls them; start(), abort(),
+// disconnect_and_join() and open() run without it (decision 0006 rule 4).
+// disconnect_and_join() runs on its own thread, racing abort()'s join: when
+// it returns, no body may still be inside (docs/failures/0011).
 TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex race every session call",
           "[util][capture-session][stress-guard]") {
     struct Shared {
@@ -676,17 +861,31 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
         std::atomic<bool> done{false};
         std::atomic<int> starts{0};
         std::atomic<int> bodies{0};
+        std::atomic<int> inside{0};  // bodies that have entered and not returned
+        std::atomic<int> inside_after_disconnect{0};
         std::atomic<long> seen{0};
+    };
+    struct Inside {
+        explicit Inside(std::atomic<int>& n) : count(n) { ++count; }
+        Inside(const Inside&) = delete;
+        Inside& operator=(const Inside&) = delete;
+        ~Inside() { --count; }
+        std::atomic<int>& count;
     };
     Shared s;  // declared before the Harness, so it outlives every body
     Harness h;
 
     const auto body = [&s](int kind) -> CaptureSession::Body {
         return [&s, kind](CaptureControl& c) {
+            const Inside inside(s.inside);
             c.exposure_started();
             ++s.bodies;
             if (kind == 0) {  // until abort, fail or the watchdog
                 while (c.wait_for(20ms)) {
+                }
+                // The SDK call after the stop takes a while, so joins overlap.
+                for (int i = 0; i < 200; ++i) {
+                    std::this_thread::yield();
                 }
                 return;
             }
@@ -733,13 +932,28 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                 std::this_thread::yield();
             }
         });
+        threads.emplace_back([&] {  // a disconnect, then the next connect, every few bodies
+            int last = 0;
+            while (!s.done) {
+                if (s.bodies < last + 3) {
+                    std::this_thread::yield();
+                    continue;
+                }
+                last = s.bodies;
+                h.session->disconnect_and_join();
+                if (s.inside != 0) {
+                    ++s.inside_after_disconnect;
+                }
+                h.session->open();
+            }
+        });
         threads.emplace_back([&] {  // moves the watchdog and start()'s bounded wait
             while (!s.done) {
                 h.clock.advance(50ms);
                 std::this_thread::yield();
             }
         });
-        for (int i = 0; i < 300; ++i) {
+        for (int i = 0; i < 20000 && s.bodies < 300; ++i) {
             if (error_of([&] { h.session->start(0.05, body(i % 3)); }) == -1) {
                 ++s.starts;
             }
@@ -758,9 +972,11 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
     storm.get();
     CHECK(s.starts > 0);
     CHECK(s.bodies > 0);
+    CHECK(s.inside_after_disconnect == 0);
 
     h.session->disconnect_and_join();
     CHECK_FALSE(h.session->busy());
+    h.session->open();
     auto p = std::make_shared<Probe>();
     h.session->start(10.0, polling_body(p));
     CHECK(h.session->camera_state() == CameraState::Exposing);
