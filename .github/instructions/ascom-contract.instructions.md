@@ -181,6 +181,9 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   (`PercentCompleted` reads them) and publish under the state lock when the image is acquired
   (`util::LastExposure`, `util/last_exposure.h`, for supported pairs); clear them on disconnect. While disconnected both raise `NotConnected` first
   (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
+- In cameras that hold the state lock across initialization, fast-fail disconnected reads before taking that
+  lock, then recheck connection under it. The first check avoids waiting behind connect I/O; the second closes
+  the disconnect race. iGuider's connect I/O already runs outside its leaf state lock.
 - **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): report the applied
   register or shutter value after rounding/clamping, or monotonic shutter-open elapsed time for a driver-timed
   exposure. Configuration, mirror settling, readout, download and decode do not count as integration.
