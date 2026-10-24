@@ -51,7 +51,8 @@ it is never reachable through `router.cpp` or the web UI.
   `get_side_of_pier()` (a `:GRa#`/`:GDe#` pair, ~25 ms each on the HM-17 at 9600 baud, so ~50 ms,
   uses about half of a FAST read's 0.1s budget; it was ~0.16s each while `read_response()` slept
   10 ms after every reply character, #1242) — hour-angle *sign* tolerates a couple of seconds of
-  RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated.
+  RA staleness, so reuse whatever is already cached and only force a fetch if never yet populated,
+  or while the link fault is latched (no cache is served then, #1414).
 - **`:GU#` status-character table**, confirmed against real hardware traces (`nNpHrsEo180` etc.
   observed live): `n`/`N` = **NOT** tracking / **NOT** slewing respectively (`== npos` check, i.e.
   the character's *absence* means the state is active — this is the opposite polarity of what
@@ -222,6 +223,33 @@ it is never reachable through `router.cpp` or the web UI.
   lands between its `stat()` and the record leaves no loss behind and does not close the new link, and
   a Disconnect bumps the generation before it closes the port; the close that follows a recorded loss
   re-checks under `mutex_` that the link is still connected and still lost (#1289).
+- **A mount that stops answering with the adapter still plugged in latches a fault, then a loss**
+  (#1414, decision 0009): mount unpowered, or the cable pulled at the mount end, so the node and the
+  fd stay healthy and nothing answers. Before, the status and position caches swallowed every
+  failure once filled, so `Connected` stayed true and every read served old values after waiting
+  out the response timeout. Now each failed `:GU#`, `:GRa#`/`:GDe#` or `:GA#`/`:GZ#` read counts
+  in `util::PolledLinkHealth`: the first two in a row still serve the cache (logged WARN), the
+  third latches a fault (ERROR) and those reads throw `DriverException` "OnStep mount
+  communications compromised" while `Connected` stays true and `get_link_fault()` reads "Mount not
+  answering (...)"; while faulted no read serves a cache (not inside the 2 s window, not
+  `SideOfPier`): each asks the mount, and one good reply clears the fault (INFO). Writes throw the
+  same `DriverException` (`refuse_while_faulted_locked()`; the motion and state commands, not the
+  raw `command_blind`/`command_bool` pass-through): the commands are blind, so on a
+  healthy fd they cannot fail and would otherwise report success to a mount that is not
+  listening. `AbortSlew` and `MoveAxis(axis, 0)` send their stops first and then throw, so the stop
+  is still tried and the client learns it may not have arrived (`AbortSlew` makes its #1230
+  tracking decision before it throws, so a faulted abort gives up the restore); `Slewing` during a
+  `MoveAxis` rethrows the fault like any read; a new `MoveAxis` move is refused
+  before it ends a waiting `Park` or `FindHome`. A refused write checks the staleness bound too,
+  so a client that only writes still sees the link lost. A fault that has
+  stood for `util::kLinkStalenessBound` (30 s, on the driver's task clock; tests advance a
+  `FakeTaskClock`) is a lost link: `OnStepProtocolWrapper::declare_link_lost()` records the reason and the
+  loss time and closes the port, as for a pulled adapter, so `Connected` reads false, calls throw
+  `NotConnected`, `DeviceState` is empty, and the next Connect relinks (and runs the #521 stops
+  after a long outage). That outage runs from the loss, not from the last good reply: the failed
+  reads still found the fd alive, so a Connect right after the loss stops nothing, and one after
+  the preserve window sends the stops. There is no poll thread: the reads are the client's, so the time to latch
+  is the client's poll cadence times three, each failed read costing the response timeout.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
   `Tracking` reads false, after the parked check and coordinate validation and before any target or
@@ -273,7 +301,9 @@ it is never reachable through `router.cpp` or the web UI.
     sending anything (the shared rule "A failed async operation body keeps its error"). A
     `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
     (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
-    still ends it, and `Slewing` reads true from the call until the task ends.
+    still ends it, and `Slewing` reads true from the call until the task ends. The task runs the
+    request current when it starts, and a task already stopped when it starts takes none, so a
+    newer Park or FindHome is never cleared by an older task that started late.
   - **`:GE#` details:** OnStep 4.x has `:GE#` too, per channel, with the same codes up to 23
     (OnStep `Globals.h` `CommandErrors`; no 25), and its `:hC#` stops the mount when it refuses for
     motion. A reply that is not a two-digit code (firmware without `:GE#`, 1 s timeout) leaves the
@@ -281,8 +311,10 @@ it is never reachable through `router.cpp` or the web UI.
     counts as started, as before. A `:hP#` answered `0` or garbled is taken as accepted when `:GE#`
     then says 0 or 25. The code is kept per serial channel; a Smart Web Server page that shares
     the channel can replace it between `:hP#` and `:GE#` (rare). A link lost between `:hC#` and
-    `:GE#` fails the read (`get_last_command_error()` rethrows); a mount that stops answering on a
-    link that stays up reads as firmware without `:GE#`, and the home counts as started, as before.
+    `:GE#` fails the read (`get_last_command_error()` rethrows). A `:GE#` with no code is followed
+    by a `:GU#` read (#1414): firmware without `:GE#` answers it and the park or home goes on as
+    above; a mount that stops answering on a link that stays up does not, so the read counts toward
+    the link fault and `Park`/`FindHome` throw `DriverException` instead of reading as started.
     OnStep 4.x `:GU#` (`Command.ino`) has `I` (parking) but no `h`, so a `FindHome` there is never
     taken as one already running.
   - **Locks and clock:** the task waits on the driver's task clock (decision 0005) with `mutex_`

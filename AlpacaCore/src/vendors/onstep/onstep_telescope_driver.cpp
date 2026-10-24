@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
 #include <alpacacore/util/task_clock.h>
@@ -108,6 +109,12 @@ std::string describe_onstepx_error(int code) {
             return "error code " + std::to_string(code);
     }
 }
+
+// open-astro#1414 (decision 0009): consecutive failed status or position reads
+// that latch a link fault, as on SynScan and Celestron. A read only happens
+// when a client asks, so the time to latch is the client's poll cadence times
+// this, each failed read costing the response timeout.
+constexpr int kLinkFaultThreshold = 3;
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
@@ -282,10 +289,12 @@ public:
         auto& protocol = OnStepProtocolWrapper::instance();
         (void)protocol.link_alive();  // notice an unplug the listing would otherwise miss
         const std::string reason = protocol.link_lost_reason();
-        if (reason.empty()) {
-            return {};
+        if (!reason.empty()) {
+            return "Link to the mount lost (" + reason + "); reconnect";
         }
-        return "Link to the mount lost (" + reason + "); reconnect";
+        // A latched fault: Connected still true, reads refused (#1414).
+        std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
+        return link_fault_text_.empty() ? std::string{} : "Mount not answering (" + link_fault_text_ + ")";
     }
 
     void connect() override { start_connection_task(true); }
@@ -351,6 +360,8 @@ public:
             utc_offset_.clear();
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
+            link_health_.reset();
+            set_link_fault_text("");
             target_ra_set_ = false;
             target_dec_set_ = false;
             clear_manual_motion_locked();
@@ -625,6 +636,7 @@ public:
     void set_tracking(bool tracking) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("Tracking");
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
@@ -703,10 +715,11 @@ public:
         // window is a few arcseconds, utterly negligible next to the ±6h
         // scale this decision operates on — so reuse whatever is already
         // cached and only force a live fetch if a position has never been
-        // read at all (e.g. immediately after connect).
+        // read at all (e.g. immediately after connect), or while the link
+        // fault is latched (no cache is served then, #1414).
         ensure_site_info_cached_locked();
-        if (!equatorial_cache_valid_) {
-            refresh_equatorial_cache_locked();
+        if (!equatorial_cache_valid_ || link_health_.faulted()) {
+            refresh_equatorial_cache_locked();  // faulted: never the cache (decision 0009 rule 1, #1414)
         }
         const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = shortest_ra_delta_hours(lst, cached_ra_hours_);
@@ -925,6 +938,7 @@ public:
     void find_home() override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("FindHome");
         check_not_parked_locked("FindHome");
         refresh_status_cache_locked(true);
         if (cached_status_.is_at_home || cached_status_.is_homing) {
@@ -936,6 +950,7 @@ public:
     void park() override {
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("Park");
         refresh_status_cache_locked(true);
         if (cached_status_.is_parked || cached_status_.is_parking) {
             return;  // ASCOM: Park() on an already-parked mount is a no-op; one already parking too.
@@ -946,6 +961,7 @@ public:
     void pulse_guide(int direction, int duration) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("PulseGuide");
         check_not_parked_locked("PulseGuide");
         if (direction < 0 || direction > 3) {
             throw AlpacaException("Invalid PulseGuide direction", AlpacaError::InvalidValue);
@@ -972,6 +988,7 @@ public:
     void set_park() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("SetPark");
         OnStepProtocolWrapper::instance().set_park();
     }
 
@@ -1017,6 +1034,7 @@ public:
     void sync_to_coordinates(double ra, double dec) override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("SyncToCoordinates");
         check_not_parked_locked("SyncToCoordinates");
         validate_ra_dec(ra, dec, "SyncToCoordinates");
         auto& protocol = OnStepProtocolWrapper::instance();
@@ -1052,6 +1070,7 @@ public:
     void unpark() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("Unpark");
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         OnStepProtocolWrapper::instance().unpark();
         cached_status_.is_parked = false;
@@ -1080,10 +1099,13 @@ public:
             throw AlpacaException("MoveAxis rate exceeds supported range", AlpacaError::InvalidValue);
         }
 
-        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
-        auto& protocol = OnStepProtocolWrapper::instance();
         constexpr double kStopEpsilon = 1e-6;
         const bool moving = std::abs(rate) > kStopEpsilon;
+        if (moving) {
+            refuse_while_faulted_locked("MoveAxis");  // before it ends a waiting Park or FindHome
+        }
+        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        auto& protocol = OnStepProtocolWrapper::instance();
 
         // Direction codes: 0=North(Dec+), 1=South(Dec-), 2=East(RA+), 3=West(RA-).
         const int positive_dir = (axis == 0) ? 2 : 0;
@@ -1117,11 +1139,12 @@ public:
         }
 
         manual_axis_slewing_[axis] = moving;
-        if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
-            clear_manual_motion_locked();
-            return;
-        }
         if (!moving) {
+            if (!manual_axis_slewing_[0] && !manual_axis_slewing_[1]) {
+                clear_manual_motion_locked();
+            }
+            // Sent, but a silent mount may not have heard it (#1414).
+            refuse_while_faulted_locked("MoveAxis stop");
             return;
         }
         // Always a fresh body, never "already running": a body that has just
@@ -1265,6 +1288,10 @@ public:
                 tracking_before_slew_ = false;  // status unknown: never restart blind
             }
         }
+        // The stops went out, but a silent mount may not have heard them
+        // (#1414). Checked after the tracking decision, so a faulted abort
+        // still gives up the restore instead of leaving it for a later slew end.
+        refuse_while_faulted_locked("AbortSlew");
     }
 
     // An Alt/Az slew is not equatorial, so it skips the Tracking check
@@ -1303,6 +1330,10 @@ public:
 
     void set_move_axis_resend_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
         move_axis_resend_.set_spawn_for_testing(std::move(spawn));
+    }
+
+    void set_park_home_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        park_home_.set_spawn_for_testing(std::move(spawn));
     }
 
 private:
@@ -1620,12 +1651,12 @@ private:
         auto& protocol = OnStepProtocolWrapper::instance();
         if (home) {
             protocol.find_home();
-            code = protocol.get_last_command_error().value_or(kCeNone);
+            code = last_command_error_locked(who).value_or(kCeNone);
         } else {
             if (protocol.park()) {
                 return true;
             }
-            code = protocol.get_last_command_error().value_or(-1);
+            code = last_command_error_locked(who).value_or(-1);
         }
         if (code == kCeNone || code == kCeTrue) {
             return true;  // for a park: the reply was lost or garbled, but the mount took it
@@ -1634,6 +1665,32 @@ private:
             throw park_or_home_refused(who, code);
         }
         return false;
+    }
+
+    // :GE# with no code is firmware without it, or a mount that stopped
+    // answering (#1414): a :GU# read tells them apart. A silent mount counts
+    // as a failed read toward the link fault, and the park or home fails
+    // instead of reading as accepted.
+    std::optional<int> last_command_error_locked(const char* who) {
+        auto& protocol = OnStepProtocolWrapper::instance();
+        if (const auto code = protocol.get_last_command_error()) {
+            return code;
+        }
+        try {
+            cached_status_ = protocol.get_status();
+            status_cache_valid_ = true;
+            last_status_update_ = clock_.now();
+            note_read_ok_locked();
+        } catch (const std::exception& ex) {
+            note_read_failure_locked(ex);  // throws once the fault latched or the link went
+            if (const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+                alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected) {
+                throw;  // the link is gone: NotConnected, as for any other call
+            }
+            throw AlpacaException(std::string(who) + ": the mount did not answer after the command (" + ex.what() + ")",
+                                  AlpacaError::DriverException);
+        }
+        return std::nullopt;
     }
 
     static AlpacaException park_or_home_refused(const char* who, int code) {
@@ -1659,8 +1716,15 @@ private:
     // retry. Waits on the task clock with mutex_ released (decision 0005).
     void run_park_or_home(util::OperationContext& ctx) {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (!park_home_request_) {
-            return;  // superseded, or carried out by an earlier body
+        // A body stopped before it runs takes no request: a newer Park or
+        // FindHome may have stored its own after cancelling this body and
+        // before its start() marked this one superseded, and this body must
+        // not end that request (#1430). Leaving it is safe because every way
+        // this slot is cancelled also clears or replaces the request
+        // (supersede_park_or_home_locked(), a newer start): keep it so, or a
+        // request no body runs leaves Slewing true.
+        if (!park_home_request_ || ctx.stop_reason() != util::StopReason::None) {
+            return;  // superseded or cancelled, or carried out by an earlier body
         }
         const ParkHomeRequest request = *park_home_request_;
         run_park_or_home_locked(lock, ctx, request.who, request.home, request.stopped, request.code, request.claim);
@@ -1745,6 +1809,8 @@ private:
     // The per-session state a disconnect or a lost link leaves behind.
     void reset_session_state_locked() {
         supersede_park_or_home_locked();
+        link_health_.reset();
+        set_link_fault_text("");
         refraction_from_firmware_.reset();
         {
             std::lock_guard<std::mutex> fwlock(firmware_mutex_);
@@ -1841,6 +1907,7 @@ private:
 
     void start_slew_locked(double ra, double dec, const char* context) {
         validate_ra_dec(ra, dec, context);
+        refuse_while_faulted_locked(context);
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         protocol.set_target_ra(ra);
@@ -1866,6 +1933,11 @@ private:
             // Slewing follows the mount once it has shown the move (#1378).
             try {
                 refresh_status_cache_locked(false);
+            } catch (const AlpacaException& ex) {
+                if (link_health_.faulted() || ex.error_code() == AlpacaError::NotConnected) {
+                    throw;  // a latched fault or a lost link is reported, as by every read (#1414)
+                }
+                return true;  // keep reporting the move; one read error is not a stop
             } catch (...) {
                 return true;  // keep reporting the move; the read error is not a stop
             }
@@ -1951,9 +2023,85 @@ private:
         }
     }
 
+    // open-astro#1414, decision 0009: a mount that stops answering while its
+    // adapter stays plugged in (mount unpowered, cable pulled at the mount)
+    // was served from the caches for ever, each read waiting out the
+    // response timeout. kLinkFaultThreshold failed reads in a row latch a
+    // fault: Connected stays true, and reads throw DriverException with the
+    // fault instead of serving the cache. A fault that has stood for
+    // util::kLinkStalenessBound is a lost link: the wrapper records it and
+    // closes the port as for a pulled adapter (#1241), so Connected reads
+    // false and calls throw NotConnected. Only the client's Connect relinks.
+    // While faulted no cache is served: every refresh skips its TTL and asks
+    // the mount, so a read either clears the fault or throws; on a polled
+    // link those reads are the only thing that can clear it. Time is the task
+    // clock.
+    void note_read_ok_locked() const {
+        if (link_health_.on_reply()) {
+            ALPACA_LOG_INFO("OnStep", "Mount answering again; link fault cleared");
+            set_link_fault_text("");
+        }
+    }
+
+    void note_read_failure_locked(const std::exception& ex) const {
+        if (const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+            alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected) {
+            return;  // the link is already gone (#1241); not a silent mount
+        }
+        const auto now = clock_.now();
+        if (const auto latched = link_health_.note_failure(ex.what(), kLinkFaultThreshold, now)) {
+            ALPACA_LOG_ERROR("OnStep", "Mount not answering; link fault latched: " + *latched);
+            set_link_fault_text(*latched);
+        } else if (!link_health_.faulted()) {
+            ALPACA_LOG_WARN("OnStep", "Mount read failed (" + std::to_string(link_health_.consecutive_failures()) +
+                                          " in a row): " + ex.what());
+        }
+        lose_link_if_stale_locked(now);
+        if (link_health_.faulted()) {
+            throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
+                                  AlpacaError::DriverException);
+        }
+    }
+
+    // A fault that has stood past util::kLinkStalenessBound is a lost link:
+    // the wrapper closes the port and this throws NotConnected.
+    void lose_link_if_stale_locked(std::chrono::steady_clock::time_point now) const {
+        if (!link_health_.fault_stale(now, util::kLinkStalenessBound)) {
+            return;
+        }
+        const std::string reason =
+            "no reply for " +
+            std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
+            " s: " + link_health_.fault();
+        OnStepProtocolWrapper::instance().declare_link_lost(reason);  // Connected now reads false
+        throw AlpacaException("OnStep link lost (" + reason + "); set Connected true to reconnect",
+                              AlpacaError::NotConnected);
+    }
+
+    // Decision 0009 rule 1: while the fault is latched, writes throw as reads
+    // do. Blind commands cannot fail on a healthy fd, so without this a
+    // Tracking, Unpark or a slew would report success to a mount that is
+    // not listening. AbortSlew and MoveAxis(axis, 0) send their stops first
+    // and call this after, so the stop is still tried (#1414).
+    void refuse_while_faulted_locked(const char* what) const {
+        if (link_health_.faulted()) {
+            // A client that only writes still sees the link lost once the
+            // fault has stood past the bound, as a read would (#1414).
+            lose_link_if_stale_locked(clock_.now());
+            throw AlpacaException(
+                std::string(what) + ": OnStep mount communications compromised: " + link_health_.fault(),
+                AlpacaError::DriverException);
+        }
+    }
+
+    void set_link_fault_text(const std::string& text) const {
+        std::lock_guard<std::mutex> fault_lock(link_fault_mutex_);
+        link_fault_text_ = text;
+    }
+
     void refresh_status_cache_locked(bool force) const {
         auto now = clock_.now();
-        if (!force && status_cache_valid_ && (now - last_status_update_) < kStatusCacheTtl) {
+        if (!force && status_cache_valid_ && !link_health_.faulted() && (now - last_status_update_) < kStatusCacheTtl) {
             return;
         }
         try {
@@ -1961,7 +2109,9 @@ private:
             status_cache_valid_ = true;
             status_read_since_move_ = true;
             last_status_update_ = now;
-        } catch (...) {
+            note_read_ok_locked();
+        } catch (const std::exception& ex) {
+            note_read_failure_locked(ex);
             if (!status_cache_valid_) {
                 throw;
             }
@@ -1970,7 +2120,7 @@ private:
 
     void refresh_equatorial_cache_locked() const {
         auto now = clock_.now();
-        if (equatorial_cache_valid_ && (now - last_equatorial_update_) < kPositionCacheTtl) {
+        if (equatorial_cache_valid_ && !link_health_.faulted() && (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
         try {
@@ -1979,7 +2129,9 @@ private:
             cached_dec_degrees_ = pos.dec_degrees;
             equatorial_cache_valid_ = true;
             last_equatorial_update_ = now;
-        } catch (...) {
+            note_read_ok_locked();
+        } catch (const std::exception& ex) {
+            note_read_failure_locked(ex);
             if (!equatorial_cache_valid_) {
                 throw;
             }
@@ -1988,7 +2140,7 @@ private:
 
     void refresh_altaz_cache_locked() const {
         auto now = clock_.now();
-        if (altaz_cache_valid_ && (now - last_altaz_update_) < kPositionCacheTtl) {
+        if (altaz_cache_valid_ && !link_health_.faulted() && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
         try {
@@ -1997,7 +2149,9 @@ private:
             cached_az_degrees_ = altaz.azimuth_degrees;
             altaz_cache_valid_ = true;
             last_altaz_update_ = now;
-        } catch (...) {
+            note_read_ok_locked();
+        } catch (const std::exception& ex) {
+            note_read_failure_locked(ex);
             if (!altaz_cache_valid_) {
                 throw;
             }
@@ -2173,6 +2327,12 @@ private:
     mutable bool pulse_guiding_active_ = false;
     mutable std::chrono::steady_clock::time_point pulse_guide_end_time_;
 
+    // Decision 0009 fault latch for a silent mount (#1414). Under mutex_.
+    mutable util::PolledLinkHealth link_health_;
+    // Its text for get_link_fault(), which takes no mutex_: own narrow mutex.
+    mutable std::mutex link_fault_mutex_;
+    mutable std::string link_fault_text_;
+
     // Web-UI firmware copy, guarded by its own narrow mutex (not mutex_) so
     // the get_device_firmware() poll never blocks on the coarse connect lock.
     mutable std::mutex firmware_mutex_;
@@ -2279,6 +2439,12 @@ void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
                                             std::function<std::thread(std::function<void()>)> spawn) {
     if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
         onstep->set_move_axis_resend_spawn_for_testing(std::move(spawn));
+    }
+}
+
+void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {
+    if (auto* onstep = dynamic_cast<OnStepTelescopeDriver*>(&driver)) {
+        onstep->set_park_home_spawn_for_testing(std::move(spawn));
     }
 }
 

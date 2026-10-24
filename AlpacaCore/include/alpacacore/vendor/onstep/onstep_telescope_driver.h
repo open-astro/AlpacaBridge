@@ -67,6 +67,12 @@ void set_park_home_before_start_for_testing(TelescopeDriver& driver, std::functi
 void set_move_axis_resend_spawn_for_testing(TelescopeDriver& driver,
                                             std::function<std::thread(std::function<void()>)> spawn);
 
+/// Test seam: replaces the thread factory of the driver's Park/FindHome
+/// slot, so a case can hold a body's thread before it runs (#1430). Call only
+/// while no start is in flight. `driver` must come from the factories above;
+/// anything else is ignored.
+void set_park_home_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn);
+
 namespace detail {
 // open-astro#521 / #1241: how long the serial link may be gone before motion
 // that outlived the outage is stopped at relink rather than left running

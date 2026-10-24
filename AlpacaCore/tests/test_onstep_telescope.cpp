@@ -2158,6 +2158,68 @@ TEST_CASE("OnStep Telescope Driver - a FindHome started before an older Park's b
     driver->set_connected(false);
 }
 
+// #1430: a Park body whose thread starts late, after a newer FindHome
+// cancelled it and stored its own request but before that FindHome's start()
+// marked it superseded, must leave that request alone. It read the request,
+// saw itself stopped and cleared it as done, so FindHome reported success
+// and nothing homed (about 1 run in 100 of "a newer command ends a Park
+// still finishing"). The spawn seam holds the Park's thread until the gap.
+TEST_CASE("OnStep Telescope Driver - a Park body that starts late leaves a newer FindHome to run",
+          "[onstep][telescope][unit]") {
+    std::mutex gate_mutex;
+    std::condition_variable gate_cv;
+    bool released = false;
+    bool park_body_returned = false;
+    std::atomic<int> spawns{0};
+    auto mount = std::make_shared<ParkHomeFake>();
+    mount->brake_ms = 3000;
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    auto driver = connect_park_home_fake(server, *mount);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    start_move(*driver, *mount, 0, 1.0);
+    alpacacore::vendor::onstep::set_park_home_spawn_for_testing(
+        *driver, [&](std::function<void()> body) -> std::thread {
+            if (spawns.fetch_add(1) != 0) {
+                return std::thread(std::move(body));
+            }
+            return std::thread([&, body = std::move(body)] {  // the Park's body: held until released
+                {
+                    std::unique_lock<std::mutex> lock(gate_mutex);
+                    // Bounded, so a case that fails before the release ends.
+                    gate_cv.wait_for(lock, std::chrono::seconds(10), [&] { return released; });
+                }
+                body();
+                {
+                    std::lock_guard<std::mutex> lock(gate_mutex);
+                    park_body_returned = true;
+                }
+                gate_cv.notify_all();
+            });
+        });
+
+    REQUIRE_NOTHROW(driver->park());  // its body is held
+    // In FindHome's gap (its request stored, its start() not yet called):
+    // let the held Park body run to its end.
+    alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, [&] {
+        std::unique_lock<std::mutex> lock(gate_mutex);
+        released = true;
+        gate_cv.notify_all();
+        gate_cv.wait_for(lock, std::chrono::seconds(5), [&] { return park_body_returned; });
+    });
+    const auto waits_before = mount->clock.wait_count();
+    REQUIRE_NOTHROW(driver->find_home());
+    alpacacore::vendor::onstep::set_park_home_before_start_for_testing(*driver, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(gate_mutex);
+        REQUIRE(park_body_returned);
+    }
+    settle(*mount, *driver, waits_before);
+    CHECK(mount->count(":hC#") == 1);  // the FindHome still runs
+    CHECK(mount->count(":hP#") == 0);
+    driver->set_connected(false);
+}
+
 TEST_CASE("OnStep Telescope Driver - an AbortSlew between Park's in-motion retries ends it",
           "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ParkHomeFake>();
