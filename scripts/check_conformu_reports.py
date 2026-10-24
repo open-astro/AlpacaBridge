@@ -27,13 +27,16 @@ use different success wording -- SUCCESS_PATTERNS below covers both observed
 phrasings; if ConformU ever changes its wording again, add the new phrase
 here rather than looping this check.
 
-Pass criteria (identical to `/submit-pr`):
+Pass criteria (the first two bullets match `/submit-pr`; the Fake* rule is checked here only):
   - JSON reports (*.json): ErrorCount, IssueCount and TimingIssuesCount must
     all be zero.
   - Text logs (*.txt): must NOT contain a line matching
     "OUTSIDE (FAST|STANDARD|EXTENDED) RESPONSE TIME TARGET" or
     "took longer than its target response time", AND MUST contain one of the
     SUCCESS_PATTERNS strings.
+  - A report under a path part starting "Fake" (a run against a test double, never
+    hardware validation) must be a .txt file whose first line starts with FAKE_MARKER.
+    This rule is not in `/submit-pr`; this script is its only description.
 """
 
 import json

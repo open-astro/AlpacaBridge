@@ -58,7 +58,7 @@ status=0
 report="$out_dir/Fake-Linux-arm64.txt"
 {
   echo "FAKE REPORT: ConformU against FakeSkyWatcherMount (simulated mount over loopback UDP), not hardware. Not hardware validation."
-  cat "$raw"
+  [ -f "$raw" ] && cat "$raw"
 } >"$report"
 
 if [ "$status" -ne 0 ]; then

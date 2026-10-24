@@ -513,23 +513,19 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
 // 2 s position cache TTL of motion) until the next status poll, 100 ms later, re-anchored it.
 TEST_CASE("SkyWatcher async - Declination read right after a Dec pulse already holds the pulse's full motion",
           "[skywatcher][async][pulseguide]") {
-    FakeSkyWatcherMount mount;
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto driver = sw::create_skywatcher_telescope(0, endpoint(mount), -33.856784, 151.215297, 42.0);
-    driver->set_connected(true);
+    auto driver = connected_driver(mount, clock, -33.856784, 151.215297, 42.0);
     driver->set_tracking(true);
     mount.jump_axis_degrees(2, 45.0);
-    std::this_thread::sleep_for(std::chrono::milliseconds(1200));  // let a poll anchor the model
+    elapse(clock, std::chrono::milliseconds(1200));  // virtual time for a poll to anchor the model
 
     driver->pulse_guide(0, 3000);  // North at the 0.5x default rate, about 22 arcsec
-    // Spin: the stale window lasts only until the next status poll (100 ms).
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (driver->get_is_pulse_guiding() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    REQUIRE_FALSE(driver->get_is_pulse_guiding());
+    // The stale window lasts only until the next status poll (100 ms of virtual time).
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::seconds(10)));
     const double just_after = driver->get_declination();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));  // a poll re-anchors on the board
+    elapse(clock, std::chrono::milliseconds(500));  // a poll re-anchors on the board
     const double settled = driver->get_declination();
     CHECK(std::abs(settled - just_after) * 3600.0 < 1.0);
     driver->set_connected(false);
