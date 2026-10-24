@@ -119,6 +119,16 @@ public:
     /// way a late answer to a timed-out command lands.
     void push_unsolicited(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
 
+    /// A USB unplug: the reader stops and both pty ends close, so the driver's reads fail with EIO from here on.
+    /// Not reversible.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        pty_.sever();
+    }
+
 private:
     void run() {
         std::string pending;
