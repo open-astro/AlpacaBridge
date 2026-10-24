@@ -49,7 +49,9 @@ public:
         add("Azimuth", [this] { return get_azimuth(); });
         add("ShutterStatus", [this] { return get_shutter_status(); });
         add("Slewing", [this] { return get_slewing(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

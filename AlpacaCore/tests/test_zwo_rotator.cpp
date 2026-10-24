@@ -427,7 +427,7 @@ TEST_CASE("ZWO CAA Rotator Driver - A dead link refuses reads instead of serving
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
     CHECK(driver->get_connected() == true);
-    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+    CHECK(driver->get_device_state().empty());
 
     // Reverse is a writable setting held in memory: it refuses too while latched.
     try {

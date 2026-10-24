@@ -6065,9 +6065,14 @@ int main() {
         auto& registry = alpacacore::management::DeviceRegistry::instance();
         auto scope = std::make_shared<TelescopeClockStubDriver>(9802);
         EXPECT(registry.register_device(scope));
-        scope->set_connected(true);
         alpacahttp::Router clock_router;
         const std::string base = "/api/v1/telescope/9802";
+        const auto empty_response = route_request(clock_router, "GET", base + "/devicestate");
+        EXPECT(empty_response.status_code() == 200);
+        const auto empty_state = nlohmann::json::parse(empty_response.body());
+        EXPECT(empty_state.at("ErrorNumber") == 0);
+        EXPECT(empty_state.at("Value") == nlohmann::json::array());
+        scope->set_connected(true);
         for (const auto ms : {0, 123, 999}) {
             const std::string fraction = ms == 0 ? "000" : ms == 123 ? "123" : "999";
             scope->set_utc_date(std::chrono::system_clock::from_time_t(978307200) + std::chrono::milliseconds{ms});
