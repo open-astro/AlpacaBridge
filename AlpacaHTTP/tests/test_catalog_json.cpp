@@ -18,7 +18,7 @@
 //   1. config_from_json converts only declared keys; undeclared keys drop.
 //   2. A JSON null or an absent key produces no entry, inside records too (#388).
 //   3. A value of the wrong JSON kind throws AlpacaException(InvalidValue) whose
-//      message names the field the way config_get() does; a nested field is
+//      message names the field the way catalog_json::get_string() does; a nested field is
 //      named with its index, "ports[1].name". The check is on the JSON kind,
 //      not on nlohmann's get<>(): a bool converts to int64 there, so `true` in
 //      an int field must still be refused.
@@ -126,7 +126,7 @@ int main() {
     }
 
     // 3a. A whole-valued JSON float in an int field (e.g. 1.0) is accepted and
-    // stored as the integer, as config_get<int>() accepted it; a fractional
+    // stored as the integer, as catalog_json::get_int() accepts it; a fractional
     // float gets the whole-number text (the case below), an out-of-int64-range
     // float is still the wrong type.
     {
@@ -309,6 +309,38 @@ int main() {
         catalog.add(big);
         const nlohmann::json described = cj::describe_json(catalog);
         EXPECT(field_named(described[0], "big").at("range").dump() == R"({"max":9223372036854775807,"min":0})");
+    }
+
+    // 7. The raw reads of vendor / deviceType / deviceNumber, before a descriptor
+    // exists: null and absent read as absent, a wrong kind or a number that
+    // is not a whole int is refused with the field named.
+    {
+        // case: raw device config reads treat null as absent and refuse a wrong kind or a non-whole int
+        const auto message_of = [](auto&& read) {
+            try {
+                read();
+            } catch (const AlpacaException& e) {
+                EXPECT(e.error_code() == AlpacaError::InvalidValue);
+                return std::string(e.what());
+            }
+            return std::string();
+        };
+        const nlohmann::json absent = {{"vendor", nullptr}};
+        EXPECT(!cj::has_value(absent, "vendor") && !cj::has_value(absent, "deviceType"));
+        EXPECT(cj::get_string(absent, "vendor").empty() && cj::get_int(absent, "deviceNumber", -1) == -1);
+        EXPECT(cj::get_string({{"vendor", "zzz"}}, "vendor") == "zzz");
+        EXPECT(cj::get_int({{"deviceNumber", 3.0}}, "deviceNumber", -1) == 3);
+        EXPECT(message_of([] { (void)cj::get_string({{"vendor", 7}}, "vendor"); }) ==
+               "Device config field 'vendor' has the wrong type (got number)");
+        EXPECT(message_of([] { (void)cj::get_int({{"deviceNumber", "3"}}, "deviceNumber", -1); }) ==
+               "Device config field 'deviceNumber' has the wrong type (got string)");
+        EXPECT(message_of([] { (void)cj::get_int({{"deviceNumber", true}}, "deviceNumber", -1); }) ==
+               "Device config field 'deviceNumber' has the wrong type (got boolean)");
+        for (const char* bad : {"4294967299", "3.5"}) {
+            EXPECT(message_of([bad] {
+                       (void)cj::get_int({{"deviceNumber", nlohmann::json::parse(bad)}}, "deviceNumber", -1);
+                   }) == "Device config field 'deviceNumber' must be a whole number inside int");
+        }
     }
 
     std::cout << "All catalog JSON bridge tests passed!\n";
