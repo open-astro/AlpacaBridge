@@ -1041,11 +1041,9 @@ int main() {
         EXPECT(count_logged("moveaxis body: Axis=0&Rate=0\\x0aHTTP GET /forged") == 1);
         EXPECT(count_logged("HTTP GET /forged") == 0);
 
-        for (const std::string method : {"imagearray", "imagearrayvariant"}) {
-            send_raw("GET /api/v1/camera/" + std::to_string(kStubNumber) + "/" + method +
-                     " HTTP/1.1\r\nHost: localhost\r\nAccept: x\x1b[2Jy\r\n\r\n");
-            EXPECT(count_logged("Camera " + method + " Accept: x\\x1b[2Jy, imagebytes=false") == 1);
-        }
+        send_raw("GET /api/v1/camera/" + std::to_string(kStubNumber) +
+                 "/imagearray HTTP/1.1\r\nHost: localhost\r\nAccept: x\x1b[2Jy\r\n\r\n");
+        EXPECT(count_logged("Camera imagearray Accept: x\\x1b[2Jy, imagebytes=false") == 1);
         EXPECT(!raw_byte_logged('\x1b'));
 
         // A validation message that quotes a decoded client value (the UTCDate
@@ -1136,16 +1134,58 @@ int main() {
             return level;
         };
 
-        for (const std::string method : {"imagearray", "imagearrayvariant"}) {
-            camera->set_image_array_error(alpacacore::AlpacaException::asked_too_early("Image not ready"));
-            EXPECT(read_image(method, "Image not ready") == alpacacore::logging::LogLevel::Debug);
+        camera->set_image_array_error(alpacacore::AlpacaException::asked_too_early("Image not ready"));
+        EXPECT(read_image("imagearray", "Image not ready") == alpacacore::logging::LogLevel::Debug);
 
-            camera->set_image_array_error(alpacacore::AlpacaException("Exposure stopped during image retrieval",
-                                                                      alpacacore::AlpacaError::InvalidOperation));
-            EXPECT(read_image(method, "Exposure stopped during image retrieval") ==
-                   alpacacore::logging::LogLevel::Error);
-        }
+        camera->set_image_array_error(alpacacore::AlpacaException("Exposure stopped during image retrieval",
+                                                                  alpacacore::AlpacaError::InvalidOperation));
+        EXPECT(read_image("imagearray", "Exposure stopped during image retrieval") ==
+               alpacacore::logging::LogLevel::Error);
         camera->set_image_array_error(std::nullopt);
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: ImageArrayVariant returns the Alpaca unsupported-property error without reading an image (#906)
+        constexpr int kCameraNumber = 8983;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        EXPECT(registry.register_device(camera));
+
+        for (bool connected : {false, true}) {
+            camera->set_connected(connected);
+            for (bool image_available : {false, true}) {
+                camera->set_image_array({{1, 2, 3, 4}, 2, 2, 2});
+                camera->set_image_array_error(
+                    image_available ? std::nullopt
+                                    : std::optional{alpacacore::AlpacaException::asked_too_early("Image not ready")});
+                for (const std::string accept : {"", "application/json", "application/imagebytes"}) {
+                    alpacahttp::Request request;
+                    std::string raw = "GET /api/v1/camera/" + std::to_string(kCameraNumber) +
+                                      "/imagearrayvariant?ClientTransactionID=906 HTTP/1.1\r\nHost: localhost\r\n";
+                    if (!accept.empty()) {
+                        raw += "Accept: " + accept + "\r\n";
+                    }
+                    raw += "\r\n";
+                    EXPECT(request.parse(raw));
+                    const auto response = router.route(request, 904);
+                    EXPECT(response.status_code() == 200);
+                    EXPECT(response.get_header("Content-Type") == "application/json");
+                    EXPECT(response.get_header("Content-Length") == std::to_string(response.body().size()));
+                    const auto body = nlohmann::json::parse(response.body());
+                    EXPECT(body.at("ErrorNumber") == (connected ? alpacacore::AlpacaError::PropertyNotImplemented
+                                                                : alpacacore::AlpacaError::NotConnected));
+                    EXPECT(body.at("ClientTransactionID") == 906);
+                    EXPECT(body.at("ServerTransactionID") == 904);
+                    EXPECT(!body.value("ErrorMessage", "").empty());
+                    if (connected) {
+                        EXPECT(body.value("ErrorMessage", "").find("use ImageArray") != std::string::npos);
+                    }
+                    EXPECT(!body.contains("Value"));
+                    EXPECT(camera->image_getter_calls == 0);
+                }
+            }
+        }
         registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
     }
 
