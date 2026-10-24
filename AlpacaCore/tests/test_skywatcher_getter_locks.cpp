@@ -394,8 +394,8 @@ TEST_CASE("SkyWatcher getters - the connect's stop-confirm wait holds up no stat
     alpacacore::test::FakeTaskClock clock;
     FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
     REQUIRE(mount.ok());
-    auto first = sw::create_skywatcher_telescope(0, endpoint(mount), kSiteLatitude, kSiteLongitude, kSiteElevation,
-                                                 {}, {}, clock);
+    auto first = sw::create_skywatcher_telescope(0, endpoint(mount), kSiteLatitude, kSiteLongitude, kSiteElevation, {},
+                                                 {}, clock);
     first->set_connected(true);
     first->set_tracking(true);
     for (int i = 0; i < 300 && !mount.axis_running(1); ++i) {
