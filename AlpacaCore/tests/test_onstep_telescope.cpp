@@ -3173,23 +3173,40 @@ TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason",
         int code;
         const char* reason;
     };
-    for (const Case& c : {Case{"1", alpacacore::AlpacaError::InvalidOperation, "below the horizon limit"},
-                          Case{"2", alpacacore::AlpacaError::InvalidOperation, "above the overhead limit"},
-                          Case{"3", alpacacore::AlpacaError::InvalidOperation, "in standby"},
-                          Case{"4", alpacacore::AlpacaError::InvalidWhileParked, "the mount is parked"},
-                          Case{"5", alpacacore::AlpacaError::InvalidOperation, "the mount stopped it"},
-                          Case{"6", alpacacore::AlpacaError::InvalidOperation, "outside the limits"},
-                          Case{"7", alpacacore::AlpacaError::InvalidOperation, "a hardware fault"},
-                          Case{"8", alpacacore::AlpacaError::InvalidOperation, "already moving"},
-                          Case{"9", alpacacore::AlpacaError::InvalidOperation, "an unspecified error"}}) {
-        mount->set_ms_reply(c.reply);
-        const auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
-        INFO("reply " << c.reply << ": " << error.second);
-        CHECK(error.first == c.code);
-        CHECK(error.second.rfind("SlewToCoordinatesAsync: the mount refused the GOTO: ", 0) == 0);
-        CHECK(error.second.find(c.reason) != std::string::npos);
-        CHECK(error.second.find(std::string("reply '") + c.reply + "'") != std::string::npos);
-        CHECK_FALSE(driver->get_slewing());  // a refused GOTO is not a slew
+    SECTION("each OnStepX refusal digit") {
+        for (const Case& c : {Case{"1", alpacacore::AlpacaError::InvalidOperation, "below the horizon limit"},
+                              Case{"2", alpacacore::AlpacaError::InvalidOperation, "above the overhead limit"},
+                              Case{"3", alpacacore::AlpacaError::InvalidOperation, "in standby"},
+                              Case{"4", alpacacore::AlpacaError::InvalidWhileParked, "the mount is parked"},
+                              Case{"5", alpacacore::AlpacaError::InvalidOperation, "the mount stopped it"},
+                              Case{"6", alpacacore::AlpacaError::InvalidOperation, "outside the limits"},
+                              Case{"7", alpacacore::AlpacaError::InvalidOperation, "a hardware fault"},
+                              Case{"8", alpacacore::AlpacaError::InvalidOperation, "already moving"},
+                              Case{"9", alpacacore::AlpacaError::InvalidOperation, "an unspecified error"}}) {
+            mount->set_ms_reply(c.reply);
+            const auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
+            INFO("reply " << c.reply << ": " << error.second);
+            CHECK(error.first == c.code);
+            CHECK(error.second.rfind("SlewToCoordinatesAsync: the mount refused the GOTO: ", 0) == 0);
+            CHECK(error.second.find(c.reason) != std::string::npos);
+            CHECK(error.second.find(std::string("reply '") + c.reply + "'") != std::string::npos);
+            CHECK_FALSE(driver->get_slewing());  // a refused GOTO is not a slew
+        }
+    }
+
+    SECTION("an LX200 text reply keeps its text, an unknown digit says so") {
+        mount->set_ms_reply("1Object below horizon");  // classic LX200: digit then text
+        auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
+        INFO(error.second);
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second.find("below the horizon limit") != std::string::npos);
+        CHECK(error.second.find("reply '1Object below horizon'") != std::string::npos);
+        mount->set_ms_reply("X");
+        error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
+        INFO(error.second);
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second.find("an unknown reason") != std::string::npos);
+        CHECK(error.second.find("reply 'X'") != std::string::npos);
     }
 
     driver->set_connected(false);
