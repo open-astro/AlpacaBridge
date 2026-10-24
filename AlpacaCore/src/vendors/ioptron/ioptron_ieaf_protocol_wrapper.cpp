@@ -29,6 +29,7 @@
 #ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
@@ -40,8 +41,6 @@ namespace {
 
 constexpr int COMMAND_DELAY_MS =
     5;  // read_response() waits for the # terminator; no need to pre-sleep a full reply time
-constexpr int READ_CHAR_DELAY_MS = 10;
-constexpr int ACK_TIMEOUT_MS = 300;
 constexpr int MAX_RESPONSE_LEN = 32;
 constexpr int HANDSHAKE_RETRIES = 3;
 constexpr int HANDSHAKE_READ_TIMEOUT_S = 2;        // Shorter than the 4s runtime timeout (INDI iEAFFOCUS_TIMEOUT)
@@ -420,41 +419,27 @@ private:
 
     std::string read_response() {
         std::string response;
-        response.reserve(MAX_RESPONSE_LEN);
-
-        int timeout_ms = config_.serial_timeout_s * 1000;
-        auto start = std::chrono::steady_clock::now();
-
-        while (true) {
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > timeout_ms) {
-                throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
-            }
-
-            char ch = 0;
-            bool got_char = false;
 #ifndef _WIN32
-            ssize_t r = util::tty_read(link_.fd(), &ch, 1, READ_CHAR_TIMEOUT_MS);
-            if (r == 1) {
-                got_char = true;
-            }
-#endif
-            if (got_char) {
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-                response += ch;
-                if (ch == '#') {
-                    break;
-                }
-                if (response.length() >= MAX_RESPONSE_LEN) {
-                    throw AlpacaException("iEAF response too long", AlpacaError::DriverException);
-                }
-            } else {
-                std::this_thread::sleep_for(std::chrono::milliseconds(READ_CHAR_DELAY_MS));
-            }
+        util::ReadSpec spec;
+        spec.max_len = MAX_RESPONSE_LEN;
+        const auto r = util::read_until(
+            link_.fd(), spec,
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(config_.serial_timeout_s * 1000));
+        switch (r.outcome) {
+            case util::ReadOutcome::Terminator:
+                response = r.bytes;
+                break;
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("iEAF response too long", AlpacaError::DriverException);
+            case util::ReadOutcome::LinkDead:
+                throw AlpacaException("iEAF serial link lost (errno " + std::to_string(r.err) + ")",
+                                      AlpacaError::DriverException);
+            default:
+                throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
         }
+#else
+        throw AlpacaException("iEAF read timeout", AlpacaError::DriverException);
+#endif
 
         ALPACA_LOG_TRACE("iOptron", "iEAF response: " + response);
         return response;
@@ -476,33 +461,25 @@ private:
     // here: leaving it in the input buffer races the tcflush at the start
     // of the next :FI# — when it lands after the flush it prefixes the reply
     // ("1+013211...") and breaks the fixed-width parse. The ack is optional:
-    // a firmware that stays silent just costs us ACK_TIMEOUT_MS.
+    // a firmware that stays silent just costs us READ_CHAR_TIMEOUT_MS.
     void send_command_blind_locked(const std::string& cmd) {
         ALPACA_LOG_TRACE("iOptron", "iEAF command (blind): " + cmd);
         tcflush_port();
         write_data(cmd);
-        auto start = std::chrono::steady_clock::now();
-        while (true) {
-            char ch = 0;
 #ifndef _WIN32
-            if (util::tty_read(link_.fd(), &ch, 1, READ_CHAR_TIMEOUT_MS) == 1) {
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-                if (ch != '1') {
-                    ALPACA_LOG_WARN("iOptron", std::string("iEAF unexpected ack byte: ") + ch);
-                }
-                return;
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        const auto r = util::read_until(
+            link_.fd(), spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(READ_CHAR_TIMEOUT_MS));
+        if (r.outcome == util::ReadOutcome::Length) {
+            if (r.bytes != "1") {
+                ALPACA_LOG_WARN("iOptron", std::string("iEAF unexpected ack byte: ") + r.bytes);
             }
-#endif
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > ACK_TIMEOUT_MS) {
-                ALPACA_LOG_DEBUG("iOptron", "iEAF no ack for " + cmd);
-                return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(READ_CHAR_DELAY_MS));
+            return;
         }
+#endif
+        ALPACA_LOG_DEBUG("iOptron", "iEAF no ack for " + cmd);
     }
 
     mutable std::mutex mutex_;
