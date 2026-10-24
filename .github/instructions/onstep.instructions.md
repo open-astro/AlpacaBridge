@@ -355,10 +355,9 @@ it is never reachable through `router.cpp` or the web UI.
   anything while `:GU#` shows a GOTO, the driver's own within the 2 s slew grace included
   (`refuse_while_goto_running_locked()`). That covers a park or home already moving and a handset GOTO
   too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace, so a slew right
-  after it goes out. A `:MS#` the mount refuses reports its reply digit and reason (OnStepX
-  `Goto.command.cpp`: 1 below the horizon limit, 2 above the overhead limit, 3 standby, 4 parked
-  (`InvalidWhileParked`), 5 a GOTO was running and the mount stopped it, 6 outside limits, 7 hardware
-  fault, 8 already in motion, 9 unspecified), not "below horizon or limit" for every refusal.
+  after it goes out. A `:MS#` the mount refuses reports its reply digit and reason (the digits are
+  listed under "Commands this driver sends"; 4 parked is `InvalidWhileParked`), not "below horizon
+  or limit" for every refusal.
 - **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
   used to send their command blind or ignore the reply, so a mount that refused them read as
   success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`
@@ -411,7 +410,10 @@ it is never reachable through `router.cpp` or the web UI.
     met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
     `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
-    sending anything (the shared rule "A failed async operation body keeps its error"). A
+    sending anything (the shared rule "A failed async operation body keeps its error"). A GOTO
+    does so only when it is sent: a slew is refused while `:GU#` shows a GOTO (#1379), which covers
+    the braking after the stops of a GOTO the park interrupted and the park itself once it moves,
+    so such a slew leaves the task and its kept refusal as they were. A
     `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
     (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
     still ends it, and `Slewing` reads true from the call until the task ends. The task runs the

@@ -1052,10 +1052,10 @@ public:
     // mount (Goto.cpp validate(): CE_SLEW_IN_SLEW) and used to read as success, as
     // did every :CM# refusal; the driver refuses first and reads the reply.
     void sync_locked(double ra, double dec, const char* who) {
+        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
         check_connected();
         refuse_while_faulted_locked(who);
         check_not_parked_locked(who);
-        util::validate_ra_dec(ra, dec, who);
         refuse_while_goto_running_locked(who);
         auto& protocol = OnStepProtocolWrapper::instance();
         // Use the mount's own sync command — do NOT maintain a driver-level

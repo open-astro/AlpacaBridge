@@ -3161,7 +3161,7 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
 
 // AGENTS.md: InvalidValue precedes the connection check. The slews used to check
 // the connection (and the park state) before their coordinates.
-TEST_CASE("OnStep Telescope Driver - slews check their coordinates before the connection",
+TEST_CASE("OnStep Telescope Driver - slews and syncs check their coordinates before the connection",
           "[onstep][telescope][unit]") {
     auto driver = make_driver(0);  // never connected
     const double nan = std::numeric_limits<double>::quiet_NaN();
@@ -3173,6 +3173,8 @@ TEST_CASE("OnStep Telescope Driver - slews check their coordinates before the co
     require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 45.0); },
                          alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(24.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->sync_to_coordinates(12.0, 45.0); }, alpacacore::AlpacaError::NotConnected);
 }
 
 // #1379: every :MS# refusal used to read "below horizon or limit". The error now
