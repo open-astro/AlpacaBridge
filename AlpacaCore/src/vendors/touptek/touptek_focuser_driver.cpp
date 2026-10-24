@@ -291,17 +291,15 @@ public:
     }
 
 private:
-    // The connection flag and the limit are read in one state-lock hold: connect and disconnect change
-    // both under it, so a racing reconnect or disconnect never yields a connected flag with a stale limit
-    // (a zero limit would turn NotConnected into an out-of-range InvalidValue).
+    // The connection flag and the limit are read in one state-lock hold. Connect publishes the limit under
+    // the lock before it sets the flag; disconnect clears both under the lock. A disconnected reading throws
+    // NotConnected without a second read: a reconnect and disconnect between two reads would yield a zero
+    // limit, which turns NotConnected into an out-of-range InvalidValue.
     int connected_max_step() const {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (connected_.load()) {
-                return max_step_current_.load();
-            }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load()) {
+            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        ensure_connected();  // throws NotConnected
         return max_step_current_.load();
     }
 
