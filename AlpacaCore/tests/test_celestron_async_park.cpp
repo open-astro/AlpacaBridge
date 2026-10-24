@@ -85,6 +85,37 @@ struct FakeCelestronState {
     std::atomic<int> j_reads{0};
     std::atomic<Clock::rep> j_hold_entered{0};
     std::atomic<bool> reject_stop{false};
+    // Pier-read hold: pier_side != 0 makes the 'p' query answer that side ('W' or 'E'), held pier_hold_ms once when
+    // pier_hold_ms > 0. l_count and slew_done_count tell the HC status query from the per-axis one.
+    std::atomic<char> pier_side{0};
+    std::atomic<int> pier_hold_ms{0};
+    std::atomic<Clock::rep> pier_hold_entered{0};
+    std::atomic<int> l_count{0};
+    std::atomic<int> slew_done_count{0};
+    // Wire order and goto text: seq numbers every GOTO and the first cancel; goto_requests counts the GOTOs the handset
+    // received, answered or not; e_hold_ms > 0 holds the next position read once.
+    std::atomic<int> seq{0};
+    std::atomic<int> goto_last_seq{0};
+    std::atomic<int> cancel_first_seq{0};
+    std::atomic<int> goto_requests{0};
+    std::atomic<int> e_hold_ms{0};
+    std::mutex goto_text_m;
+    std::string last_goto_text;
+    void note_goto(const std::string& text) {
+        goto_requests.fetch_add(1);
+        std::lock_guard<std::mutex> lock(goto_text_m);
+        last_goto_text = text;
+    }
+    std::string goto_text() {
+        std::lock_guard<std::mutex> lock(goto_text_m);
+        return last_goto_text;
+    }
+    void hold_pier() {
+        const int hold = pier_hold_ms.exchange(0);
+        if (hold <= 0) return;
+        pier_hold_entered.store(Clock::now().time_since_epoch().count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+    }
     void hold_j() {
         j_reads.fetch_add(1);
         if (j_hold_ms.load() < 0) return;
@@ -127,11 +158,15 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'z':
             case 'Z':
                 st->position_reads.fetch_add(1);
+                if (const int hold = st->e_hold_ms.exchange(0); hold > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+                }
                 return "12AB0500,20000500#";  // parseable 16/24-bit position pair
             case 'r':
             case 'R':
             case 'b':
             case 'B':
+                st->note_goto(chunk);
                 if (st->silent_from_goto.load()) {
                     st->silent.store(true);
                     return "";
@@ -141,12 +176,24 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
+                st->goto_last_seq.store(st->seq.fetch_add(1) + 1);
                 return "#";
             case 'L':
+                st->l_count.fetch_add(1);
                 return st->goto_in_progress() ? "1#" : "0#";
+            case 'p':  // pier side
+                if (st->pier_side.load() != 0) {
+                    st->hold_pier();
+                    return std::string(1, st->pier_side.load()) + "#";
+                }
+                return "0#";
             case 'M':  // cancel goto
                 if (st->reject_stop.load()) return "";
                 st->hold_stop();
+                {
+                    int none = 0;
+                    st->cancel_first_seq.compare_exchange_strong(none, st->seq.fetch_add(1) + 1);
+                }
                 st->cancel_goto_count.fetch_add(1);
                 st->goto_seen.store(false);
                 return "#";
@@ -191,6 +238,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                     return "#";
                 }
                 if (op == 0x13) {  // MC_SLEW_DONE: 0x00 = still slewing, 0xFF = done
+                    st->slew_done_count.fetch_add(1);
                     return st->goto_in_progress() ? std::string("\x00#", 2) : std::string("\xFF#");
                 }
                 return std::string("\xFF#");
@@ -979,8 +1027,19 @@ TEST_CASE("Celestron initiator supersede - AbortSlew during a held Park GOTO lea
     auto held = std::make_shared<HeldBody>();
     CHECK(second_initiator_with_held_body([](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }, rig, held) ==
           kSuperseded);
-    CHECK_THROWS(rig.driver->get_target_right_ascension());  // the superseded dispatch wrote no target
-    CHECK_THROWS(rig.driver->get_target_declination());
+    // The superseded dispatch wrote no target: the getters throw ValueNotSet, not some other failure.
+    const auto code_of = [](const std::function<void()>& call) -> int {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return ex.error_code();
+        } catch (...) {
+            return -1;
+        }
+        return 0;
+    };
+    CHECK(code_of([&] { (void)rig.driver->get_target_right_ascension(); }) == alpacacore::AlpacaError::ValueNotSet);
+    CHECK(code_of([&] { (void)rig.driver->get_target_declination(); }) == alpacacore::AlpacaError::ValueNotSet);
 }
 
 // ---- The Park body's dispatch writes state around two reads (decision 0006, rule 6) ----
@@ -1160,6 +1219,147 @@ TEST_CASE("Celestron initiator supersede - Unpark over a Park body in its J read
     CHECK(out.goto_count == 0);
     CHECK_FALSE(out.slewing_threw);
     CHECK_FALSE(out.slewing);
+}
+
+// ---- The claim protocol around the send gate (decision 0006 "Claim", Celestron adoption) ----
+
+// The pier read is the Park body's second read in do_slew_to_coordinates(); it sets flip_in_progress_ right after,
+// which switches the status poll from the HC "L" query to the per-axis slew-done query. An AbortSlew that lands during
+// the read must leave that flag alone. The poll is the public view of it: after the body returns, a tick must still use
+// "L". One of the two pier sides needs a flip whatever the time of day, so both are run.
+TEST_CASE("Celestron initiator supersede - AbortSlew over a Park body in its pier read leaves no flip state",
+          "[celestron][telescope][initiator-supersede]") {
+    for (const char side : {'W', 'E'}) {
+        SupersedeRig rig(1200);
+        rig.keep_first_body_thread_alive(0);
+        rig.st->pier_side.store(side);
+        rig.st->pier_hold_ms.store(kHoldMs);
+        rig.driver->park();
+        REQUIRE(wait_until([&] { return rig.st->pier_hold_entered.load() != 0; }, 5000));
+        REQUIRE_NOTHROW(rig.driver->abort_slew());
+        REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
+        CHECK(rig.st->goto_count.load() == 0);
+        cel::set_status_poll_paused_for_testing(*rig.driver, false);
+        const int slew_done_before = rig.st->slew_done_count.load();
+        const int l_before = rig.st->l_count.load();
+        CHECK(cel::poll_status_now_for_testing(*rig.driver));
+        CHECK(rig.st->slew_done_count.load() == slew_done_before);  // a stale flip would poll the axes
+        CHECK(rig.st->l_count.load() > l_before);
+        CHECK_FALSE(rig.driver->get_slewing());
+    }
+}
+
+// The send gate keeps a queued GOTO from passing a later stop: whichever way the race between the body and the
+// AbortSlew falls, the GOTO is either never sent or sent before the cancel (16 short trials).
+TEST_CASE("Celestron initiator supersede - a queued goto never reaches the mount after AbortSlew",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.keep_first_body_thread_alive(0);
+    for (int trial = 0; trial < 16; ++trial) {
+        rig.st->goto_last_seq.store(0);
+        rig.st->cancel_first_seq.store(0);
+        rig.driver->slew_to_coordinates_async(5.5 + 0.01 * trial, 20.0);
+        REQUIRE_NOTHROW(rig.driver->abort_slew());
+        REQUIRE(wait_until([&] { return rig.bodies_done.load() >= trial + 1; }, 5000));
+        INFO("trial " << trial);
+        REQUIRE(rig.st->cancel_first_seq.load() > 0);
+        CHECK((rig.st->goto_last_seq.load() == 0 || rig.st->goto_last_seq.load() < rig.st->cancel_first_seq.load()));
+    }
+}
+
+// A superseded body whose GOTO fails (the handset swallows it; the claim lands during the wait) sends no failure stop
+// and stores no failure: the new owner has the mount. The only cancels that go out are the new owner's: AbortSlew
+// sends one, MoveAxis none.
+namespace {
+
+void superseded_body_fails_then(const std::function<void(alpacacore::TelescopeDriver&)>& first,
+                                const std::function<void(alpacacore::TelescopeDriver&)>& takeover,
+                                int expected_cancels) {
+    SupersedeRig rig(1200);
+    rig.keep_first_body_thread_alive(0);
+    rig.st->reject_goto.store(true);
+    first(*rig.driver);
+    REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 1; }, 5000));
+    REQUIRE_NOTHROW(takeover(*rig.driver));  // the claim lands while the swallowed GOTO times out
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 8000));
+    CHECK(rig.st->cancel_goto_count.load() == expected_cancels);
+    bool slewing = true;
+    CHECK_NOTHROW(slewing = rig.driver->get_slewing());  // a stored failure would make this throw
+    CHECK(slewing == (expected_cancels == 0));           // MoveAxis leaves its axis moving; AbortSlew ends it
+}
+
+}  // namespace
+
+TEST_CASE("Celestron initiator supersede - a superseded Park body's failure stops nothing and stores nothing",
+          "[celestron][telescope][initiator-supersede]") {
+    superseded_body_fails_then([](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }, 1);
+}
+
+TEST_CASE("Celestron initiator supersede - a superseded slew body whose dispatch throws leaves the error alone",
+          "[celestron][telescope][initiator-supersede]") {
+    superseded_body_fails_then([](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+                               [](auto& d) { d.move_axis(0, 0.5); }, 0);
+}
+
+// A refused start after the claim superseded a body in flight stops the mount and publishes the AbortSlew state: the
+// old motion may run on with nobody left to stop it.
+TEST_CASE("Celestron initiator supersede - a refused start after a claim stops the mount",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto spawns = std::make_shared<std::atomic<int>>(0);
+    cel::set_slew_spawn_for_testing(*rig.driver, [spawns](std::function<void()> body) -> std::thread {
+        if (spawns->fetch_add(1) == 0) return std::thread(std::move(body));
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    CHECK_THROWS(rig.driver->slew_to_coordinates_async(6.5, 25.0));
+    CHECK(rig.st->cancel_goto_count.load() >= 1);  // the old body's motion was stopped
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+// learn_ra_offset() commits a measurement after a read that ran with mutex_ free; a body that lost the slot meanwhile
+// must not commit it. The offset is visible through the GOTO text of the next slew to the same target: slew 1 learns
+// (control: the text changes), slew 2 is superseded during the learning read (the text stays), slew 3 shows it.
+TEST_CASE("Celestron initiator supersede - a superseded slew body does not learn the RA offset",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.keep_first_body_thread_alive(0);
+    constexpr double kTargetRa = 1.750129 + 0.0003;  // 0.0003 h from what the fake mount reports: within the 30" limit
+    const auto finish = [&](int bodies) {
+        for (int i = 0; i < 60 && rig.bodies_done.load() < bodies; ++i) {
+            rig.clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+            rig.clock.advance(std::chrono::milliseconds(250));
+            rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
+        return rig.bodies_done.load() >= bodies;
+    };
+    rig.driver->slew_to_coordinates_async(kTargetRa, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 1; }, 5000));
+    const std::string before_learning = rig.st->goto_text();
+    REQUIRE(finish(1));  // the tail learns the offset
+    rig.driver->slew_to_coordinates_async(kTargetRa, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 2; }, 5000));
+    const std::string after_learning = rig.st->goto_text();
+    CHECK(after_learning != before_learning);
+    // Slew 2: hold its learning read (the first position read after the tail starts), take the slot with MoveAxis.
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.st->e_hold_ms.store(1500);
+    std::thread stepper([&] {  // steps the clock to the tail; its settle wait outlasts the hold, so it runs apart
+        for (int i = 0; i < 60 && rig.st->e_hold_ms.load() != 0; ++i) {
+            rig.clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+            rig.clock.advance(std::chrono::milliseconds(250));
+            rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+        }
+    });
+    const bool in_flight = wait_until([&] { return rig.st->e_hold_ms.load() == 0; }, 15000);
+    REQUIRE(in_flight);  // the learning read is in flight, held
+    REQUIRE_NOTHROW(rig.driver->move_axis(0, 0.5));
+    stepper.join();
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 2; }, 5000));
+    rig.driver->slew_to_coordinates_async(kTargetRa, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_requests.load() >= 3; }, 5000));
+    CHECK(rig.st->goto_text() == after_learning);  // slew 2's measurement was dropped
 }
 
 #endif  // !_WIN32
