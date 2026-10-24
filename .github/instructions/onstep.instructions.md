@@ -62,6 +62,38 @@ true are success; `22` in motion makes Park/FindHome wait for the mount to be st
 3 s; any other code is a refusal the driver keeps and reports with its number (#1430). The `:MS#`
 digits are these codes 15 to 23 less 14.
 
+#### OnStep 4.x and OnStepX
+
+OnStep (the older firmware, 4.x, last release branch `release-4.24`) and OnStepX (10.x, a
+rewrite) speak the same LX200 dialect for every command in the table, with the differences below
+(read from OnStep `Command.ino`/`Goto.ino` at `3b73bffcfb` and the OnStepX sources). Only OnStepX
+is tested: the TeSeek HM-17 runs OnStepX 10.23a, and no OnStep 4.x mount has been run, so the 4.x
+column is from the source, not from hardware.
+
+- **Telling them apart**: OnStepX numbers its releases from 10 (`:GVN#` `10.23a`), OnStep 4.x and
+  older below that (`is_onstepx_version()`, version 10 or later). The driver uses this only to
+  decide whether to ask `:GXEE#`.
+- **`:GXEE#`** (coordinate mode, `DoesRefraction`, #1216): OnStepX only. OnStep 4.x answers any
+  unknown command with `0`, so the driver does not ask it there and keeps the settable local flag.
+- **`:GE#`**: both, with the same codes up to 23; OnStep 4.x has no `25` (`CE_1`) and keeps the
+  code per serial channel (see the Park and FindHome bullet).
+- **`:GU#`**: the letters the driver reads are the same, except that OnStep 4.x has no `h`
+  (homing), so a `FindHome` there is never taken as one already running. OnStep 4.x adds letters
+  the driver does not read (`R`, `S`, `r`, `s`, `t`, `w`, `u`, `z`, `a` and a PEC character).
+  Both send `g` while a `:Mn#`-style move runs and `G` while a pulse guide runs.
+- **`:GG#`** (UTC offset): OnStep 4.x answers whole hours (`sHH#`), OnStepX `sHH:MM#`; the
+  sexagesimal parser reads both.
+- **`:GRa#` / `:GDe#`**: both take `a`/`e` as the high-precision form, like `H`.
+- **`:ST`** (tracking rate): both reply `0`/`1`; OnStep 4.x refuses it while slewing
+  (`CE_MOUNT_IN_MOTION`); OnStepX does not start tracking while parked (no error, `Mount.command.cpp`).
+  The driver sends it blind either way and reads the result from the next `:GU#`.
+- **A GOTO during a GOTO** (#1379): both stop the running one and refuse the new one (OnStepX
+  `Goto.cpp` `CE_SLEW_IN_SLEW`; OnStep 4.x `Goto.ino` `CE_GOTO_ERR_GOTO`, unless built with
+  `CE_GOTO_ERR_GOTO_OFF`), with `:MS#` reply `5`.
+- **The guide time limit that ends a `MoveAxis`** (`GUIDE_TIME_LIMIT`, #1378) is a build setting
+  in both: 1-120 s or `0` for none (OnStep 4.x `Config.h` ships `0`; OnStepX defaults to 10 s, which
+  the HM-17 runs). The re-send keeps a move going under a limit and changes nothing without one.
+
 Connection types: **Serial (USB) only** in this project — no Wi-Fi/network config is exposed to
 users, unlike iOptron/Celestron. Default 9600 baud, 8N1, standard LX200 `#`-terminated ASCII
 commands. `onstep_protocol_wrapper`'s `ConnectionType::Network` branch still exists internally
@@ -73,9 +105,9 @@ it is never reachable through `router.cpp` or the web UI.
   CH341 substrings, plus `Arduino`/`Teensy`) falling back to `/dev/ttyUSB0-9` **and**
   `/dev/ttyACM0-9` — OnStep boards commonly enumerate as ttyACM (native USB-CDC) rather than
   ttyUSB, unlike the RS-232-based mounts (iOptron/Celestron) this project supported first.
-- **Identity probe**: `:GVP#` (get product name) must return `"OnStep"` or `"On-Step"`;
-  cross-checked with `:GVN#`'s leading version digit to distinguish legacy OnStep from OnStepX
-  per the INDI driver's own detection logic.
+- **Identity probe**: `:GVP#` (get product name) must return `"OnStep"` or `"On-Step"` (both
+  firmwares); `:GVN#` is read for the firmware string only. Which firmware it is matters in one
+  place, see "OnStep 4.x and OnStepX" below.
 - **DTR/HUPCL Arduino-reset quirk**: like the Gemini focuser wrapper, CH340/CH341/native-USB-CDC
   adapters reset the MCU on a DTR edge at port open. The probe path (`probe_onstep_port()`)
   clears `HUPCL` before *and* after probing, and the production `connect_serial()` path also
