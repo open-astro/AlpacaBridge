@@ -1972,11 +1972,11 @@ TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not app
     driver->set_connected(false);
 }
 
-// AbortSlew joins the slew body before its stops go out: the park body sends its GOTO with mutex_ free, so a stop sent
-// first could be followed by a GOTO that starts the mount again. The hook holds the park body past its last supersede
-// check, before its GOTO, until the cancel reaches the mount or 500 ms pass: with the join, AbortSlew sends nothing
-// until the body is done, so the GOTO lands first.
-TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of a park in flight",
+// AbortSlew claims the slot instead of joining the park body, so the park body that was held before its GOTO finds
+// itself superseded at the send gate and sends nothing: the cancel is the only motion command that reaches the mount.
+// The hook holds the park body past its last supersede check, before the gate, until the cancel reaches the mount or
+// 500 ms pass. A GOTO that was already on the wire would have to land before the cancel (the gate), never after it.
+TEST_CASE("Celestron AbortSlew - the cancel reaches the mount and the held park GOTO never follows it",
           "[celestron][telescope][snapshot][iolock]") {
     SlowMountDriver mount;
     std::atomic<bool> in_dispatch{false};
@@ -1993,10 +1993,10 @@ TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of 
         mount.driver->abort_slew();
     } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
     }
-    REQUIRE(snapshot_wait_for([&] { return mount.st->goto_last.load() > 0; }));
     cel::set_slew_dispatch_hook_for_testing(*mount.driver, nullptr);
+    mount.driver->set_connected(false);  // joins the park body: it has seen the claim by now
     REQUIRE(mount.st->cancel_first.load() > 0);
-    CHECK(mount.st->goto_last.load() < mount.st->cancel_first.load());  // no goto after the first cancel
+    CHECK(mount.st->goto_last.load() == 0);  // the park body lost the slot before the gate: no GOTO at all
 }
 
 #endif  // _WIN32
