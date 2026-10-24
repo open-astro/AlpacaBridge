@@ -47,7 +47,8 @@ alpacacore::vendor::bisque::ConnectionInfo refused_endpoint() {
 
 }  // namespace
 
-TEST_CASE("Bisque telescope - concurrent connect/disconnect/operate stress", "[bisque][telescope][stress]") {
+TEST_CASE("Bisque telescope - concurrent connect/disconnect/operate stress (mutex-guarded getters)",
+          "[bisque][telescope][stress]") {
     auto driver = alpacacore::vendor::bisque::create_bisque_telescope(0, refused_endpoint());
 
     // open-astro#326: one guard per call. run_lifecycle_stress wraps the WHOLE
