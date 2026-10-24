@@ -10,7 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-
 #pragma once
 
 // Test-only: the Sky-Watcher telescope driver over a FakeSkyWatcherMount's

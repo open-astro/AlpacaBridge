@@ -10,7 +10,6 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-
 // Test-only server for the hardware-free ConformU job (scripts/run_fake_conformu.sh).
 // It serves one Telescope through a test catalog descriptor
 // ("skywatcher-fake") whose factory builds the real Sky-Watcher driver over
@@ -26,7 +25,6 @@
 
 #include <alpacacore/alpaca_defs.h>
 #include <alpacacore/catalog/device_catalog.h>
-
 #include <alpacahttp/config.h>
 #include <alpacahttp/server.h>
 
