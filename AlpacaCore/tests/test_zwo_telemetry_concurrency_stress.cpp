@@ -68,6 +68,10 @@ struct Rig {
     std::atomic<bool> late_reply_ready{false};
     std::atomic<bool> bad_tracking_rate{false};
     std::atomic<bool> hold_identity{false}, identity_entered{false}, release_identity{false};
+    std::atomic<bool> bad_identity{false};
+    std::atomic<bool> hold_time{false}, time_entered{false}, release_time{false};
+    std::atomic<bool> hold_time_write{false}, time_write_entered{false};
+    std::atomic<int> timezone_hours{0};
     std::atomic<int> tracking_queries{0}, time_queries{0}, time_year{0};
     std::atomic<int> pulse_commands{0};
     std::atomic<int> gu{0}, gr{0}, gd{0}, stops{0}, writes{0}, gotos{0};
@@ -110,6 +114,10 @@ struct Rig {
                 ++stops;
             } else if (command.starts_with(":S") || command == ":MS#") {
                 ++writes;
+                if (command.starts_with(":SMTI") && hold_time_write.load()) {
+                    time_write_entered.store(true);
+                    while (!release_time.load()) std::this_thread::yield();
+                }
                 if (command == ":MS#") ++gotos;
                 response += command == ":MS#" ? "0#" : "1#";
             } else if (command == ":Ggr#")
@@ -119,7 +127,7 @@ struct Rig {
                     identity_entered.store(true);
                     while (!release_identity.load()) std::this_thread::yield();
                 }
-                response += "AM5N#";
+                response += bad_identity.load() ? "OnStep#" : "AM5N#";
             } else if (command == ":GMA#") {
                 response += "012345ABCDEF#";
             } else if (command == ":GT#") {
@@ -128,7 +136,13 @@ struct Rig {
             } else if (command == ":GMTI#" || command == ":GL#" || command == ":GC#") {
                 ++time_queries;
                 const int year = time_year.load();
-                response += year == 0 ? "bad#" : "01/02/" + std::to_string(year) + "&03:04:05&+00:00#";
+                if (hold_time.load()) {
+                    time_entered.store(true);
+                    while (!release_time.load()) std::this_thread::yield();
+                }
+                response += year == 0 ? "bad#"
+                                      : "01/02/" + std::to_string(year) + "&03:04:05&+0" +
+                                            std::to_string(timezone_hours.load()) + ":00#";
             } else if (command == ":GA#")
                 response += horizontal_error.load() ? "e1#" : "+45*00:00#";
             else if (command == ":GZ#")
@@ -144,17 +158,18 @@ struct Rig {
     }};
     std::unique_ptr<TelescopeDriver> driver;
 
-    explicit Rig(int response_timeout_ms = 500, int device_number = 0) {
+    explicit Rig(int response_timeout_ms = 500, int device_number = 0, bool sync_time = false) {
         vendor::zwo::ConnectionInfo info;
         info.type = vendor::zwo::ConnectionType::Network;
         info.host = "127.0.0.1";
         info.tcp_port = server.port();
         info.response_timeout_ms = response_timeout_ms;
-        driver = vendor::zwo::create_zwo_telescope_with_site(device_number, info, 30.0, -100.0, {}, false, clock);
+        driver = vendor::zwo::create_zwo_telescope_with_site(device_number, info, 30.0, -100.0, {}, sync_time, clock);
     }
     ~Rig() {
         release_status.store(true);
         release_identity.store(true);
+        release_time.store(true);
         driver.reset();
     }
     void connect() {
@@ -754,6 +769,249 @@ TEST_CASE("ZWO UTCDate getters never read the link and the poll refreshes mount 
     rig.tick(1s);
     CHECK(rig.driver->get_utc_date() == mount_time + 366 * 24h);
     CHECK(rig.time_queries.load() == queries + 2);
+}
+
+TEST_CASE("ZWO UTC anchor preserves fractional elapsed time and earlier or later client writes",
+          "[zwo][telescope][utc][issue1522]") {
+    Rig rig;
+    const auto first = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 123456789ns;
+    // Offline writes remain supported, but a fresh connection starts a new lifetime.
+    rig.driver->set_utc_date(first);
+    CHECK(rig.driver->get_utc_date() == first);
+    rig.clock.advance(123456789ns);
+    CHECK(rig.driver->get_utc_date() == first + 123456789ns);
+    rig.connect();
+    for (const auto value : {first, first - 365 * 24h, first + 365 * 24h}) {
+        rig.driver->set_utc_date(value);
+        CHECK(rig.driver->get_utc_date() == value);
+        rig.tick(987654321ns);
+        CHECK(rig.driver->get_utc_date() == value + 987654321ns);
+    }
+    CHECK(rig.count(":SMTI01/02/20&00:00:00&+00:00#") == 1);
+}
+
+TEST_CASE("ZWO UTC anchor clears on disconnect fresh connect and failed initialization",
+          "[zwo][telescope][utc][issue1522]") {
+    const bool fail_identity = GENERATE(false, true);
+    Rig rig;
+    const auto old = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    const auto host_fallback = [&] {
+        const auto before = std::chrono::system_clock::now();
+        const auto value = rig.driver->get_utc_date();
+        CHECK(value >= before);
+        CHECK(value <= std::chrono::system_clock::now());
+    };
+    rig.driver->set_utc_date(old);
+    rig.connect();  // Sync disabled: the offline anchor must not leak into this session.
+    host_fallback();
+    rig.driver->set_utc_date(old);
+    rig.driver->set_connected(true);  // Redundant Connected=true is not a new session.
+    CHECK(rig.driver->get_utc_date() == old);
+    rig.driver->set_connected(false);
+    host_fallback();
+    // A write made after disconnect remains usable offline, including during teardown.
+    rig.driver->set_utc_date(old);
+    CHECK(rig.driver->get_utc_date() == old);
+    rig.bad_identity.store(fail_identity);
+    if (fail_identity) {
+        CHECK_THROWS_AS(rig.driver->set_connected(true), AlpacaException);
+        CHECK_FALSE(rig.driver->get_connected());
+        host_fallback();
+        rig.bad_identity.store(false);
+    }
+    rig.connect();
+    host_fallback();
+}
+
+TEST_CASE("ZWO failed periodic time read keeps the last anchor and successful reads convert timezone",
+          "[zwo][telescope][utc][issue1522]") {
+    Rig rig(1000);
+    rig.connect();
+    const auto client = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(client);
+    rig.tick(29s);
+    rig.tick(1s);
+    CHECK(rig.time_queries.load() > 0);
+    CHECK(rig.driver->get_utc_date() == client + 30s);
+    rig.time_year.store(20);
+    rig.timezone_hours.store(3);
+    rig.tick(29s);
+    rig.tick(1s);
+    // The wire timezone is west-positive: +03:00 means local time is UTC-3.
+    const auto mount = std::chrono::sys_days{std::chrono::year{2020} / 1 / 2} + 6h + 4min + 5s;
+    CHECK(rig.driver->get_utc_date() == mount);
+}
+
+TEST_CASE("ZWO a failed transport open clears an offline UTC anchor", "[zwo][telescope][utc][issue1522]") {
+    test::FakeTaskClock clock;
+    vendor::zwo::ConnectionInfo info;
+    info.port_path = "/dev/does-not-exist-issue-1522";
+    auto driver = vendor::zwo::create_zwo_telescope(0, info, clock);
+    driver->set_utc_date(std::chrono::sys_days{std::chrono::year{2001} / 1 / 2});
+    CHECK_THROWS_AS(driver->set_connected(true), AlpacaException);
+    const auto before = std::chrono::system_clock::now();
+    CHECK(driver->get_utc_date() >= before);
+    CHECK(driver->get_utc_date() <= std::chrono::system_clock::now());
+}
+
+TEST_CASE("ZWO failed initialization clears a UTC write made during the handshake",
+          "[zwo][telescope][utc][issue1522]") {
+    Rig rig;
+    rig.hold_identity.store(true);
+    rig.bad_identity.store(true);
+    rig.driver->connect();
+    REQUIRE(eventually([&] { return rig.identity_entered.load(); }));
+    rig.driver->set_utc_date(std::chrono::sys_days{std::chrono::year{2001} / 1 / 2});
+    rig.release_identity.store(true);
+    REQUIRE(eventually([&] { return !rig.driver->get_connecting(); }));
+    CHECK_FALSE(rig.driver->get_connected());
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+}
+
+TEST_CASE("ZWO disconnect cannot republish a periodic UTC read from the old session",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    Rig rig(1000);
+    rig.connect();
+    rig.time_year.store(20);
+    rig.tick(29s);
+    rig.hold_time.store(true);
+    rig.clock.advance(1s);
+    REQUIRE(eventually([&] { return rig.time_entered.load(); }));
+    rig.driver->set_connected(false);
+    const auto offline = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(offline);
+    rig.release_time.store(true);
+    REQUIRE(rig.clock.wait_for_woken_settled(5s));
+    CHECK(rig.driver->get_utc_date() == offline);
+    rig.driver->set_connected(true);  // Joins teardown and starts with sync disabled.
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+}
+
+TEST_CASE("ZWO an old UTC writer cannot replace an offline write after disconnect",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    Rig rig(1000);
+    rig.connect();
+    rig.hold_time_write.store(true);
+    const auto old = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    auto writer = std::async(std::launch::async, [&] {
+        try {
+            rig.driver->set_utc_date(old);
+        } catch (const AlpacaException&) {
+            // Disconnect may cancel the exchange rather than let its acknowledgement complete.
+        }
+    });
+    const bool entered = eventually([&] { return rig.time_write_entered.load(); });
+    if (!entered) rig.release_time.store(true);
+    REQUIRE(entered);
+    rig.driver->set_connected(false);
+    const auto offline = old + 24h;
+    rig.driver->set_utc_date(offline);
+    rig.release_time.store(true);
+    writer.get();
+    CHECK(rig.driver->get_utc_date() == offline);
+}
+
+TEST_CASE("ZWO UTC refuses a lost link and starts fresh on explicit reconnect",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    const bool transport_loss = GENERATE(false, true);
+    Rig rig;
+    rig.connect();
+    const auto old = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(old);
+    REQUIRE(rig.driver->get_utc_date() == old);
+    if (transport_loss) {
+        REQUIRE(rig.server.drop_connections());
+        rig.tick();
+    } else {
+        rig.silent.store(true);
+        rig.tick();
+        rig.tick();
+        rig.tick();
+        REQUIRE(rig.driver->get_connected());
+        error([&] { rig.driver->get_utc_date(); }, AlpacaError::DriverException);
+        rig.tick(30s);
+        rig.silent.store(false);
+    }
+    REQUIRE_FALSE(rig.driver->get_connected());
+    // Loss keeps its reason: unlike a deliberate disconnect, it refuses offline UTC access.
+    error([&] { rig.driver->get_utc_date(); }, AlpacaError::NotConnected);
+    error([&] { rig.driver->set_utc_date(old + 24h); }, AlpacaError::NotConnected);
+    CHECK(rig.driver->get_device_state().empty());
+    rig.connect();  // No intervening Disconnect that could hide a stale session.
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    CHECK(rig.gotos.load() == 0);
+}
+
+TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    Rig rig(1000, 0, true);
+    rig.connect();
+    rig.hold_time_write.store(true);
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.time_write_entered.load(); }));
+    rig.driver->set_connected(false);  // Cancels the exchange and joins the GOTO worker.
+    rig.release_time.store(true);
+    rig.clock.advance(10s);
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    const auto offline = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(offline);
+    rig.clock.advance(1234ms);
+    CHECK(rig.driver->get_utc_date() == offline + 1234ms);
+    CHECK(rig.gotos.load() == 0);
+}
+
+TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before GOTO",
+          "[zwo][telescope][utc][issue1522]") {
+    const bool sync_time = GENERATE(false, true);
+    Rig rig(1000, 0, sync_time);
+    const auto before_connect = std::chrono::system_clock::now();
+    rig.connect();
+    CHECK(rig.writes.load() >= 1);  // Configured site is applied regardless of time policy.
+    const auto time_writes = [&] {
+        std::lock_guard<std::mutex> lock(rig.commands_mutex);
+        return std::count_if(rig.commands.begin(), rig.commands.end(),
+                             [](const auto& command) { return command.starts_with(":SMTI"); });
+    };
+    CHECK(time_writes() == (sync_time ? 1 : 0));
+    CHECK(rig.driver->get_utc_date() >= before_connect);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    if (sync_time) {
+        const auto after_connect = std::chrono::system_clock::now();
+        rig.tick(1234ms);
+        CHECK(rig.driver->get_utc_date() >= before_connect + 1234ms);
+        CHECK(rig.driver->get_utc_date() <= after_connect + 1234ms);
+    }
+    const auto client = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(client);
+    const auto before_refresh = std::chrono::system_clock::now();
+    rig.driver->set_connected(true);
+    if (sync_time) {
+        CHECK(rig.driver->get_utc_date() >= before_refresh);
+        const auto after_refresh = std::chrono::system_clock::now();
+        REQUIRE(rig.clock.wait_for_waiters(1, 5s));
+        rig.tick(1234ms);
+        CHECK(rig.driver->get_utc_date() >= before_refresh + 1234ms);
+        CHECK(rig.driver->get_utc_date() <= after_refresh + 1234ms);
+    } else
+        CHECK(rig.driver->get_utc_date() == client);
+    const auto before_goto = std::chrono::system_clock::now();
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.gotos.load() == 1; }));
+    REQUIRE_NOTHROW(rig.driver->command_string(":GVP", false));  // Drain the setup exchange.
+    CHECK(rig.driver->get_utc_date() >= before_goto);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    const auto after_goto = std::chrono::system_clock::now();
+    rig.tick(1234ms);
+    CHECK(rig.driver->get_utc_date() >= before_goto + 1234ms);
+    CHECK(rig.driver->get_utc_date() <= after_goto + 1234ms);
+    CHECK(time_writes() == (sync_time ? 4 : 2));
 }
 
 TEST_CASE("ZWO a management health read cannot expire the connect warmup", "[zwo][telescope][telemetry]") {
