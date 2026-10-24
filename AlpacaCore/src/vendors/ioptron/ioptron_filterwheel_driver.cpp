@@ -14,11 +14,14 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/ttl_status_cache.h>
 #include <alpacacore/vendor/ioptron/ioptron_filterwheel_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_iefw_protocol_wrapper.h>
 #include <alpacacore/version.h>
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -43,7 +46,8 @@ public:
           wheel_index_(wheel_index),
           connected_(false),
           protocol_(),
-          model_name_(model == "iefw18" ? "iEFW-18" : "iEFW-15") {}
+          model_name_(model == "iefw18" ? "iEFW-18" : "iEFW-15"),
+          status_cache_("iOptron iEFW", kStatusTtl, 3, "iOptron") {}
 
     ~IefwFilterWheelDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -97,7 +101,9 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // transition_mutex_ spans the whole call and no getter takes it: the connect handshake runs
+        // under it and the I/O lock, never under mutex_ (decision 0016).
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check (see AsyncConnectable).
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
@@ -110,46 +116,48 @@ public:
         }
 
         if (connected) {
-            IefwConnectionConfig config;
-            config.serial_port = resolve_serial_port_locked();
-            IefwDeviceInfo info = protocol_.connect(config);
-            try {
-                slot_count_ = iefw_slot_count(info.model);
-                if (iefw_model_name(info.model) != model_name_) {
-                    ALPACA_LOG_WARN("iOptron", "Configured model " + model_name_ + " but the wheel reports " +
-                                                   iefw_model_name(info.model) + " (model code " +
-                                                   std::to_string(info.model) + "); using its " +
-                                                   std::to_string(slot_count_) + " slots");
+            {
+                std::lock_guard<std::mutex> io(io_mutex_);
+                IefwConnectionConfig config;
+                config.serial_port = resolve_serial_port();
+                IefwDeviceInfo info = protocol_.connect(config);
+                try {
+                    publish_connect_state(info);
+                } catch (...) {
+                    protocol_.disconnect();
+                    throw;
                 }
-                firmware_ = read_firmware_string(info);
-                // Offsets stored on the wheel (set via iOptron's own software)
-                // seed FocusOffsets when the config supplies none; config
-                // values override and nothing is written back (Player One
-                // convention).
-                const bool offsets_configured = !focus_offsets_.empty();
-                normalize_slot_data_locked();
-                if (!offsets_configured) {
-                    read_stored_offsets_locked();
-                }
-            } catch (...) {
-                protocol_.disconnect();
-                throw;
             }
-            moving_ = false;
+            // After the I/O lock is released: the cache lock is taken before it, never inside it.
+            // Also drops a closed frame that a refill racing the last disconnect cached after that
+            // disconnect's reset(): it counts as a good reply and would be served for up to the TTL.
+            status_cache_.reset();
             connected_.store(true);
-            ALPACA_LOG_INFO("iOptron",
-                            model_name_ + " filter wheel connected (" + std::to_string(slot_count_) + " slots)");
+            std::int32_t slots = 0;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                slots = slot_count_;
+            }
+            ALPACA_LOG_INFO("iOptron", model_name_ + " filter wheel connected (" + std::to_string(slots) + " slots)");
             return;
         }
 
+        // Clear driver state before the protocol close: if the close throws the driver must not stay
+        // half-connected.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            firmware_.clear();
+            moving_ = false;
+            connected_.store(false);
+        }
+        status_cache_.reset();
         try {
+            // Waits for an exchange in flight: the port is never closed under one.
+            std::lock_guard<std::mutex> io(io_mutex_);
             protocol_.disconnect();
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("iOptron", "iEFW disconnect error: " + std::string(e.what()));
         }
-        firmware_.clear();
-        moving_ = false;
-        connected_.store(false);
         ALPACA_LOG_INFO("iOptron", "iEFW filter wheel disconnected");
     }
 
@@ -175,22 +183,50 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
+        // The refill runs under the cache's own mutex, then the I/O lock (lock order: cache mutex, I/O lock,
+        // mutex_), so it must not take mutex_ and no caller may hold mutex_ or the I/O lock around the cache.
+        const Status status = status_cache_.get([this] {
+            std::lock_guard<std::mutex> io(io_mutex_);
+            Status fresh;
+            if (!connected_.load()) {
+                // A disconnect that won the I/O lock has closed the port. Returning (not throwing) keeps it
+                // out of the link-health count; the disconnect's reset() drops this frame.
+                fresh.closed = true;
+                return fresh;
+            }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                fresh.move_seq = move_seq_;
+            }
+            fresh.wire = protocol_.get_position();
+            return fresh;
+        });
+        if (status.closed) {
+            throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
         // :WP# answers -1 while the wheel is moving. Also hold -1 from the
         // moment a move is commanded until the wheel reports the target, so
         // a poll that lands before the motor starts does not show the old
         // slot as "arrived" (IFilterWheel: Position is -1 while moving).
-        const std::int32_t wire = const_cast<IefwFilterWheelDriver*>(this)->protocol_.get_position();
-        if (wire < 0) {
-            return -1;
-        }
-        if (moving_) {
-            if (wire != target_) {
-                return -1;
+        int result = static_cast<int>(status.wire);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (status.wire < 0) {
+                result = -1;
+            } else if (moving_) {
+                // A frame read before the latest move was commanded cannot show that move's arrival.
+                if (status.move_seq != move_seq_ || status.wire != target_) {
+                    result = -1;
+                } else {
+                    moving_ = false;
+                }
             }
-            moving_ = false;
         }
-        return static_cast<int>(wire);
+        if (result < 0) {
+            // A moving frame is not held: the next poll goes to the wheel, so the move end is seen at once.
+            status_cache_.invalidate();
+        }
+        return result;
     }
 
     void set_position(int position) override {
@@ -201,16 +237,47 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (slot_count_ <= 0) {
+                throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+            }
+            if (position >= slot_count_) {
+                throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+            }
         }
-        if (position >= slot_count_) {
-            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        try {
+            // The I/O lock spans the latch set, :WM and the restore, so two concurrent moves cannot
+            // interleave (A sets its target, B sets and sends :WM, A sends :WM: the wheel ends on A's
+            // slot with B's target latched).
+            std::lock_guard<std::mutex> io(io_mutex_);
+            // A disconnect that won the I/O lock has closed the port; mutex_ held across the move gave
+            // this guarantee before the conversion.
+            ensure_connected();
+            std::int32_t previous_target = 0;
+            bool previous_moving = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                previous_target = target_;
+                previous_moving = moving_;
+                target_ = position;
+                moving_ = true;
+                ++move_seq_;
+            }
+            try {
+                protocol_.move_to(position);
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                target_ = previous_target;
+                moving_ = previous_moving;
+                throw;
+            }
+        } catch (...) {
+            // A refused or half-done move leaves the cached frame untrusted.
+            status_cache_.invalidate();
+            throw;
         }
-        protocol_.move_to(position);
-        target_ = position;
-        moving_ = true;
+        status_cache_.invalidate();
     }
 
     std::vector<int> get_focus_offsets() const override {
@@ -254,7 +321,7 @@ private:
 
     // Serial mode uses the configured port; auto mode scans at connect so a
     // wheel plugged in after startup is still found.
-    std::string resolve_serial_port_locked() {
+    std::string resolve_serial_port() {
         if (serial_port_.has_value() && !serial_port_->empty()) {
             return *serial_port_;
         }
@@ -288,16 +355,53 @@ private:
         return info.firmware > 0 ? std::to_string(info.firmware) : std::string();
     }
 
-    void read_stored_offsets_locked() {
-        for (std::int32_t slot = 0; slot < slot_count_; ++slot) {
+    // Caller holds io_mutex_ (the reads are wheel exchanges); the state publishes under mutex_.
+    void publish_connect_state(const IefwDeviceInfo& info) {
+        const std::int32_t slots = iefw_slot_count(info.model);
+        if (iefw_model_name(info.model) != model_name_) {
+            ALPACA_LOG_WARN("iOptron", "Configured model " + model_name_ + " but the wheel reports " +
+                                           iefw_model_name(info.model) + " (model code " + std::to_string(info.model) +
+                                           "); using its " + std::to_string(slots) + " slots");
+        }
+        std::string firmware = read_firmware_string(info);
+        // Offsets stored on the wheel (set via iOptron's own software)
+        // seed FocusOffsets when the config supplies none; config
+        // values override and nothing is written back (Player One
+        // convention).
+        bool offsets_configured = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            offsets_configured = !focus_offsets_.empty();
+        }
+        std::vector<int> stored;
+        if (!offsets_configured) {
+            stored = read_stored_offsets(slots);
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        slot_count_ = slots;
+        firmware_ = std::move(firmware);
+        // A FocusOffsets write that landed during the :WF reads is kept (the check above ran unlocked).
+        const bool seed = !offsets_configured && focus_offsets_.empty();
+        normalize_slot_data_locked();
+        if (seed) {
+            focus_offsets_ = std::move(stored);
+        }
+        moving_ = false;
+    }
+
+    // A failed read stops the loop; the remaining slots stay 0.
+    std::vector<int> read_stored_offsets(std::int32_t slots) {
+        std::vector<int> offsets(static_cast<std::size_t>(std::max<std::int32_t>(slots, 0)), 0);
+        for (std::int32_t slot = 0; slot < slots; ++slot) {
             try {
-                focus_offsets_[static_cast<std::size_t>(slot)] = protocol_.get_stored_offset(slot);
+                offsets[static_cast<std::size_t>(slot)] = protocol_.get_stored_offset(slot);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("iOptron",
                                 "iEFW stored offset read failed for slot " + std::to_string(slot) + ": " + e.what());
-                return;
+                break;
             }
         }
+        return offsets;
     }
 
     void normalize_slot_data_locked() {
@@ -361,11 +465,28 @@ private:
         }
     }
 
+    // One refill is one :WP#. `wire` is the raw reply (-1 while moving); the moving_/target_ latch is
+    // applied by the reader after the cache, never stored in the frame.
+    struct Status {
+        std::int32_t wire = 0;
+        bool closed = false;
+        std::uint64_t move_seq = 0;  // move_seq_ when the refill took the I/O lock; the latch needs a match
+    };
+    static constexpr std::chrono::milliseconds kStatusTtl{100};
+
     int device_number_;
     std::optional<std::string> serial_port_;
     std::optional<int> wheel_index_;
     std::atomic<bool> connected_;
-    IefwProtocolWrapper protocol_;
+    mutable IefwProtocolWrapper protocol_;  // its own mutex serialises one exchange (SDK-wrapper leaf)
+
+    // Lock order: transition_mutex_, then the status cache's mutex, then io_mutex_, then mutex_ (a leaf:
+    // never held across a wheel exchange or the connect handshake), then the protocol wrapper's mutex.
+    // transition_mutex_ spans set_connected() only and no getter takes it; io_mutex_ serialises the
+    // latch set + :WM + restore of a move against a :WP# refill and the connect/close. Nothing calls the
+    // cache (reset/invalidate/fault) while holding io_mutex_ or mutex_.
+    std::mutex transition_mutex_;
+    mutable std::mutex io_mutex_;
 
     // Everything below is guarded by mutex_.
     mutable std::mutex mutex_;
@@ -378,6 +499,9 @@ private:
     // target. moving_ is mutable so the arrival latch can run in const get_position().
     mutable bool moving_ = false;
     std::int32_t target_ = 0;
+    std::uint64_t move_seq_ = 0;  // bumped with each latch set, under io_mutex_ and mutex_
+
+    mutable util::TtlStatusCache<Status> status_cache_;
 };
 
 std::unique_ptr<FilterWheelDriver> create_iefw_filterwheel(int device_number, const std::string& serial_port,
