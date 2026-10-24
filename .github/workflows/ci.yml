@@ -1042,9 +1042,8 @@ jobs:
 
       - name: Check every router-constructed driver is in the contract sweep
         # Issue #571: AlpacaCore/tests/contract_sweep.h must hold an entry for
-        # every (vendor, deviceType) pair Router::register_device_from_config()
-        # constructs, or ALLOWLIST it with a reason. Also checks the guard
-        # macros reach alpacacore_tests, so the registry cannot compile empty.
+        # every (vendor, deviceType) pair the device catalog constructs, or ALLOWLIST it with a reason.
+        # Also checks the guard macros reach alpacacore_tests, so the registry cannot compile empty.
         run: python3 scripts/check_contract_sweep.py
 
   conformu-reports:
