@@ -189,8 +189,36 @@ h2 {
 
 .device-card.collapsed .device-info,
 .device-card.collapsed .device-settings,
-.device-card.collapsed .device-actions {
+.device-card.collapsed .device-actions,
+.device-card.collapsed .calibration-controls {
     display: none;
+}
+
+.calibration-controls {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.calibration-status-warn {
+    color: var(--warn);
+}
+
+.calibration-hint {
+    color: var(--dim);
+    font-size: 12.5px;
+}
+
+.calibration-hint:empty {
+    display: none;
+}
+
+.calibration-buttons {
+    display: flex;
+    gap: 8px;
 }
 
 .device-card-header {
