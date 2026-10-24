@@ -119,6 +119,8 @@ public:
 
     bool ok() const { return listen_fd_ >= 0 && port_ > 0; }
     int port() const { return port_; }
+    /// Non-empty replies written to a socket so far.
+    std::uint64_t replies_sent() const { return replies_sent_.load(); }
 
     /// Sends bytes to every live connection unprompted (a mount that keeps talking).
     void push(const std::string& bytes) {
@@ -230,6 +232,7 @@ private:
             const std::string reply = responder_(std::string(buf, static_cast<std::size_t>(n)));
             if (!reply.empty()) {
                 static_cast<void>(::send(fd, reply.data(), reply.size(), MSG_NOSIGNAL));
+                replies_sent_.fetch_add(1);
             }
         }
         // Deregister and close under one lock so the destructor can never
@@ -245,6 +248,7 @@ private:
     int listen_fd_ = -1;
     int port_ = 0;
     std::atomic<bool> stop_{false};
+    std::atomic<std::uint64_t> replies_sent_{0};
     std::thread accept_thread_;
     std::mutex conn_mutex_;
     std::vector<int> conn_fds_;
