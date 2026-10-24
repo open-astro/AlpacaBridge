@@ -229,6 +229,50 @@ TEST_CASE("ZWO Camera Driver - PercentCompleted only while Exposing", "[zwo][cam
     }
 }
 
+// ICameraV4: LastExposureDuration / LastExposureStartTime raise InvalidOperation until an image has been
+// successfully acquired (issue #1477). A failed exposure never publishes them; an earlier success survives it.
+TEST_CASE("ZWO Camera Driver - LastExposure values follow successful images only", "[zwo][camera][unit]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    camera->set_connected(true);
+    clock.advance(std::chrono::seconds(1));
+    const auto fail_exposure = [&](double duration) {
+        camera->start_exposure(duration, true);
+        sdk.script_exposure_status({alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed,
+                                    alpacacore::vendor::zwo::ZWOExposureStatus::Failed});
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        CHECK_FALSE(camera->get_image_ready());
+        clock.advance(std::chrono::milliseconds(250));
+        alpacacore::test::require_error_code([&] { (void)camera->get_image_ready(); },
+                                             alpacacore::AlpacaError::DriverException);
+    };
+
+    SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*camera); }
+    SECTION("a failed first exposure publishes nothing") {
+        fail_exposure(0.001);
+        alpacacore::test::require_last_exposure_unset(*camera);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        const auto start = camera->get_last_exposure_start_time();
+        CHECK(camera->get_last_exposure_duration() == 0.001);
+        fail_exposure(0.002);
+        CHECK(camera->get_last_exposure_duration() == 0.001);
+        CHECK(camera->get_last_exposure_start_time() == start);
+    }
+    SECTION("a new success replaces the earlier one") {
+        camera->start_exposure(0.001, true);
+        REQUIRE(camera->get_image_ready());
+        camera->start_exposure(0.002, true);
+        REQUIRE(camera->get_image_ready());
+        CHECK(camera->get_last_exposure_duration() == 0.002);
+    }
+}
+
 TEST_CASE("ZWO Camera Driver - cooler members need the cooler capability", "[zwo][camera][unit]") {
     alpacacore::test::FakeZWOSDK sdk;
     sdk.report_cooler_controls = false;

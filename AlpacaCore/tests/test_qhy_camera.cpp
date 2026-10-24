@@ -700,6 +700,35 @@ TEST_CASE("QHY Camera Driver - a failed exposure is raised by ImageReady and Ima
     driver->set_connected(false);
 }
 
+// ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired (issue #1477).
+TEST_CASE("QHY Camera Driver - LastExposure values follow successful images only", "[qhy][camera][unit]") {
+    auto fake = make_fake();
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+    driver->set_connected(true);
+    const auto failed = [&] { return error_code_of([&] { (void)driver->get_image_ready(); }) != 0; };
+
+    SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*driver); }
+    SECTION("a failed first exposure publishes nothing") {
+        fake.frame_ok = false;
+        driver->start_exposure(0.01, true);
+        REQUIRE(eventually(failed));
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        driver->start_exposure(0.05, true);
+        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        const auto start = driver->get_last_exposure_start_time();
+        CHECK(driver->get_last_exposure_duration() == 0.05);
+        fake.frame_ok = false;
+        driver->start_exposure(0.07, true);
+        REQUIRE(eventually(failed));
+        CHECK(driver->get_last_exposure_duration() == 0.05);
+        CHECK(driver->get_last_exposure_start_time() == start);
+    }
+    driver->set_connected(false);
+}
+
 TEST_CASE("QHY Camera Driver - AbortExposure clears a failure from a completed exposure", "[qhy][camera][unit]") {
     auto fake = make_fake();
     fake.frame_ok = false;

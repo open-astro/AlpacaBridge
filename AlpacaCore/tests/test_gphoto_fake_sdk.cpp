@@ -379,6 +379,80 @@ TEST_CASE("GPhoto camera fake - short native exposure decodes into image_ready w
     driver->set_connected(false);
 }
 
+// ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired (issue #1477).
+TEST_CASE("GPhoto camera fake - LastExposure values follow successful images only", "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*driver); }
+    SECTION("a failed first exposure publishes nothing") {
+        fake.throw_from.insert("capture_and_download");
+        driver->start_exposure(0.01, true);
+        wait_for_exposure_to_finish(*driver);
+        require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        driver->start_exposure(0.01, true);
+        wait_for_exposure_to_finish(*driver);
+        REQUIRE(driver->get_image_ready());
+        const auto start = driver->get_last_exposure_start_time();
+        const double duration = driver->get_last_exposure_duration();
+        fake.throw_from.insert("capture_and_download");
+        driver->start_exposure(0.2, true);
+        wait_for_exposure_to_finish(*driver);
+        require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+        CHECK(driver->get_last_exposure_duration() == duration);
+        CHECK(driver->get_last_exposure_start_time() == start);
+    }
+    driver->set_connected(false);
+}
+
+// ICameraV4: LastExposureDuration is the actual duration. A native exposure runs at the shutter speed the driver
+// wrote (the nearest choice), not at the requested duration (issue #1477).
+TEST_CASE("GPhoto camera fake - LastExposureDuration is the shutter speed actually set",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    const std::pair<double, std::pair<const char*, double>> cases[] = {{0.1, {"1/200", 0.005}}, {0.6, {"1", 1.0}}};
+    for (const auto& [requested, expected] : cases) {
+        INFO("requested " << requested);
+        driver->start_exposure(requested, true);
+        wait_for_exposure_to_finish(*driver);
+        REQUIRE(driver->get_image_ready());
+        CHECK(fake.cameras[0].choice_value.at("shutterspeed2") == expected.first);
+        CHECK(driver->get_last_exposure_duration() == Catch::Approx(expected.second));
+    }
+    driver->set_connected(false);
+}
+
+// A bulb exposure holds the shutter for the duration the driver times itself, so the requested value is the actual
+// one (the driver has no read-back of the real shutter-open time).
+TEST_CASE("GPhoto camera fake - LastExposureDuration of a bulb exposure is the held duration",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_bulb_camera());
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    driver->set_connected(true);
+
+    driver->start_exposure(0.05, true);  // > 1/50 s native ceiling => bulb path
+    wait_for_exposure_to_finish(*driver);
+    REQUIRE(driver->get_image_ready());
+    CHECK(driver->get_last_exposure_duration() == 0.05);
+    driver->set_connected(false);
+}
+
 TEST_CASE("GPhoto camera fake - bulb capture drives toggle true then false then downloads",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

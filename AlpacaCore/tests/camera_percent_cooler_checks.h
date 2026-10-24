@@ -18,6 +18,8 @@
 // - PercentCompleted raises InvalidOperation unless CameraState is Exposing, and is then absent from
 //   DeviceState; while Exposing it is an integer 0..100 in both.
 // - CoolerOn (get and set) and CoolerPower raise PropertyNotImplemented on a camera without a cooler.
+// - LastExposureDuration and LastExposureStartTime raise InvalidOperation until an image has been successfully
+//   acquired (issue #1477); a failed exposure never publishes them and never erases an earlier success.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
@@ -50,6 +52,13 @@ inline void require_error_code(const std::function<void()>& fn, int expected_cod
         return;
     }
     FAIL("Expected AlpacaException " << expected_code);
+}
+
+// No image has been successfully acquired: both LastExposure* getters raise InvalidOperation (ICameraV4), not
+// ValueNotSet.
+inline void require_last_exposure_unset(const CameraDriver& camera) {
+    require_error_code([&] { (void)camera.get_last_exposure_duration(); }, AlpacaError::InvalidOperation);
+    require_error_code([&] { (void)camera.get_last_exposure_start_time(); }, AlpacaError::InvalidOperation);
 }
 
 // CameraState is not Exposing: the GET path raises InvalidOperation and DeviceState omits the member.

@@ -142,6 +142,11 @@ public:
         return true;
     }
     void set_control_value(int camera_id, Control type, long value, bool is_auto) override {
+        if (type == Control::FrameSpeedMode) {
+            // Outside the mutex like open_camera: the driver's deferred write takes about a second on hardware.
+            const auto delay = std::chrono::milliseconds(frame_speed_write_delay_ms_.load());
+            if (delay.count() > 0) std::this_thread::sleep_for(delay);
+        }
         std::lock_guard lock(mutex_);
         record_locked("set_control_value");
         if (type == Control::Exposure) record_locked("set_control_value.Exposure");
@@ -158,6 +163,7 @@ public:
         }
         values_[type] = value;
         auto_values_[type] = is_auto;
+        if (type == Control::FrameSpeedMode) frame_speed_written_at_ = std::chrono::system_clock::now();
     }
     ROI get_roi_format(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -434,6 +440,14 @@ public:
         block_video_data_ = false;
         video_data_cv_.notify_all();
     }
+    // Models the slow deferred FrameSpeedMode write; frame_speed_written_at() is when the last one completed.
+    void set_frame_speed_write_delay(std::chrono::milliseconds delay) {
+        frame_speed_write_delay_ms_.store(delay.count());
+    }
+    std::chrono::system_clock::time_point frame_speed_written_at() {
+        std::lock_guard lock(mutex_);
+        return frame_speed_written_at_;
+    }
     void fail_next(std::string method) {
         std::lock_guard lock(mutex_);
         ++one_shot_failures_[std::move(method)];
@@ -498,6 +512,8 @@ private:
     int last_video_wait_ms_{0};
     int max_read_wait_ms_{250};
     std::atomic<std::int64_t> open_delay_ms_{0};
+    std::atomic<std::int64_t> frame_speed_write_delay_ms_{0};
+    std::chrono::system_clock::time_point frame_speed_written_at_{};
     int timeout_reads_remaining_{0};
     int completed_video_data_reads_{0};
     int open_count_{0};
