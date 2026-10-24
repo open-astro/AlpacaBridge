@@ -425,7 +425,7 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
     driver->set_connected(true);
     sdk.set_frame_data(std::vector<std::uint8_t>(20 * 10 * 2, 0));
     require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_duration()); },
-                         alpacacore::AlpacaError::ValueNotSet);
+                         alpacacore::AlpacaError::InvalidOperation);
 
     const auto failed = [&] {
         try {
@@ -444,7 +444,7 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
                              alpacacore::AlpacaError::DriverException);
     }
     require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_duration()); },
-                         alpacacore::AlpacaError::ValueNotSet);
+                         alpacacore::AlpacaError::InvalidOperation);
 
     sdk.set_returned_size(16, 8);
     sdk.set_frame_data({0x34, 0x12});

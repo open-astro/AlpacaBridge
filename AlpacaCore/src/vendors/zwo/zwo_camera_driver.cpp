@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/version_format.h>
@@ -620,6 +621,7 @@ public:
         last_image_ = std::move(image);
         image_cached_ = true;
         image_ready_ = true;
+        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
         return last_image_;
     }
 
@@ -680,7 +682,9 @@ public:
             }
         }
         image_ready_ = ready;
-        if (!ready) {
+        if (ready) {
+            published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
+        } else {
             image_cached_ = false;
         }
         return ready;
@@ -703,19 +707,15 @@ public:
     }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        return published_exposure_.start_time();
     }
 
     int get_max_adu() const override {
@@ -1183,6 +1183,9 @@ private:
     // const status readers) restarts the exposure clock.
     mutable std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
+    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
+    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    mutable util::LastExposure published_exposure_;
     // Transient-failure recovery (see poll_exposure_status): mutable
     // because the const status readers drive the retry state machine.
     static constexpr int kExposureRetries = 2;
@@ -1288,6 +1291,7 @@ private:
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
+        published_exposure_.clear();
         exposure_is_dark_ = false;
         exposure_reg_us_ = 0;
         ++exposure_seq_;

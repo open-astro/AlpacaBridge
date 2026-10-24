@@ -16,6 +16,7 @@
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
 
 #include <atomic>
+#include <functional>
 
 namespace alpacacore::test {
 
@@ -49,6 +50,9 @@ public:
     }();
 
     bool should_throw{false};
+    // Runs inside decode() on the calling thread before the frame returns; a test blocks here to hold a decode
+    // open (ADR 0015 rule 5: an explicit hook, never a sleep).
+    std::function<void()> on_decode;
     // Atomic because the stress harness hands one decoder to a driver that
     // decodes from the connect-priming and exposure threads. The driver
     // serializes those today (connecting_priming_ under mutex_), but this is
@@ -58,6 +62,7 @@ public:
 
     vendor::gphoto::DecodedFrame decode(const std::vector<std::uint8_t>&) override {
         ++decode_call_count;
+        if (on_decode) on_decode();
         if (should_throw) {
             throw AlpacaException("FakeRawDecoder: injected decode failure", AlpacaError::DriverException);
         }
