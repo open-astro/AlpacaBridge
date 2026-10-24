@@ -551,7 +551,7 @@ All 9 steps required for end-to-end functionality:
 1. Catalog descriptor: `<vendor>_fields.h`, `<vendor>_schema.cpp` and `<vendor>_catalog.cpp` under `AlpacaCore/src/vendors/<vendor>/`, registered in `AlpacaCore/src/catalog/builtin_catalog.cpp` (the router has no vendor arm).
 2. No vendor include in `AlpacaHTTP/src/http/router.cpp` (`scripts/check_layering.py`).
 3. Config sanitization: every persisted field declared in the schema.
-4. Web UI vendor dropdown in `AlpacaHTTP/web/app.js`.
+4. Web UI vendor dropdown: add the `<option>` to `#vendor` in `AlpacaHTTP/web/index.html`; which device types offer it comes from the descriptor's `available` flag in the device catalog.
 5. Web UI vendor-specific form fields.
    - **Unique vendor-prefixed `name` on EVERY field** (not just filter wheels): hidden
      vendor sections still submit, so a generic `name` like `cameraIndex`/`focuserIndex`
@@ -570,8 +570,9 @@ All 9 steps required for end-to-end functionality:
      fails on a named field without one, on a catalog field no form field names, and on a
      control that does not fit the field type or role.
 6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
-   filterwheel/rotator), add an entry to the `INDEX_FIELDS` array in `app.js`
-   (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That wires up
+   filterwheel/rotator), make it a `type="number"` input whose `data-config-key` names an
+   `EnumerationIndex` catalog field. `app.js` derives the index fields from the catalog
+   (`deriveIndexFields()` in `catalog_schema.js`), so there is no table to edit. That wires up
    per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
    of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
    device number, which auto-assigns per type already.) See "Enumeration index fields" in

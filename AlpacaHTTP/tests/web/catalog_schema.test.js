@@ -257,9 +257,18 @@ test('app.js keeps no hand-kept INDEX_FIELDS table and derives the index fields 
 test('updateVendorOptions takes the offered vendors from the catalog', () => {
     const body = functionBody(app, 'updateVendorOptions');
     assert.match(body, /\bvendorSelectState\(/, 'updateVendorOptions does not call vendorSelectState()');
-    assert.match(body, /\bvendorSelect\.disabled\s*=(?!=)/, 'updateVendorOptions never disables #vendor');
-    assert.match(body, /\bvendorSelect\.value\s*=(?!=)/, 'updateVendorOptions never clears a vendor not offered');
-    assert.match(body, /\.hidden\s*=(?!=)/, 'updateVendorOptions never hides a vendor option');
+    // The select's disabled flag and value read the vendorSelectState() result,
+    // not a constant: `vendorSelect.disabled = false` would fail open.
+    const state = body.match(/\b(?:const|let) (\w+) = vendorSelectState\(/);
+    assert.ok(state, 'updateVendorOptions does not keep the vendorSelectState() result');
+    assert.match(body, new RegExp(`\\bvendorSelect\\.disabled\\s*=\\s*${state[1]}\\.disabled\\b`),
+        'updateVendorOptions does not disable #vendor from the state');
+    assert.match(body, new RegExp(`\\bvendorSelect\\.value\\s*=\\s*${state[1]}\\.value\\b`),
+        'updateVendorOptions does not clear a vendor the state drops');
+    const hidden = body.match(/\boption\.hidden\s*=\s*([^;]+);/);
+    assert.ok(hidden, 'updateVendorOptions never hides a vendor option');
+    assert.ok(body.includes(`option.disabled = ${hidden[1]};`),
+        'updateVendorOptions does not disable a vendor option the way it hides it');
     for (const vendor of vendors) {
         assert.doesNotMatch(body, new RegExp(`['"\`]${vendor}['"\`]`), `updateVendorOptions names the vendor ${vendor}`);
     }
@@ -294,6 +303,11 @@ test('startEditDevice awaits the catalog before it fills the form, and fills not
     const wait = body.match(/const (\w+) = await ensureCatalog\(\);\s*if \(!\1\) \{?\s*return;/);
     assert.ok(wait, 'startEditDevice does not await ensureCatalog() and return without a catalog');
     assert.ok(wait.index < body.indexOf("setFormValue('vendor'"), 'startEditDevice fills the vendor before the catalog');
+});
+
+test('the edit click handler awaits startEditDevice', () => {
+    assert.match(app, /^ {4}await startEditDevice\(device\);$/m);
+    assert.doesNotMatch(app, /^ *startEditDevice\(/m, 'a startEditDevice() call that is not awaited');
 });
 
 test('catalog_schema.js writes no markup', () => {
