@@ -19,7 +19,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OpenAstro AlpacaBridge</title>
     <link rel="icon" type="image/x-icon" href="/web/favicon.ico">
-    <link rel="stylesheet" href="/web/style.css?v=32">
+    <link rel="stylesheet" href="/web/style.css?v=33">
 </head>
 <body>
     <div class="container">
@@ -578,7 +578,7 @@
                 <div id="celestron-config" class="vendor-config" style="display: none;">
                   <div id="celestron-focuser-config" style="display: none;">
                     <h3>Celestron Focus Motor Configuration</h3>
-                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you run the driver's Calibrate action (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
+                    <small style="color: #666;">The focus motor's own USB port, at a fixed 9600 baud (not through the mount's AUX port). An uncalibrated motor connects but cannot move until you press Calibrate on its device card (about 5 minutes); the Celestron Focuser Utility can erase the calibration when it closes.</small>
                     <div class="form-group">
                         <label for="celestron-focuser-port-path">Serial Port:</label>
                         <input type="text" id="celestron-focuser-port-path" name="celestronFocuserPortPath" placeholder="/dev/serial/by-id/usb-Celestron_Celestron_Focuser_MF_v1-if00">
@@ -2042,7 +2042,7 @@
         </div>
     </div>
 
-    <script src="/web/format.js?v=14"></script>
-    <script src="/web/app.js?v=45"></script>
+    <script src="/web/format.js?v=15"></script>
+    <script src="/web/app.js?v=46"></script>
 </body>
 </html>
