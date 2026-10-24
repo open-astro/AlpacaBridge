@@ -3276,11 +3276,7 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
     const Request& request = call.request();
 
     return call.run("telescope method '" + method_name + "'", [&]() -> Response {
-        // Helper function to parse double from query param, JSON body, or form-encoded body
 
-        // Helper function to parse int from query param, JSON body, or form-encoded body
-
-        // Helper function to parse bool from query param, JSON body, or form-encoded body
         // GET-only boolean properties
         if (request.method() == HttpMethod::GET) {
             if (method_name == "cansetrightascensionrate") {

@@ -20,6 +20,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacahttp/request.h>
 #include <alpacahttp/response.h>
+#include <alpacahttp/util/error_mapping.h>
 
 #include <cstdint>
 #include <iostream>
@@ -241,6 +242,16 @@ void case_run_std_exception_is_driver_error() {
     EXPECT(json["ServerTransactionID"] == kServerTx);
 }
 
+// The outer handle_device catch and the management handlers map foreign exceptions with
+// exception_to_error_code; its text-based guess is gone.
+// Falsified by: reinstating the substring tail in exception_to_error_code (this text mapping to 0x401 or 0x407).
+void case_exception_to_error_code_ignores_text() {
+    EXPECT(alpacahttp::util::exception_to_error_code(std::invalid_argument("invalid value: not connected")) ==
+           kDriverError);
+    EXPECT(alpacahttp::util::exception_to_error_code(
+               alpacacore::AlpacaException("x", alpacacore::AlpacaError::NotConnected)) == 0x407);
+}
+
 // ok() and ok_void() build the success envelope with both ids and no error.
 // Falsified by: swapping the two ids in ok(); giving ok_void() a Value.
 void case_ok_envelope() {
@@ -317,6 +328,7 @@ int main() {
     case_run_invalid_value_stays_200();
     case_run_alpaca_exception_mapped_with_both_ids();
     case_run_std_exception_is_driver_error();
+    case_exception_to_error_code_ignores_text();
     case_ok_envelope();
     case_body_parsed_once();
     case_client_transaction_id();
