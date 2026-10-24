@@ -159,6 +159,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// blocks on before the driver is destroyed.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
+/// Test seam: `hook` runs on the thread that changes the RA rate, in the window
+/// where it has released the driver locks and not yet started the rate-applied
+/// check, so a case can land a disconnect and a reconnect before the check body
+/// starts. Pass an empty function to clear it.
+void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.
 std::unique_ptr<TelescopeDriver> create_skywatcher_telescope_deferred(

@@ -4006,6 +4006,18 @@ private:
 
     // Test seam: called between a poll's sample and its publish, with no lock
     // held, so a case can land a client write in that window.
+    // Test seam: runs in spawn_rate_verify_task_locked()'s unlocked gap, before start().
+    void run_rate_verify_before_start_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = rate_verify_before_start_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     void run_status_poll_after_sample_hook() {
         std::function<void()> hook;
         {
@@ -4237,8 +4249,9 @@ private:
             return;  // nothing changed, nothing to verify
         }
         const Wire protocol = wire();
-        // A reconnect rewrites axis_params_ under mutex_ while this body (cancelled, not joined) may still
-        // run: copy the one value it needs under the state lock rather than reading the array bare.
+        // A body can start in spawn_rate_verify_task_locked()'s unlocked start() gap after a concurrent
+        // disconnect already joined the slot, so the next connect may rewrite axis_params_ (under mutex_)
+        // while this runs: copy the one value it needs under the state lock rather than reading the array bare.
         uint32_t counts_per_revolution = 0;
         {
             std::lock_guard<std::mutex> state(mutex_);
@@ -4371,6 +4384,7 @@ private:
         // is what a reaper in the unlocked window invalidates: it bumps it
         // under mutex_, and the body's resend checks it under mutex_.
         lock.unlock();
+        run_rate_verify_before_start_hook();
         try {
             rate_verify_.start(
                 [this, previous_rate_deg_per_sec, expected_rate_deg_per_sec, epoch](util::OperationContext& ctx) {
@@ -6365,6 +6379,11 @@ public:
         status_poll_after_sample_hook_ = std::move(hook);
     }
 
+    void set_rate_verify_before_start_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        rate_verify_before_start_hook_ = std::move(hook);
+    }
+
 private:
     // Per-axis (open-astro#620): a pulse on one axis must never cancel or
     // join the other axis's pulse body -- ASCOM allows RA and Dec PulseGuide
@@ -6649,6 +6668,7 @@ private:
     std::atomic<bool> status_poll_paused_for_testing_{false};
     std::mutex status_poll_hook_mutex_;
     std::function<void()> status_poll_after_sample_hook_;
+    std::function<void()> rate_verify_before_start_hook_;
     util::OperationGeneration status_poll_generation_;
     util::AsyncOperation status_poll_{"SkyWatcher status poll", status_poll_generation_, clock_};
 
@@ -6821,6 +6841,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused) {
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
         sw->set_status_poll_after_sample_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* sw = dynamic_cast<SkyWatcherTelescopeDriver*>(&driver)) {
+        sw->set_rate_verify_before_start_hook_for_testing(std::move(hook));
     }
 }
 

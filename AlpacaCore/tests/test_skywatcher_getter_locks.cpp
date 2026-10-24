@@ -291,23 +291,42 @@ TEST_CASE("SkyWatcher getters - SiderealTime and UTCDate read one client-clock s
 
 TEST_CASE("SkyWatcher getters - a reconnect does not race the rate-applied check reading the axis parameters",
           "[skywatcher][getter-locks][stress-guard]") {
-    // RightAscensionRate on a tracking axis starts a background rate-applied check. A disconnect only cancels it
-    // (the body is not joined), so it can still be reading the axis parameters when the next connect rewrites them
-    // under the state lock. The values are equal on every connect, so no assertion can see the race: only the TSan
-    // run (`[stress-guard]`) fails when the check reads axis_params_ without the state lock.
+    // A rate change starts its background rate-applied check after releasing the driver locks. In that gap a
+    // disconnect joins an empty slot, and the next connect rewrites the axis parameters under the state lock while
+    // the newly started body reads them. The values are equal on every connect, so no assertion can see the race:
+    // only the TSan run (`[stress-guard]`) fails when the check reads axis_params_ without the state lock. The
+    // hook runs the disconnect and the reconnect on a second thread; the setter waits for the disconnect only, so
+    // the reconnect write and the body read have no ordering.
     FakeSkyWatcherMount mount;
     REQUIRE(mount.ok());
     auto driver = connected_driver(mount);
+    std::vector<std::thread> reconnects;
     for (int i = 0; i < 15; ++i) {
         driver->set_tracking(true);
+        std::atomic<bool> disconnected{false};
+        sw::set_rate_verify_before_start_hook_for_testing(*driver, [&] {
+            reconnects.emplace_back([&] {
+                driver->set_connected(false);
+                disconnected = true;
+                driver->set_connected(true);
+            });
+            while (!disconnected) {
+                std::this_thread::yield();
+            }
+        });
         try {
             driver->set_right_ascension_rate(i % 2 == 0 ? 0.5 : -0.5);
         } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
             // A rate change refused mid-transition is not the subject here.
         }
-        driver->set_connected(false);
-        driver->set_connected(true);
-        CHECK(driver->get_connected());
+        sw::set_rate_verify_before_start_hook_for_testing(*driver, nullptr);
+        for (auto& t : reconnects) {
+            t.join();
+        }
+        reconnects.clear();
+        if (!driver->get_connected()) {
+            driver->set_connected(true);
+        }
     }
     driver->set_connected(false);
 }
