@@ -1555,6 +1555,66 @@ TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition 
     CHECK(disconnect_stepping(clock, *driver) < seconds(2));
 }
 
+TEST_CASE("QHY Camera Driver - failed replacement setup retires the cancelled acquisition",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    const auto failing_call =
+        GENERATE("set_param", "is_control_available", "set_resolution", "set_bin_mode", "set_bits_mode");
+    const bool previous_success = GENERATE(false, true);
+    CAPTURE(failing_call, previous_success);
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "get_single_frame");
+    gate.armed = false;
+    const auto hold_frame = fake.before_call;
+    std::atomic<bool> cancel_releases_frame{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "cancel_exposure" && cancel_releases_frame.load()) gate.release = true;
+        hold_frame(name);
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    std::chrono::system_clock::time_point previous_start{};
+    if (previous_success) {
+        driver->start_exposure(0.02, true);
+        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        previous_start = driver->get_last_exposure_start_time();
+    }
+    gate.armed = true;
+    gate.release = false;
+    {
+        ClockPump pump(clock);
+        driver->start_exposure(3000.0, true);
+    }
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    fake.throw_from.insert(failing_call);
+    cancel_releases_frame = true;
+    {
+        ClockPump pump(clock);
+        CHECK(error_code_of([&] { driver->start_exposure(1.0, false); }) == AlpacaError::DriverException);
+    }
+    fake.throw_from.clear();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == AlpacaError::InvalidOperation);
+    CHECK_NOTHROW(driver->set_gain(12));
+    clock.advance(seconds(3601));
+    CHECK_FALSE(driver->get_image_ready());  // The cancelled deadline must not expire later.
+    if (previous_success) {
+        CHECK(driver->get_last_exposure_duration() == 0.02);
+        CHECK(driver->get_last_exposure_start_time() == previous_start);
+    } else {
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    gate.armed = false;
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 1.0);
+}
+
 TEST_CASE("QHY Camera Driver - an unpolled deadline rejects a late successful frame",
           "[qhy][camera][unit][taskclock][metadata]") {
     // Observe worker completion without calling a getter that could expire the deadline itself.

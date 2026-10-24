@@ -259,8 +259,7 @@ TEST_CASE("SVBONY Camera - pending failed and cancelled frames preserve successf
     SECTION("late B cannot publish after the watchdog") {
         clock.advance(16s);
         wait_for_driver_exception(*camera, "completion deadline");
-        sdk.release_video_data();
-        camera->abort_exposure();  // joins the late worker
+        camera->abort_exposure();  // Abort releases the held read; a finished worker makes abort a no-op.
         require_a();
         CHECK_FALSE(camera->get_image_ready());
     }

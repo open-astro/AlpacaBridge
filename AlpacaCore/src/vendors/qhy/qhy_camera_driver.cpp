@@ -1443,6 +1443,14 @@ public:
                 throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
                                       AlpacaError::InvalidOperation);
             }
+            // The superseded worker cannot retire its state if replacement setup throws.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_status_ == QHYExposureStatus::Working) {
+                exposure_status_ = QHYExposureStatus::Idle;
+                exposure_deadline_valid_ = false;
+                exposure_armed_ = false;
+                last_exposure_valid_ = false;
+            }
         }
 
         // Apply exposure time (microseconds)
