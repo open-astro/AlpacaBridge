@@ -57,7 +57,7 @@ Revert the PR. The bound is one constant, so "never lost by silence" is a one-li
 
 ## Adoption
 
-`scripts/check_docs_drift.py` check 23 holds this roster to the code: a driver that names `kLinkStalenessBound` needs a row. OnStep applies the transport-gone half of point 2 only, so its row checks that half's symbol.
+`scripts/check_docs_drift.py` check 23 holds this roster to the code: a driver that names `kLinkStalenessBound` needs a row.
 
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `kLinkStalenessBound`
@@ -69,7 +69,7 @@ Symbol: `kLinkStalenessBound`
 | Gemini PDH, flat panel, focuser |  | — | planned | — | Polled latch; `Connected` stays true |
 | iOptron mount, iEAF, iEFW, iMate |  | — | planned | — | `device_faulted_`; `Connected` stays true |
 | QHY Q-Focuser |  | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | `link_lost_` latch on the next transaction (#527); applied with the state snapshot (#1310): a poll that has not been answered for `util::kLinkStalenessBound` is a lost link (`Connected` false, transport released), three failed polls are a fault |
-| OnStep (serial) | `consume_link_lost_at` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | partial | #1241, #1414 | Applied: node check, fd errors, relink; the #521 window is timed from the last time the link was seen alive to the end of the reconnect (see the OnStep instructions); no fault latch or staleness bound yet |
+| OnStep (serial) |  | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1241, #1414 | Applied: node check, fd errors, relink (#1241); the #521 window is timed from the last time the link was seen alive (the fd, not a reply, so after a staleness loss it runs from the loss) to the end of the reconnect (see the OnStep instructions); three failed status or position reads in a row latch a fault (`util::PolledLinkHealth`; reads and writes throw, `Connected` stays true; AbortSlew and `MoveAxis(axis, 0)` still send their stops first; the raw `command_blind`/`command_bool` pass-through is not refused), and a fault standing past `util::kLinkStalenessBound` is a lost link through the same path as a pulled adapter (#1414). No poll thread: the reads are the client's |
 | Celestron telescope (NexStar) |  | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | Applied with the state snapshot (#1337): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters `NotConnected`, `DeviceState` empty); no `LinkLostStamp` (no #521 consumer) |
 | SynScan telescope |  | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | Applied with the state snapshot (#1247): three failed status polls are a fault, a fault standing past `util::kLinkStalenessBound` is a lost link (`Connected` false, getters and setters `NotConnected`, `DeviceState` empty, transport closed); no `LinkLostStamp` (no #521 consumer) |
 | Celestron CGX |  | — | planned | — | No latch; transport errors only |
