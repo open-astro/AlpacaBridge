@@ -1007,9 +1007,18 @@ const std::map<std::string, StateType>* ascom_device_state_types(DeviceType type
 }
 
 // Case 6, camera rows only. LastExposureDuration and LastExposureStartTime before any successful image are the
-// ICameraV4 InvalidOperation, not ValueNotSet (issue #1477).
+// ICameraV4 InvalidOperation, not ValueNotSet (issue #1477); while disconnected they raise NotConnected.
 [[maybe_unused]] void case_t2_last_exposure_before_image(const Tier2Host& h) {
     REQUIRE(h.type == DeviceType::Camera);
+    {
+        // Disconnected: NotConnected wins over the no-image InvalidOperation.
+        Hosted down = h.connectable(false);
+        REQUIRE(down.driver != nullptr);
+        auto& cam = dynamic_cast<alpacacore::CameraDriver&>(*down.driver);
+        INFO(h.id << " LastExposure* while disconnected");
+        alpacacore::test::require_error_code([&] { (void)cam.get_last_exposure_duration(); }, err::NotConnected);
+        alpacacore::test::require_error_code([&] { (void)cam.get_last_exposure_start_time(); }, err::NotConnected);
+    }
     Hosted hosted = connected_host(h);
     INFO(h.id << " LastExposure* before any exposure");
     alpacacore::test::require_last_exposure_unset(dynamic_cast<alpacacore::CameraDriver&>(*hosted.driver));

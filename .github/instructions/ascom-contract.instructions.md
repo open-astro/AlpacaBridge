@@ -178,7 +178,8 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   been successfully acquired"), never `ValueNotSet`. A failed exposure publishes nothing and never erases the
   values of an earlier success; only a new success replaces them. Keep the exposure in flight in pending fields
   (`PercentCompleted` reads them) and commit them to `util::LastExposure` (`util/last_exposure.h`) at the point
-  the image is acquired; clear it on disconnect.
+  the image is acquired; clear it on disconnect. While disconnected both raise `NotConnected` first
+  (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
 - **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): GPhoto reports the
   parsed shutter speed it wrote (`1/200` is 0.005), the bulb or B-mode requested value when the driver times the
   exposure itself, and iGuider the step taken. `PercentCompleted` keeps the requested duration for progress.

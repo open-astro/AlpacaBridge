@@ -866,11 +866,13 @@ public:
     bool get_is_pulse_guiding() const override { return false; }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         return published_exposure_.start_time();
     }
@@ -1544,6 +1546,11 @@ private:
             DecodedFrame decoded = decoder_.decode(capture.data);
 
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!exposure_active_.load()) {
+                // Aborted while the frame was decoding: the image is discarded,
+                // so nothing is applied or published.
+                return;
+            }
             apply_decoded_frame_locked(decoded);
             image_cached_ = true;
             image_ready_ = true;
