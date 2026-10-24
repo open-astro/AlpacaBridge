@@ -7,10 +7,60 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 Devices: Telescope.
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
-ESP32, STM32) for DIY/retrofit mounts. No manufacturer protocol PDF exists; the reference for
-this driver is INDI's `lx200_OnStep` driver (`indilib/indi`, `drivers/telescope/lx200_OnStep.cpp`
-+ the shared `lx200telescope.cpp`/`lx200driver.cpp` base it inherits from) — there was no INDI
-driver naming collision to resolve, "OnStep"/"On-Step" appears verbatim in both.
+ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own
+[OnStepX command reference](https://github.com/hjd1964/OnStepX/blob/097cc5797b4708e3787dd0b8bbbf81df66fdb5ff/docs/COMMAND_REFERENCE.md)
+(pinned at the commit read for the table below; GPL-3.0, so it is linked, not copied), then the firmware source itself
+([OnStepX](https://github.com/hjd1964/OnStepX), and [OnStep](https://github.com/hjd1964/OnStep)
+`Command.ino` for the older firmware). Check a reply format there before a driver change or a
+test fake relies on it. The driver was first written from INDI's `lx200_OnStep` driver
+(`indilib/indi`, `drivers/telescope/lx200_OnStep.cpp` + the shared `lx200telescope.cpp`/`lx200driver.cpp`
+base it inherits from); several of INDI's readings turned out wrong (see the `:GU#` polarity and
+the tracking commands below), so INDI is history, not the reference.
+
+#### Commands this driver sends
+
+Replies are from the command reference unless noted. "Bare digit" means one character and no
+`#` (the driver reads it with `require_hash_terminator=false` and `kSetAckTimeoutMs`); "blind"
+means the driver sends it and drains whatever arrives within 50 ms without reading it.
+
+| Command | Used for | Reply | How the driver reads it |
+| --- | --- | --- | --- |
+| `:GVP#` / `:GVN#` | identity probe, firmware version | `name#` / `M.mm...#` | `#`-terminated; product must be `OnStep` or `On-Step` |
+| `:GXEE#` | coordinate mode (`DoesRefraction`, #1216) | `0#`, `1#`, ... | read without waiting for `#` |
+| `:GU#` | status (tracking, slewing, park, home, guide, pier side) | packed status `#` | `#`-terminated; see the status table below |
+| `:GRa#` / `:GDe#` | RA / Dec | `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSS#` | `#`-terminated. Not in the reference: aliases of `:GRH#`/`:GDH#` (OnStepX `Mount.command.cpp`, the `'a'`/`'e'` parameter) |
+| `:GA#` / `:GZ#` | altitude / azimuth | `sDD*MM#` or `sDD*MM'SS#` / `DDD*MM#` or `DDD*MM'SS#` | `#`-terminated |
+| `:Gh#` / `:Go#` | horizon / overhead limit (MoveAxis gate, #1378) | `sDD*#` / `DD*#` | `#`-terminated |
+| `:GS#` | sidereal time | `HH:MM:SS#` | `#`-terminated |
+| `:Gt#` / `:Gg#` | latitude / longitude (west-positive on the wire) | `sDD*MM#` / `sDDD*MM#` | `#`-terminated |
+| `:GL#` / `:GC#` / `:GG#` | local time / date / UTC offset (`UTCDate` read) | `HH:MM:SS#` / `MM/DD/YY#` / `sHH:MM#` | `#`-terminated |
+| `:GE#` | last command error (after `:hP#`/`:hC#`, #1430) | 2-digit code `#` | `#`-terminated; codes below |
+| `:SrHH:MM:SS#` / `:SdsDD*MM:SS#` | GOTO target | `0`/`1` | bare digit, `1` accepted |
+| `:StsDD*MM#` / `:SgsDDD*MM#` | site latitude / longitude | `0`/`1` | bare digit |
+| `:SLHH:MM:SS#` / `:SCMM/DD/YY#` / `:SGsHH[:MM]#` | time sync (UTC as local, offset 0) | `0`/`1` | bare digit |
+| `:MS#` | GOTO | one digit `0`..`9` | bare digit; `0` accepted, the rest below |
+| `:CM#` | sync | `N/A#`, or `E1#`..`E9#` on failure (the `:MS#` digits) | `#`-terminated, reply not checked |
+| `:Q#` | stop all slews, abort GOTO | none | blind |
+| `:Qn#` / `:Qs#` / `:Qe#` / `:Qw#` | stop one axis direction | none | blind |
+| `:Mn#` / `:Ms#` / `:Me#` / `:Mw#` | MoveAxis at the custom guide rate | none | blind; re-sent every 7 s (#1378) |
+| `:RAn.n#` / `:REn.n#` | MoveAxis rate, deg/s per axis | none | blind |
+| `:RS#` | slew-rate preset before a move | none | blind |
+| `:Mgdnnnn#` | pulse guide, `d` = `n`/`s`/`e`/`w`, 4-digit ms | none | blind |
+| `:ST60.164275#` / `:ST0#` | tracking on / off | `0`/`1` | blind, reply not checked; the next `:GU#` shows the result |
+| `:hP#` | park | `0`/`1` | bare digit; then `:GE#` for the reason |
+| `:hC#` | find home | none | blind; then `:GE#` for the reason |
+| `:hR#` | unpark | `0`/`1` | blind, reply not checked |
+| `:hQ#` | set park position | `0`/`1` | blind, reply not checked |
+
+`:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
+`E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
+in standby, `4` parked, `5` GOTO in progress (OnStepX also stops the running GOTO), `6` outside
+limits, `7` hardware fault, `8` already in motion, `9` unspecified.
+
+`:GE#` codes the driver acts on (the full list is in the command reference): `00` none and `25`
+true are success; `22` in motion makes Park/FindHome wait for the mount to be still and retry for
+3 s; any other code is a refusal the driver keeps and reports with its number (#1430). The `:MS#`
+digits are these codes 15 to 23 less 14.
 
 Connection types: **Serial (USB) only** in this project — no Wi-Fi/network config is exposed to
 users, unlike iOptron/Celestron. Default 9600 baud, 8N1, standard LX200 `#`-terminated ASCII
