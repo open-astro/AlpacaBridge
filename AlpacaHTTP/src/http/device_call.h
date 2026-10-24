@@ -44,10 +44,8 @@ public:
 
 // Request-text helpers shared with the management handlers in router.cpp.
 std::string to_lower_copy(std::string value);
-std::string url_decode(const std::string& value);
 std::uint32_t parse_client_transaction_id(const std::string& value);
 double parse_double_value(const std::string& raw, const std::string& param_name);
-int parse_int_value(const std::string& raw, const std::string& param_name);
 int json_int_value(const nlohmann::json& value, const std::string& param_name);
 bool parse_bool_value(const std::string& raw, const std::string& param_name);
 const nlohmann::json* find_json_value(const nlohmann::json& json_obj, const std::string& key);
@@ -119,7 +117,7 @@ private:
 
     struct Raw {
         const nlohmann::json* json = nullptr;
-        std::optional<std::string> text;
+        std::string text;
     };
     std::optional<Raw> find_raw(const std::string& name) const;
 

@@ -24,6 +24,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 #include "../core/catalog_json.h"
 
@@ -41,6 +42,7 @@ std::string to_lower_copy(std::string value) {
     return value;
 }
 
+namespace {
 std::string url_decode(const std::string& value) {
     std::string result;
     result.reserve(value.size());
@@ -58,6 +60,7 @@ std::string url_decode(const std::string& value) {
     }
     return result;
 }
+}  // namespace
 
 std::uint32_t parse_client_transaction_id(const std::string& value) {
     if (value.empty()) {
@@ -99,6 +102,7 @@ double parse_double_value(const std::string& raw, const std::string& param_name)
     }
 }
 
+namespace {
 int parse_int_value(const std::string& raw, const std::string& param_name) {
     try {
         std::size_t pos = 0;
@@ -114,6 +118,7 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
         throw_bad_request("Invalid value for parameter: " + param_name);
     }
 }
+}  // namespace
 
 // A JSON-body integer parameter (#1476): accepted only as a whole number
 // inside int, given as a JSON integer, a JSON number with no fraction (0.0),
@@ -248,19 +253,22 @@ std::optional<std::string> DeviceCall::form_field(const std::string& name) const
 // The one parameter rule: query, then the JSON body (the name, then "Value"),
 // then the form body (the name, then "Value").
 std::optional<DeviceCall::Raw> DeviceCall::find_raw(const std::string& name) const {
-    Raw raw;
     if (request_.has_query_param(name)) {
-        raw.text = request_.get_query_param(name);
-        return raw;
+        return Raw{nullptr, request_.get_query_param(name)};
     }
     if (const auto* json = body_json()) {
-        if ((raw.json = find_json_value(*json, name)) != nullptr ||
-            (raw.json = find_json_value(*json, "Value")) != nullptr) {
-            return raw;
+        if (const auto* value = find_json_value(*json, name)) {
+            return Raw{value, {}};
+        }
+        if (const auto* value = find_json_value(*json, "Value")) {
+            return Raw{value, {}};
         }
     }
-    if ((raw.text = get_form_value(request_.body(), name)) || (raw.text = get_form_value(request_.body(), "Value"))) {
-        return raw;
+    if (auto value = get_form_value(request_.body(), name)) {
+        return Raw{nullptr, std::move(*value)};
+    }
+    if (auto value = get_form_value(request_.body(), "Value")) {
+        return Raw{nullptr, std::move(*value)};
     }
     return std::nullopt;
 }
@@ -268,7 +276,7 @@ std::optional<DeviceCall::Raw> DeviceCall::find_raw(const std::string& name) con
 std::optional<double> DeviceCall::find_double(const std::string& name) const {
     const auto raw = find_raw(name);
     if (!raw) return std::nullopt;
-    if (raw->json == nullptr) return parse_double_value(*raw->text, name);
+    if (raw->json == nullptr) return parse_double_value(raw->text, name);
     if (raw->json->is_number()) return raw->json->get<double>();
     if (raw->json->is_string()) return parse_double_value(raw->json->get<std::string>(), name);
     throw_bad_request("Invalid JSON value for parameter: " + name);
@@ -277,14 +285,14 @@ std::optional<double> DeviceCall::find_double(const std::string& name) const {
 std::optional<int> DeviceCall::find_int(const std::string& name) const {
     const auto raw = find_raw(name);
     if (!raw) return std::nullopt;
-    if (raw->json == nullptr) return parse_int_value(*raw->text, name);
+    if (raw->json == nullptr) return parse_int_value(raw->text, name);
     return json_int_value(*raw->json, name);
 }
 
 std::optional<bool> DeviceCall::find_bool(const std::string& name) const {
     const auto raw = find_raw(name);
     if (!raw) return std::nullopt;
-    if (raw->json == nullptr) return parse_bool_value(*raw->text, name);
+    if (raw->json == nullptr) return parse_bool_value(raw->text, name);
     if (raw->json->is_boolean()) return raw->json->get<bool>();
     if (raw->json->is_string()) return parse_bool_value(raw->json->get<std::string>(), name);
     throw_bad_request("Invalid JSON value for parameter: " + name);
@@ -293,7 +301,7 @@ std::optional<bool> DeviceCall::find_bool(const std::string& name) const {
 std::optional<std::string> DeviceCall::find_string(const std::string& name) const {
     const auto raw = find_raw(name);
     if (!raw) return std::nullopt;
-    if (raw->json == nullptr) return *raw->text;
+    if (raw->json == nullptr) return raw->text;
     if (raw->json->is_string()) return raw->json->get<std::string>();
     throw_bad_request("Invalid JSON value for parameter: " + name);
 }

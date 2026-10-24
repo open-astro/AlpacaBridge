@@ -74,14 +74,7 @@ namespace {
 using alpacacore::logging::LogLevel;
 using alpacahttp::find_json_value;
 using alpacahttp::get_form_value;
-using alpacahttp::json_int_value;
-using alpacahttp::log_alpaca_exception;
-using alpacahttp::parse_bool_value;
-using alpacahttp::parse_client_transaction_id;
-using alpacahttp::RequestNotInterpretable;
-using alpacahttp::throw_bad_request;
 using alpacahttp::to_lower_copy;
-using alpacahttp::url_decode;
 
 const std::filesystem::path kPersistedDevicesFile = std::filesystem::path("config") / "registered_devices.json";
 
