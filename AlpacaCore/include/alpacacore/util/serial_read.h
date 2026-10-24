@@ -125,15 +125,15 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
                            std::chrono::steady_clock::time_point deadline) {
     using Clock = std::chrono::steady_clock;
     ReadResult res;
-    const auto first_limit = spec.first_byte_timeout
-                                 ? std::optional<Clock::time_point>(Clock::now() + *spec.first_byte_timeout)
-                                 : std::nullopt;
+    const bool has_first_limit = spec.first_byte_timeout.has_value();
+    const Clock::time_point first_limit =
+        Clock::now() + (has_first_limit ? *spec.first_byte_timeout : std::chrono::milliseconds::zero());
     Clock::time_point last_kept = Clock::now();
     for (;;) {
         // The next instant something other than a byte ends the read.
         auto limit = deadline;
         if (res.bytes.empty()) {
-            if (first_limit && *first_limit < limit) limit = *first_limit;
+            if (has_first_limit && first_limit < limit) limit = first_limit;
         } else if (spec.stop == ReadSpec::Stop::IdleGap && last_kept + spec.idle_gap < limit) {
             limit = last_kept + spec.idle_gap;
         }

@@ -268,7 +268,7 @@ TEST_CASE("read_until_socket - a closed peer is LinkDead with ECONNRESET", "[ser
 TEST_CASE("read_until_socket - a non-socket fd is LinkDead with ENOTSOCK", "[serial][serial_read][issue1604]") {
     int fds[2];
     REQUIRE(::pipe(fds) == 0);
-    ::write(fds[1], "x", 1);
+    REQUIRE(::write(fds[1], "x", 1) == 1);
     const auto r = read_until_socket(fds[0], ReadSpec{}, Clock::now() + 1s);
     ::close(fds[0]);
     ::close(fds[1]);
