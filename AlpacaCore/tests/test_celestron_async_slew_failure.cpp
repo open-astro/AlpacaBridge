@@ -422,8 +422,10 @@ TEST_CASE("Celestron Unpark - a no-op Unpark clears a stored slew error",
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(no_flip_ra_hours(), 20.0));
     REQUIRE(wait_until([&] { return read_slewing(*driver) == SlewingRead::Threw; }, 10000));
 
+    // An Unpark with no park in flight claims nothing and joins nothing (decision 0006): the failing body finishes its
+    // own failure, so Slewing reads false once its stop is answered, not necessarily when Unpark returns.
     REQUIRE_NOTHROW(driver->unpark());
-    CHECK(read_slewing(*driver) == SlewingRead::False);
+    CHECK(wait_until([&] { return read_slewing(*driver) == SlewingRead::False; }, 5000));
     driver->set_connected(false);
 }
 

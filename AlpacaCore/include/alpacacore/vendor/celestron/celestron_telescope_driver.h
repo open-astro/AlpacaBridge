@@ -13,6 +13,7 @@
 #pragma once
 
 #include <alpacacore/telescope_driver.h>
+#include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
@@ -62,6 +63,12 @@ void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<vo
 /// Runs when the poll or the slew-complete wait has found a failure, before its stops are sent, without any driver
 /// lock held; null clears it.
 void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+/// What a slew-slot body passes its test hook: reads the body's own stop reason (None, Cancelled or Superseded).
+using SlewBodyStopReason = std::function<util::StopReason()>;
+using SlewBodyHook = std::function<void(const SlewBodyStopReason&)>;
+/// Runs in the async slew body and in the Park body right after the GOTO exchange returned, with mutex_ released and
+/// before the body takes it again; a hook that blocks holds the body there. Null clears it.
+void set_slew_body_hook_for_testing(TelescopeDriver& driver, SlewBodyHook hook);
 /// Runs in the park's and the blocking slew's dispatch, after the flip decision and before the GOTO, with mutex_
 /// released (a blocking slew still holds its initiator lock); null clears it.
 void set_slew_dispatch_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
