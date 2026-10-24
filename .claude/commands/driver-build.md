@@ -565,14 +565,17 @@ All 9 steps required for end-to-end functionality:
      per-slot filter name dropdowns, and the advanced names textarea. Instantiate
      `createFilterwheelSlotUI({...})` in `app.js` with vendor-prefixed element IDs and
      copy the markup pattern from an existing filterwheel vendor in `index.html`.
+   - **Catalog keys**: put each field inside a `data-vendor` / `data-device-type` scope
+     `<div>` and give it `data-config-key="<catalog key>"`; `catalog_form_drift.test.js`
+     fails on a named field without one, on a catalog field no form field names, and on a
+     control that does not fit the field type or role.
 6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
    filterwheel/rotator), add an entry to the `INDEX_FIELDS` array in `app.js`
    (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That wires up
    per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
    of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
    device number, which auto-assigns per type already.) See "Enumeration index fields" in
-   `.github/instructions/http-integration.instructions.md`. Each named form field also
-   carries `data-config-key` and sits in a `data-vendor` / `data-device-type` scope `<div>`.
+   `.github/instructions/http-integration.instructions.md`.
 7. Frontend validation logic.
 8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
 9. Routing/config tests in `AlpacaHTTP/tests/`.
