@@ -52,6 +52,25 @@ SUCCESS_PATTERNS = (
 )
 
 
+# A report made against a test double, not a device, lives in a path component
+# that starts with "Fake" (AlpacaCore/conformu/SkyWatcher/Fake/Fake-Linux-arm64.txt)
+# and says so on its first line, so no reader takes it for hardware validation
+# (SUPPORTED-DRIVERS.md keeps hardware rows apart). A JSON report has no first
+# line to carry the marker, so a Fake* path cannot be JSON.
+FAKE_MARKER = "FAKE REPORT:"
+
+
+def is_fake_report(path):
+    return any(part.startswith("Fake") for part in path.replace("\\", "/").split("/"))
+
+
+def check_fake_marker(path, text):
+    if text.split("\n", 1)[0].startswith(FAKE_MARKER):
+        return []
+    return ["%s: a Fake* report must start with a %r line saying it ran against a "
+            "test double, not hardware" % (path, FAKE_MARKER)]
+
+
 def changed_conformu_files(base_ref):
     merge_base = subprocess.run(
         ["git", "merge-base", base_ref, "HEAD"],
@@ -93,6 +112,10 @@ def check_json(path):
     except (OSError, json.JSONDecodeError) as e:
         return ["%s: could not parse as JSON (%s)" % (path, e)]
 
+    if is_fake_report(path):
+        return ["%s: a Fake* report must be a .txt file, because only text carries the %r first line"
+                % (path, FAKE_MARKER)]
+
     if not isinstance(data, dict):
         return ["%s: top-level JSON is a %s, not an object -- cannot check "
                 "ErrorCount/IssueCount/TimingIssuesCount" % (path, type(data).__name__)]
@@ -124,7 +147,7 @@ def check_text(path):
     except OSError as e:
         return ["%s: could not read file (%s)" % (path, e)]
 
-    failures = []
+    failures = check_fake_marker(path, text) if is_fake_report(path) else []
     for lineno, line in enumerate(text.splitlines(), start=1):
         if TIMING_OUTSIDE_RE.search(line):
             failures.append("%s:%d: %s" % (path, lineno, line.strip()))
@@ -288,6 +311,26 @@ def self_test():
         found = check_text(path)
         check("check_text still applies its rules to a non-UTF-8 report",
               len(found) == 1 and found[0].startswith("%s:2: OUTSIDE FAST" % path))
+        # A Fake* report: marker on the first line, .txt only.
+        os.mkdir(os.path.join(tmp, "Fake"))
+        good_fake = "%s no hardware\n%s\n" % (FAKE_MARKER, SUCCESS_PATTERNS[0])
+        check("check_text passes a Fake* report with the marker on line 1",
+              check_text(text_file("Fake/Fake-Linux-arm64.txt", good_fake)) == [])
+        found = check_text(text_file("Fake/nomarker.txt", "%s\n" % SUCCESS_PATTERNS[0]))
+        check("check_text FAILS a Fake* report without the marker",
+              len(found) == 1 and "must start with" in found[0])
+        found = check_text(text_file("Fake/late.txt", "header\n" + good_fake))
+        check("check_text FAILS a Fake* report whose marker is not the first line",
+              len(found) == 1 and "must start with" in found[0])
+        found = check_text(text_file("FakeName.txt", "%s\n" % SUCCESS_PATTERNS[0]))
+        check("check_text FAILS a Fake* file name without the marker",
+              len(found) == 1 and "must start with" in found[0])
+        check("check_text does not ask a hardware report for the marker",
+              check_text(text_file("hw.txt", "%s\n" % SUCCESS_PATTERNS[0])) == [])
+        found = check_json(json_file("Fake/report.json",
+                                     '{"ErrorCount": 0, "IssueCount": 0, "TimingIssuesCount": 0}'))
+        check("check_json FAILS a Fake* JSON report",
+              len(found) == 1 and "must be a .txt" in found[0])
         found = check_text(os.path.join(tmp, "absent.txt"))
         check("check_text FAILS on a missing file",
               len(found) == 1 and "could not read file" in found[0])
