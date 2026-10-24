@@ -30,6 +30,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace alpacacore::util {
@@ -46,13 +47,10 @@ public:
     CaptureControl(const CaptureControl&) = delete;
     CaptureControl& operator=(const CaptureControl&) = delete;
 
-    /// Waits `d` on the session's TaskClock, never past the watchdog deadline.
-    /// True when the full time passed; false when the body must stop (abort,
-    /// disconnect, fail, the watchdog).
+    /// Waits `d` on the TaskClock, never past the watchdog deadline. False when the body must stop.
     inline bool wait_for(std::chrono::nanoseconds d);
     StopReason stop_reason() const { return ctx_.stop_reason(); }
-    /// The SDK exposure has begun: stamps LastExposureStartTime (a
-    /// system_clock value) and the PercentCompleted base (the TaskClock).
+    /// The SDK exposure has begun: stamps LastExposureStartTime and the PercentCompleted base.
     inline void exposure_started();
     /// The frame is being downloaded: CameraState Download.
     inline void reading_out();
@@ -134,7 +132,7 @@ public:
         try {
             slot_.start(
                 [this, token, fn = std::move(body)](OperationContext& ctx) mutable { run_body(token, fn, ctx); });
-        } catch (const AlpacaException&) {
+        } catch (...) {  // AlpacaException, or std::bad_alloc from building the slot's function
             lock.lock();
             --running_;
             if (owner_ == token && open_) {  // still ours: nothing else moved the state
@@ -148,10 +146,14 @@ public:
         }
     }
 
+    /// Forwards to the slot's thread factory, for a test that must hold a body
+    /// before it runs or make thread creation fail. Call with nothing running.
+    void set_spawn_for_testing(std::function<std::thread(std::function<void()>)> spawn) {
+        slot_.set_spawn_for_testing(std::move(spawn));
+    }
+
     /// Cancels the exposure in flight and joins its body; the frame is
-    /// discarded. A no-op when nothing is exposing. A start() that begins
-    /// during the join waits for it, so the join never cancels that start's
-    /// body.
+    /// discarded. A no-op when nothing is exposing.
     void abort() {
         std::unique_lock<std::mutex> lock(mutex_);
         if (!is_exposing_locked()) {

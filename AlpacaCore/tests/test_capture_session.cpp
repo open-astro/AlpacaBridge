@@ -10,18 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-// Tests for util::CaptureSession, one camera's exposure state, time, watchdog
-// and kept failure over one util::AsyncOperation slot (issue #1605).
-//
-// Every case runs on a FakeTaskClock: time moves only through advance(), and
-// every blocking step on the test thread has a real-time bound (a future
-// waited for 2 s, or a yield loop with a 2 s deadline), so a defect fails the
-// case instead of hanging the binary. The lock-order storm is the exception:
-// its threads cannot unwind from a deadlock, so it aborts the binary instead.
-//
-// "Blocked in the SDK" means a body waiting on a test-owned Gate that ignores
-// the session's cancel, the shape of a vendor call blocked until its own
-// timeout. The Harness opens every gate before it destroys the session.
+// Tests for util::CaptureSession (issue #1605). Every case runs on a
+// FakeTaskClock and bounds each blocking step in real time, so a defect fails
+// the case instead of hanging. "Blocked in the SDK" means a body waiting on a
+// test-owned Gate that ignores the session's cancel; the Harness opens every
+// gate before it destroys the session.
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/camera_driver.h>
@@ -37,8 +30,10 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -987,4 +982,147 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
     h.session->start(10.0, polling_body(p));
     CHECK(h.session->camera_state() == CameraState::Exposing);
     h.session->abort();
+}
+
+namespace {
+using Spawn = std::function<std::thread(std::function<void()>)>;
+Spawn plain_spawn() {
+    return [](std::function<void()> f) { return std::thread(std::move(f)); };
+}
+// Holds the slot thread on `g` before it runs `f`.
+Spawn held_spawn(const GatePtr& g) {
+    return [g](std::function<void()> f) {
+        return std::thread([g, f = std::move(f)]() mutable {
+            g->wait();
+            f();
+        });
+    };
+}
+}  // namespace
+
+TEST_CASE("CaptureSession - a start reserved before a close or an abort never runs its body",
+          "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    auto held = h.gate();
+    h.session->set_spawn_for_testing(held_spawn(held));
+    h.session->start(10.0, polling_body(p));  // reserved; its thread waits before run_body
+
+    SECTION("disconnect_and_join") {
+        auto closing = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
+        REQUIRE(eventually(
+            [&] { return error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::NotConnected; }));
+        held->open();
+        REQUIRE(closing.wait_for(kBound) == std::future_status::ready);
+        closing.get();
+    }
+    SECTION("abort") {
+        auto aborting = std::async(std::launch::async, [&] { h.session->abort(); });
+        REQUIRE(eventually([&] { return h.session->camera_state() == CameraState::Idle; }));
+        held->open();
+        REQUIRE(aborting.wait_for(kBound) == std::future_status::ready);
+        aborting.get();
+    }
+    CHECK_FALSE(p->entered);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    CHECK_FALSE(h.session->busy());
+    CHECK_FALSE(h.session->failure().has_value());
+}
+
+TEST_CASE("CaptureSession - a refused body thread rolls the start back and the next start runs",
+          "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    h.session->start(1.0, instant_body(p, 5));
+    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    auto earlier = h.session->image();
+    REQUIRE(eventually([&] { return !h.session->busy(); }));
+
+    SECTION("a refused thread") {
+        h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread {
+            throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+        });
+        CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
+    }
+    SECTION("bad_alloc") {
+        h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread { throw std::bad_alloc(); });
+        CHECK_THROWS_AS(h.session->start(1.0, polling_body(p)), std::bad_alloc);
+    }
+    CHECK_FALSE(h.session->busy());
+    CHECK(h.session->image_ready());  // the earlier frame, not Exposing
+    CHECK(h.session->image() == earlier);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+
+    h.session->set_spawn_for_testing(plain_spawn());
+    auto q = std::make_shared<Probe>();
+    h.session->start(1.0, instant_body(q, 6));
+    REQUIRE(eventually([&] { return q->exited.load(); }));
+}
+
+TEST_CASE("CaptureSession - a refused body thread keeps the earlier failure", "[util][capture-session]") {
+    Harness h;
+    h.session->start(10.0, [](CaptureControl&) { throw std::runtime_error("earlier failure"); });
+    REQUIRE(eventually([&] { return h.session->failure().has_value() && !h.session->busy(); }));
+    h.session->set_spawn_for_testing([](std::function<void()>) -> std::thread {
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK(error_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::DriverException);
+    REQUIRE(h.session->failure().has_value());
+    CHECK(*h.session->failure() == "earlier failure");
+    CHECK_FALSE(h.session->busy());
+}
+
+TEST_CASE("CaptureSession - a stale body's reading_out does not move the session", "[util][capture-session]") {
+    Harness h;
+    auto sdk = h.gate();
+    auto p = std::make_shared<Probe>();
+    auto body = [p, sdk](CaptureControl& c) {
+        c.exposure_started();
+        p->entered = true;
+        sdk->wait();
+        c.reading_out();
+        p->exited = true;
+    };
+
+    SECTION("after fail") {
+        h.session->start(10.0, body);
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        h.session->fail("x");
+        sdk->open();
+        REQUIRE(eventually([&] { return p->exited.load() && !h.session->busy(); }));
+        REQUIRE(h.session->failure().has_value());
+        CHECK(*h.session->failure() == "x");
+    }
+    SECTION("after abort") {
+        h.session->start(10.0, body);
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        auto aborting = std::async(std::launch::async, [&] { h.session->abort(); });
+        REQUIRE(eventually([&] { return h.session->camera_state() == CameraState::Idle; }));
+        sdk->open();
+        REQUIRE(aborting.wait_for(kBound) == std::future_status::ready);
+        aborting.get();
+        CHECK_FALSE(h.session->failure().has_value());
+    }
+    CHECK(h.session->camera_state() == CameraState::Idle);
+}
+
+TEST_CASE("CaptureSession - a refused body thread does not restore state over a close", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    h.session->start(1.0, instant_body(p, 5));
+    REQUIRE(eventually([&] { return h.session->image_ready() && !h.session->busy(); }));
+
+    std::future<void> closing;
+    h.session->set_spawn_for_testing([&](std::function<void()>) -> std::thread {
+        closing = std::async(std::launch::async, [&] { h.session->disconnect_and_join(); });
+        REQUIRE(eventually([&] {
+            return error_of([&] { h.session->start(1.0, [](CaptureControl&) {}); }) == AlpacaError::NotConnected;
+        }));
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    CHECK(error_of([&] { h.session->start(1.0, polling_body(p)); }) == AlpacaError::DriverException);
+    REQUIRE(closing.wait_for(kBound) == std::future_status::ready);
+    closing.get();
+    CHECK_FALSE(h.session->image_ready());  // the closed session stays cleared
+    CHECK_FALSE(h.session->busy());
 }
