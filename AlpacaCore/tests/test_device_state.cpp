@@ -22,6 +22,7 @@
 #include <alpacacore/telescope_driver.h>
 
 #include <algorithm>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,10 +36,8 @@
 // base classes pushed a TimeStamp entry unconditionally, so a disconnected
 // driver reported [TimeStamp] instead of [].
 //
-// These doubles are never connected: get_connected() is always false and
-// every operational getter throws NotConnected, matching a real driver's
-// disconnected behavior (driver-lifecycle.instructions.md: "Every property otherwise throws
-// NotConnected when disconnected").
+// The doubles default to disconnected with unavailable operational getters.
+// Tests can independently enable a connection and a subset of values.
 
 namespace {
 
@@ -56,6 +55,14 @@ bool has_timestamp(const std::vector<alpacacore::DeviceState>& state) {
 template <typename Base>
 class DisconnectedDriverBase : public Base {
 public:
+    bool state_available = false;
+
+    template <typename T>
+    T available_value(T value) const {
+        if (!state_available) throw_not_connected();
+        return value;
+    }
+
     int get_device_number() const override { return 0; }
     std::string get_name() const override { return "Disconnected Driver"; }
     std::string fallback_unique_id() const override { return "disconnected-driver"; }
@@ -118,7 +125,7 @@ public:
     double get_heat_sink_temperature() const override { throw_not_connected(); }
     alpacacore::ImageArray get_image_array() const override { throw_not_connected(); }
     std::string get_image_array_variant() const override { throw_not_connected(); }
-    bool get_image_ready() const override { throw_not_connected(); }
+    bool get_image_ready() const override { return available_value(false); }
     bool get_is_pulse_guiding() const override { throw_not_connected(); }
     double get_last_exposure_duration() const override { throw_not_connected(); }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override { throw_not_connected(); }
@@ -187,7 +194,7 @@ class DisconnectedCoverCalibrator final : public DisconnectedDriverBase<alpacaco
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::CoverCalibrator; }
 
-    int get_brightness() const override { throw_not_connected(); }
+    int get_brightness() const override { return available_value(0); }
     void set_brightness(int) override {}
     alpacacore::CalibratorState get_calibrator_state() const override { throw_not_connected(); }
     bool get_calibrator_changing() const override { throw_not_connected(); }
@@ -205,7 +212,7 @@ class DisconnectedDome final : public DisconnectedDriverBase<alpacacore::DomeDri
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Dome; }
 
-    double get_altitude() const override { throw_not_connected(); }
+    double get_altitude() const override { return available_value(12.5); }
     bool get_can_find_home() const override { throw_not_connected(); }
     bool get_can_park() const override { throw_not_connected(); }
     bool get_can_set_altitude() const override { throw_not_connected(); }
@@ -236,7 +243,7 @@ class DisconnectedFilterWheel final : public DisconnectedDriverBase<alpacacore::
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::FilterWheel; }
 
-    int get_position() const override { throw_not_connected(); }
+    int get_position() const override { return available_value(2); }
     void set_position(int) override {}
     std::vector<int> get_focus_offsets() const override { throw_not_connected(); }
     void set_focus_offsets(const std::vector<int>&) override {}
@@ -249,7 +256,7 @@ public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Focuser; }
 
     bool get_absolute() const override { throw_not_connected(); }
-    bool get_is_moving() const override { throw_not_connected(); }
+    bool get_is_moving() const override { return available_value(false); }
     int get_max_step() const override { throw_not_connected(); }
     int get_max_increment() const override { throw_not_connected(); }
     int get_position() const override { throw_not_connected(); }
@@ -268,7 +275,7 @@ public:
 
     double get_average_period() const override { throw_not_connected(); }
     void set_average_period(double) override {}
-    double get_cloud_cover() const override { throw_not_connected(); }
+    double get_cloud_cover() const override { return available_value(12.5); }
     double get_dew_point() const override { throw_not_connected(); }
     double get_humidity() const override { throw_not_connected(); }
     double get_pressure() const override { throw_not_connected(); }
@@ -293,7 +300,7 @@ public:
     bool get_can_reverse() const override { throw_not_connected(); }
     bool get_reverse() const override { throw_not_connected(); }
     void set_reverse(bool) override {}
-    bool get_is_moving() const override { throw_not_connected(); }
+    bool get_is_moving() const override { return available_value(false); }
     double get_mechanical_position() const override { throw_not_connected(); }
     double get_position() const override { throw_not_connected(); }
     double get_step_size() const override { throw_not_connected(); }
@@ -310,23 +317,26 @@ class DisconnectedSafetyMonitor final : public DisconnectedDriverBase<alpacacore
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::SafetyMonitor; }
 
-    bool get_is_safe() const override { throw_not_connected(); }
+    bool get_is_safe() const override { return available_value(false); }
 };
 
 class DisconnectedSwitch final : public DisconnectedDriverBase<alpacacore::SwitchDriver> {
 public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Switch; }
 
-    int get_max_switch() const override { throw_not_connected(); }
+    int get_max_switch() const override { return available_value(2); }
     bool get_can_write(int) const override { throw_not_connected(); }
     bool get_can_async(int) const override { throw_not_connected(); }
-    bool get_switch(int) const override { throw_not_connected(); }
+    bool get_switch(int id) const override {
+        if (id != 0) throw_not_connected();
+        return available_value(false);
+    }
     void set_switch(int, bool) override {}
     void set_async(int, bool) override {}
-    double get_switch_value(int) const override { throw_not_connected(); }
+    double get_switch_value(int) const override { return available_value(0.0); }
     void set_switch_value(int, double) override {}
     void set_async_value(int, double) override {}
-    bool get_state_change_complete(int) const override { throw_not_connected(); }
+    bool get_state_change_complete(int) const override { return available_value(true); }
     std::string get_switch_name(int) const override { throw_not_connected(); }
     void set_switch_name(int, const std::string&) override {}
     std::string get_switch_description(int) const override { throw_not_connected(); }
@@ -340,7 +350,7 @@ public:
     alpacacore::DeviceType get_device_type() const override { return alpacacore::DeviceType::Telescope; }
 
     alpacacore::AlignmentMode get_alignment_mode() const override { throw_not_connected(); }
-    double get_altitude() const override { throw_not_connected(); }
+    double get_altitude() const override { return available_value(12.5); }
     double get_aperture_diameter() const override { throw_not_connected(); }
     void set_aperture_diameter(double) override {}
     double get_aperture_area() const override { throw_not_connected(); }
@@ -527,34 +537,68 @@ TEST_CASE("DeviceState is empty while disconnected even when a getter does not t
     CHECK(state.empty());
 }
 
-// The connected side of the contract: the early return must key on
-// get_connected(), not be unconditional. Each double's getters throw
-// NotConnected regardless (omitted by the per-getter try/catch), so a
-// connected double still reports the TimeStamp -- and only a base class whose
-// early return ignored get_connected() could report the empty list here.
 namespace {
 template <typename Driver>
-void require_timestamp_once_connected() {
+void require_empty_when_unavailable() {
     Driver driver;
     REQUIRE(driver.get_device_state().empty());
     driver.set_connected(true);
     std::vector<alpacacore::DeviceState> state;
     REQUIRE_NOTHROW(state = driver.get_device_state());
-    CHECK(has_timestamp(state));
+    CHECK(state.empty());
+    CHECK_FALSE(has_timestamp(state));
+}
+
+template <typename Driver>
+void require_available_state(std::initializer_list<alpacacore::DeviceState> expected) {
+    Driver driver;
+    driver.state_available = true;
+    REQUIRE(driver.get_device_state().empty());
+    driver.set_connected(true);
+    const auto before = alpacacore::device_state_timestamp();
+    const auto state = driver.get_device_state();
+    const auto after = alpacacore::device_state_timestamp();
+    REQUIRE(state.size() == expected.size() + 1);
+    std::size_t i = 0;
+    for (const auto& entry : expected) {
+        CHECK(state[i].name == entry.name);
+        CHECK(state[i].value == entry.value);
+        ++i;
+    }
+    CHECK(state.back().name == "TimeStamp");
+    const auto stamp = std::get<std::string>(state.back().value);
+    CHECK(stamp >= before);
+    CHECK(stamp <= after);
 }
 }  // namespace
 
-TEST_CASE("DeviceState carries the TimeStamp once connected, per base class", "[driver]") {
-    SECTION("Camera") { require_timestamp_once_connected<DisconnectedCamera>(); }
-    SECTION("CoverCalibrator") { require_timestamp_once_connected<DisconnectedCoverCalibrator>(); }
-    SECTION("Dome") { require_timestamp_once_connected<DisconnectedDome>(); }
-    SECTION("FilterWheel") { require_timestamp_once_connected<DisconnectedFilterWheel>(); }
-    SECTION("Focuser") { require_timestamp_once_connected<DisconnectedFocuser>(); }
-    SECTION("ObservingConditions") { require_timestamp_once_connected<DisconnectedObservingConditions>(); }
-    SECTION("Rotator") { require_timestamp_once_connected<DisconnectedRotator>(); }
-    SECTION("SafetyMonitor") { require_timestamp_once_connected<DisconnectedSafetyMonitor>(); }
-    SECTION("Switch") { require_timestamp_once_connected<DisconnectedSwitch>(); }
-    SECTION("Telescope") { require_timestamp_once_connected<DisconnectedTelescope>(); }
+TEST_CASE("DeviceState is empty when all connected reads fail, per base class", "[driver]") {
+    SECTION("Camera") { require_empty_when_unavailable<DisconnectedCamera>(); }
+    SECTION("CoverCalibrator") { require_empty_when_unavailable<DisconnectedCoverCalibrator>(); }
+    SECTION("Dome") { require_empty_when_unavailable<DisconnectedDome>(); }
+    SECTION("FilterWheel") { require_empty_when_unavailable<DisconnectedFilterWheel>(); }
+    SECTION("Focuser") { require_empty_when_unavailable<DisconnectedFocuser>(); }
+    SECTION("ObservingConditions") { require_empty_when_unavailable<DisconnectedObservingConditions>(); }
+    SECTION("Rotator") { require_empty_when_unavailable<DisconnectedRotator>(); }
+    SECTION("SafetyMonitor") { require_empty_when_unavailable<DisconnectedSafetyMonitor>(); }
+    SECTION("Switch") { require_empty_when_unavailable<DisconnectedSwitch>(); }
+    SECTION("Telescope") { require_empty_when_unavailable<DisconnectedTelescope>(); }
+}
+
+TEST_CASE("DeviceState preserves available values with one TimeStamp, per base class", "[driver]") {
+    SECTION("Camera") { require_available_state<DisconnectedCamera>({{"ImageReady", false}}); }
+    SECTION("CoverCalibrator") { require_available_state<DisconnectedCoverCalibrator>({{"Brightness", 0}}); }
+    SECTION("Dome") { require_available_state<DisconnectedDome>({{"Altitude", 12.5}}); }
+    SECTION("FilterWheel") { require_available_state<DisconnectedFilterWheel>({{"Position", 2}}); }
+    SECTION("Focuser") { require_available_state<DisconnectedFocuser>({{"IsMoving", false}}); }
+    SECTION("ObservingConditions") { require_available_state<DisconnectedObservingConditions>({{"CloudCover", 12.5}}); }
+    SECTION("Rotator") { require_available_state<DisconnectedRotator>({{"IsMoving", false}}); }
+    SECTION("SafetyMonitor") { require_available_state<DisconnectedSafetyMonitor>({{"IsSafe", false}}); }
+    SECTION("Switch") {
+        require_available_state<DisconnectedSwitch>(
+            {{"GetSwitch0", false}, {"GetSwitchValue0", 0.0}, {"StateChangeComplete0", true}});
+    }
+    SECTION("Telescope") { require_available_state<DisconnectedTelescope>({{"Altitude", 12.5}}); }
 }
 
 TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads", "[driver][utcdate]") {
@@ -591,12 +635,11 @@ TEST_CASE("Telescope DeviceState includes known UTCDate and omits failed reads",
     const auto state = driver.get_device_state();
     const auto after = std::chrono::system_clock::now() - std::chrono::seconds{10};
     CHECK(driver.utc_reads == 1);
-    REQUIRE(state.size() == (driver.failure ? 1 : 2));
-    if (!driver.failure) {
-        CHECK(state.front().name == "UTCDate");
-        REQUIRE(std::holds_alternative<std::string>(state.front().value));
-        CHECK(std::get<std::string>(state.front().value) == "2024-02-29T23:59:58.123Z");
-    }
+    REQUIRE(state.size() == (driver.failure ? 0 : 2));
+    if (driver.failure) return;
+    CHECK(state.front().name == "UTCDate");
+    REQUIRE(std::holds_alternative<std::string>(state.front().value));
+    CHECK(std::get<std::string>(state.front().value) == "2024-02-29T23:59:58.123Z");
     CHECK(state.back().name == "TimeStamp");
     const auto stamp = std::get<std::string>(state.back().value);
     CHECK(stamp >= alpacacore::device_state_timestamp(before));
