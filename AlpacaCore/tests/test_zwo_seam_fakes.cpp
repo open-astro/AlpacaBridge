@@ -17,8 +17,10 @@
 
 #include <chrono>
 #include <functional>
+#include <future>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "fake_zwo_caa_sdk.h"
@@ -255,4 +257,143 @@ TEST_CASE("FakeZWOEFWSDK - refuses an out-of-range slot and honours its scripted
     const auto start = std::chrono::steady_clock::now();
     sdk.open_wheel(sdk.id);
     CHECK(std::chrono::steady_clock::now() - start >= std::chrono::milliseconds(50));
+}
+
+// --- Position served through util::TtlStatusCache (issue #1072) ---
+// The cache TTL is 100 ms; kPastTtl clears it. FakeZWOEFWSDK::position_calls counts the SDK reads.
+
+namespace {
+
+constexpr auto kPastTtl = std::chrono::milliseconds(150);
+
+}  // namespace
+
+// Falsified by: zwo_filterwheel_driver.cpp get_position() calling the SDK on every read (position_calls is 2
+// inside the TTL, not 1), or a cache that never expires (no second SDK read after the TTL).
+TEST_CASE("ZWO EFW seam - two Position reads inside the TTL cost one SDK call",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.position = 3;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+    CHECK(sdk.position_calls == 1);
+
+    sdk.position = 1;  // changes behind the driver's back: the frame still stands
+    CHECK(driver->get_position() == 3);
+    std::this_thread::sleep_for(kPastTtl);
+    CHECK(driver->get_position() == 1);
+    CHECK(sdk.position_calls == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp set_position() without status_cache_.invalidate() after the SDK
+// move (the read after the move is served from the pre-move frame: position 3, one SDK read).
+TEST_CASE("ZWO EFW seam - a Position read after set_position goes to the SDK",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.position = 3;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+
+    driver->set_position(4);
+    CHECK(driver->get_position() == 4);
+    CHECK(sdk.position_calls == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the first read
+// after the reconnect is served from the previous session's frame: position 3, one SDK read).
+TEST_CASE("ZWO EFW seam - a reconnect drops the cached Position",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.position = 3;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+
+    driver->set_connected(false);
+    sdk.position = 2;
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 2);
+    CHECK(sdk.position_calls == 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp reading Position without the cache's fault threshold (the third
+// failed read throws the raw "link down", not "ZWO EFW communications compromised"), or serving the last good
+// frame after a failed refill (the first failed read returns 3).
+TEST_CASE("ZWO EFW seam - failed Position reads are not served and latch a link fault",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.position = 3;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 3);
+    std::this_thread::sleep_for(kPastTtl);
+
+    sdk.fail_reads = true;
+    CHECK_THROWS(driver->get_position());
+    CHECK_THROWS(driver->get_position());
+    try {
+        driver->get_position();
+        FAIL("third consecutive failure must throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
+
+    // A good refill clears the latch with no reconnect, and its frame is served again.
+    sdk.fail_reads = false;
+    const int before = sdk.position_calls;
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+    CHECK(sdk.position_calls == before + 1);
+    driver->set_connected(false);
+}
+
+// Falsified by: zwo_filterwheel_driver.cpp caching a -1 frame (the second poll is served -1 from the cache: one
+// SDK read for two polls), or mapping -1 to a slot (Position reads 0, not the ASCOM moving sentinel).
+TEST_CASE("ZWO EFW seam - Position reads -1 while moving and the move end is seen at once",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.moving_reads = 2;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->set_position(4);
+    const int before = sdk.position_calls;
+
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 4);  // no sleep: a moving frame is never held
+    CHECK(sdk.position_calls == before + 3);
+    driver->set_connected(false);
+}
+
+// Decision 0016: a member that needs no device access never waits behind a Position refill.
+// Falsified by: zwo_filterwheel_driver.cpp get_position() holding mutex_ across the SDK read (get_names() waits
+// the whole 400 ms delay).
+TEST_CASE("ZWO EFW seam - get_names does not wait behind a slow Position refill",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache][timing]") {
+    FakeZWOEFWSDK sdk;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.position_delay = std::chrono::milliseconds(400);
+    auto refill = std::async(std::launch::async, [&] { return driver->get_position(); });
+    for (int i = 0; i < 500 && sdk.position_entered.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(sdk.position_entered.load() == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_names().size() == 7);
+    CHECK(driver->get_name() == "EFW");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(150));
+    refill.get();
+    driver->set_connected(false);
 }

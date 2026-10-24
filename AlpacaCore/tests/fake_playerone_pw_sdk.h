@@ -95,8 +95,14 @@ public:
 
     // -1 while moving, as the real wrapper reports PW_ERROR_IS_MOVING.
     int get_position(int handle) override {
+        std::chrono::milliseconds delay;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            record("get_position");
+            delay = position_delay_;
+        }
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard<std::mutex> lock(mutex_);
-        record("get_position");
         check_open_locked(handle);
         maybe_fail_locked("get_position");
         if (moving_reads_left_ > 0) {
@@ -207,6 +213,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         open_delay_ = delay;
     }
+    // get_position() sleeps this long (outside the mutex, after it is counted) before answering: a slow Position
+    // refill.
+    void set_position_delay(std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        position_delay_ = delay;
+    }
     // get_position() reads that report -1 after a goto to a different slot.
     void set_moving_reads(int reads) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -272,6 +284,7 @@ private:
     std::map<std::string, int> calls_;
     std::string fail_next_;
     std::chrono::milliseconds open_delay_{0};
+    std::chrono::milliseconds position_delay_{0};
     int open_count_{0};
     int position_{0};
     int target_{0};

@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <stdexcept>
@@ -68,6 +69,10 @@ public:
     int last_set_position{-1};
     int calibrate_calls{0};
     int moving_refusals{0};
+    // get_position() sleeps this long, outside the fake's mutex, before answering (a slow Position refill).
+    // position_entered counts the calls that have started, so a test knows the refill is in flight.
+    std::chrono::milliseconds position_delay{0};
+    std::atomic<int> position_entered{0};
 
     std::vector<Info> enumerate_wheels() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -103,6 +108,8 @@ public:
         ++close_calls;
     }
     int get_position(int wheel_id) override {
+        ++position_entered;
+        if (position_delay.count() > 0) std::this_thread::sleep_for(position_delay);
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++position_calls;

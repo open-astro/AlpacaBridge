@@ -14,8 +14,11 @@
 #include <alpacacore/vendor/playerone/playerone_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <future>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -319,4 +322,144 @@ TEST_CASE("FakePlayerOnePWSDK behind LockedPlayerOnePWSDK - forwards every entry
         INFO(name);
         CHECK(fake.call_count(name) >= 1);
     }
+}
+
+// --- Position served through util::TtlStatusCache (issue #1072) ---
+// The cache TTL is 100 ms; kPastTtl clears it. fake.call_count("get_position") counts the SDK reads.
+
+namespace {
+
+using namespace std::chrono_literals;
+constexpr auto kPastTtl = 150ms;
+
+}  // namespace
+
+// Falsified by: playerone_filterwheel_driver.cpp get_position() calling the SDK on every read (two SDK reads
+// inside the TTL, not one), or a cache that never expires (no second SDK read after the TTL).
+TEST_CASE("Player One PW Filter Wheel Driver - two Position reads inside the TTL cost one SDK call",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_position(3);
+    const int before = fake.call_count("get_position");
+
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+    CHECK(fake.call_count("get_position") == before + 1);
+
+    std::this_thread::sleep_for(kPastTtl);
+    CHECK(driver->get_position() == 3);
+    CHECK(fake.call_count("get_position") == before + 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: playerone_filterwheel_driver.cpp set_position() without status_cache_.invalidate() after
+// goto_position (the read after the move is served from the pre-move frame: position 0, one SDK read).
+TEST_CASE("Player One PW Filter Wheel Driver - a Position read after set_position goes to the SDK",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    const int before = fake.call_count("get_position");
+    CHECK(driver->get_position() == 0);
+    CHECK(driver->get_position() == 0);
+
+    driver->set_position(4);
+    CHECK(driver->get_position() == 4);
+    CHECK(fake.call_count("get_position") == before + 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: playerone_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the first
+// read after the reconnect is served from the previous session's frame: one SDK read, not two).
+TEST_CASE("Player One PW Filter Wheel Driver - a reconnect drops the cached Position",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    const int before = fake.call_count("get_position");
+    CHECK(driver->get_position() == 0);
+    CHECK(driver->get_position() == 0);
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+    CHECK(fake.call_count("get_position") == before + 2);
+    driver->set_connected(false);
+}
+
+// Falsified by: playerone_filterwheel_driver.cpp reading Position without the cache's fault threshold (the
+// third failed read throws the raw scripted failure, not "Player One PW communications compromised"), or serving
+// the last good frame after a failed refill (the first failed read returns 0).
+TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not served and latch a link fault",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+    std::this_thread::sleep_for(kPastTtl);
+
+    // fail_next is one-shot: arm it before each read.
+    fake.fail_next("get_position");
+    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    fake.fail_next("get_position");
+    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    fake.fail_next("get_position");
+    try {
+        driver->get_position();
+        FAIL("third consecutive failure must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
+
+    // A good refill clears the latch with no reconnect, and its frame is served again.
+    const int before = fake.call_count("get_position");
+    CHECK(driver->get_position() == 0);
+    CHECK(driver->get_position() == 0);
+    CHECK(fake.call_count("get_position") == before + 1);
+    driver->set_connected(false);
+}
+
+// Falsified by: playerone_filterwheel_driver.cpp caching a -1 frame (the second poll is served -1 from the
+// cache: one SDK read for two polls), or mapping -1 to a slot (Position reads 0, not the ASCOM moving sentinel).
+TEST_CASE("Player One PW Filter Wheel Driver - Position reads -1 while moving and the move end is seen at once",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    fake.set_moving_reads(2);
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    driver->set_position(3);
+    const int before = fake.call_count("get_position");
+
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == -1);
+    CHECK(driver->get_position() == 3);  // no sleep: a moving frame is never held
+    CHECK(fake.call_count("get_position") == before + 3);
+    driver->set_connected(false);
+}
+
+// Decision 0016: a member that needs no device access never waits behind a Position refill.
+// Falsified by: playerone_filterwheel_driver.cpp get_position() holding mutex_ across the SDK read (get_names()
+// waits the whole 400 ms delay).
+TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a slow Position refill",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache][timing]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    const int before = fake.call_count("get_position");
+    fake.set_position_delay(400ms);
+    auto refill = std::async(std::launch::async, [&] { return driver->get_position(); });
+    for (int i = 0; i < 500 && fake.call_count("get_position") == before; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.call_count("get_position") == before + 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_names().size() == 5);
+    CHECK(driver->get_name() == "FakePhoenixWheel");
+    CHECK(std::chrono::steady_clock::now() - start < 150ms);
+    refill.get();
+    driver->set_connected(false);
 }

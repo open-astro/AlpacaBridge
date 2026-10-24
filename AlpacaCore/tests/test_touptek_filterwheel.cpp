@@ -14,10 +14,13 @@
 #include <alpacacore/vendor/touptek/touptek_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
+#include <memory>
 #include <string>
+#include <thread>
 #include <variant>
 #include <vector>
 
@@ -174,4 +177,165 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - homing poll sleeps on the task cloc
     connect.get();
     CHECK(driver->get_connected());
     CHECK(fake.call_count("get_filter_wheel_position") == 4);
+}
+
+// --- Position served through util::TtlStatusCache (issue #1072) ---
+// The cache TTL is 100 ms; kPastTtl clears it. The connect homes the wheel over the real task clock (about
+// 300 ms of settled reads), so every case counts get_filter_wheel_position from after the connect.
+
+namespace {
+
+using namespace std::chrono_literals;
+constexpr auto kPastTtl = 150ms;
+constexpr const char* kPositionCall = "get_filter_wheel_position";
+
+struct ConnectedAfw {
+    alpacacore::test::FakeToupTekSDK fake;
+    std::unique_ptr<alpacacore::FilterWheelDriver> driver;
+    int base = 0;
+
+    ConnectedAfw() {
+        alpacacore::test::FakeToupTekSDK::ToupFilterWheelInfo wheel;
+        wheel.id = "fake-afw-0";
+        wheel.name = "FakeAFW";
+        wheel.model_name = "AFW-M";
+        fake.wheels.push_back(wheel);
+        driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
+        driver->set_connected(true);
+        base = fake.call_count(kPositionCall);
+    }
+    ~ConnectedAfw() {
+        try {
+            driver->set_connected(false);
+        } catch (...) {
+        }
+    }
+    int reads() const { return fake.call_count(kPositionCall) - base; }
+};
+
+}  // namespace
+
+// Falsified by: touptek_filterwheel_driver.cpp get_position() calling the SDK on every read (two SDK reads
+// inside the TTL, not one), or a cache that never expires (no second SDK read after the TTL).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - two Position reads inside the TTL cost one SDK call",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    wheel.driver->set_position(3);
+    wheel.base = wheel.fake.call_count(kPositionCall);
+
+    CHECK(wheel.driver->get_position() == 3);
+    CHECK(wheel.driver->get_position() == 3);
+    CHECK(wheel.reads() == 1);
+
+    std::this_thread::sleep_for(kPastTtl);
+    CHECK(wheel.driver->get_position() == 3);
+    CHECK(wheel.reads() == 2);
+}
+
+// Falsified by: touptek_filterwheel_driver.cpp set_position() without status_cache_.invalidate() after the SDK
+// move (the read after the move is served from the pre-move frame: position 0, one SDK read).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - a Position read after set_position goes to the SDK",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.driver->get_position() == 0);
+
+    wheel.driver->set_position(4);
+    CHECK(wheel.driver->get_position() == 4);
+    CHECK(wheel.reads() == 2);
+}
+
+// The connect homes the wheel for about 300 ms, longer than the TTL, so a stale frame cannot outlive a
+// reconnect here; the link-health record can. Two failures before the reconnect and two after must not add up to
+// the three that latch the fault.
+// Falsified by: touptek_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the fourth
+// failed read in all, the second after the reconnect, throws "communications compromised").
+// Passes before the cache exists: it guards the reset once the cache does.
+TEST_CASE("ToupTek AFW Filter Wheel Driver - a reconnect clears the Position link-health count",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    wheel.fake.throw_from.insert(kPositionCall);
+    CHECK_THROWS(wheel.driver->get_position());
+    CHECK_THROWS(wheel.driver->get_position());
+    wheel.fake.throw_from.erase(kPositionCall);
+
+    wheel.driver->set_connected(false);
+    wheel.driver->set_connected(true);
+    wheel.fake.throw_from.insert(kPositionCall);
+    CHECK_THROWS(wheel.driver->get_position());
+    try {
+        wheel.driver->get_position();
+        FAIL("a failed read must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+    }
+    wheel.fake.throw_from.erase(kPositionCall);
+}
+
+// Falsified by: touptek_filterwheel_driver.cpp reading Position without the cache's fault threshold (the third
+// failed read throws the raw injected failure, not "ToupTek AFW communications compromised"), or serving the
+// last good frame after a failed refill (the first failed read returns 0).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - failed Position reads are not served and latch a link fault",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    CHECK(wheel.driver->get_position() == 0);
+    std::this_thread::sleep_for(kPastTtl);
+
+    wheel.fake.throw_from.insert(kPositionCall);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    try {
+        wheel.driver->get_position();
+        FAIL("third consecutive failure must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+    }
+
+    // A good refill clears the latch with no reconnect, and its frame is served again.
+    wheel.fake.throw_from.erase(kPositionCall);
+    const int before = wheel.reads();
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.reads() == before + 1);
+}
+
+// Falsified by: touptek_filterwheel_driver.cpp caching a -1 frame (the second poll is served -1 from the cache:
+// one SDK read for two polls), or mapping -1 to a slot (Position reads 0, not the ASCOM moving sentinel).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - Position reads -1 while moving and the move end is seen at once",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    wheel.driver->set_position(4);
+    wheel.fake.wheel_position_script = {-1, -1, 4};  // after the move command, which clears any script
+    wheel.base = wheel.fake.call_count(kPositionCall);
+
+    CHECK(wheel.driver->get_position() == -1);
+    CHECK(wheel.driver->get_position() == -1);
+    CHECK(wheel.driver->get_position() == 4);  // no sleep: a moving frame is never held
+    CHECK(wheel.reads() == 3);
+}
+
+// Decision 0016: a member that needs no device access never waits behind a Position refill.
+// Falsified by: touptek_filterwheel_driver.cpp get_position() holding mutex_ across the SDK read (get_names()
+// waits the whole 400 ms delay).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a slow Position refill",
+          "[touptek][filterwheel][unit][position-cache][timing]") {
+    ConnectedAfw wheel;
+    auto slow = std::make_shared<std::atomic<bool>>(false);
+    wheel.fake.before_call = [slow](const std::string& fn) {
+        if (slow->load() && fn == kPositionCall) std::this_thread::sleep_for(400ms);
+    };
+    slow->store(true);
+    auto refill = std::async(std::launch::async, [&] { return wheel.driver->get_position(); });
+    for (int i = 0; i < 500 && wheel.reads() == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(wheel.reads() == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(wheel.driver->get_names().size() == 5);
+    CHECK(wheel.driver->get_name() == "FakeAFW");
+    CHECK(std::chrono::steady_clock::now() - start < 150ms);
+    refill.get();
+    slow->store(false);
 }
