@@ -73,6 +73,7 @@ public:
     void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
         image_array_error_ = std::move(error);
     }
+    mutable int image_getter_calls = 0;
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -109,11 +110,18 @@ public:
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
     ImageArray get_image_array() const override {
+        ++image_getter_calls;
         if (image_array_error_) throw *image_array_error_;
         return image_array_;
     }
-    std::string get_image_array_variant() const override { return std::string{}; }
-    bool get_image_ready() const override { return bool{}; }
+    std::string get_image_array_variant() const override {
+        ++image_getter_calls;
+        return std::string{};
+    }
+    bool get_image_ready() const override {
+        ++image_getter_calls;
+        return bool{};
+    }
     bool get_is_pulse_guiding() const override { return bool{}; }
     double get_last_exposure_duration() const override { return double{}; }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
