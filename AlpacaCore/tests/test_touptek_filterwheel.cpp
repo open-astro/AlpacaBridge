@@ -365,7 +365,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a failed set_position invalidates t
 }
 
 // Decision 0016 rules 1 and 4: the connect (open and handshake) runs off the state lock.
-// Falsified by: touptek_filterwheel_driver.cpp set_connected(true) holding mutex_ across open_camera_by_id
+// Falsified by: touptek_filterwheel_driver.cpp set_connected(true) holding mutex_ across open_filter_wheel_by_id
 // (get_names() and get_name() wait the whole 400 ms open).
 TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a held connect",
           "[touptek][filterwheel][unit][position-cache][timing]") {
@@ -376,14 +376,14 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a he
     info.model_name = "AFW-M";
     fake.wheels.push_back(info);
     fake.before_call = [](const std::string& fn) {
-        if (fn == "open_camera_by_id") std::this_thread::sleep_for(400ms);
+        if (fn == "open_filter_wheel_by_id") std::this_thread::sleep_for(400ms);
     };
     auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
     auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
-    for (int i = 0; i < 500 && fake.call_count("open_camera_by_id") == 0; ++i) {
+    for (int i = 0; i < 500 && fake.call_count("open_filter_wheel_by_id") == 0; ++i) {
         std::this_thread::sleep_for(2ms);
     }
-    REQUIRE(fake.call_count("open_camera_by_id") == 1);
+    REQUIRE(fake.call_count("open_filter_wheel_by_id") == 1);
 
     const auto start = std::chrono::steady_clock::now();
     CHECK_NOTHROW(driver->get_names());
