@@ -187,23 +187,25 @@ Compare **numerically per dot-segment, never lexicographically** (`4.9.0` vs `4.
 supports (AGENTS.md "Target Architecture"; the version rule is "ConformU version" in `.github/instructions/testing.instructions.md`) -- an installed **4.5.0 or 4.5.1 counts as outdated no matter what
 `releases/latest` says**. The 4.5.0 arm64 asset was published without `PublishReadyToRun`, so the *first*
 member returning each distinct response type is charged ~0.13-0.22 s "OUTSIDE FAST RESPONSE TIME TARGET"
-([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.5.2**, which fixes it and
+([ConformU#31](https://github.com/ASCOMInitiative/ConformU/issues/31)); the standard is **4.5.3**, which carries that fix and
 keeps the Telescope PulseGuide test declinations within +-65 degrees
 ([ConformU#35](https://github.com/ASCOMInitiative/ConformU/issues/35)).
 
-If the installed version is MISSING, outdated, or **4.5.0 or 4.5.1**, install the pinned 4.5.2 release asset
+If the installed version is MISSING, outdated, or **4.5.0 or 4.5.1**, install the pinned 4.5.3 release asset
 (no confirmation needed -- this is part of the standard rig setup). The install stops before unpacking if the
 checksum does not match:
 
 ```bash
-ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.xz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.2/conformu.linux-arm64.tar.xz' && echo '603803767a56bed38fe4ee872da00b5bd4e5f7f4364f17217a8a3e93e06e57b9  cu.tar.xz' | sha256sum -c - && tar xJf cu.tar.xz && rm cu.tar.xz && chmod +x conformu && ./conformu --version | tail -1"
+ssh astro@<host> "mkdir -p ~/conformu && cd ~/conformu && curl -sSfL -o cu.tar.gz 'https://github.com/ASCOMInitiative/ConformU/releases/download/v4.5.3/conformu.4.5.3.linux-arm64.tar.gz' && echo '8c01fce9447f78e7f076c2279d6f38c7b8f78ef8d3c9f92e78566a61fb778bbc  cu.tar.gz' | sha256sum -c - && tar xzf cu.tar.gz && rm cu.tar.gz && chmod +x conformu && ./conformu --version | tail -1"
 ```
 
-The printed version line must read `Conform Universal 4.5.2 (Build 56139.4ccb591)`. A saved report's log header
-(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.2.56139, Build time:` (4.5.2, build 56139). Reports made with
-4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted only after a
+The printed version line must read `Conform Universal 4.5.3 (Build 56334.33d9e18)`. A saved report's log header
+(`ASCOM Universal Device Conformance Checker Version ...`) must carry `4.5.3.56334, Build time:` (4.5.3, build 56334). Reports made with
+4.5.2 (build 56139), 4.5.2-rc.1 (build 56111) and 4.5.1 (build 54507) stay valid. A newer ConformU release is adopted after a
 check on one camera and one telescope run: then update the URL, sha256 and build line above, the
 `conformu` watch in `scripts/dependency_sdk_versions.json` and the version `.github/instructions/testing.instructions.md` names ("ConformU version").
+A release that only adds a fix on the same ReadyToRun (`PublishReadyToRun`) publish build as the current standard (4.5.3 over 4.5.2) may be pinned provisionally before that check; record the
+camera and telescope run in `SUPPORTED-DRIVERS.md` afterwards.
 
 (If the SBC has no internet, download on the dev machine and `scp -r` the extracted `conformu/`
 directory to `astro@<host>:~/`.) Re-check `--version` before continuing, and never label a log with a
