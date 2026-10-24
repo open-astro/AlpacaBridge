@@ -4188,8 +4188,7 @@ private:
     }
 
     uint32_t tracking_step_period_for(double rate_deg_per_sec) const {
-        // Callers hold mutex_ or run from the pulse task after setup under it;
-        // axis_params_ is immutable after connect.
+        // Callers hold mutex_ (a connect rewrites axis_params_ under it).
         const AxisParameters& params = axis_params_[0];
         double counts_per_sec = std::abs(rate_deg_per_sec) * params.counts_per_revolution / 360.0;
         double preset = static_cast<double>(params.timer_frequency) / counts_per_sec;
@@ -4238,11 +4237,15 @@ private:
             return;  // nothing changed, nothing to verify
         }
         const Wire protocol = wire();
-        const AxisParameters& params = axis_params_[static_cast<std::size_t>(channel - 1)];
-        const double expected_counts_per_sec =
-            std::abs(expected_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
-        const double previous_counts_per_sec =
-            std::abs(previous_rate_deg_per_sec) * params.counts_per_revolution / 360.0;
+        // A reconnect rewrites axis_params_ under mutex_ while this body (cancelled, not joined) may still
+        // run: copy the one value it needs under the state lock rather than reading the array bare.
+        uint32_t counts_per_revolution = 0;
+        {
+            std::lock_guard<std::mutex> state(mutex_);
+            counts_per_revolution = axis_params_[static_cast<std::size_t>(channel - 1)].counts_per_revolution;
+        }
+        const double expected_counts_per_sec = std::abs(expected_rate_deg_per_sec) * counts_per_revolution / 360.0;
+        const double previous_counts_per_sec = std::abs(previous_rate_deg_per_sec) * counts_per_revolution / 360.0;
         // ":j" is whole counts, and each of the two reads truncates, so the
         // sampled delta carries up to ~2 counts of error. The window must be
         // long enough for the two candidate rates to sit at least
@@ -4321,8 +4324,8 @@ private:
                             std::to_string(previous_counts_per_sec) + "; " + board_state + "); resending :I and :J");
         try {
             // Same preset the dispatch computed (slow mode: a live change never
-            // switches speed mode). step_period_for_locked only reads
-            // axis_params_, immutable after connect.
+            // switches speed mode). step_period_for_locked reads axis_params_
+            // under the state lock taken just below.
             StateLock lock(*this);
             if (!may_resend_locked()) {
                 return;  // a reaper owns the axis now

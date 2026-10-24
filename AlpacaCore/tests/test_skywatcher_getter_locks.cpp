@@ -289,4 +289,27 @@ TEST_CASE("SkyWatcher getters - SiderealTime and UTCDate read one client-clock s
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher getters - a reconnect does not race the rate-applied check reading the axis parameters",
+          "[skywatcher][getter-locks][stress-guard]") {
+    // RightAscensionRate on a tracking axis starts a background rate-applied check. A disconnect only cancels it
+    // (the body is not joined), so it can still be reading the axis parameters when the next connect rewrites them
+    // under the state lock. The values are equal on every connect, so no assertion can see the race: only the TSan
+    // run (`[stress-guard]`) fails when the check reads axis_params_ without the state lock.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount);
+    for (int i = 0; i < 15; ++i) {
+        driver->set_tracking(true);
+        try {
+            driver->set_right_ascension_rate(i % 2 == 0 ? 0.5 : -0.5);
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // A rate change refused mid-transition is not the subject here.
+        }
+        driver->set_connected(false);
+        driver->set_connected(true);
+        CHECK(driver->get_connected());
+    }
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
