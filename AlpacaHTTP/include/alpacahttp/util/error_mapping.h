@@ -36,9 +36,9 @@ constexpr std::int32_t ACTION_NOT_IMPLEMENTED = alpacacore::AlpacaError::ActionN
 constexpr std::int32_t DRIVER_ERROR = alpacacore::AlpacaError::DriverException;
 }
 
-// Map exception to Alpaca error code and message
+// Map an exception to an Alpaca error code: an AlpacaException by its error
+// number, anything else to DRIVER_ERROR. The message is e.what().
 std::int32_t exception_to_error_code(const std::exception& e);
-std::string exception_to_error_message(const std::exception& e);
 
 // Map generic error to Alpaca error
 std::int32_t map_error_code(int error_code);

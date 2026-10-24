@@ -259,6 +259,7 @@ set(ALPACAHTTP_SOURCES
     src/core/json_utils.cpp
     src/core/catalog_json.cpp
     src/http/router.cpp
+    src/http/device_call.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
     src/util/threading.cpp
@@ -395,6 +396,12 @@ if(ALPACAHTTP_BUILD_TESTS)
     set(TEST_ROUTE_TABLE_DIR ${CMAKE_CURRENT_BINARY_DIR}/test_route_table_cwd)
     file(MAKE_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
     add_test(NAME test_route_table COMMAND test_route_table WORKING_DIRECTORY ${TEST_ROUTE_TABLE_DIR})
+
+    # DeviceCall (parameters, envelope, 400-text policy) on a parsed Request:
+    # no Router, no driver, no shared registry or config file.
+    add_executable(test_device_call tests/test_device_call.cpp)
+    target_link_libraries(test_device_call alpacahttp)
+    add_test(NAME test_device_call COMMAND test_device_call)
 
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,

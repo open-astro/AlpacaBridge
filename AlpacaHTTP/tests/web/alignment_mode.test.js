@@ -30,7 +30,7 @@ const app = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
 for (const vendor of ['synscan', 'celestron']) {
     test(`${vendor} form offers auto, altaz and equatorial`, () => {
         const select = html.match(
-            new RegExp(`<select id="${vendor}-alignment-mode" name="${vendor}AlignmentMode">([\\s\\S]*?)</select>`));
+            new RegExp(`<select id="${vendor}-alignment-mode" name="${vendor}AlignmentMode"[^>]*>([\\s\\S]*?)</select>`));
         assert.ok(select, `no ${vendor}-alignment-mode select`);
         const values = [...select[1].matchAll(/<option value="([^"]+)"/g)].map((m) => m[1]);
         assert.deepEqual(values, ['auto', 'altaz', 'equatorial']);
