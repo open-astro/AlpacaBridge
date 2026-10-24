@@ -39,18 +39,18 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:StsDD*MM#` / `:SgsDDD*MM#` | site latitude / longitude | `0`/`1` | bare digit |
 | `:SLHH:MM:SS#` / `:SCMM/DD/YY#` / `:SGsHH[:MM]#` | time sync (UTC as local, offset 0) | `0`/`1` | bare digit |
 | `:MS#` | GOTO | one digit `0`..`9` | bare digit; `0` accepted, the rest below |
-| `:CM#` | sync | `N/A#`, or `E1#`..`E9#` on failure (the `:MS#` digits) | `#`-terminated, reply not checked |
+| `:CM#` | sync | `N/A#`, or `E1#`..`E9#` on failure (the `:MS#` digits) | `#`-terminated; `E<n>` throws with the digit's reason (#1379) |
 | `:Q#` | stop all slews, abort GOTO | none | blind |
 | `:Qn#` / `:Qs#` / `:Qe#` / `:Qw#` | stop one axis direction | none | blind |
 | `:Mn#` / `:Ms#` / `:Me#` / `:Mw#` | MoveAxis at the custom guide rate | none | blind; re-sent every 7 s (#1378) |
 | `:RAn.n#` / `:REn.n#` | MoveAxis rate, deg/s per axis | none | blind |
 | `:RS#` | slew-rate preset before a move | none | blind |
 | `:Mgdnnnn#` | pulse guide, `d` = `n`/`s`/`e`/`w`, 4-digit ms | none | blind |
-| `:ST60.164275#` / `:ST0#` | tracking on / off | `0`/`1` | blind, reply not checked; the next `:GU#` shows the result |
+| `:ST60.164275#` / `:ST0#` | tracking on / off | `0`/`1` | bare digit for the client's `Tracking` write (`0` throws with the `:GE#` reason, #1379); blind for the driver's own tracking restores |
 | `:hP#` | park | `0`/`1` | bare digit; then `:GE#` for the reason |
 | `:hC#` | find home | none | blind; then `:GE#` for the reason |
-| `:hR#` | unpark | `0`/`1` | blind, reply not checked |
-| `:hQ#` | set park position | `0`/`1` | blind, reply not checked |
+| `:hR#` | unpark | `0`/`1` | bare digit; `0` throws with the `:GE#` reason, except `11` (not parked), ASCOM's no-op |
+| `:hQ#` | set park position | `0`/`1` | bare digit; `0` throws with the `:GE#` reason |
 
 `:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
 `E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
@@ -86,7 +86,7 @@ column is from the source, not from hardware.
 - **`:GRa#` / `:GDe#`**: both take `a`/`e` as the high-precision form, like `H`.
 - **`:ST`** (tracking rate): both reply `0`/`1`; OnStep 4.x refuses it while slewing
   (`CE_MOUNT_IN_MOTION`); OnStepX does not start tracking while parked (no error, `Mount.command.cpp`).
-  The driver sends it blind either way and reads the result from the next `:GU#`.
+  The client's `Tracking` write reads the reply, so a 4.x refusal during a GOTO throws (#1379).
 - **A GOTO during a GOTO** (#1379): both stop the running one and refuse the new one (OnStepX
   `Goto.cpp` `CE_SLEW_IN_SLEW`; OnStep 4.x `Goto.ino` `CE_GOTO_ERR_GOTO`, unless built with
   `CE_GOTO_ERR_GOTO_OFF`), with `:MS#` reply `5`.
@@ -359,6 +359,15 @@ it is never reachable through `router.cpp` or the web UI.
   `Goto.command.cpp`: 1 below the horizon limit, 2 above the overhead limit, 3 standby, 4 parked
   (`InvalidWhileParked`), 5 a GOTO was running and the mount stopped it, 6 outside limits, 7 hardware
   fault, 8 already in motion, 9 unspecified), not "below horizon or limit" for every refusal.
+- **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
+  used to send their command blind or ignore the reply, so a mount that refused them read as
+  success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`
+  ("<member> refused by the mount (<reason>)") with the `:GE#` reason, unless `:GE#` then says `00`
+  or `25`, which is taken as accepted, as for `:hP#`; `Unpark` on a mount that is not parked (`11`)
+  stays ASCOM's no-op. A `:CM#` `E<n>` throws with the `:MS#` digit's reason, and a sync while a
+  GOTO runs is refused before anything is sent, as the slews are (OnStepX refuses it with reply
+  `5`). `SyncToTarget` reports under its own name. The driver's own tracking restores after a
+  slew stay blind, so AbortSlew's timing is unchanged.
 - **An Alt/Az slew is refused while Tracking is true** (#1377, ITelescopeV4 `SlewToAltAz`): both
   forms throw `InvalidOperation` ("<member> is not allowed while Tracking is true") after the
   Alt/Az validation and the parked check, before anything is sent, under their own names

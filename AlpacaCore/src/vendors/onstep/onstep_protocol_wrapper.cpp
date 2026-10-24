@@ -868,10 +868,10 @@ public:
         return send_command(":MS#", false, kSetAckTimeoutMs);
     }
 
-    void sync_to_target() {
-        // :CM# returns the name/description of the synced object — content
-        // isn't meaningful here, only that the mount responded.
-        (void)send_command(":CM#", true, 0);
+    std::string sync_to_target() {
+        // "N/A#" on success, "En#" on a refusal (n the :MS# digit); the driver
+        // reads it (#1379). Classic LX200 firmware returns an object name instead.
+        return send_command(":CM#", true, 0);
     }
 
     void abort_slew() { send_command_blind(":Q#"); }
@@ -890,15 +890,27 @@ public:
 
     void stop_tracking() { send_command_blind(":ST0#"); }
 
+    // A numeric reply: one bare digit, no '#' (OnStepX ProcessCmds.cpp).
+    bool set_tracking_checked(bool on) {
+        const std::string reply = send_command(on ? ":ST60.164275#" : ":ST0#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
     bool park() {
         // Bare digit, no '#' (OnStepX numeric reply): '1' accepted, '0' refused.
         const std::string reply = send_command(":hP#", false, kSetAckTimeoutMs);
         return !reply.empty() && reply[0] == '1';
     }
 
-    void set_park() { send_command_blind(":hQ#"); }
+    bool set_park() {
+        const std::string reply = send_command(":hQ#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
 
-    void unpark() { send_command_blind(":hR#"); }
+    bool unpark() {
+        const std::string reply = send_command(":hR#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
 
     void find_home() { send_command_blind(":hC#"); }
 
@@ -1542,19 +1554,20 @@ void OnStepProtocolWrapper::set_target_dec(double dec_degrees) { pimpl_->set_tar
 
 std::string OnStepProtocolWrapper::slew_to_target() { return pimpl_->slew_to_target(); }
 
-void OnStepProtocolWrapper::sync_to_target() { pimpl_->sync_to_target(); }
+std::string OnStepProtocolWrapper::sync_to_target() { return pimpl_->sync_to_target(); }
 
 void OnStepProtocolWrapper::abort_slew() { pimpl_->abort_slew(); }
 
 void OnStepProtocolWrapper::start_tracking() { pimpl_->start_tracking(); }
 
 void OnStepProtocolWrapper::stop_tracking() { pimpl_->stop_tracking(); }
+bool OnStepProtocolWrapper::set_tracking_checked(bool on) { return pimpl_->set_tracking_checked(on); }
 
 bool OnStepProtocolWrapper::park() { return pimpl_->park(); }
 
-void OnStepProtocolWrapper::set_park() { pimpl_->set_park(); }
+bool OnStepProtocolWrapper::set_park() { return pimpl_->set_park(); }
 
-void OnStepProtocolWrapper::unpark() { pimpl_->unpark(); }
+bool OnStepProtocolWrapper::unpark() { return pimpl_->unpark(); }
 
 void OnStepProtocolWrapper::find_home() { pimpl_->find_home(); }
 

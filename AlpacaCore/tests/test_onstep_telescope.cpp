@@ -725,8 +725,9 @@ struct MoveAxisFake {
                   std::lock_guard<std::mutex> lock(*m);
                   *sent += chunk;
               }
-              if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0) {
-                  return std::string("1");
+              if (chunk.rfind(":SL", 0) == 0 || chunk.rfind(":SC", 0) == 0 || chunk.rfind(":SG", 0) == 0 ||
+                  chunk.rfind(":ST", 0) == 0) {
+                  return std::string("1");  // bare-digit acks (:ST too, #1379)
               }
               if (chunk.rfind(":GA", 0) == 0) {
                   const int tenths = alt->load();
@@ -1488,7 +1489,12 @@ namespace {
 struct ScriptedOnStep {
     std::mutex mutex;
     std::string status = "nNpEW180#";
-    std::string ms_reply = "0";  // slew accepted
+    std::string ms_reply = "0";     // slew accepted
+    std::string st_reply = "1";     // :ST tracking accepted (bare digit)
+    std::string hq_reply = "1";     // :hQ# set park accepted
+    std::string hr_reply = "1";     // :hR# unpark accepted
+    std::string cm_reply = "N/A#";  // :CM# synced
+    std::string ge_reply = "00#";   // :GE# last command error
     std::vector<std::string> log;
 
     void set_status(const std::string& s) {
@@ -1498,6 +1504,17 @@ struct ScriptedOnStep {
     void set_ms_reply(const std::string& r) {
         std::lock_guard<std::mutex> lock(mutex);
         ms_reply = r;
+    }
+    // A numeric command answered '0', and the :GE# code that says why.
+    void refuse(const char* command, const std::string& ge) {
+        std::lock_guard<std::mutex> lock(mutex);
+        const std::string c = command;
+        (c == ":ST" ? st_reply : c == ":hQ" ? hq_reply : hr_reply) = "0";
+        ge_reply = ge;
+    }
+    void set_cm_reply(const std::string& r) {
+        std::lock_guard<std::mutex> lock(mutex);
+        cm_reply = r;
     }
     std::size_t count(const char* needle) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1512,9 +1529,14 @@ struct ScriptedOnStep {
         std::lock_guard<std::mutex> lock(mutex);
         log.push_back(chunk);
         if (chunk.rfind(":GU", 0) == 0) return status;
-        if (chunk.rfind(":S", 0) == 0) return "1";   // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG/:ST)
+        if (chunk.rfind(":ST", 0) == 0) return st_reply;
+        if (chunk.rfind(":S", 0) == 0) return "1";        // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG)
         if (chunk.rfind(":MS", 0) == 0) return ms_reply;  // bare digit, no '#'
         if (chunk.rfind(":hP", 0) == 0) return "1";  // park accepted (bare digit, #1430)
+        if (chunk.rfind(":hQ", 0) == 0) return hq_reply;
+        if (chunk.rfind(":hR", 0) == 0) return hr_reply;
+        if (chunk.rfind(":CM", 0) == 0) return cm_reply;
+        if (chunk.rfind(":GE", 0) == 0) return ge_reply;
         if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
         if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
         return "0#";
@@ -3203,6 +3225,95 @@ TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason",
         CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
         CHECK(error.second.find("an unknown reason") != std::string::npos);
         CHECK(error.second.find("reply 'X'") != std::string::npos);
+    }
+
+    driver->set_connected(false);
+}
+
+// #1379: Tracking, SetPark, Unpark and Sync sent their commands blind or ignored
+// the reply, so a mount that refused them read as success. Each now reads the
+// reply (a bare '0'/'1', or N/A# / En# for :CM#) and throws on a refusal, with
+// the :GE# reason; a '0' that :GE# then calls no error is taken (as for :hP#).
+TEST_CASE("OnStep Telescope Driver - a Tracking write SetPark Unpark or Sync the mount refuses throws",
+          "[onstep][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // the 2 s status cache (decision 0005); outlives the driver
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not slewing, not parked
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto refused = [&](const std::function<void()>& call, const std::string& prefix, const char* reason) {
+        const auto error = alpaca_error_of(call);
+        INFO(error.second);
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second.rfind(prefix, 0) == 0);
+        CHECK(error.second.find(reason) != std::string::npos);
+    };
+
+    SECTION("a Tracking write the mount refuses throws and leaves Tracking as the mount has it") {
+        mount->refuse(":ST", "22#");  // OnStep 4.x: in motion
+        refused([&]() { driver->set_tracking(false); }, "Tracking refused by the mount", "mount still in motion");
+        CHECK(driver->get_tracking());  // the cache was not patched to the refused value
+        CHECK(mount->count(":ST0#") == 1);
+    }
+
+    SECTION("a refused SetPark throws") {
+        mount->refuse(":hQ", "22#");  // OnStepX Park::set(): a GOTO or guide move runs
+        refused([&]() { driver->set_park(); }, "SetPark refused by the mount", "mount still in motion");
+    }
+
+    SECTION("a '0' that :GE# calls no error is taken") {
+        mount->refuse(":hQ", "00#");
+        REQUIRE_NOTHROW(driver->set_park());
+        mount->refuse(":ST", "25#");
+        REQUIRE_NOTHROW(driver->set_tracking(false));
+    }
+
+    SECTION("a refused Unpark throws and the mount stays parked; 'not parked' is a no-op") {
+        mount->set_status("nNPHEo180#");  // parked at home
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        REQUIRE(driver->get_at_park());
+        mount->refuse(":hR", "21#");  // OnStepX Park::restore(): motor fault
+        refused([&]() { driver->unpark(); }, "Unpark refused by the mount", "hardware fault");
+        CHECK(driver->get_at_park());
+        mount->refuse(":hR", "11#");  // not parked
+        REQUIRE_NOTHROW(driver->unpark());
+        CHECK_FALSE(driver->get_at_park());
+    }
+
+    SECTION("a Sync the mount refuses throws with the reason; both forms under their names") {
+        mount->set_cm_reply("E6#");  // outside limits
+        auto error = alpaca_error_of([&]() { driver->sync_to_coordinates(12.0, 45.0); });
+        INFO(error.second);
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second.rfind("SyncToCoordinates: the mount refused the sync: ", 0) == 0);
+        CHECK(error.second.find("outside the limits") != std::string::npos);
+        CHECK(error.second.find(":CM# reply 'E6'") != std::string::npos);
+        driver->set_target_right_ascension(12.0);
+        driver->set_target_declination(45.0);
+        error = alpaca_error_of([&]() { driver->sync_to_target(); });
+        CHECK(error.second.rfind("SyncToTarget: ", 0) == 0);
+        mount->set_cm_reply("N/A#");
+        REQUIRE_NOTHROW(driver->sync_to_coordinates(12.0, 45.0));
+    }
+
+    SECTION("a Sync during a GOTO is refused before anything is sent") {
+        mount->set_status("pEW180#");                    // a GOTO runs
+        clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        mount->clear_log();
+        const auto error = alpaca_error_of([&]() { driver->sync_to_coordinates(12.0, 45.0); });
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second == "SyncToCoordinates is not allowed while a GOTO is running");
+        CHECK(mount->count(":Sr") == 0);
+        CHECK(mount->count(":CM#") == 0);
     }
 
     driver->set_connected(false);
