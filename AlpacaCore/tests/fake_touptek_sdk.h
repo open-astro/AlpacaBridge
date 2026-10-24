@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -219,11 +220,18 @@ public:
         }
         actual_width = delivered_dimensions ? delivered_dimensions->first : modelled_width;
         actual_height = delivered_dimensions ? delivered_dimensions->second : modelled_height;
+        // Inject malformed metadata without touching pixels; the driver must
+        // reject these dimensions before converting them to its signed geometry.
+        if (actual_width > static_cast<unsigned>(std::numeric_limits<int>::max()) ||
+            actual_height > static_cast<unsigned>(std::numeric_limits<int>::max())) {
+            return true;
+        }
         // Real SDK: nRowPitch is the destination stride and must hold a whole
         // delivered row; a shorter pitch is E_INVALIDARG (GPCMOS01200KPF,
         // 2026-10-14). The driver once relied on a short pitch to crop an
         // odd-NumX frame and every such sub-frame failed on hardware.
-        if (row_pitch < static_cast<int>(actual_width) * (bits > 8 ? 2 : 1)) {
+        if (row_pitch < 0 ||
+            static_cast<std::size_t>(row_pitch) < static_cast<std::size_t>(actual_width) * (bits > 8 ? 2U : 1U)) {
             throw alpacacore::AlpacaException("Toupcam_WaitImageV4: E_INVALIDARG",
                                               alpacacore::AlpacaError::DriverException);
         }
