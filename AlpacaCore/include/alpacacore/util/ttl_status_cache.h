@@ -46,10 +46,9 @@ namespace alpacacore::util {
  *
  * Locking: the cache has its own mutex, held across the refill so concurrent
  * readers share one device round trip. Lock order is driver mutex (if held)
- * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch, ZWO EFW,
- * Player One PW, ToupTek AFW)
- * refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock when they call the cache.
- * Never call get() from inside the refill.
+ * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch,
+ * ZWO EFW, Player One PW, ToupTek AFW) refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock
+ * when they call the cache. Never call get() from inside the refill.
  *
  * Clock: the TTL reads the TaskClock passed to the constructor (decision 0005), the real
  * steady clock by default; a driver on an injected clock passes it so a test ages the frame with advance().
