@@ -335,10 +335,17 @@ jobs:
               DECISION RECORDS IN SCOPE below; read each listed rule in
               docs/decisions/ (the base branch's copy) and cite the record
               file and rule number. A rule with "Checked by: review" is yours
-              to check. An Adoption row that a change makes wrong is a defect
-              too. A PR that changes a record is checked against the base
-              copy; the change to the rule itself needs a reason in the PR
-              description, not a defect.
+              to check; when it says "review (<what to look for>)", look for
+              exactly that evidence. An Adoption row that a change makes wrong
+              is a defect too. A PR that changes a record is checked against
+              the base copy; the change to the rule itself needs a reason in
+              the PR description, not a defect.
+            - A new decision record (a file the PR adds under docs/decisions/)
+              that fails one of the three tests in docs/decisions/README.md
+              ("What earns a record": hard to reverse, surprising without
+              context, a real trade-off with named alternatives), or whose
+              Consequences section carves out code that deviates from its
+              own rules instead of pointing at an issue.
             Each defect names the file, the line, and the input or scenario
             that shows it, so the builder can reproduce it before fixing.
 

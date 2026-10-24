@@ -71,3 +71,33 @@ not to call it. Module names (Device Catalog, task clock, and so on) live in
   `AlpacaCore/conformu/`, for the exact commit being claimed.
 - Avoid: "tested", "verified" or "validated" without saying which. A fake-only change
   says "ConformU not re-run" in its PR body.
+
+## Retired vs superseded record
+
+- **Superseded record**: a decision record in `docs/decisions/` replaced by a
+  newer one; the newer record is the rule and the old one names it.
+- **Retired record**: a decision record whose choice stopped being true with no
+  successor, because the module or hardware it governed is gone. It keeps its
+  history and has no rules.
+- Avoid: "deprecated" or "obsolete" for either; a superseded record points
+  somewhere, a retired one does not.
+
+## Review-checked vs script-checked rule
+
+- **Script-checked rule**: a decision-record rule whose `Checked by` names a test
+  or a drift check that fails when the rule is broken.
+- **Review-checked rule**: a rule only a reader can apply; its `Checked by` says
+  what evidence the reader looks for, and the review bot applies it.
+- Avoid: "unenforced" for a review-checked rule; it is enforced by the review
+  bot, with the evidence the rule names.
+
+## Record rule vs topic-file rule
+
+- **Record rule**: a numbered line in a decision record's Rules section, with a
+  scope glob and a check. It exists because the decision behind it was hard to
+  reverse, surprising, and a trade-off.
+- **Topic-file rule**: a rule in a shared topic file or vendor file under
+  `.github/instructions/`, with no record behind it, because the choice fails at
+  least one of those three tests.
+- Avoid: calling a topic-file rule an "ADR" or writing a record for a plain
+  convention.
