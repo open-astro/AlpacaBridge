@@ -173,6 +173,14 @@ public:
     /// disconnect() or a successful connect().
     std::string link_lost_reason() const;
 
+    /**
+     * @brief Ends the link as lost (decision 0009 point 2, #1414): records
+     *        `reason` and the loss time as a pulled adapter does, and closes
+     *        the port. For a fault that has stood past
+     *        util::kLinkStalenessBound. A no-op when not connected.
+     */
+    void declare_link_lost(const std::string& reason);
+
     /// When the link was lost (first detection), read and cleared. Kept
     /// across disconnect() so a reconnect can tell how long the outage was.
     std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at();
