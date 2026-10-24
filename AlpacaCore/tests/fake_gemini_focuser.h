@@ -135,6 +135,19 @@ public:
     /// way a late answer to a timed-out command lands.
     void push_unsolicited(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
 
+    /// One shot, then spent: the next reply the fake sends is held for @p delay (blind commands do not use it up).
+    void hold_next_reply(std::chrono::milliseconds delay) { hold_ms_.store(static_cast<int>(delay.count())); }
+
+    /// A USB unplug: the reader stops and both pty ends close, so the driver's reads fail with EIO from here on.
+    /// Not reversible.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) {
+            reader_.join();
+        }
+        pty_.sever();
+    }
+
 private:
     void run() {
         std::string pending;
@@ -210,6 +223,9 @@ private:
         } else {
             return;  // every other write is blind on this firmware
         }
+        if (const int hold_ms = hold_ms_.exchange(0); hold_ms > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+        }
         pty_write_bounded(pty_.master_fd(), reply, stop_);
     }
 
@@ -219,6 +235,7 @@ private:
     std::thread reader_;
     std::atomic<bool> stop_{false};
     std::atomic<long long> handshake_delay_ms_{0};
+    std::atomic<int> hold_ms_{0};
     std::atomic<bool> temp_comp_on_{false};
 
     mutable std::mutex mutex_;

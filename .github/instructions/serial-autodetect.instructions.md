@@ -39,8 +39,12 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   length or an idle gap, drops CR/LF, caps the length, keeps one `steady_clock` deadline and returns `LinkDead` with
   the errno for a hangup. It never latches, closes, throws, sleeps or flushes: the wrapper keeps its flush, command
   delay and exception text and decides what `LinkDead` means. It is two concrete overloads, not a `ByteChannel`
-  (decision 0013 section 7). The Sky-Watcher and Celestron CGX loops (decision 0017 rule 9) and the stream readers
-  (Wanderer, Gemini PDH) keep their own shape.
+  (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the Gemini focuser and flat
+  panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that hears a hangup logs "no
+  ack" and does not report a lost link). The iOptron mount, Celestron NexStar, SynScan and ZWO mount loops, the
+  QHY CFW3 and Q-Focuser readers and the probe and handshake loops still use their own loops and move in later
+  slices (upstream issue #1604). The Sky-Watcher and Celestron CGX loops (decision 0017 rule 9) and the stream
+  readers (Wanderer, Gemini PDH) keep their own shape.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
   pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
