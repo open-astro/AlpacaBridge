@@ -326,7 +326,8 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   instead of throwing on the read; commands still throw.
 - **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
   filter names/offsets) — it does not depend on the device. `DeviceState` then degrades to
-  `TimeStamp` only through the base class's per-id try/catch.
+  an empty list without `TimeStamp` through the base class's per-id try/catch when no
+  operational values remain (the ASCOM read-all FAQ).
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
   first frame clears the latch without a reconnect (a re-plugged hub on the same node).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and

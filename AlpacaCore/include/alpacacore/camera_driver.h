@@ -71,9 +71,9 @@ public:
     // individual property getters so the reported values always agree with the
     // corresponding GET endpoints (a consistency ConformU verifies). Properties
     // that throw (not implemented / not currently known) are omitted; a
-    // TimeStamp entry is added when connected. A disconnected driver returns the empty list, with no TimeStamp. Defined
-    // inline to keep the CameraDriver vtable weak so the per-vendor static libraries link without a base-library
-    // ordering dependency.
+    // TimeStamp entry is added only when operational values are available. A disconnected driver returns the empty
+    // list. Defined inline to keep the CameraDriver vtable weak so the per-vendor static libraries link without a
+    // base-library ordering dependency.
     std::vector<DeviceState> get_device_state() const override final {
         if (!get_connected()) {
             return {};
@@ -101,7 +101,9 @@ public:
         // getter raises InvalidOperation, so the entry is omitted on purpose, not dropped by accident.
         add("PercentCompleted", [this] { return static_cast<std::int32_t>(get_percent_completed_checked()); });
 
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

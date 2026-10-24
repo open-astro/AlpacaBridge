@@ -541,8 +541,7 @@ TEST_CASE("Gemini PDH Switch Driver - Silent hub faults the link, and frames res
     CHECK(driver->get_max_switch_value(15) == 30.0);
     // DeviceState omits the unavailable members rather than failing outright.
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    CHECK(state.front().name == "TimeStamp");
+    CHECK(state.empty());
 
     // The reader keeps polling; the next answered poll restores the link.
     hub.set_input_voltage(12.4);

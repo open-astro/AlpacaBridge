@@ -260,8 +260,7 @@ TEST_CASE("WandererAstro Box Switch Driver - Silent link faults reads, frames re
     CHECK_FALSE(driver->get_switch_name(14).empty());
     // DeviceState omits the unavailable members rather than failing outright.
     const auto state = driver->get_device_state();
-    REQUIRE(state.size() == 1);
-    CHECK(state.front().name == "TimeStamp");
+    CHECK(state.empty());
 
     // The next frame restores the link without a reconnect.
     box.set_muted(false);
