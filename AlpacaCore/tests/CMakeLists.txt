@@ -255,8 +255,8 @@ if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope_snapshot.cpp)
     # Connected takes no lock the connect holds (issue #910).
     list(APPEND TEST_SOURCES test_bisque_getter_locks.cpp)
-    # Covers the mutex-guarded get_connected() driver shape in the [stress]
-    # pool (PR #115 round-2 ABBA regression coverage).
+    # In the [stress] pool for the connect/disconnect lifecycle (PR #115
+    # round-2 ABBA regression coverage), not for a locking getter.
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_touptek)
