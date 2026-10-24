@@ -7534,15 +7534,18 @@ int main() {
         std::filesystem::create_directories("config");
         {
             std::ofstream out(std::filesystem::path("config") / "registered_devices.json", std::ios::trunc);
-            out << R"([{"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299}])";
+            out << R"([{"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":4294967299},
+                   {"vendor":"nosuchvendor","deviceType":"focuser","deviceNumber":true}])";
         }
         alpacahttp::Router router;
         const auto listed =
             nlohmann::json::parse(route_request(router, "GET", "/management/v1/faileddevices").body(), nullptr, false);
         EXPECT(!listed.is_discarded() && listed.contains("Value") && listed["Value"].is_array());
-        EXPECT(listed["Value"].size() == 1);
-        if (listed["Value"][0].value("DeviceNumber", 0) != -1) std::cerr << listed.dump() << "\n";
-        EXPECT(listed["Value"][0].value("DeviceNumber", 0) == -1);
+        EXPECT(listed["Value"].size() == 2);
+        for (const auto& entry : listed["Value"]) {
+            if (entry.value("DeviceNumber", 0) != -1) std::cerr << listed.dump() << "\n";
+            EXPECT(entry.value("DeviceNumber", 0) == -1);
+        }
     }
 
 #ifdef ALPACACORE_ENABLE_SKYWATCHER
@@ -7573,13 +7576,13 @@ int main() {
         // Issue #388, the other half: a config field of a genuinely wrong TYPE
         // is still an error -- silently falling back would accept a typo'd
         // config and register a device with defaults nobody asked for -- but
-        // catalog_json::get_string() reports it as an AlpacaException naming the field
-        // rather than letting nlohmann's type_error reach the outer catch.
+        // config_from_json() (the catalog bridge) reports it as an AlpacaException naming
+        // the field rather than letting nlohmann's type_error reach the outer catch.
         //
         // The null case above does NOT cover this: it asserts only the absence
         // of "json.exception" text, and passes with or without the try/catch,
         // because a null never reaches get<T>() at all. Deleting the wrong-type
-        // check in catalog_json::get_string() must fail HERE.
+        // check in config_from_json() (the Double arm) must fail HERE.
         alpacahttp::Router router;
         nlohmann::json config = {{"vendor", "skywatcher"},  {"deviceType", "telescope"},
                                  {"deviceNumber", 50},      {"connectionType", "serial"},
