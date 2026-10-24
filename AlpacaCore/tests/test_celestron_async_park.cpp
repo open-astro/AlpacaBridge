@@ -78,6 +78,22 @@ struct FakeCelestronState {
     std::atomic<Clock::rep> stop_gate_entered{0};
     std::atomic<Clock::rep> stop_gate_left{0};
     std::atomic<bool> reject_goto{false};
+    // J-read hold: the (j_hold_skip+1)th J read is held j_hold_ms; j_hold_ms < 0 means no hold. reject_stop swallows
+    // every cancel-GOTO (M), so a stop fails.
+    std::atomic<int> j_hold_ms{-1};
+    std::atomic<int> j_hold_skip{0};
+    std::atomic<int> j_reads{0};
+    std::atomic<Clock::rep> j_hold_entered{0};
+    std::atomic<bool> reject_stop{false};
+    void hold_j() {
+        j_reads.fetch_add(1);
+        if (j_hold_ms.load() < 0) return;
+        if (j_hold_skip.fetch_sub(1) > 0) return;
+        const int hold = j_hold_ms.exchange(-1);
+        if (hold < 0) return;
+        j_hold_entered.store(Clock::now().time_since_epoch().count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+    }
     void hold_stop() {
         const int hold = stop_gate_ms.exchange(0);
         if (hold <= 0) return;
@@ -129,11 +145,13 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'L':
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':  // cancel goto
+                if (st->reject_stop.load()) return "";
                 st->hold_stop();
                 st->cancel_goto_count.fetch_add(1);
                 st->goto_seen.store(false);
                 return "#";
             case 'J':  // alignment complete (the slew-safety gate requires it)
+                st->hold_j();
                 return "1#";
             case 'w':  // site read: eight binary bytes (a short answer would wait out the response timeout)
                 return std::string(8, '\0') + "#";
@@ -855,8 +873,12 @@ struct ReleaseOnExit {
     ~ReleaseOnExit() { held->release(); }
 };
 
+// Only the first body that enters the hook is held and records its reason; a later body (the new owner's) returns at
+// once, so it cannot overwrite the result.
 void hold_slew_body(SupersedeRig& rig, const std::shared_ptr<HeldBody>& held) {
-    cel::set_slew_body_hook_for_testing(*rig.driver, [held](const cel::SlewBodyStopReason& stop_reason) {
+    auto entries = std::make_shared<std::atomic<int>>(0);
+    cel::set_slew_body_hook_for_testing(*rig.driver, [held, entries](const cel::SlewBodyStopReason& stop_reason) {
+        if (entries->fetch_add(1) != 0) return;
         std::unique_lock<std::mutex> lock(held->m);
         held->entered = true;
         held->cv.notify_all();
@@ -947,12 +969,26 @@ TEST_CASE("Celestron initiator supersede - AbortSlew ends the held Park body Sup
           kSuperseded);
 }
 
+// A Park body superseded inside its GOTO exchange writes no target and clears no home state afterwards (the dispatch
+// writes them after the exchange; decision 0006, rule 6). The target checks alone also pass on the base (AbortSlew
+// clears them after the join); the case is red on the in-time and stop-reason checks and guards the writes once the
+// join is gone.
+TEST_CASE("Celestron initiator supersede - AbortSlew during a held Park GOTO leaves the targets unset",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }, rig, held) ==
+          kSuperseded);
+    CHECK_THROWS(rig.driver->get_target_right_ascension());  // the superseded dispatch wrote no target
+    CHECK_THROWS(rig.driver->get_target_declination());
+}
+
 // ---- The Park body's dispatch writes state around two reads (decision 0006, rule 6) ----
 //
 // do_slew_to_coordinates() reads J and the pier side with mutex_ free, then publishes Slewing, clears the stored
-// errors and sends the GOTO. The dispatch hook sits between the reads and the publish. An initiator that takes the
-// Park over while the body is there owns the state: after the release the body sends no GOTO and leaves Slewing,
-// AtPark and the stored error as the claimer left them.
+// errors and sends the GOTO. The dispatch hook sits after both reads and the publish, just before the GOTO. An
+// initiator that takes the Park over while the body is there owns the state: after the release the body sends no GOTO
+// and leaves Slewing, AtPark and the stored error as the claimer left them.
 namespace {
 
 void park_dispatch_held_then(const std::function<void(alpacacore::TelescopeDriver&)>& takeover) {
@@ -1050,6 +1086,80 @@ TEST_CASE("Celestron initiator supersede - a failed AbortSlew during a Park ends
     CHECK(code_of([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); }) !=
           alpacacore::AlpacaError::InvalidWhileParked);
     CHECK(code_of([&] { rig.driver->move_axis(0, 0.5); }) != alpacacore::AlpacaError::InvalidWhileParked);
+}
+
+// ---- The Park body inside its J read (decision 0006, rule 6) ----
+//
+// The J read is the first thing do_slew_to_coordinates() does, before it publishes Slewing and clears the stored
+// errors. A claim that lands there must leave all of that alone: after the J answer the body checks it still owns the
+// park and returns without a write or a GOTO. The hold is on the wire (the fake answers the second J read late), so
+// the takeover waits out the one exchange in flight and nothing else.
+namespace {
+
+struct JHeldOutcome {
+    bool takeover_threw = false;
+    int goto_count = -1;
+    bool at_park = true;
+    bool slewing_threw = false;
+    bool slewing = true;
+    std::string slewing_message;
+};
+
+JHeldOutcome park_held_in_j_read_then(const std::function<void(alpacacore::TelescopeDriver&)>& takeover,
+                                      bool stops_fail) {
+    SupersedeRig rig(1200);
+    rig.keep_first_body_thread_alive(0);
+    rig.st->j_hold_skip.store(1);  // the initiator's own J read is the first; the body's is the held one
+    rig.st->j_hold_ms.store(kHoldMs);
+    rig.driver->park();
+    REQUIRE(wait_until([&] { return rig.st->j_hold_entered.load() != 0; }, 5000));
+    rig.st->reject_stop.store(stops_fail);
+    JHeldOutcome out;
+    try {
+        takeover(*rig.driver);
+    } catch (...) {
+        out.takeover_threw = true;
+    }
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
+    out.goto_count = rig.st->goto_count.load();
+    out.at_park = rig.driver->get_at_park();
+    try {
+        out.slewing = rig.driver->get_slewing();
+    } catch (const std::exception& ex) {
+        out.slewing_threw = true;
+        out.slewing_message = ex.what();
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("Celestron initiator supersede - AbortSlew over a Park body in its J read keeps the stop error",
+          "[celestron][telescope][initiator-supersede]") {
+    const auto out = park_held_in_j_read_then([](auto& d) { d.abort_slew(); }, true);
+    CHECK(out.takeover_threw);  // the stops failed
+    CHECK(out.goto_count == 0);
+    CHECK_FALSE(out.at_park);
+    CHECK(out.slewing_threw);  // the body did not clear the stored error
+    CHECK(out.slewing_message.find("AbortSlew stop failed") != std::string::npos);
+}
+
+TEST_CASE("Celestron initiator supersede - AbortSlew over a Park body in its J read leaves Slewing false",
+          "[celestron][telescope][initiator-supersede]") {
+    const auto out = park_held_in_j_read_then([](auto& d) { d.abort_slew(); }, false);
+    CHECK_FALSE(out.takeover_threw);
+    CHECK(out.goto_count == 0);
+    CHECK_FALSE(out.slewing_threw);
+    CHECK_FALSE(out.slewing);  // the body did not set Slewing true again
+}
+
+TEST_CASE("Celestron initiator supersede - Unpark over a Park body in its J read leaves Slewing false",
+          "[celestron][telescope][initiator-supersede]") {
+    const auto out = park_held_in_j_read_then([](auto& d) { d.unpark(); }, false);
+    CHECK_FALSE(out.takeover_threw);
+    CHECK(out.goto_count == 0);
+    CHECK_FALSE(out.slewing_threw);
+    CHECK_FALSE(out.slewing);
 }
 
 #endif  // !_WIN32

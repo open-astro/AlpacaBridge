@@ -1123,10 +1123,7 @@ public:
                         parking_ = false;
                     }
                 };
-                hooks.dispatch = [&] {
-                    do_slew_to_coordinates(lock, park_ra, park_dec);
-                    without_lock(lock, [&] { run_slew_body_hook(ctx); });  // test seam, as in the slew body
-                };
+                hooks.dispatch = [&] { do_slew_to_coordinates(lock, park_ra, park_dec, &ctx); };
                 hooks.poll_slewing = [&] { return poll_hardware_slewing(lock); };
                 hooks.stop_tracking = [&] {
                     without_lock(lock, [] { CelestronProtocolWrapper::instance().set_tracking_mode(0); });
@@ -3536,7 +3533,8 @@ private:
     // The blocking slew's and the park's dispatch. The blocking slew's caller holds the initiator lock. The park
     // body runs on the slot thread without it; that is safe because every initiator cancels and joins slew_
     // before it acts, so no other initiator runs while mutex_ is free for the exchanges.
-    void do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec) {
+    void do_slew_to_coordinates(std::unique_lock<std::mutex>& lock, double ra, double dec,
+                                const util::OperationContext* body_ctx = nullptr) {
         validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_slew_safety(lock, "SlewToCoordinates");
         slew_aborted_ = false;
@@ -3588,6 +3586,9 @@ private:
             } else {
                 protocol.mc_goto_fast(0, ra_raw_target);
                 protocol.mc_goto_fast(1, dec_raw_target);
+            }
+            if (body_ctx != nullptr) {
+                run_slew_body_hook(*body_ctx);  // test seam: the GOTO is out, mutex_ is free (Park body only)
             }
         });
         target_ra_hours_ = ra;
