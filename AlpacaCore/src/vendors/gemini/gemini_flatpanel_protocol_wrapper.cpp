@@ -30,6 +30,7 @@
 #include <windows.h>
 #else
 #include <alpacacore/util/serial_link.h>
+#include <alpacacore/util/serial_read.h>
 #include <errno.h>
 #include <termios.h>
 #include <unistd.h>
@@ -39,7 +40,9 @@ namespace alpacacore::vendor::gemini {
 
 namespace {
 constexpr int kCommandDelayMs = 50;
+#ifdef _WIN32
 constexpr int kReadCharDelayMs = 10;
+#endif
 constexpr int kMaxResponseLen = 32;
 constexpr int kMaxCommandLen = 32;  // ">Bnnn#" + nul fits comfortably
 constexpr int kHandshakeRetries = 3;
@@ -775,11 +778,11 @@ private:
     }
 
     std::string read_response() {
+        const int timeout_ms = config_.serial_timeout_s * 1000;
         std::string response;
+#ifdef _WIN32
         response.reserve(kMaxResponseLen);
         char ch = 0;
-
-        int timeout_ms = config_.serial_timeout_s * 1000;
         auto start = std::chrono::steady_clock::now();
 
         while (true) {
@@ -789,22 +792,9 @@ private:
                 throw AlpacaException("Read timeout", AlpacaError::DriverException);
             }
 
-            bool got_char = false;
-#ifdef _WIN32
             DWORD bytes_read = 0;
             if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-                got_char = true;
-            }
-#else
-            const ssize_t r = util::tty_read(link_.fd(), &ch, 1, static_cast<int>(timeout_ms - elapsed));
-            if (r == 1) {
-                got_char = true;
-            } else if (r == 0) {
-                continue;  // timed out; the elapsed check above throws
-            }
-#endif
-
-            if (got_char) {
+                // Ignore CR/LF
                 if (ch == '\r' || ch == '\n') {
                     continue;
                 }
@@ -819,6 +809,24 @@ private:
                 std::this_thread::sleep_for(std::chrono::milliseconds(kReadCharDelayMs));
             }
         }
+#else
+        util::ReadSpec spec;
+        spec.max_len = kMaxResponseLen;
+        const auto r = util::read_until(link_.fd(), spec,
+                                        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        switch (r.outcome) {
+            case util::ReadOutcome::Terminator:
+                response = r.bytes;
+                break;
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("Response too long", AlpacaError::DriverException);
+            case util::ReadOutcome::LinkDead:
+                throw AlpacaException("Serial link lost (errno " + std::to_string(r.err) + ")",
+                                      AlpacaError::DriverException);
+            default:
+                throw AlpacaException("Read timeout", AlpacaError::DriverException);
+        }
+#endif
 
         ALPACA_LOG_TRACE("Gemini", "Flat panel response: " + response);
         return response;
