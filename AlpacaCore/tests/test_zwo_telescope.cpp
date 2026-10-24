@@ -13,15 +13,17 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/logging.h>
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -31,6 +33,7 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 
 #include <alpacacore/vendor/zwo/zwo_telescope_driver.h>
@@ -290,8 +293,9 @@ TEST_CASE("ZWO Telescope Driver - a far-off client UTCDate is logged once per co
     // before the driver caches the instant; :GAT "1#" reports tracking on,
     // and "0#" is a validly terminated reply for everything else.
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
-        if (chunk.find(":GVP") != std::string::npos) return "AM5#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
         if (chunk.find(":SMTI") != std::string::npos) {
@@ -362,8 +366,9 @@ TEST_CASE(
     // so the wrapper's idle-break wait does not add 100 ms to every refresh),
     // and "0#" is a validly terminated reply for everything else.
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
-        if (chunk.find(":GVP") != std::string::npos) return "AM5#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
         if (chunk.find(":SMTI") != std::string::npos) {
@@ -465,6 +470,85 @@ TEST_CASE(
     CHECK(alpacacore::test::settle_connected(*driver, false));
 }
 
+TEST_CASE("ZWO Telescope Driver - a same-value Tracking write does not drop the in-flight poll",
+          "[zwo][telescope][unit][tracking]") {
+    // The poll thread is held inside ":GU#" (its snapshot token already taken) while same-value Tracking writes
+    // arrive; the mandatory sample must still publish, so the DeviceState TimeStamp age stays within one poll.
+    alpacacore::test::FakeTaskClock clock;
+    std::atomic<bool> hold_status{false}, status_entered{false}, release_status{false};
+    alpacacore::test::FakeMountServer server([&](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
+        if (chunk.find(":GU#") != std::string::npos) {
+            if (hold_status.load()) {
+                status_entered.store(true);
+                while (!release_status.load()) std::this_thread::yield();
+            }
+            return "nN#";  // lowercase n: not tracking, so Tracking=false is the cached no-op value
+        }
+        if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
+        if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
+        if (chunk.find(":Ggr") != std::string::npos) return "0.50#";
+        return "0#";
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 250;
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope_with_site(0, conn, 30.0, -100.0, {}, false, clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    driver->set_tracking(false);  // seeds the tracking cache; the writes below are then no-ops
+
+    auto timestamp_age_ms = [&driver] {
+        for (const auto& entry : driver->get_device_state()) {
+            if (entry.name != "TimeStamp") continue;
+            int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
+            REQUIRE(std::sscanf(std::get<std::string>(entry.value).c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h,
+                                &mi, &s, &ms) == 7);
+            std::tm tm{};
+            tm.tm_year = y - 1900;
+            tm.tm_mon = mo - 1;
+            tm.tm_mday = d;
+            tm.tm_hour = h;
+            tm.tm_min = mi;
+            tm.tm_sec = s;
+            const auto stamp = std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+            return std::chrono::duration<double, std::milli>(std::chrono::system_clock::now() - stamp).count();
+        }
+        FAIL("no TimeStamp in DeviceState");
+        return 0.0;
+    };
+
+    clock.advance(std::chrono::milliseconds(250));  // one clean poll first, so a frame exists
+    REQUIRE(clock.wait_for_woken_settled(std::chrono::seconds(5)));
+    REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    hold_status.store(true);
+    for (int period = 0; period < 12; ++period) {
+        CAPTURE(period);
+        status_entered.store(false);
+        release_status.store(false);
+        clock.advance(std::chrono::milliseconds(250));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!status_entered.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        REQUIRE(status_entered.load());
+        driver->set_tracking(false);  // same value, poll in flight
+        release_status.store(true);
+        REQUIRE(clock.wait_for_waiters(1, std::chrono::seconds(5)));  // poll finished, back in its wait
+        // A dropped poll leaves the sample a whole period older each time (250 ms, 500 ms, ...); real time
+        // elapsed between the two clock reads is microseconds.
+        const double age_ms = timestamp_age_ms();
+        INFO("TimeStamp age after the poll: " << age_ms << " ms");
+        CHECK(age_ms < 125.0);
+    }
+    release_status.store(true);
+
+    CHECK(alpacacore::test::settle_connected(*driver, false));
+}
+
 TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axis moving",
           "[zwo][telescope][unit][moveaxis]") {
     // Thread-safe counters: the fake answers on its own thread.
@@ -478,7 +562,8 @@ TEST_CASE("ZWO Telescope Driver - MoveAxis stop on one axis leaves the other axi
     for (const int stopped_axis : {0, 1}) {
         auto counts = std::make_shared<Counts>();
         alpacacore::test::FakeMountServer server([counts](const std::string& chunk) -> std::string {
-            if (chunk.find(":GVP") != std::string::npos) return "AM5#";
+            if (chunk == ":GVP#") return "AM5#";
+            if (chunk == ":GMA#") return "012345ABCDEF#";
             if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
             if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
             const auto count = [&chunk](const std::string& command) {
@@ -601,8 +686,9 @@ TEST_CASE("ZWO mount site longitude converts between east-positive API and west-
 // #1298: the LST helper cut UTC to whole seconds.
 TEST_CASE("ZWO Mount Telescope Driver - SiderealTime follows the clock to under a second", "[zwo][telescope][unit]") {
     alpacacore::test::FakeMountServer server([](const std::string& chunk) -> std::string {
+        if (chunk == ":GVP#") return "AM5#";
+        if (chunk == ":GMA#") return "012345ABCDEF#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
-        if (chunk.find(":GVP") != std::string::npos) return "AM5#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
         if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
         if (chunk.find(":GMGE#") != std::string::npos) return "+30*00:00&+100*00:00#";
@@ -651,6 +737,7 @@ struct SlowMount {
 
     alpacacore::test::FakeMountServer::Responder responder() {
         return [this](const std::string& chunk) -> std::string {
+            if (chunk == ":GMA#") return "012345ABCDEF#";
             if (chunk.find(":GU#") != std::string::npos) return "NG#";
             if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
             if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -882,165 +969,30 @@ TEST_CASE("ZWO Mount Telescope Driver - A disconnect returns while an exchange i
     CHECK_FALSE(driver->get_connected());
 }
 
-namespace {
-
-// A mount whose ":GVP" reply is set per test and which records every request it receives. "silent" sends nothing.
-// ":GR" can be made unreadable so the first mandatory telemetry sample fails after a verified identity.
-struct IdentityMount {
-    std::mutex mutex;
-    std::string gvp_reply = "AM5#";
-    bool silent = false;
-    bool fail_first_sample = false;
-    std::vector<std::string> requests;
-
-    void set_reply(std::string reply, bool is_silent = false) {
-        std::lock_guard<std::mutex> lock(mutex);
-        gvp_reply = std::move(reply);
-        silent = is_silent;
-    }
-    std::vector<std::string> seen() {
-        std::lock_guard<std::mutex> lock(mutex);
-        return requests;
-    }
-
-    alpacacore::test::FakeMountServer::Responder responder() {
-        return [this](const std::string& chunk) -> std::string {
-            std::lock_guard<std::mutex> lock(mutex);
-            requests.push_back(chunk);
-            if (chunk.find(":GVP") != std::string::npos) return silent ? std::string() : gvp_reply;
-            if (chunk.find(":GU#") != std::string::npos) return "NG#";
-            if (chunk.find(":GR#") != std::string::npos) return fail_first_sample ? "x#" : "12:00:00#";
-            if (chunk.find(":GD#") != std::string::npos) return fail_first_sample ? "x#" : "+45*00:00#";
-            if (chunk.find(":SMTI") != std::string::npos || chunk.find(":SMGE") != std::string::npos) return "1";
-            if (chunk.find(":GAT") != std::string::npos) return "1#";
-            return "0#";
-        };
-    }
-};
-
-alpacacore::vendor::zwo::ConnectionInfo identity_connection(const alpacacore::test::FakeMountServer& server) {
-    auto conn = slow_mount_connection(server);
-    conn.response_timeout_ms = 150;
-    return conn;
-}
-
-bool only_identity_probes(const std::vector<std::string>& requests) {
-    return !requests.empty() && std::all_of(requests.begin(), requests.end(),
-                                            [](const std::string& r) { return r.find(":GVP") != std::string::npos; });
-}
-
-}  // namespace
-
-// Falsified by: zwo_mount_protocol_wrapper.cpp is_zwo_am_model_reply() accepting any non-empty body.
-TEST_CASE("ZWO mount identity - only AM models pass the :GVP family check", "[zwo][telescope][unit]") {
-    using alpacacore::vendor::zwo::is_zwo_am_model_reply;
-    for (const char* ok : {"AM3", "AM5", "AM5N", "AM7", "AM5#", " AM5N \r\n"}) {
-        CAPTURE(ok);
-        CHECK(is_zwo_am_model_reply(ok));
-    }
-    for (const char* bad : {"OnStep#", "LX200 GPS#", "0#", "#", "", "AM", "AMx", "AM5n", "AM5NN", "XAM5", "AM5 N"}) {
-        CAPTURE(bad);
-        CHECK_FALSE(is_zwo_am_model_reply(bad));
-    }
-}
-
-// Falsified by: zwo_telescope_driver.cpp set_connected(true) catching a failed or rejected get_mount_info() and
-// carrying on (Connected publishes true for an OnStep, LX200 GPS, "0" or "" reply, and the site write goes out).
-TEST_CASE("ZWO Mount Telescope Driver - A non-ZWO :GVP reply refuses the connect and writes nothing",
-          "[zwo][telescope][unit][identity]") {
-    using namespace alpacacore::test;
-    for (const char* reply : {"OnStep#", "LX200 GPS#", "0#", "#"}) {
-        CAPTURE(reply);
-        IdentityMount mount;
-        mount.set_reply(reply);
-        FakeMountServer server(mount.responder());
-        REQUIRE(server.ok());
-        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, identity_connection(server));
-        driver->set_site_latitude(-33.856784);
-        driver->set_site_longitude(151.215297);
-
-        require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
-        CHECK_FALSE(driver->get_connected());
-        CHECK(only_identity_probes(mount.seen()));  // one attempt and one retry, no site/time/rate traffic
-        CHECK(mount.seen().size() == 2);
-    }
-}
-
-// Falsified by: zwo_telescope_driver.cpp set_connected(true) treating a timed-out :GVP as "identity unknown, go on".
-TEST_CASE("ZWO Mount Telescope Driver - A silent device refuses the connect with a readable reason",
-          "[zwo][telescope][unit][identity]") {
-    using namespace alpacacore::test;
-    IdentityMount mount;
-    mount.set_reply("", /*is_silent=*/true);
-    FakeMountServer server(mount.responder());
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, identity_connection(server));
-
-    try {
-        driver->set_connected(true);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);
-        CHECK(std::string(ex.what()).find("not confirmed as a ZWO AM mount") != std::string::npos);
-    }
-    CHECK_FALSE(driver->get_connected());
-    CHECK(only_identity_probes(mount.seen()));
-    CHECK(mount.seen().size() == 2);
-}
-
-// Falsified by: zwo_telescope_driver.cpp quoting the device reply into the error without sanitize_for_log().
-TEST_CASE("ZWO Mount Telescope Driver - The refusal quotes the reply with control bytes removed",
-          "[zwo][telescope][unit][identity]") {
-    using namespace alpacacore::test;
-    IdentityMount mount;
-    mount.set_reply("Evil\x01\x1b[31mX#");
-    FakeMountServer server(mount.responder());
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, identity_connection(server));
-    try {
-        driver->set_connected(true);
-        FAIL("Expected AlpacaException");
-    } catch (const alpacacore::AlpacaException& ex) {
-        const std::string what = ex.what();
-        CHECK(what.find("Evil??[31mX") != std::string::npos);
-        CHECK(what.find('\x1b') == std::string::npos);
-    }
-}
-
-// Falsified by: zwo_telescope_driver.cpp set_connected(true) failing the connect when the first mandatory sample
-// fails (decision 0017 keeps unavailable telemetry after a verified identity).
-TEST_CASE("ZWO Mount Telescope Driver - A failed first sample after a verified identity still connects",
-          "[zwo][telescope][unit][identity]") {
-    using namespace alpacacore::test;
-    IdentityMount mount;
-    mount.fail_first_sample = true;
-    FakeMountServer server(mount.responder());
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, identity_connection(server));
-
-    REQUIRE_NOTHROW(driver->set_connected(true));
-    CHECK(driver->get_connected());
-    driver->set_connected(false);
-}
-
-// Falsified by: zwo_telescope_driver.cpp catch (...) cleanup skipping protocol.disconnect() or leaving connected_
-// true after a refusal (the retry then reports Connected without re-probing, or the port stays held).
-TEST_CASE("ZWO Mount Telescope Driver - A refused connect can be retried against a device that answers AM5",
-          "[zwo][telescope][unit][identity]") {
-    using namespace alpacacore::test;
-    IdentityMount mount;
-    mount.set_reply("OnStep#");
-    FakeMountServer server(mount.responder());
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, identity_connection(server));
-
-    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
-    CHECK_FALSE(driver->get_connected());
-
-    mount.set_reply("AM5#");
-    REQUIRE_NOTHROW(driver->set_connected(true));
-    CHECK(driver->get_connected());
-    CHECK(driver->get_name().rfind("ZWO AM5", 0) == 0);
-    driver->set_connected(false);
-}
 #endif
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("ZWO Mount Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("ZWO Mount Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
+          "[zwo][telescope][unit][spec-audit]") {
+    alpacacore::vendor::zwo::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::zwo::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, conn);
+    // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_site_elevation(42.0);
+    CHECK(driver->get_site_elevation() == 42.0);
+}

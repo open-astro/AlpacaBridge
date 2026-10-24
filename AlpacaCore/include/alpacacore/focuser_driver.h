@@ -56,10 +56,13 @@ public:
         add("IsMoving", [this] { return get_is_moving(); });
         add("Position", [this] { return static_cast<std::int32_t>(get_position()); });
         add("Temperature", [this] { return get_temperature(); });
-        state.push_back({"TimeStamp", age ? device_state_timestamp(
-                                                std::chrono::system_clock::now() -
-                                                std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
-                                          : device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
+        }
         return state;
     }
 

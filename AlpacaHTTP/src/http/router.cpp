@@ -60,6 +60,7 @@
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <utility>
 #include <variant>
@@ -400,14 +401,15 @@ struct PersistedKey {
 };
 
 // Decision 0018: the persisted UniqueID of a configured device. A stored or
-// client-sent value is kept when it is a version 4 UUID that no other entry
-// holds (the web UI edits a device by removing and re-adding it, sending the
-// GUID back); anything else gets a fresh one.
+// client-sent value is kept when it is a keepable ID (a version 4 UUID or a
+// long non-slot string such as ZWO_UID_<hex>) that no other entry holds (the
+// web UI edits a device by removing and re-adding it, sending the ID back);
+// only an entry with none, a device-number ID or a duplicate gets a fresh GUID.
 std::string stored_unique_id(const nlohmann::json& entry) {
     const auto it = entry.find("uniqueId");
     if (it == entry.end() || !it->is_string()) return {};
     const std::string value = it->get<std::string>();
-    return alpacacore::util::is_unique_id(value) ? value : std::string();
+    return alpacacore::util::is_keepable_unique_id(value) ? value : std::string();
 }
 
 std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::string>& taken) {
@@ -418,22 +420,53 @@ std::string choose_unique_id(const nlohmann::json& entry, const std::set<std::st
     return value;
 }
 
+// A JSON number as an int: a JSON integer inside int, or a finite float with
+// no fraction (a hand-written 3.0) inside int. nullopt for anything else, so
+// no caller narrows with get<int>(), which wraps 2^32 to 0 and cuts 3.5 to 3
+// (ADR 0007 rule 4).
+std::optional<int> whole_json_int(const nlohmann::json& value) {
+    if (value.is_number_unsigned()) {
+        const auto v = value.get<std::uint64_t>();
+        if (!std::in_range<int>(v)) return std::nullopt;
+        return static_cast<int>(v);
+    }
+    if (value.is_number_integer()) {
+        const auto v = value.get<std::int64_t>();
+        if (!std::in_range<int>(v)) return std::nullopt;
+        return static_cast<int>(v);
+    }
+    if (value.is_number_float()) {
+        const double d = value.get<double>();
+        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(std::numeric_limits<int>::min()) ||
+            d > static_cast<double>(std::numeric_limits<int>::max())) {
+            return std::nullopt;
+        }
+        return static_cast<int>(d);
+    }
+    return std::nullopt;
+}
+
 std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
     if (!entry.is_object()) {
         return std::nullopt;
     }
     const auto type_it = entry.find("deviceType");
     const auto number_it = entry.find("deviceNumber");
-    // Any JSON number is accepted, as config_get<int>() accepts it at
-    // registration: a hand-written 3.0 registers as device 3, so the walks
-    // over the persisted list must find that same entry or removedevice
-    // would drop it from the registry and leave it in the file.
-    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end() || !number_it->is_number()) {
+    // The numbers config_get<int>() accepts at registration (whole_json_int):
+    // a hand-written 3.0 registers as device 3, so the walks over the
+    // persisted list must find that same entry or removedevice would drop it
+    // from the registry and leave it in the file. A number registration
+    // refuses (4294967299, 3.5) has no key, like a wrong-typed one.
+    if (type_it == entry.end() || !type_it->is_string() || number_it == entry.end()) {
+        return std::nullopt;
+    }
+    const auto number = whole_json_int(*number_it);
+    if (!number) {
         return std::nullopt;
     }
     PersistedKey key;
     key.device_type = to_lower_copy(type_it->get<std::string>());
-    key.device_number = number_it->get<int>();
+    key.device_number = *number;
     const auto vendor_it = entry.find("vendor");
     if (vendor_it != entry.end() && vendor_it->is_string()) {
         key.vendor = vendor_it->get<std::string>();
@@ -443,9 +476,25 @@ std::optional<PersistedKey> persisted_key(const nlohmann::json& entry) {
 
 // Throw a parameter-validation failure with an explicit ASCOM error code, so
 // the ErrorNumber on the wire is deterministic rather than inferred from the
-// message text. A missing or unparseable parameter is InvalidValue (0x401).
+// message text. For a value that parsed but is out of range (InvalidValue,
+// 0x401, HTTP 200); a missing or unparseable parameter is throw_bad_request().
 [[noreturn]] void throw_invalid_value(const std::string& message) {
     throw alpacacore::AlpacaException(message, alpacacore::AlpacaError::InvalidValue);
+}
+
+// A Device API request the server cannot interpret: a required parameter is
+// missing, or its value does not parse as the required type. The router answers
+// HTTP 400 text/plain (Alpaca API Reference s2.5), never reaching the driver. It
+// is an AlpacaException with InvalidValue so a caller that only wants the old
+// error (the description write) still sees one. A value that parses but is out
+// of range is not this: it stays throw_invalid_value() -> HTTP 200 + 0x401.
+class RequestNotInterpretable : public alpacacore::AlpacaException {
+public:
+    using alpacacore::AlpacaException::AlpacaException;
+};
+
+[[noreturn]] void throw_bad_request(const std::string& message) {
+    throw RequestNotInterpretable(message, alpacacore::AlpacaError::InvalidValue);
 }
 
 std::string url_decode(const std::string& value) {
@@ -511,7 +560,7 @@ double parse_double_value(const std::string& raw, const std::string& param_name)
         }
         return value;
     } catch (const std::exception&) {
-        throw_invalid_value("Invalid value for parameter: " + param_name);
+        throw_bad_request("Invalid value for parameter: " + param_name);
     }
 }
 
@@ -527,39 +576,25 @@ int parse_int_value(const std::string& raw, const std::string& param_name) {
         }
         return static_cast<int>(value);
     } catch (const std::exception&) {
-        throw_invalid_value("Invalid value for parameter: " + param_name);
+        throw_bad_request("Invalid value for parameter: " + param_name);
     }
 }
 
 // A JSON-body integer parameter (#1476): accepted only as a whole number
 // inside int, given as a JSON integer, a JSON number with no fraction (0.0),
-// or a string parse_int_value() accepts. The query and form paths already
+// or a string parse_int_value() accepts. Anything else is a request the
+// server cannot interpret (throw_bad_request, HTTP 400). The query and form paths already
 // refuse "0.5" and values outside int; before this, the JSON path truncated
 // 0.5 to 0 and wrapped 2^32 to 0 in all six device dispatchers.
 int json_int_value(const nlohmann::json& value, const std::string& param_name) {
-    constexpr auto kMin = static_cast<long long>(std::numeric_limits<int>::min());
-    constexpr auto kMax = static_cast<long long>(std::numeric_limits<int>::max());
-    if (value.is_number_unsigned()) {
-        const auto v = value.get<std::uint64_t>();
-        if (v > static_cast<std::uint64_t>(kMax)) throw_invalid_value("Invalid value for parameter: " + param_name);
-        return static_cast<int>(v);
-    }
-    if (value.is_number_integer()) {
-        const auto v = value.get<std::int64_t>();
-        if (v < kMin || v > kMax) throw_invalid_value("Invalid value for parameter: " + param_name);
-        return static_cast<int>(v);
-    }
-    if (value.is_number_float()) {
-        const double d = value.get<double>();
-        if (!std::isfinite(d) || d != std::trunc(d) || d < static_cast<double>(kMin) || d > static_cast<double>(kMax)) {
-            throw_invalid_value("Invalid value for parameter: " + param_name);
-        }
-        return static_cast<int>(d);
+    if (value.is_number()) {
+        if (const auto v = whole_json_int(value)) return *v;
+        throw_bad_request("Invalid value for parameter: " + param_name);
     }
     if (value.is_string()) {
         return parse_int_value(value.get<std::string>(), param_name);
     }
-    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+    throw_bad_request("Invalid JSON value for parameter: " + param_name);
 }
 
 bool parse_bool_value(const std::string& raw, const std::string& param_name) {
@@ -570,7 +605,7 @@ bool parse_bool_value(const std::string& raw, const std::string& param_name) {
     if (lowered == "false" || lowered == "0") {
         return false;
     }
-    throw_invalid_value("Invalid value for parameter: " + param_name);
+    throw_bad_request("Invalid value for parameter: " + param_name);
 }
 
 // The verb masks below mirror the GET/PUT branches of each dispatch_*_method,
@@ -1148,13 +1183,8 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
 
 constexpr std::uint32_t kImageTypeInt16 = 1;
 constexpr std::uint32_t kImageTypeInt32 = 2;
-constexpr std::uint32_t kImageTypeDouble = 3;
-constexpr std::uint32_t kImageTypeSingle = 4;
-constexpr std::uint32_t kImageTypeUInt64 = 5;
 constexpr std::uint32_t kImageTypeByte = 6;
-constexpr std::uint32_t kImageTypeInt64 = 7;
 constexpr std::uint32_t kImageTypeUInt16 = 8;
-constexpr std::uint32_t kImageTypeUInt32 = 9;
 
 constexpr std::uint32_t kImageBytesMetadataVersion = 1;
 constexpr std::size_t kImageBytesMetadataSize = 11 * sizeof(std::uint32_t);
@@ -1201,41 +1231,6 @@ bool accepts_imagebytes(const alpacahttp::Request& request) {
     }
     std::string accept = to_lower_copy(request.get_header("accept"));
     return accept.find("application/imagebytes") != std::string::npos;
-}
-
-std::uint32_t image_element_type_from_variant(const std::string& variant, std::uint32_t fallback) {
-    if (variant.empty()) {
-        return fallback;
-    }
-    std::string lowered = to_lower_copy(variant);
-    if (lowered == "int16" || lowered == "short") {
-        return kImageTypeInt16;
-    }
-    if (lowered == "uint16" || lowered == "ushort") {
-        return kImageTypeUInt16;
-    }
-    if (lowered == "byte" || lowered == "uint8") {
-        return kImageTypeByte;
-    }
-    if (lowered == "double") {
-        return kImageTypeDouble;
-    }
-    if (lowered == "single" || lowered == "float") {
-        return kImageTypeSingle;
-    }
-    if (lowered == "uint32") {
-        return kImageTypeUInt32;
-    }
-    if (lowered == "uint64" || lowered == "ulong") {
-        return kImageTypeUInt64;
-    }
-    if (lowered == "int64" || lowered == "long") {
-        return kImageTypeInt64;
-    }
-    if (lowered == "int32") {
-        return kImageTypeInt32;
-    }
-    return fallback;
 }
 
 ImageBytesFormat choose_image_bytes_format(const alpacacore::ImageArray& image,
@@ -1668,6 +1663,9 @@ std::optional<Response> reject_cross_origin_request(const Request& request, std:
 // text/plain message (Alpaca API Reference s2.5, #1508).
 void set_wrong_verb_text(Response& response, const char* what);
 
+// A Device API request the router cannot interpret: HTTP 400 text/plain (#1476).
+void set_bad_request_text(Response& response, const std::string& message);
+
 }  // namespace
 
 Router::Router() : Router(CatalogExtension{}) {}
@@ -1790,16 +1788,9 @@ Response Router::route(const Request& request, std::uint32_t server_transaction_
         // open-astro#711: before any regex, static file or setup handler. The
         // message gives the lengths, never the path itself.
         if (request.path().size() > kMaxRequestPathBytes) {
-            response.set_status(400, "Bad Request");
-            std::uint32_t client_tx_id = 0;
-            if (request.has_query_param("ClientTransactionID")) {
-                client_tx_id = parse_client_transaction_id(request.get_query_param("ClientTransactionID"));
-            }
-            AlpacaResponse alpaca_response =
-                make_error_response(client_tx_id, server_transaction_id, util::ErrorCode::INVALID_VALUE,
-                                    "Request path is " + std::to_string(request.path().size()) +
-                                        " bytes; the limit is " + std::to_string(kMaxRequestPathBytes) + " bytes");
-            response.set_body(alpaca_response);
+            set_bad_request_text(response, "Request path is " + std::to_string(request.path().size()) +
+                                               " bytes; the limit is " + std::to_string(kMaxRequestPathBytes) +
+                                               " bytes");
             return response;
         }
 
@@ -2664,6 +2655,7 @@ Response Router::handle_failed_devices(const Request& request, std::uint32_t ser
                                 "Unsupported HTTP method for faileddevices endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -2745,13 +2737,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
     if (!is_lowercase_ascii(match.device_type) || !is_known_device_type_name(match.device_type)) {
         // Alpaca spec: HTTP 400 indicates the device could not interpret the
         // request, e.g. a misspelt device type or invalid device number.
-        response.set_status(400, "Bad Request");
-        AlpacaResponse alpaca_response = make_error_response(
-            client_tx_id, server_tx_id,
-            util::ErrorCode::INVALID_VALUE,
-            "Unknown device type: " + match.device_type
-        );
-        response.set_body(alpaca_response);
+        set_bad_request_text(response, "Unknown device type: " + match.device_type);
         return response;
     }
 
@@ -2761,11 +2747,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
     // throw out_of_range and come back as an internal-error 200. Reject it
     // the same way an unknown device type is rejected, above.
     if (match.device_number_invalid) {
-        response.set_status(400, "Bad Request");
-        AlpacaResponse alpaca_response =
-            make_error_response(client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                                "Invalid device number for device type: " + match.device_type);
-        response.set_body(alpaca_response);
+        set_bad_request_text(response, "Invalid device number for device type: " + match.device_type);
         return response;
     }
 
@@ -2776,13 +2758,7 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         const unsigned method_verbs =
             is_lowercase_ascii(match.method_name) ? allowed_verbs(device_type, match.method_name) : 0;
         if (method_verbs == 0) {
-            response.set_status(400, "Bad Request");
-            AlpacaResponse alpaca_response = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::INVALID_VALUE,
-                "Unknown method: " + match.method_name
-            );
-            response.set_body(alpaca_response);
+            set_bad_request_text(response, "Unknown method: " + match.method_name);
             return response;
         }
 
@@ -2803,11 +2779,8 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
             if (auto rejected = reject_cross_origin_request(request, client_tx_id, server_tx_id, "device method")) {
                 return *rejected;
             }
-            response.set_status(400, "Bad Request");
-            AlpacaResponse alpaca_response = make_error_response(
-                client_tx_id, server_tx_id, util::ErrorCode::INVALID_VALUE,
-                "Method '" + match.method_name + "' does not accept " + http_method_name(request.method()));
-            response.set_body(alpaca_response);
+            set_bad_request_text(
+                response, "Method '" + match.method_name + "' does not accept " + http_method_name(request.method()));
             return response;
         }
 
@@ -2822,13 +2795,8 @@ Response Router::handle_device(const Request& request, const RouteMatch& match, 
         }
 
         if (!device) {
-            response.set_status(400, "Bad Request");
-            AlpacaResponse alpaca_response = make_error_response(
-                client_tx_id, server_tx_id,
-                util::ErrorCode::INVALID_VALUE,
-                "Device not found: " + match.device_type + " #" + std::to_string(match.device_number)
-            );
-            response.set_body(alpaca_response);
+            set_bad_request_text(response,
+                                 "Device not found: " + match.device_type + " #" + std::to_string(match.device_number));
             return response;
         }
 
@@ -2904,6 +2872,14 @@ alpacacore::DeviceType Router::string_to_device_type(const std::string& type_str
 }
 
 namespace {
+// A Device API request the router cannot interpret: HTTP 400 with a short
+// text/plain message (Alpaca API Reference s2.5 and the Device API 400 text).
+void set_bad_request_text(Response& response, const std::string& message) {
+    response.set_status(400, "Bad Request");
+    response.set_content_type("text/plain");
+    response.set_body(message);
+}
+
 void set_wrong_verb_text(Response& response, const char* what) {
     response.set_status(400, "Bad Request");
     response.set_content_type("text/plain");
@@ -3125,7 +3101,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             connected = parse_bool_value(val->get<std::string>(), "Connected");
                         } else {
-                            throw_invalid_value("Invalid JSON value for parameter: Connected");
+                            throw_bad_request("Invalid JSON value for parameter: Connected");
                         }
                         found = true;
                     } else if (const auto* val = find_json_value(*json_opt, "Value")) {
@@ -3134,7 +3110,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             connected = parse_bool_value(val->get<std::string>(), "Connected");
                         } else {
-                            throw_invalid_value("Invalid JSON value for parameter: Connected");
+                            throw_bad_request("Invalid JSON value for parameter: Connected");
                         }
                         found = true;
                     }
@@ -3152,7 +3128,7 @@ Response Router::dispatch_device_method(
                 }
                 
                 if (!found) {
-                    throw_invalid_value("Missing parameter: Connected");
+                    throw_bad_request("Missing parameter: Connected");
                 }
 
                 // Per-client Connected refcounting (issue #160): the first
@@ -3309,7 +3285,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Action")) {
                         if (!val->is_string()) {
-                            throw_invalid_value("Invalid JSON value for parameter: Action");
+                            throw_bad_request("Invalid JSON value for parameter: Action");
                         }
                         action_name = val->get<std::string>();
                     }
@@ -3329,7 +3305,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (action_name.empty()) {
-                    throw_invalid_value("Missing parameter: Action");
+                    throw_bad_request("Missing parameter: Action");
                 }
                 
                 std::string result = device->action(action_name, action_parameters);
@@ -3348,7 +3324,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw_invalid_value("Invalid JSON value for parameter: Command");
+                            throw_bad_request("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -3358,7 +3334,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw_invalid_value("Invalid JSON value for parameter: Raw");
+                            throw_bad_request("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -3373,7 +3349,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw_invalid_value("Missing parameter: Command");
+                    throw_bad_request("Missing parameter: Command");
                 }
                 
                 device->command_blind(command, raw);
@@ -3391,7 +3367,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw_invalid_value("Invalid JSON value for parameter: Command");
+                            throw_bad_request("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -3401,7 +3377,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw_invalid_value("Invalid JSON value for parameter: Raw");
+                            throw_bad_request("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -3416,7 +3392,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw_invalid_value("Missing parameter: Command");
+                    throw_bad_request("Missing parameter: Command");
                 }
                 
                 bool result = device->command_bool(command, raw);
@@ -3435,7 +3411,7 @@ Response Router::dispatch_device_method(
                 if (json_opt) {
                     if (const auto* val = find_json_value(*json_opt, "Command")) {
                         if (!val->is_string()) {
-                            throw_invalid_value("Invalid JSON value for parameter: Command");
+                            throw_bad_request("Invalid JSON value for parameter: Command");
                         }
                         command = val->get<std::string>();
                     }
@@ -3445,7 +3421,7 @@ Response Router::dispatch_device_method(
                         } else if (val->is_string()) {
                             raw = parse_bool_value(val->get<std::string>(), "Raw");
                         } else {
-                            throw_invalid_value("Invalid JSON value for parameter: Raw");
+                            throw_bad_request("Invalid JSON value for parameter: Raw");
                         }
                     }
                 }
@@ -3460,7 +3436,7 @@ Response Router::dispatch_device_method(
                 }
 
                 if (command.empty()) {
-                    throw_invalid_value("Missing parameter: Command");
+                    throw_bad_request("Missing parameter: Command");
                 }
                 
                 std::string result = device->command_string(command, raw);
@@ -3628,7 +3604,11 @@ Response Router::dispatch_device_method(
         );
         response.set_body(alpaca_response);
         return response;
-        
+
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in device method", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -3681,7 +3661,7 @@ Response Router::dispatch_telescope_method(
                         if (val->is_string()) {
                             return parse_double_value(val->get<std::string>(), param_name);
                         }
-                        throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                        throw_bad_request("Invalid JSON value for parameter: " + param_name);
                     }
                 }
             }
@@ -3689,7 +3669,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), param_name)) {
                 return parse_double_value(*value, param_name);
             }
-            throw_invalid_value("Missing parameter: " + param_name);
+            throw_bad_request("Missing parameter: " + param_name);
         };
         
         // Helper function to parse int from query param, JSON body, or form-encoded body
@@ -3711,7 +3691,7 @@ Response Router::dispatch_telescope_method(
             if (auto value = get_form_value(request.body(), param_name)) {
                 return parse_int_value(*value, param_name);
             }
-            throw_invalid_value("Missing parameter: " + param_name);
+            throw_bad_request("Missing parameter: " + param_name);
         };
         
         // Helper function to parse bool from query param, JSON body, or form-encoded body
@@ -3731,7 +3711,7 @@ Response Router::dispatch_telescope_method(
                     if (val->is_string()) {
                         return parse_bool_value(val->get<std::string>(), param_name);
                     }
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
                 }
                 if (const auto* val = find_json_value(*json_opt, "Value")) {
                     if (val->is_boolean()) {
@@ -3740,7 +3720,7 @@ Response Router::dispatch_telescope_method(
                     if (val->is_string()) {
                         return parse_bool_value(val->get<std::string>(), param_name);
                     }
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
                 }
             }
             
@@ -3752,7 +3732,7 @@ Response Router::dispatch_telescope_method(
                 return parse_bool_value(*value, param_name);
             }
 
-            throw_invalid_value("Missing parameter: " + param_name);
+            throw_bad_request("Missing parameter: " + param_name);
         };
 
         // GET-only boolean properties
@@ -3912,11 +3892,11 @@ Response Router::dispatch_telescope_method(
             } else if (method_name == "destinationsideofpier") {
                 auto ra_value = get_query_param_case_insensitive(request, "RightAscension");
                 if (!ra_value) {
-                    throw_invalid_value("Missing parameter: RightAscension");
+                    throw_bad_request("Missing parameter: RightAscension");
                 }
                 auto dec_value = get_query_param_case_insensitive(request, "Declination");
                 if (!dec_value) {
-                    throw_invalid_value("Missing parameter: Declination");
+                    throw_bad_request("Missing parameter: Declination");
                 }
                 double ra = parse_double_value(*ra_value, "RightAscension");
                 double dec = parse_double_value(*dec_value, "Declination");
@@ -4113,8 +4093,14 @@ Response Router::dispatch_telescope_method(
                     date_str = request.get_query_param("UTCDate");
                 } else if (auto json_opt = parse_json(request.body())) {
                     if (const auto* val = find_json_value(*json_opt, "UTCDate")) {
+                        if (!val->is_string()) {
+                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
+                        }
                         date_str = val->get<std::string>();
                     } else if (const auto* val = find_json_value(*json_opt, "Value")) {
+                        if (!val->is_string()) {
+                            throw_bad_request("Invalid JSON value for parameter: UTCDate");
+                        }
                         date_str = val->get<std::string>();
                     }
                 }
@@ -4126,7 +4112,7 @@ Response Router::dispatch_telescope_method(
                     }
                 }
                 if (date_str.empty()) {
-                    throw_invalid_value("Missing parameter: UTCDate or Value");
+                    throw_bad_request("Missing parameter: UTCDate or Value");
                 }
                 std::string cleaned = date_str;
                 if (!cleaned.empty() && (cleaned.back() == 'Z' || cleaned.back() == 'z')) {
@@ -4147,7 +4133,7 @@ Response Router::dispatch_telescope_method(
                     try {
                         millis = std::stoi(frac);
                     } catch (const std::exception&) {
-                        throw_invalid_value("Invalid UTC date format: " + date_str);
+                        throw_bad_request("Invalid UTC date format: " + date_str);
                     }
                 }
 
@@ -4155,11 +4141,11 @@ Response Router::dispatch_telescope_method(
                 std::istringstream ss(base);
                 ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
                 if (ss.fail()) {
-                    throw_invalid_value("Invalid UTC date format: " + date_str);
+                    throw_bad_request("Invalid UTC date format: " + date_str);
                 }
                 auto utc_time = timegm(&tm);
                 if (utc_time == static_cast<std::time_t>(-1)) {
-                    throw_invalid_value("Failed to convert UTC date: " + date_str);
+                    throw_bad_request("Failed to convert UTC date: " + date_str);
                 }
                 auto time_point = std::chrono::system_clock::from_time_t(utc_time) +
                     std::chrono::milliseconds(millis);
@@ -4530,7 +4516,11 @@ Response Router::dispatch_telescope_method(
         );
         response.set_body(alpaca_response);
         return response;
-        
+
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in telescope method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -4591,7 +4581,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -4600,7 +4590,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4609,7 +4599,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
@@ -4631,7 +4621,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -4647,7 +4637,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -4656,7 +4646,7 @@ Response Router::dispatch_camera_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -4665,7 +4655,7 @@ Response Router::dispatch_camera_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto format_utc = [](std::chrono::system_clock::time_point time_point) -> std::string {
@@ -4843,31 +4833,12 @@ Response Router::dispatch_camera_method(
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                util::log_debug(
-                    "Camera imagearrayvariant Accept: " +
-                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
-                    ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
-                if (accepts_imagebytes(request)) {
-                    auto image = camera->get_image_array();
-                    auto variant = camera->get_image_array_variant();
-                    auto element_type = image_element_type_from_variant(variant, kImageTypeInt32);
-                    auto format = choose_image_bytes_format(image, element_type);
-                    response.set_content_type("application/imagebytes");
-                    response.set_body(build_image_bytes_payload(image, format, client_tx_id, server_tx_id));
-                    return response;
+                if (camera->get_connecting() || !camera->get_connected()) {
+                    throw alpacacore::AlpacaException("Camera is not connected", alpacacore::AlpacaError::NotConnected);
                 }
-
-                auto image = camera->get_image_array();
-                auto variant = camera->get_image_array_variant();
-                int type = 2;
-                if (variant == "Int16" || variant == "UInt16" || variant == "Short") {
-                    type = 1;
-                } else if (variant == "Double") {
-                    type = 3;
-                }
-                response.set_content_type("application/json");
-                response.set_body(build_image_array_payload(image, type, client_tx_id, server_tx_id));
-                return response;
+                // ImageArrayVariant is COM-only; Alpaca must refuse it without retrieving a frame.
+                throw alpacacore::AlpacaException("ImageArrayVariant is not supported by Alpaca; use ImageArray",
+                                                  alpacacore::AlpacaError::PropertyNotImplemented);
             } else if (method_name == "imageready") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, camera->get_image_ready());
@@ -5112,6 +5083,10 @@ Response Router::dispatch_camera_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in camera method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -5159,7 +5134,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -5168,7 +5143,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5177,7 +5152,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_int = [&](const std::string& param_name) -> int {
@@ -5199,7 +5174,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -5215,7 +5190,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -5224,7 +5199,7 @@ Response Router::dispatch_switch_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5233,7 +5208,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_string = [&](const std::string& param_name) -> std::string {
@@ -5244,13 +5219,13 @@ Response Router::dispatch_switch_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, param_name)) {
                 if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                    throw_bad_request("Invalid JSON value for parameter: " + param_name);
                 }
                 return val->get<std::string>();
             }
@@ -5261,7 +5236,7 @@ Response Router::dispatch_switch_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return *value;
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -5394,6 +5369,10 @@ Response Router::dispatch_switch_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in switch method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -5447,7 +5426,7 @@ Response Router::dispatch_filterwheel_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -5487,14 +5466,14 @@ Response Router::dispatch_filterwheel_method(
                 auto json_opt = parse_json(request.body());
                 const auto* names_val = json_opt ? find_json_value(*json_opt, "Names") : nullptr;
                 if (!names_val) {
-                    throw_invalid_value("Missing parameter: Names");
+                    throw_bad_request("Missing parameter: Names");
                 }
                 if (!names_val->is_array()) {
-                    throw_invalid_value("Names must be an array of strings");
+                    throw_bad_request("Names must be an array of strings");
                 }
                 for (const auto& name : *names_val) {
                     if (!name.is_string()) {
-                        throw_invalid_value("Names must be an array of strings");
+                        throw_bad_request("Names must be an array of strings");
                     }
                 }
                 std::vector<std::string> names = names_val->get<std::vector<std::string>>();
@@ -5506,9 +5485,16 @@ Response Router::dispatch_filterwheel_method(
                 auto json_opt = parse_json(request.body());
                 const auto* offsets_val = json_opt ? find_json_value(*json_opt, "FocusOffsets") : nullptr;
                 if (!offsets_val) {
-                    throw_invalid_value("Missing parameter: FocusOffsets");
+                    throw_bad_request("Missing parameter: FocusOffsets");
                 }
-                std::vector<int> offsets = offsets_val->get<std::vector<int>>();
+                if (!offsets_val->is_array()) {
+                    throw_bad_request("FocusOffsets must be an array of integers");
+                }
+                std::vector<int> offsets;
+                offsets.reserve(offsets_val->size());
+                for (const auto& offset : *offsets_val) {
+                    offsets.push_back(json_int_value(offset, "FocusOffsets"));
+                }
                 filterwheel->set_focus_offsets(offsets);
                 AlpacaResponse alpaca_response(client_tx_id, server_tx_id);
                 response.set_body(alpaca_response);
@@ -5522,6 +5508,10 @@ Response Router::dispatch_filterwheel_method(
             "Method '" + method_name + "' not yet implemented for FilterWheel"
         );
         response.set_body(alpaca_response);
+        return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in filter wheel method '" + method_name + "'", e);
@@ -5576,7 +5566,7 @@ Response Router::dispatch_focuser_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -5592,7 +5582,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -5601,7 +5591,7 @@ Response Router::dispatch_focuser_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5610,7 +5600,7 @@ Response Router::dispatch_focuser_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -5691,6 +5681,10 @@ Response Router::dispatch_focuser_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in focuser method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -5738,7 +5732,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -5747,7 +5741,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5756,7 +5750,7 @@ Response Router::dispatch_rotator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -5772,7 +5766,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -5781,7 +5775,7 @@ Response Router::dispatch_rotator_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5790,7 +5784,7 @@ Response Router::dispatch_rotator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -5885,6 +5879,10 @@ Response Router::dispatch_rotator_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in rotator method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -5932,7 +5930,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -5941,7 +5939,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5950,7 +5948,7 @@ Response Router::dispatch_dome_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_bool = [&](const std::string& param_name) -> bool {
@@ -5966,7 +5964,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_boolean()) {
@@ -5975,7 +5973,7 @@ Response Router::dispatch_dome_method(
                 if (val->is_string()) {
                     return parse_bool_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -5984,7 +5982,7 @@ Response Router::dispatch_dome_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_bool_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -6132,6 +6130,10 @@ Response Router::dispatch_dome_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in dome method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -6185,7 +6187,7 @@ Response Router::dispatch_covercalibrator_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_int_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     try {
@@ -6260,6 +6262,10 @@ Response Router::dispatch_covercalibrator_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in cover calibrator method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -6307,7 +6313,7 @@ Response Router::dispatch_observingconditions_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
             if (const auto* val = find_json_value(*json_opt, "Value")) {
                 if (val->is_number()) {
@@ -6316,7 +6322,7 @@ Response Router::dispatch_observingconditions_method(
                 if (val->is_string()) {
                     return parse_double_value(val->get<std::string>(), param_name);
                 }
-                throw_invalid_value("Invalid JSON value for parameter: " + param_name);
+                throw_bad_request("Invalid JSON value for parameter: " + param_name);
             }
         }
         if (auto value = get_form_value(request.body(), param_name)) {
@@ -6325,7 +6331,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "Value")) {
             return parse_double_value(*value, param_name);
         }
-        throw_invalid_value("Missing parameter: " + param_name);
+        throw_bad_request("Missing parameter: " + param_name);
     };
 
     auto parse_property_name = [&]() -> std::string {
@@ -6339,13 +6345,13 @@ Response Router::dispatch_observingconditions_method(
         if (json_opt) {
             if (const auto* val = find_json_value(*json_opt, "PropertyName")) {
                 if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: PropertyName");
+                    throw_bad_request("Invalid JSON value for parameter: PropertyName");
                 }
                 return val->get<std::string>();
             }
             if (const auto* val = find_json_value(*json_opt, "SensorName")) {
                 if (!val->is_string()) {
-                    throw_invalid_value("Invalid JSON value for parameter: SensorName");
+                    throw_bad_request("Invalid JSON value for parameter: SensorName");
                 }
                 return val->get<std::string>();
             }
@@ -6356,7 +6362,7 @@ Response Router::dispatch_observingconditions_method(
         if (auto value = get_form_value(request.body(), "SensorName")) {
             return *value;
         }
-        throw_invalid_value("Missing parameter: PropertyName");
+        throw_bad_request("Missing parameter: SensorName");
     };
 
     try {
@@ -6468,6 +6474,10 @@ Response Router::dispatch_observingconditions_method(
         );
         response.set_body(alpaca_response);
         return response;
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
+        return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in observing conditions method '" + method_name + "'", e);
         auto error_code = util::map_error_code(e.error_code());
@@ -6518,6 +6528,12 @@ Response Router::dispatch_safetymonitor_method(
             "Method '" + method_name + "' not yet implemented for SafetyMonitor"
         );
         response.set_body(alpaca_response);
+        return response;
+        // Unreachable today: no SafetyMonitor method reads a parameter. Kept so a
+        // method that adds one answers 400 text like the other dispatchers.
+    } catch (const RequestNotInterpretable& e) {
+        util::log_debug("Unparsable request parameter: " + util::escape_for_log(e.what()));
+        set_bad_request_text(response, e.what());
         return response;
     } catch (const alpacacore::AlpacaException& e) {
         log_alpaca_exception("AlpacaException in safety monitor method '" + method_name + "'", e);
@@ -6671,6 +6687,7 @@ Response Router::handle_device_catalog(const Request& request, std::uint32_t ser
                                 "Unsupported HTTP method for devicecatalog endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -6707,6 +6724,7 @@ Response Router::handle_thermal_cameras(const Request& request, std::uint32_t se
                                 "Unsupported HTTP method for thermalcameras endpoint");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET");
         return response;
     }
 
@@ -6931,6 +6949,15 @@ T config_get(const nlohmann::json& config, const char* key, const T& fallback) {
     if (it == config.end() || it->is_null()) {
         return fallback;
     }
+    if constexpr (std::is_same_v<T, int>) {
+        // get<int>() would wrap 4294967299 to 3 and cut 3.5 to 3 (ADR 0007 rule 4).
+        if (it->is_number()) {
+            if (const auto v = whole_json_int(*it)) return *v;
+            throw alpacacore::AlpacaException(
+                std::string("Device config field '") + key + "' must be a whole number inside int",
+                alpacacore::AlpacaError::InvalidValue);
+        }
+    }
     try {
         return it->template get<T>();
     } catch (const nlohmann::json::exception&) {
@@ -7069,6 +7096,7 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -7116,8 +7144,8 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
             return response;
         }
 
-        // Decision 0018: keep a GUID the client sends back (the web UI's edit
-        // removes the entry first, so its own GUID is free again) unless another
+        // Decision 0018: keep a stored ID the client sends back (the web UI's edit
+        // removes the entry first, so its own ID is free again) unless another
         // entry holds it, or another configuredevice call chose it and has not
         // stored its entry yet; otherwise mint one. The entry this call replaces
         // (same vendor, type and number, as add_or_replace_persisted_device()
@@ -7179,7 +7207,12 @@ Response Router::handle_configure_device(const Request& request, std::uint32_t s
         response.set_body(alpaca_response);
         return response;
     } catch (const std::exception& e) {
-        util::log_error("Error configuring device: " + std::string(e.what()));
+        // A config field the client typed wrong is InvalidValue: DEBUG, not ERROR (ADR 0007 rule 9).
+        if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+            log_alpaca_exception("Error configuring device", *alpaca);
+        } else {
+            util::log_error("Error configuring device: " + util::escape_for_log(e.what(), 4096));
+        }
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::exception_to_error_code(e),
@@ -7220,6 +7253,7 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -7319,7 +7353,12 @@ Response Router::handle_remove_device(const Request& request, std::uint32_t serv
         }
         
     } catch (const std::exception& e) {
-        util::log_error("Error removing device: " + std::string(e.what()));
+        // A config field the client typed wrong is InvalidValue: DEBUG, not ERROR (ADR 0007 rule 9).
+        if (const auto* alpaca = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
+            log_alpaca_exception("Error removing device", *alpaca);
+        } else {
+            util::log_error("Error removing device: " + util::escape_for_log(e.what(), 4096));
+        }
         AlpacaResponse alpaca_response = make_error_response(
             client_tx_id, server_tx_id,
             util::exception_to_error_code(e),
@@ -7798,6 +7837,7 @@ Response Router::handle_shutdown(const Request& request, std::uint32_t server_tx
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
     
@@ -7945,6 +7985,7 @@ Response Router::handle_sync_time(const Request& request, std::uint32_t server_t
                                 "Method not allowed. GET reads the server time; POST or PUT sets it.");
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "GET, POST, PUT");
         return response;
     }
 
@@ -8088,7 +8129,12 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             }
             int priority = 0;
             if (const auto* pr = find_json_value(body, "Priority"); pr && pr->is_number_integer()) {
-                priority = pr->get<int>();
+                // Range-check before narrowing: get<int>() wraps 2^32 to 0.
+                if (pr->is_number_unsigned() ? !std::in_range<int>(pr->get<std::uint64_t>())
+                                             : !std::in_range<int>(pr->get<std::int64_t>())) {
+                    throw util::WifiError("Priority must be an int");
+                }
+                priority = static_cast<int>(pr->get<std::int64_t>());
             }
             ok.value = wifi.save_profile(ssid, passphrase, autoconnect, priority);
         } else if (sub.rfind("profiles/", 0) == 0 && is_delete) {
@@ -8118,7 +8164,10 @@ Response Router::handle_wifi(const Request& request, const RouteMatch& match, st
             }
             std::uint32_t channel = 0;
             if (const auto* c = find_json_value(body, "Channel"); c && c->is_number_unsigned()) {
-                channel = c->get<std::uint32_t>();
+                if (!std::in_range<std::uint32_t>(c->get<std::uint64_t>())) {
+                    throw util::WifiError("Channel must be a uint32");
+                }
+                channel = static_cast<std::uint32_t>(c->get<std::uint64_t>());
             }
             bool enabled = true;
             if (const auto* e = find_json_value(body, "Enabled"); e && e->is_boolean()) {
@@ -8253,6 +8302,7 @@ Response Router::handle_restart(const Request& request, std::uint32_t server_tx_
         );
         response.set_body(alpaca_response);
         response.set_status(405, "Method Not Allowed");
+        response.set_header("Allow", "POST, PUT");
         return response;
     }
 
@@ -8479,7 +8529,7 @@ bool Router::register_device_from_config(const nlohmann::json& raw_config, std::
                     (*learned_config)[field] = nullptr;
                 }
             }
-            // Decision 0018: the configured device's persisted GUID is its UniqueID.
+            // Decision 0018: the configured device's stored ID is its UniqueID.
             std::string unique_id = stored_unique_id(config);
             if (unique_id.empty()) {
                 unique_id = alpacacore::util::generate_unique_id();
@@ -8570,7 +8620,7 @@ nlohmann::json Router::sanitize_device_config(const nlohmann::json& raw_config) 
     copy_if_present("siteElevation");
     copy_if_present("learnSiteFromClient");  // open-astro#444
     copy_if_present("syncTimeOnConnect");
-    // Decision 0018: the server-owned GUID, for every device type.
+    // Decision 0018: the server-owned stored ID, for every device type.
     if (const std::string unique_id = stored_unique_id(config); !unique_id.empty()) {
         sanitized["uniqueId"] = unique_id;
     }
@@ -8793,8 +8843,8 @@ void Router::load_persisted_devices() {
             }
 
             persisted_devices_.clear();
-            // Decision 0018: every stored entry gets a GUID once (the upgrade, or a
-            // hand-edited file), and a duplicated one is replaced in the later entry.
+            // Decision 0018: every stored entry without a keepable ID gets a GUID once (the
+            // upgrade, or a hand-edited file), and a duplicated one is replaced in the later entry.
             std::set<std::string> taken;
             for (auto& entry : payload) {
                 nlohmann::json sanitized = sanitize_device_config(entry);
@@ -8824,7 +8874,7 @@ void Router::load_persisted_devices() {
         }
     }
     // A removed rotator's offset goes here, not at removal: the web UI's edit
-    // removes and re-adds the entry with the same GUID (decisions 0008, 0018).
+    // removes and re-adds the entry with the same stored ID (decisions 0008, 0018).
     if (const std::size_t pruned = alpacacore::util::RotatorSyncOffsetStore::prune_unknown_unique_ids(live_unique_ids);
         pruned > 0) {
         util::log_info("Removed " + std::to_string(pruned) + " sync offset(s) of rotators no longer configured");

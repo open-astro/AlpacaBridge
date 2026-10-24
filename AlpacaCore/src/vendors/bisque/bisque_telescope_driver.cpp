@@ -160,7 +160,7 @@ public:
           connection_info_(connection_info),
           site_latitude_(site_latitude_deg.value_or(0.0)),
           site_longitude_(site_longitude_deg.value_or(0.0)),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           site_info_valid_(site_latitude_deg.has_value() && site_longitude_deg.has_value()) {
         guide_rate_.ra = kDefaultGuideRateDegPerSec;
         guide_rate_.dec = kDefaultGuideRateDegPerSec;
@@ -275,6 +275,9 @@ public:
             lock.lock();
         }
         if (connected) {
+            // The handshake and the first sample run under transition_mutex_ alone: every exchange takes the
+            // wrapper's per-link lock, and no getter waits behind the wire (decision 0016).
+            lock.unlock();
             if (!protocol.connect(connection_info_)) {
                 throw AlpacaException("Failed to connect to TheSkyX at " +
                                       connection_info_.host + ":" +
@@ -293,10 +296,25 @@ public:
                 protocol.disconnect();
                 throw AlpacaException("TheSkyX handshake failed — is the mount connected in TheSkyX?");
             }
+            // Check initial park/tracking state.
+            bool parked_now = false;
+            try {
+                parked_now = protocol.is_parked();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): no answer reads as not parked
+            }
+            // The first frame, so the first property reads are served from memory. A TheSkyX that does not
+            // answer leaves a frame with nothing known; the poll fills it in.
+            PolledFrame seed;
+            try {
+                seed = sample_frame(seed);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the poll fills it in
+            }
+
+            lock.lock();
             connected_ = true;
             target_ra_set_ = false;
             target_dec_set_ = false;
-            parked_ = false;
+            parked_ = parked_now;
             at_home_ = false;
             homing_ = false;
             slewing_cached_ = false;
@@ -309,15 +327,7 @@ public:
             pulse_guide_error_.clear();
             ++pulse_request_;
             pulse_generation_.bump();
-
-            // Check initial park/tracking state.
-            try {
-                parked_ = protocol.is_parked();
-            } catch (...) {
-            }
-
-            // Seed the snapshot so the first property reads are served from memory.
-            seed_snapshot_locked();
+            seed_snapshot_locked(seed);
 
             ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
                             std::string(parked_ ? "true" : "false"));
@@ -326,10 +336,6 @@ public:
         } else {
             ++pulse_request_;
             pulse_generation_.bump();
-            try {
-                protocol.disconnect();
-            } catch (...) {
-            }
             connected_ = false;
             target_ra_set_ = false;
             target_dec_set_ = false;
@@ -343,6 +349,12 @@ public:
             manual_axis_slewing_[1] = false;
             pulse_guiding_ = false;
             lock.unlock();
+            // State is cleared first; the close then takes the wrapper's lock with mutex_ free, so an exchange in
+            // flight finishes before the socket closes and no getter waits for it.
+            try {
+                protocol.disconnect();
+            } catch (...) {  // NOLINT(bugprone-empty-catch): state is already cleared
+            }
             status_poll_.cancel_all_and_join();
             pulse_guide_op_.cancel_all_and_join();
         }
@@ -469,12 +481,12 @@ public:
     }
 
     void set_tracking(bool tracking) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected_now();
         auto& protocol = BisqueProtocolWrapper::instance();
-        // ignore_rates=true uses sidereal.
+        // ignore_rates=true uses sidereal. The exchange runs without mutex_.
         protocol.set_tracking(tracking, true, 0.0, 0.0);
         // Written through, so the next read sees it before the next poll runs.
+        std::lock_guard<std::mutex> lock(mutex_);
         snapshot_.write([tracking](PolledFrame& frame) {
             frame.tracking = tracking;
             frame.tracking_known = true;
@@ -535,7 +547,8 @@ public:
         throw AlpacaException("SetSideOfPier not supported", AlpacaError::PropertyNotImplemented);
     }
 
-    int get_destination_side_of_pier(double ra, double /*dec*/) const override {
+    int get_destination_side_of_pier(double ra, double dec) const override {
+        detail::validate_ra_dec(ra, dec);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double lst_hours = compute_local_sidereal_time_hours(
@@ -549,12 +562,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -574,7 +588,11 @@ public:
     }
 
     double get_site_elevation() const override {
-        return site_elevation_m_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
 
     void set_site_elevation(double elevation) override {
@@ -582,6 +600,7 @@ public:
             throw AlpacaException("SiteElevation must be in range -300 to 10000 meters",
                                   AlpacaError::InvalidValue);
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         site_elevation_m_ = elevation;
     }
 
@@ -682,20 +701,24 @@ public:
     // ── Telescope methods ──
 
     void find_home() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked("FindHome");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked("FindHome");
+        }
         auto& protocol = BisqueProtocolWrapper::instance();
-        // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds.
+        // FindHome blocks in TheSkyX (with internal sleep loop), up to 60 seconds; mutex_ is free meanwhile.
         protocol.find_home();
-        homing_ = false;
-        at_home_ = true;
-        publish_measurement_locked();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            homing_ = false;
+            at_home_ = true;
+        }
+        publish_measurement();
     }
 
     void park() override {
-        std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.park();
         // Poll until parked.
@@ -709,15 +732,15 @@ public:
                 if (protocol.is_parked()) break;
             } catch (...) {
             }
-            // Release lock briefly so other threads can query state.
-            lock.unlock();
             clock_.sleep_for(std::chrono::seconds(1));
-            lock.lock();
-            // The mount may have been disconnected while the lock was released.
-            check_connected();
+            // The mount may have been disconnected meanwhile.
+            check_connected_now();
         }
-        parked_ = true;
-        publish_measurement_locked();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            parked_ = true;
+        }
+        publish_measurement();
     }
 
     void pulse_guide(int direction, int duration) override {
@@ -850,8 +873,7 @@ public:
     }
 
     void set_park() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.set_park_position();
     }
@@ -859,10 +881,13 @@ public:
     void slew_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
         detail::validate_ra_dec(ra, dec);
+        // Initiator lock: the gate, the command and the state write happen in the order of the commands on the
+        // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
+        std::unique_lock<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinates");
-        check_tracking_for_slew_locked("SlewToCoordinates");
+        check_tracking_for_slew(lock, "SlewToCoordinates");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -870,21 +895,26 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
 
+        lock.unlock();
         protocol.slew_to_ra_dec(ra, dec);
+        lock.lock();
         note_slew_started_locked();
+        const uint64_t epoch = slew_epoch_;
+        ilock.unlock();
 
         // Wait for completion.
         const SlewWaitGuard waiting(slew_waiters_);
-        wait_for_slew_complete_locked(lock);
+        wait_for_slew_complete(lock, epoch);
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
         detail::validate_ra_dec(ra, dec);
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
+        std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
         check_not_parked("SlewToCoordinatesAsync");
-        check_tracking_for_slew_locked("SlewToCoordinatesAsync");
+        check_tracking_for_slew(lock, "SlewToCoordinatesAsync");
 
         auto& protocol = BisqueProtocolWrapper::instance();
         target_ra_hours_ = ra;
@@ -892,7 +922,9 @@ public:
         target_ra_set_ = true;
         target_dec_set_ = true;
 
+        lock.unlock();
         protocol.slew_to_ra_dec(ra, dec);
+        lock.lock();
         note_slew_started_locked();
     }
 
@@ -925,17 +957,22 @@ public:
     void sync_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
         detail::validate_ra_dec(ra, dec);
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked("SyncToCoordinates");
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked("SyncToCoordinates");
+        }
 
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.sync_to_coordinates(ra, dec);
-        target_ra_hours_ = ra;
-        target_dec_degrees_ = dec;
-        target_ra_set_ = true;
-        target_dec_set_ = true;
-        publish_measurement_locked();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            target_ra_hours_ = ra;
+            target_dec_degrees_ = dec;
+            target_ra_set_ = true;
+            target_dec_set_ = true;
+        }
+        publish_measurement();
     }
 
     void sync_to_target() override {
@@ -952,14 +989,14 @@ public:
     }
 
     void unpark() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
+        check_connected_now();
         auto& protocol = BisqueProtocolWrapper::instance();
         protocol.unpark();
         // Confirm unpark.
         if (protocol.is_parked()) {
             throw AlpacaException("Failed to unpark mount");
         }
+        std::lock_guard<std::mutex> lock(mutex_);
         parked_ = false;
     }
 
@@ -977,15 +1014,20 @@ public:
         }
         detail::validate_move_axis_rate(rate);
 
-        std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        check_not_parked("MoveAxis");
+        // Initiator lock: the exchange and the state write stay in wire order against AbortSlew.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            check_not_parked("MoveAxis");
+        }
 
         auto& protocol = BisqueProtocolWrapper::instance();
 
         if (std::abs(rate) < 1e-9) {
             // Stop motion.
             protocol.stop_open_loop_motion();
+            std::lock_guard<std::mutex> lock(mutex_);
             manual_axis_slewing_[axis] = false;
             drop_poll_in_flight_locked();
             return;
@@ -1004,6 +1046,7 @@ public:
         }
 
         protocol.start_open_loop_motion(direction, speed_index);
+        std::lock_guard<std::mutex> lock(mutex_);
         manual_axis_slewing_[axis] = true;
         drop_poll_in_flight_locked();
     }
@@ -1021,8 +1064,11 @@ public:
     }
 
     void abort_slew() override {
+        // Initiator lock: the state clear and the command follow any initiator whose command is on the wire.
+        std::lock_guard<std::mutex> ilock(initiator_mutex_);
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
+        ++slew_epoch_;
         // Bumping the request id retires a running guide body: under mutex_ it
         // sends and records nothing. It is not cancelled or joined here, because a PulseGuide
         // started while the abort waits on the wrapper owns the slot by then.
@@ -1084,11 +1130,21 @@ public:
         return alive;
     }
 
+    void set_slew_complete_hook_for_testing(std::function<void()> hook) {
+        std::lock_guard<std::mutex> lock(test_hook_mutex_);
+        slew_complete_hook_ = std::move(hook);
+    }
+
 private:
     void check_connected() const {
         if (!connected_ || link_lost_) {
             throw AlpacaException("Not connected to TheSkyX", AlpacaError::NotConnected);
         }
+    }
+
+    void check_connected_now() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
     }
 
     void check_not_parked(const char* operation) const {
@@ -1162,6 +1218,7 @@ private:
     }
 
     void note_slew_started_locked() {
+        ++slew_epoch_;
         slewing_cached_ = true;
         slew_poll_error_.clear();
         slew_force_until_ = clock_.now() + std::chrono::seconds(8);
@@ -1200,27 +1257,29 @@ private:
         return frame;
     }
 
-    // The first frame, at the end of a connect with mutex_ held, so the getters have an answer the moment Connect
-    // returns. A TheSkyX that does not answer leaves a frame with nothing known; the poll fills it in.
-    void seed_snapshot_locked() {
-        const auto token = snapshot_.begin_poll();
-        PolledFrame frame;
-        try {
-            frame = sample_frame(frame);
-        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the poll fills it in
-        }
-        snapshot_.publish(token, frame);
-    }
+    // Publishes the first frame, sampled by the connect before it took mutex_, so the getters have an answer the
+    // moment Connect returns.
+    void seed_snapshot_locked(const PolledFrame& frame) { snapshot_.publish(snapshot_.begin_poll(), frame); }
 
     // Where the control path ends or lands a move (sync, slew complete, home, park): reads the mount now and
     // publishes the frame, so a read right after sees the new position, not one from before the move. A failed
     // read leaves the position unknown, which the getters refuse until the next poll answers.
-    void publish_measurement_locked() const {
+    // Call without mutex_: the token is taken under it, the sample runs without it (every getter takes it), and the
+    // publish is under it again. A write since the token (an abort, a slew) drops the publish; a disconnect since
+    // drops it too.
+    void publish_measurement() const {
+        std::unique_lock<std::mutex> lock(mutex_);
         const auto token = snapshot_.begin_poll();
-        publish_measured_locked(token, measure_frame());
+        lock.unlock();
+        const auto measured = measure_frame();
+        lock.lock();
+        if (!connected_) {
+            return;
+        }
+        publish_measured_locked(token, measured);
     }
 
-    // The sample half of publish_measurement_locked(), callable without mutex_. nullopt: the position read failed.
+    // The sample half of publish_measurement(), callable without mutex_. nullopt: the position read failed.
     std::optional<PolledFrame> measure_frame() const {
         try {
             const auto previous = snapshot_.read();
@@ -1252,13 +1311,13 @@ private:
     }
 
     struct SlewWaitGuard {
-        explicit SlewWaitGuard(int& count) : count_(count) { ++count_; }
+        explicit SlewWaitGuard(std::atomic<int>& count) : count_(count) { ++count_; }
         ~SlewWaitGuard() { --count_; }
         SlewWaitGuard(const SlewWaitGuard&) = delete;
         SlewWaitGuard& operator=(const SlewWaitGuard&) = delete;
 
     private:
-        int& count_;
+        std::atomic<int>& count_;
     };
 
     void publish_link_fault_locked() const {
@@ -1434,60 +1493,74 @@ private:
     // answer through to the snapshot, so the Tracking getter agrees with it at once; it does not read the frame, which
     // can be a poll period old and would refuse a slew right after the client switched Tracking on. A retarget of this
     // driver's own slew still in flight is not refused: the TheSkyX docs do not say what IsTracking reads during a
-    // GOTO.
-    void check_tracking_for_slew_locked(const char* who) const {
-        if (own_slew_in_flight_locked()) {
+    // GOTO. Called with `lock` held; it releases it across each exchange and returns with it held again.
+    void check_tracking_for_slew(std::unique_lock<std::mutex>& lock, const char* who) {
+        if (own_slew_in_flight(lock)) {
             return;
         }
-        if (!get_tracking_locked()) {
+        if (!get_tracking_live(lock)) {
             throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
     }
 
     // slewing_cached_ alone is not enough: it stays set until a poll tick or a wait loop sees the slew complete,
     // so ask TheSkyX past the force window. A failed
-    // poll proves nothing either way; the IsTracking read then decides.
-    bool own_slew_in_flight_locked() const {
+    // poll proves nothing either way; the IsTracking read then decides. Lock handling as check_tracking_for_slew().
+    bool own_slew_in_flight(std::unique_lock<std::mutex>& lock) {
         if (!slewing_cached_) {
             return false;
         }
         if (clock_.now() < slew_force_until_) {
             return true;
         }
+        bool complete = false;
+        lock.unlock();
         try {
-            if (!BisqueProtocolWrapper::instance().is_slew_complete()) {
-                return true;
-            }
-            // No measurement here: an initiator holds mutex_ and is timed against the 1 s target, and a retarget
-            // starts a new slew at once. Drop the tick in flight; the next poll publishes the position.
-            drop_poll_in_flight_locked();
-            slewing_cached_ = false;
-            slew_poll_error_.clear();
+            complete = BisqueProtocolWrapper::instance().is_slew_complete();
         } catch (const std::exception&) {
+            lock.lock();
             return false;  // keep slewing_cached_: a failed poll is not completion
         }
+        lock.lock();
+        check_connected();
+        if (!complete) {
+            return true;
+        }
+        // No slew start or abort wrote meanwhile: both callers hold initiator_mutex_, as every slew_epoch_ writer does.
+        // No measurement here: an initiator is timed against the 1 s target, and a retarget starts a new slew at
+        // once. Drop the tick in flight; the next poll publishes the position.
+        drop_poll_in_flight_locked();
+        slewing_cached_ = false;
+        slew_poll_error_.clear();
         return false;
     }
 
     // A fresh read for the slew gate (a control-path call may talk to TheSkyX, and a Tracking the client just
     // switched on must not be refused on a frame up to a poll period old). Written through, so the getter agrees.
-    bool get_tracking_locked() const {
+    // Lock handling as check_tracking_for_slew().
+    bool get_tracking_live(std::unique_lock<std::mutex>& lock) {
+        lock.unlock();
         try {
-            auto& protocol = BisqueProtocolWrapper::instance();
-            const bool tracking = protocol.is_tracking();
+            const bool tracking = BisqueProtocolWrapper::instance().is_tracking();
+            lock.lock();
             snapshot_.write([tracking](PolledFrame& frame) {
                 frame.tracking = tracking;
                 frame.tracking_known = true;
             });
             return tracking;
         } catch (...) {
+            if (!lock.owns_lock()) {
+                lock.lock();
+            }
             // A failed read keeps what the Tracking getter would answer: the frame's last value.
             const auto held = snapshot_.read();
             return held && held->value.tracking_known && held->value.tracking;
         }
     }
 
-    void wait_for_slew_complete_locked(std::unique_lock<std::mutex>& lock) {
+    // Called with `lock` held; each exchange runs with it released, so a getter never waits for a poll of TheSkyX.
+    // `epoch` is slew_epoch_ right after this slew started: a newer slew start or an abort keeps the flag it wrote.
+    void wait_for_slew_complete(std::unique_lock<std::mutex>& lock, uint64_t epoch) {
         // One failed poll is tolerated (a transient TheSkyX hiccup); this many in a
         // row is a persistent fault and is reported as such, not as a 120 s timeout.
         constexpr int kMaxConsecutivePollFailures = 3;
@@ -1500,21 +1573,11 @@ private:
             }
             int failure_code = AlpacaError::DriverException;
             std::string failure_what;
+            bool complete = false;
+            lock.unlock();
             try {
-                auto& protocol = BisqueProtocolWrapper::instance();
-                const bool complete = protocol.is_slew_complete();
+                complete = BisqueProtocolWrapper::instance().is_slew_complete();
                 consecutive_failures = 0;
-                if (complete) {
-                    publish_measurement_locked();  // the position read after the stop goes out with Slewing false
-                    slewing_cached_ = false;
-                    if (slew_settle_time_seconds_ > 0) {
-                        lock.unlock();
-                        clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
-                        lock.lock();
-                        check_connected();
-                    }
-                    return;
-                }
             } catch (const AlpacaException& ex) {
                 // A racing disconnect stays NotConnected.
                 if (ex.error_code() == AlpacaError::NotConnected) {
@@ -1530,13 +1593,28 @@ private:
                 failure_what = "unknown error";
                 ++consecutive_failures;
             }
+            if (complete) {
+                // The position read after the stop is published first; Slewing clears in the next mutex_ hold.
+                publish_measurement();
+                run_slew_complete_hook();  // test seam: a retarget lands before the outcome is applied
+                lock.lock();
+                if (epoch == slew_epoch_) {  // a retarget or abort since this slew started owns the flag
+                    slewing_cached_ = false;
+                }
+                if (slew_settle_time_seconds_ > 0) {
+                    lock.unlock();
+                    clock_.sleep_for(std::chrono::seconds(slew_settle_time_seconds_));
+                    lock.lock();
+                    check_connected();
+                }
+                return;
+            }
             if (consecutive_failures >= kMaxConsecutivePollFailures) {
                 // slewing_cached_ stays set: a failed poll is not evidence of arrival.
                 throw AlpacaException("Slew completion poll failed " + std::to_string(consecutive_failures) +
                                           " times in a row: " + failure_what,
                                       failure_code);
             }
-            lock.unlock();
             clock_.sleep_for(std::chrono::seconds(1));
             lock.lock();
             // The mount may have been disconnected while the lock was released.
@@ -1544,10 +1622,24 @@ private:
         }
     }
 
+    void run_slew_complete_hook() {
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(test_hook_mutex_);
+            hook = slew_complete_hook_;
+        }
+        if (hook) {
+            hook();
+        }
+    }
+
     util::TaskClock& clock_;
     int device_number_;
     ConnectionInfo connection_info_;
     std::mutex transition_mutex_;
+    // Serialises the motion initiators (MoveAxis, the slew forms) with AbortSlew across gate, exchange and state
+    // write. Order: initiator_mutex_, the wrapper's per-link lock, mutex_ (leaf).
+    std::mutex initiator_mutex_;
     mutable std::mutex mutex_;
     bool connected_ = false;
 
@@ -1577,18 +1669,22 @@ private:
     mutable std::string link_fault_text_;
     mutable std::string slew_poll_error_;  // last failed IsSlewComplete poll, under mutex_
     int slew_poll_error_code_ = AlpacaError::DriverException;
-    int slew_waiters_ = 0;  // SlewToCoordinates waits polling by themselves
+    std::atomic<int> slew_waiters_{0};  // SlewToCoordinates waits polling by themselves; atomic: a wait that throws
+                                        // leaves its guard without mutex_
     std::atomic<bool> status_poll_paused_for_testing_{false};
+    std::mutex test_hook_mutex_;                // leaf; never held while the hook runs
+    std::function<void()> slew_complete_hook_;  // guarded by test_hook_mutex_
 
     double site_latitude_ = 0.0;
     double site_longitude_ = 0.0;
-    double site_elevation_m_ = 0.0;
+    std::optional<double> site_elevation_m_;  // nullopt until set or configured
     bool site_info_valid_ = false;
 
     mutable bool parked_ = false;
     mutable bool at_home_ = false;
     mutable bool homing_ = false;
     mutable bool slewing_cached_ = false;
+    uint64_t slew_epoch_ = 0;  // under mutex_; bumped by a slew start and by AbortSlew
     mutable util::TaskClock::clock::time_point slew_force_until_;
     mutable bool manual_axis_slewing_[2] = {false, false};
     mutable bool pulse_guiding_ = false;
@@ -1599,7 +1695,6 @@ private:
     util::OperationGeneration poll_generation_;
     util::AsyncOperation status_poll_{"Bisque status poll", poll_generation_, clock_};
 
-    bool does_refraction_ = false;
     int slew_settle_time_seconds_ = 0;
 
     GuideRate guide_rate_{};
@@ -1629,6 +1724,12 @@ bool poll_status_now_for_testing(TelescopeDriver& driver) {
         return bisque->poll_status_now_for_testing();
     }
     return false;
+}
+
+void set_slew_complete_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
+    if (auto* bisque = dynamic_cast<BisqueTelescopeDriver*>(&driver)) {
+        bisque->set_slew_complete_hook_for_testing(std::move(hook));
+    }
 }
 
 } // namespace alpacacore::vendor::bisque

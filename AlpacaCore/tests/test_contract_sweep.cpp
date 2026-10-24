@@ -1093,7 +1093,8 @@ Tier2Host tier2_host_zwo_telescope() {
     return mount_server_host(
         "zwo_telescope", "zwo", "zwo_telescope",
         [](const std::string& chunk) -> std::string {
-            if (chunk.find(":GVP#") != std::string::npos) return "AM5#";  // the connect gate needs a ZWO AM identity
+            if (chunk.find(":GVP#") != std::string::npos) return "AM5#";
+            if (chunk.find(":GMA#") != std::string::npos) return "012345ABCDEF#";
             if (chunk.find(":GU#") != std::string::npos) return "NG#";
             if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
             if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -2919,6 +2920,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
     auto mount =
         std::make_shared<alpacacore::test::FakeMountServer>([muted](const std::string& command) -> std::string {
             if (command.find(":GVP#") != std::string::npos) return "AM5#";
+            if (command.find(":GMA#") != std::string::npos) return "012345ABCDEF#";
             if (command.find(":GU#") != std::string::npos) return muted->load() ? "e1#" : "NG#";
             if (command.find(":GR#") != std::string::npos) return "12:00:00#";
             if (command.find(":GD#") != std::string::npos) return "+45*00:00#";
@@ -2933,7 +2935,7 @@ std::unique_ptr<SnapshotRig> snapshot_rig_zwo_telescope() {
     info.type = zwo::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = mount->port();
-    info.response_timeout_ms = 100;
+    info.response_timeout_ms = 500;
     rig->fake = mount;
     rig->driver = zwo::create_zwo_telescope_with_site(0, info, 30.0, -100.0, {}, false, *rig->clock);
     rig->driver->set_connected(true);

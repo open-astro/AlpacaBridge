@@ -46,7 +46,9 @@ public:
         add("IsMoving", [this] { return get_is_moving(); });
         add("MechanicalPosition", [this] { return get_mechanical_position(); });
         add("Position", [this] { return get_position(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

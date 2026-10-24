@@ -920,6 +920,15 @@ public:
         return (reply[0] - '0') * 10 + (reply[1] - '0');
     }
 
+    void declare_link_lost(const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_) {
+            return;
+        }
+        note_loss(reason);
+        disconnect_locked();
+    }
+
     void select_max_slew_rate() { send_command_blind(":RS#"); }
 
     void move_axis_start(int direction, double rate_deg_per_sec) {
@@ -1551,6 +1560,7 @@ void OnStepProtocolWrapper::unpark() { pimpl_->unpark(); }
 void OnStepProtocolWrapper::find_home() { pimpl_->find_home(); }
 
 std::optional<int> OnStepProtocolWrapper::get_last_command_error() { return pimpl_->get_last_command_error(); }
+void OnStepProtocolWrapper::declare_link_lost(const std::string& reason) { pimpl_->declare_link_lost(reason); }
 
 void OnStepProtocolWrapper::select_max_slew_rate() { pimpl_->select_max_slew_rate(); }
 

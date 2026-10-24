@@ -52,13 +52,13 @@ public:
 
     // Offset for @p key. When @p key has no entry and @p legacy_key has one,
     // moves that entry to @p key and returns it: the one-time move from a
-    // driver-built ID to the persisted GUID (decision 0018). A failed move
+    // driver-built ID to the stored ID (decision 0018). A failed move
     // still returns the offset and leaves the legacy entry in place.
     static double load_or_adopt(const std::string& key, const std::string& legacy_key);
 
     // Removes every GUID-shaped key (util::is_unique_id) that is not in
     // @p live_unique_ids: the offsets of removed rotators. Driver-built legacy
-    // keys are left alone. Returns how many entries went.
+    // keys and kept non-GUID IDs (ZWO_UID_) are left alone. Returns how many entries went.
     static std::size_t prune_unknown_unique_ids(const std::set<std::string>& live_unique_ids);
 };
 

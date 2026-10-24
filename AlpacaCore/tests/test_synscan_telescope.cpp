@@ -705,3 +705,50 @@ TEST_CASE("SynScan Telescope Driver - SiderealTime follows the clock to under a 
         0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
 }
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("SynScan Telescope Driver spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // ITelescopeV4.DestinationSideOfPier: InvalidValue for RA outside 0..24 h or Dec outside -90..90, checked
+    // before the connection (ascom-contract), so a disconnected driver answers InvalidValue too.
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(-1.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, 91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, -91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+}
+
+TEST_CASE("SynScan Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("SynScan Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
+          "[synscan][telescope][unit][spec-audit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_site_elevation(42.0);
+    CHECK(driver->get_site_elevation() == 42.0);
+}

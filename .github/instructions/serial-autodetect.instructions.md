@@ -35,9 +35,13 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
-  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment or a
-  pre-#1202 `mark_serial_port_*` call anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the
-  two helper headers. The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
+  fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
+  pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
+  `serial_fd_`) anywhere under `AlpacaCore/src` or `AlpacaCore/include` outside the two helper headers.
+  Only the Sky-Watcher and Celestron CGX wrappers may use raw `read`/`write` (their `poll()`-bounded loops
+  behind test seams); the allowance is per rule, so the other rules still apply to them. `TIOCEXCL` is
+  best effort: a refusal logs a warning and the open goes on, unless the link opts in to
+  `SerialExclusive::Required` (decision 0017). The `write_all`/`clear_nonblocking` advice below now applies to sockets and to
   non-tty fds only.
 - A by-id name does not identify a CH340 device (they carry no serial number): the connect-time handshake
   is what proves which device is on a port, so every serial driver must check its handshake reply.
@@ -117,8 +121,9 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   refusal (#358), so it reaches the client and `LastConnectError`. **The first
   connect after a service restart pays the scan** (5.5 s for the iOptron Wi-Fi
   sweep, up to two boots for the CFW3 probe) inside the Platform 7 `Connecting`
-  window, so before a ConformU run against a freshly restarted service connect
-  the device once from the web UI, or give it an explicit port or host. A
+  window, unless the driver remembers its location (next section), so before a
+  ConformU run against a freshly restarted service connect the device once from
+  the web UI, or give it an explicit port or host. A
   connect that finds another device's probe on its serial port waits for that
   probe too (up to `util::kSerialProbeClaimWait`, sized for the CFW3 probe,
   #1202), which can likewise outlast the 5 s window.
@@ -136,6 +141,42 @@ device", the web UI showed `(failed to load)`, and nothing ever retried (issue
   `resolve_serial_port_locked()`, Gemini PDH / flat panel, WandererAstro) already
   meet the rule; do not move them back into a factory. A new `_auto` or
   `_by_index` factory that scans at construction is a review-blocking regression.
+
+### Remembered auto-detect location (`util/device_location_store.h`)
+
+Issue #1452: a reconnect that runs the full search again (about 8 s for a
+Gemini hub, 5-13 s for a Gemini flat panel, 2-5 s for an iOptron Wi-Fi sweep)
+misses the client's 5 s `Connect()` budget. A driver that adopts the store
+(today the Gemini PDH, the three Gemini flat panel models and the iOptron
+mount, serial and network) follows these rules:
+
+- **The store is `util::DeviceLocationStore`**: one flat JSON object of strings
+  in `config/device_locations.json`, runtime state kept apart from
+  `registered_devices.json` (the [decision 0008](../../docs/decisions/0008-rotator-sync-offset-persistence.md)
+  pattern: temp file plus rename, other keys kept, a missing or corrupt file
+  means no remembered location, a failed save logs a WARNING and never fails
+  the connect). No getter touches it ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md)).
+- **The key is `util::location_key(get_unique_id(), index)`, `<id>#<index>`**:
+  the persisted unique ID ([decision 0018](../../docs/decisions/0018-persisted-unique-id.md))
+  plus the enumeration index. The ID survives an edit of the entry, so without
+  the index a renumbered entry would take the old index's unit.
+- **The value is the location**: the `/dev/serial/by-id/...` path when one
+  resolves to the port (`util::serial_location_for()`, it survives a replug
+  under another `ttyUSBn`), else the raw node; `host:port` for a network device.
+- **Connect tries the remembered location once, then searches**: a serial
+  driver calls `util::recall_serial_location()`, which runs the device's own
+  identity handshake on that one port through a `SerialLink` probe claim and
+  never probes a port a connected driver holds ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)).
+  Any failure runs the full search as before. Save only after the connect
+  succeeded and only for an auto-detected device: a configured port or host
+  never reads or writes the store.
+- **Same-model units**: a handshake that returns a model code only cannot tell
+  two units apart, so the recall relies on the same index order as the full
+  search; the vendor file says what its handshake carries.
+- Tests point the store at a temp directory with `TempLocationDir`
+  (`tests/device_location_test_dir.h`) in every case that connects an
+  auto-detected driver, so no test writes `config/device_locations.json` in
+  the build tree.
 
 ### Serial auto-detect scan (`util/serial_by_id_scan.h`)
 

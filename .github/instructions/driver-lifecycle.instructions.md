@@ -104,7 +104,7 @@ vendor-agnostic; do them in the driver from the start.
   an I/O lock ([decision 0010](../../docs/decisions/0010-snapshot-served-state.md)):
   a getter served from a snapshot already meets this rule.
   Identity, limits and capabilities (`Name`, `Max*`, `Can*`, names
-  lists) are published at the end of connect (the `UniqueID` is the router's GUID, decision 0018); `Connected` is lock-free. Lock order in
+  lists) are published at the end of connect (the `UniqueID` is the router's stored ID, decision 0018); `Connected` is lock-free. Lock order in
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
@@ -326,7 +326,8 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   instead of throwing on the read; commands still throw.
 - **Static metadata keeps answering** (names, descriptions, ranges, `CanWrite`, driver-side
   filter names/offsets) — it does not depend on the device. `DeviceState` then degrades to
-  `TimeStamp` only through the base class's per-id try/catch.
+  an empty list without `TimeStamp` through the base class's per-id try/catch when no
+  operational values remain (the ASCOM read-all FAQ).
 - **Recovery is automatic**: keep polling/reading at the normal cadence while faulted so the
   first frame clears the latch without a reconnect (a re-plugged hub on the same node).
 - **Test it hardware-free** with the pty fakes: `set_muted(true)` (hung MCU, healthy fd) and

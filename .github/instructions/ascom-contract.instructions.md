@@ -102,6 +102,13 @@ All map to HTTP 200 with a non-zero `ErrorNumber` — clients read the body, not
 
 A camera's "no image yet" answer (`ImageArray` before any exposure, or while one is still running) is an `InvalidOperation` the contract requires, not a fault: throw it with `AlpacaException::asked_too_early(message)`, so the router logs it at DEBUG instead of ERROR (issue #1167). Never use it for an `InvalidOperation` that reports a failed, stopped or racing exposure. The tier-2 contract sweep checks the first case on every camera fake.
 
+### Telescope refraction, site elevation and DestinationSideOfPier (all telescope drivers)
+
+- `DoesRefraction` throws `PropertyNotImplemented` on read and write in a driver that neither knows nor computes refraction (ITelescopeV4). Never store the flag and read it back: it would claim a correction the driver does not apply. OnStep reads it from the firmware.
+- `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
+- `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
+- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron follows this; the other adopters are not converted yet.
+
 ### A failed async operation body keeps its error (all drivers)
 
 The ASCOM async FAQ makes a failed async command (a goto, a slew, a cover move, an exposure) a failed
@@ -111,11 +118,15 @@ or a reconnect clears it. Never log the failure and report done, and never answe
 read that invents a value. Clear the kept error in the connect/teardown path as well, and test each clear
 site on its own. Precedent: the QHY CFW3 `Position` (`move_failure_`), the Gemini flat panel.
 
-### UniqueID is the router's persisted GUID (all drivers)
+### UniqueID is the router's stored ID (all drivers)
 
-A driver does not build its `UniqueID`. The router assigns each configured device the version 4
-UUID stored in its config entry (`uniqueId`) through `AlpacaDriver::assign_unique_id()` before it
-registers the driver, and the base class's non-virtual `get_unique_id()` returns it. A new driver
+A driver does not build its `UniqueID`. The router assigns each configured device the ID stored
+in its config entry (`uniqueId`; never changed once stored) through `AlpacaDriver::assign_unique_id()` before it
+registers the driver. The router keeps a stored or client-sent ID that `is_keepable_unique_id()` accepts
+(a version 4 UUID, or 12 to 128 printable ASCII characters that are not a device-number ID such as
+`SkyWatcher_0`; `ZWO_UID_<hex>` and `my-rig-focuser-A` pass) and that no other entry holds; only an entry
+with none, a device-number ID or a duplicate gets a minted UUID, once (decision 0018). The base
+class's non-virtual `get_unique_id()` returns the assigned ID. A new driver
 implements only `fallback_unique_id()`, which answers for a driver a unit test builds directly; never
 key persistent state on the fallback. A driver that keys state on its ID (the rotator Sync offset)
 reads `get_unique_id()`, or `assigned_unique_id()` while holding its own mutex. State saved under an
@@ -132,8 +143,9 @@ ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: 
 `SupportedActions` may use any casing. Match the requested name against the supported
 list without regard to case, in `action()` and in `can_action()` alike, and throw
 `ActionNotImplemented` only when no supported name matches. The two drivers with
-actions already do this: the Player One camera (`to_lower_copy`) and the Celestron
-focuser (`same_action`). A new driver with actions does the same.
+actions already do this: the Player One camera (`to_lower_copy`), the Celestron
+focuser (`same_action`) and the iOptron and Celestron mounts' `gps_status`
+(`util::is_gps_status_action`). A new driver with actions does the same.
 
 ### Camera ROI alignment (all camera vendors)
 
@@ -159,6 +171,29 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   control, Player One and QHY: the camera's cooler flag, GPhoto: none). Never answer `false` or `0.0` for a
   member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
 - **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
+
+### Camera values the SDK cannot give (all camera vendors)
+
+- **`ElectronsPerADU` and `FullWellCapacity` raise `PropertyNotImplemented` when the SDK has no figure that follows the
+  current gain and mode** (ICameraV4: "if not available"); never `1.0`, `0.0`, the ADU saturation (MaxADU) or a static
+  figure. Once connected they raise it (`NotConnected` first while disconnected). Today: QHY, ToupTek (and Altair),
+  SVBONY, GPhoto and ZWO (the SDK's `ElecPerADU` is one static number) raise it for both; Player One raises it for
+  `FullWellCapacity` and returns the real per-gain `POA_EGAIN` for `ElectronsPerADU`, raising it only when the camera
+  lacks `POA_EGAIN` or the read fails. A client such as Ara stores whatever it is told, so a missing value beats a false
+  one. Restore a return only when a per-gain source turns up.
+- **`SensorName` is never a placeholder**: ICameraV4 makes it mandatory and says to "return an empty string if the name
+  is not known". It never raises PropertyNotImplemented, and a literal such as `"<vendor> Sensor"` is a made-up
+  name. Return `""`.
+
+### Mount `gps_status` action (iOptron, Celestron)
+
+`Action("gps_status")` returns the JSON string `{"fix":<bool>,"latitude":<deg|null>,"longitude":<deg|null>,
+"elevation":<m|null>}` so a client can tell that the site came from the mount's own GPS receiver, not from the bridge
+config. `latitude` and `longitude` are the receiver's reading and are `null` unless `fix` is true; `elevation` is `null`
+where the mount does not report one (iOptron and Celestron never do). It is listed in `SupportedActions` only while
+connected, and on Celestron only when the bus probe found the GPS module; `NotConnected` otherwise. The format lives in
+`util::format_gps_status` (`util/gps_status.h`); iOptron reads the `:GLS#` GPS digit and site, Celestron the AUX 0xB0
+GPS module (see the vendor files). OnStep does not offer it yet.
 
 ### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
 
@@ -251,9 +286,10 @@ notes carry only the pin map and per-board deltas.
   operational-property list by calling that device's own property getters inside a
   `try { … } catch (const std::exception&) {}` (a getter that throws — `AlpacaException`
   or any unwrapped vendor error — is omitted, never propagated) and
-  appending a `TimeStamp` via the inline `device_state_timestamp()` helper. A disconnected
-  driver returns the empty list with no `TimeStamp` (each base class checks `get_connected()`
-  first). Using the
+  appending a `TimeStamp` via the inline `device_state_timestamp()` helper only when at least
+  one operational value is available. If every operational read fails, return the empty list
+  with no `TimeStamp`, even while connected (the ASCOM read-all FAQ). A disconnected driver
+  also returns the empty list (each base class checks `get_connected()` first). Using the
   same getters as the GET endpoints guarantees DeviceState ↔ GET consistency, which is
   what ConformU checks. A new vendor driver inherits the compliant DeviceState for free.
 - DeviceState is **not an atomic snapshot**: each getter locks the driver mutex

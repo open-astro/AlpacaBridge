@@ -12,9 +12,10 @@
 
 #pragma once
 
-// One do-nothing driver per Alpaca device type, used by test_route_table to
-// reach the router's per-type dispatchers (#646). Every pure virtual of the
-// device interface returns a value-initialised default; nothing here models
+// One do-nothing driver per Alpaca device type, used by test_route_table and
+// test_routing to reach the router's per-type dispatchers (#646). Every pure
+// virtual of the device interface returns a value-initialised default, except
+// that FilterWheelStub returns the focus offsets last set; nothing else models
 // device behaviour. If a driver interface gains or loses a pure virtual this
 // header stops compiling, which is the cue to update it deliberately.
 
@@ -72,6 +73,7 @@ public:
     void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
         image_array_error_ = std::move(error);
     }
+    mutable int image_getter_calls = 0;
 
     int get_bayer_offset_x() const override { return int{}; }
     int get_bayer_offset_y() const override { return int{}; }
@@ -108,11 +110,18 @@ public:
     bool get_has_shutter() const override { return bool{}; }
     double get_heat_sink_temperature() const override { return double{}; }
     ImageArray get_image_array() const override {
+        ++image_getter_calls;
         if (image_array_error_) throw *image_array_error_;
         return image_array_;
     }
-    std::string get_image_array_variant() const override { return std::string{}; }
-    bool get_image_ready() const override { return bool{}; }
+    std::string get_image_array_variant() const override {
+        ++image_getter_calls;
+        return std::string{};
+    }
+    bool get_image_ready() const override {
+        ++image_getter_calls;
+        return bool{};
+    }
     bool get_is_pulse_guiding() const override { return bool{}; }
     double get_last_exposure_duration() const override { return double{}; }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
@@ -258,14 +267,15 @@ public:
 
     int get_position() const override { return int{}; }
     void set_position(int position) override {}
-    std::vector<int> get_focus_offsets() const override { return std::vector<int>{}; }
-    void set_focus_offsets(const std::vector<int>& offsets) override {}
+    std::vector<int> get_focus_offsets() const override { return focus_offsets_; }
+    void set_focus_offsets(const std::vector<int>& offsets) override { focus_offsets_ = offsets; }
     std::vector<std::string> get_names() const override { return std::vector<std::string>{}; }
     void set_names(const std::vector<std::string>& names) override {}
 
 private:
     int number_;
     bool connected_ = false;
+    std::vector<int> focus_offsets_;  // last set, so a test can read back what the router parsed
 };
 
 class FocuserStub final : public alpacacore::FocuserDriver {

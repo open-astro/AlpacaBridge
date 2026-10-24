@@ -462,3 +462,30 @@ TEST_CASE("ToupTek Camera Driver - a superseding pulse cancels the clock wait", 
     CHECK(outcome.guiding);
     CHECK_FALSE(outcome.connected);
 }
+
+// Issue #1277: the ToupTek SDK has no e-/ADU or full-well figure, so both raise PropertyNotImplemented (ICameraV4
+// "if not available") instead of a made-up 1.0 or the ADU saturation; an unknown SensorName is "", not a placeholder.
+TEST_CASE(
+    "ToupTek Camera Driver - ElectronsPerADU and FullWellCapacity are not implemented, SensorName has no placeholder",
+    "[touptek][camera][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    fake.cameras.push_back(alpacacore::test::FakeToupTekSDK::default_camera("fake-cam-0", "FakeCam One"));
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek Camera Driver - an unknown SensorName is empty", "[touptek][camera][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;  // no camera attached
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    CHECK(driver->get_sensor_name().empty());
+}

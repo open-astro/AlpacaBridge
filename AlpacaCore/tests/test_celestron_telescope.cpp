@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "gps_status_check.h"
 #include "sidereal_time_check.h"
 
 #ifndef _WIN32
@@ -776,6 +777,24 @@ struct SnapshotMount {
     std::atomic<bool> l_fail{false};  // the slewing query goes unanswered
     std::atomic<bool> z_fail{false};  // the alt-az query goes unanswered
     std::atomic<int> slow_count{0};   // pier-side and tracking-mode queries received
+    std::atomic<bool> level_mute{false};  // the FindHome level-done query goes unanswered
+    std::atomic<int> level_count{0};      // level-done queries received
+    std::atomic<int> m_delay_ms{0};       // the goto cancel (a stop exchange) answers after this long
+    std::atomic<int> m_count{0};          // goto cancels received
+    std::atomic<int> t_delay_ms{0};       // the tracking-mode write answers after this long
+    std::atomic<int> t_count{0};          // tracking-mode writes received
+    std::atomic<bool> h_mute{false};      // the time write goes unanswered
+    std::atomic<int> s_delay_ms{0};       // the sync reply arrives after this long
+    std::atomic<bool> p_mute{false};      // the pier-side query goes unanswered
+    std::atomic<int> p_count{0};          // pier-side queries received
+    std::atomic<int> s_count{0};          // sync and time commands received
+    std::atomic<bool> gps_absent{false};  // no GPS module on the AUX bus: its version probe goes unanswered
+    std::atomic<bool> gps_linked{false};  // GPS_LINKED (0x37) answer
+    std::atomic<int> gps_lat_raw{0};      // GPS_GET_LAT: 24-bit signed fraction of 360 degrees
+    std::atomic<int> gps_long_raw{0};     // GPS_GET_LONG: the same encoding
+    std::atomic<int> order{0};            // arrival counter shared by the goto and cancel records below
+    std::atomic<int> goto_last{0};        // arrival number of the last goto, GOTO or axis goto-fast (0: none)
+    std::atomic<int> cancel_first{0};     // arrival number of the first goto cancel (0: none)
 };
 
 std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
@@ -802,6 +821,10 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'Z':
             if (st.z_fail.load()) return "";
             return "20AB0500,10000500#";
+        case 'r':
+        case 'R':
+            st.goto_last.store(st.order.fetch_add(1) + 1);
+            return "#";
         case 'L':
             if (st.l_fail.load()) return "";
             return st.slewing.load() ? "1#" : "0#";
@@ -809,24 +832,69 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
             return "1#";
         case 'p':
             st.slow_count.fetch_add(1);
+            st.p_count.fetch_add(1);
+            if (st.p_mute.load()) return "";
             return std::string(1, st.pier.load()) + "#";
         case 't':
             st.slow_count.fetch_add(1);
             return st.tracking.load() ? std::string("\x02#") : std::string("\x00#", 2);
         case 'T':
+            st.t_count.fetch_add(1);
+            if (st.t_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.t_delay_ms.load()));
             st.tracking.store(chunk.size() > 1 && chunk[1] != 0);
             return "#";
-        case 'W':
+        case 'h': {  // the mount's clock: the host's UTC with a zero zone, so UTCDate has a mount time to seed from
+            const std::time_t now = std::time(nullptr);
+            std::tm utc{};
+            gmtime_r(&now, &utc);
+            std::string reply;
+            for (const int field :
+                 {utc.tm_hour, utc.tm_min, utc.tm_sec, utc.tm_mon + 1, utc.tm_mday, utc.tm_year % 100, 0, 0}) {
+                reply.push_back(static_cast<char>(field));
+            }
+            return reply + "#";
+        }
+        case 'H':
+            if (st.h_mute.load()) return "";
+            return "#";
         case 'M':
+            st.m_count.fetch_add(1);
+            {
+                int none = 0;
+                st.cancel_first.compare_exchange_strong(none, st.order.fetch_add(1) + 1);
+            }
+            if (st.m_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.m_delay_ms.load()));
+            return "#";
+        case 'W':
         case 's':
         case 'S':
+            st.s_count.fetch_add(1);
+            if (st.s_delay_ms.load() > 0) std::this_thread::sleep_for(std::chrono::milliseconds(st.s_delay_ms.load()));
             return "#";
         case 'P': {  // AUX passthrough: P len dev op ...
             const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
             const unsigned char device = chunk.size() > 2 ? static_cast<unsigned char>(chunk[2]) : 0;
+            if (device == 0xB0) {  // GPS module (AUX 0xB0)
+                if (op == 0xFE) return st.gps_absent.load() ? std::string() : std::string("\x01\x00#", 3);
+                if (op == 0x37) return std::string(1, st.gps_linked.load() ? '\x01' : '\x00') + "#";
+                if (op == 0x01 || op == 0x02) {
+                    const int raw = (op == 0x01 ? st.gps_lat_raw.load() : st.gps_long_raw.load()) & 0xFFFFFF;
+                    return std::string{static_cast<char>((raw >> 16) & 0xFF), static_cast<char>((raw >> 8) & 0xFF),
+                                       static_cast<char>(raw & 0xFF), '#'};
+                }
+            }
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
+            // MC_GOTO_FAST: a park whose target lies across the meridian (host-clock LST) flips with it
+            if (op == 0x02) {
+                st.goto_last.store(st.order.fetch_add(1) + 1);
+                return "#";
+            }
+            if (op == 0x12) {                                                      // MC_LEVEL_DONE
+                st.level_count.fetch_add(1);
+                if (st.level_mute.load()) return "";
+            }
             return std::string("\xFF#");
         }
         default:
@@ -1312,4 +1380,827 @@ TEST_CASE("Celestron UTCDate - a written UTCDate reads back advanced by the task
     driver->set_connected(false);
 }
 
+// Decision 0016 rule 1 (#1437): a control-path exchange runs under the link's I/O lock only, never under the
+// driver mutex_ a getter takes. Each case parks one exchange in the fake mount and times the getters meanwhile.
+namespace {
+
+bool snapshot_wait_for(const std::function<bool()>& done) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done()) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
+// A no-device getter and a snapshot getter, each held to the budget a fake-mount exchange would overrun.
+void check_getters_do_not_wait(alpacacore::TelescopeDriver& driver) {
+    CHECK(snapshot_timed([&] { (void)driver.get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver.get_can_find_home(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver.get_right_ascension(); }) < kSnapshotGetterBudget);
+}
+
+}  // namespace
+
+TEST_CASE("Celestron FindHome - a completion check on a silent link does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+
+    std::thread tick([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    REQUIRE(snapshot_wait_for([&] { return st->level_count.load() > 0; }));
+    check_getters_do_not_wait(*driver);
+    tick.join();
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron FindHome - the third failed check still sends the stops and no getter waits for them",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(st->m_count.load() == 0);  // two failures: no stop yet
+
+    st->m_delay_ms = 600;
+    std::thread tick([&] { (void)cel::poll_status_now_for_testing(*driver); });
+    REQUIRE(snapshot_wait_for([&] { return st->m_count.load() > 0; }));  // the safety stop went out
+    check_getters_do_not_wait(*driver);
+    tick.join();
+    CHECK_THROWS_WITH(driver->get_slewing(), Catch::Matchers::ContainsSubstring("FindHome completion polling failed"));
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron setters - a slow set_tracking exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+
+    st->t_delay_ms = 200;  // under the 300 ms exchange timeout: the write succeeds
+    const int writes = st->t_count.load();
+    std::thread setter([&] { driver->set_tracking(false); });
+    REQUIRE(snapshot_wait_for([&] { return st->t_count.load() > writes; }));
+    check_getters_do_not_wait(*driver);
+    setter.join();
+    CHECK_FALSE(driver->get_tracking());
+    driver->set_connected(false);
+}
+
+namespace {
+
+// Runs `op` on its own thread with every mount exchange slowed to kSlowExchange (under the 300 ms exchange timeout, so
+// each succeeds), waits until its first exchange is on the wire and checks the getters meanwhile. A getter that waited
+// behind the exchange would pay the whole of kSlowExchange.
+constexpr int kSlowExchangeMs = 150;
+
+// The driver runs on the fake task clock, so an op that waits on it (the blocking slew) gets virtual seconds from the
+// loop below once the getters have been checked.
+template <typename Op>
+void check_getters_during(FakeTaskClock& clock, SnapshotMount& st, alpacacore::TelescopeDriver& driver, Op&& op) {
+    st.latency_ms = kSlowExchangeMs;
+    const int before = st.transactions.load();
+    std::atomic<bool> done{false};
+    std::thread worker([&] {
+        try {
+            op();
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the getters, not the op
+        }
+        done.store(true);
+    });
+    REQUIRE(snapshot_wait_for([&] { return st.transactions.load() > before; }));
+    check_getters_do_not_wait(driver);
+    while (!done.load()) {
+        clock.advance(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    worker.join();
+    st.latency_ms = 0;
+}
+
+struct SlowMountDriver {
+    FakeTaskClock clock;
+    std::shared_ptr<SnapshotMount> st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server{[this](const std::string& c) { return snapshot_reply(*st, c); }};
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+
+    SlowMountDriver() {
+        REQUIRE(server.ok());
+        driver = snapshot_driver(server, clock);
+        REQUIRE(driver->get_connected());
+        cel::set_status_poll_paused_for_testing(*driver, true);
+    }
+    ~SlowMountDriver() { driver->set_connected(false); }
+};
+
+}  // namespace
+
+TEST_CASE("Celestron connect - a slow handshake does not hold Connected or Name",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, false,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    st->latency_ms = kSlowExchangeMs;
+    std::thread connecting([&] { driver->set_connected(true); });
+    REQUIRE(snapshot_wait_for([&] { return st->transactions.load() > 0; }));
+    CHECK(snapshot_timed([&] { CHECK_FALSE(driver->get_connected()); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)driver->get_can_find_home(); }) < kSnapshotGetterBudget);
+    connecting.join();
+    st->latency_ms = 0;
+    CHECK(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron disconnect - a close behind an exchange in flight does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    mount.st->latency_ms = kSlowExchangeMs;
+    const int before = mount.st->transactions.load();
+    std::thread setter([&] {
+        try {
+            mount.driver->set_tracking(false);
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the getters
+        }
+    });
+    REQUIRE(snapshot_wait_for([&] { return mount.st->transactions.load() > before; }));
+    std::atomic<bool> close_started{false};
+    std::thread closing([&] {
+        close_started.store(true);
+        mount.driver->set_connected(false);
+    });
+    REQUIRE(snapshot_wait_for([&] { return close_started.load(); }));
+    CHECK(snapshot_timed([&] { (void)mount.driver->get_name(); }) < kSnapshotGetterBudget);
+    CHECK(snapshot_timed([&] { (void)mount.driver->get_connected(); }) < kSnapshotGetterBudget);
+    setter.join();
+    closing.join();
+    mount.st->latency_ms = 0;
+    CHECK_FALSE(mount.driver->get_connected());
+}
+
+TEST_CASE("Celestron SlewToCoordinatesAsync - the initiator and its goto do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver,
+                         [&] { mount.driver->slew_to_coordinates_async(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron SlewToCoordinates - the blocking initiator does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->slew_to_coordinates(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron Park - the initiator and the park slew do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->park(); });
+}
+
+TEST_CASE("Celestron SyncToCoordinates - the sync exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->sync_to_coordinates(5.0, 20.0); });
+}
+
+TEST_CASE("Celestron FindHome - the dispatch does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->find_home(); });
+}
+
+TEST_CASE("Celestron MoveAxis - the rate write does not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->move_axis(0, 1.0); });
+}
+
+TEST_CASE("Celestron AbortSlew - the stops do not hold the getters", "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->abort_slew(); });
+}
+
+TEST_CASE("Celestron PulseGuide - the pier read and the guide write do not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    REQUIRE(mount.driver->get_can_pulse_guide());
+    check_getters_during(mount.clock, *mount.st, *mount.driver, [&] { mount.driver->pulse_guide(0, 500); });
+}
+
+TEST_CASE("Celestron site and time writes - the write exchange does not hold the getters",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    SECTION("SiteLatitude") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_site_latitude(-33.856784); });
+    }
+    SECTION("SiteLongitude") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_site_longitude(151.215297); });
+    }
+    SECTION("UTCDate") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_utc_date(std::chrono::system_clock::now()); });
+    }
+    SECTION("CommandString") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { (void)mount.driver->command_string("V", true); });
+    }
+    SECTION("GuideRate") {
+        check_getters_during(mount.clock, *mount.st, *mount.driver,
+                             [&] { mount.driver->set_guide_rate(alpacacore::GuideRate{0.002, 0.002}); });
+    }
+}
+
+// The FindHome failure stops go out only while no newer initiator has taken the mount. The hook stands in for the
+// client that saw the sticky FindHome error and sent a new goto before the stops: the poll then skips them.
+TEST_CASE("Celestron FindHome - the failure stops are skipped when a new goto took the mount first",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    REQUIRE(st->m_count.load() == 0);
+
+    int m_after_goto = -1;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        driver->slew_to_coordinates_async(1.5, 20.0);
+        m_after_goto = st->m_count.load();
+    });
+    (void)cel::poll_status_now_for_testing(*driver);
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(m_after_goto >= 0);
+    CHECK(st->m_count.load() == m_after_goto);  // no stale goto cancel after the new goto
+    driver->set_connected(false);
+}
+
+// A sync holds the initiator lock without taking a motion generation. The third-failure stops that find the lock busy
+// stay pending and go out on a later poll tick, once the sync is done.
+TEST_CASE("Celestron FindHome - the failure stops still go out when a sync held the initiator lock",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    REQUIRE(st->m_count.load() == 0);
+
+    st->s_delay_ms = 300;
+    std::thread syncer;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!syncer.joinable()) {
+            const int before = st->s_count.load();
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(syncer.joinable());
+    syncer.join();
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// Unpark with no park in flight sends nothing to the mount and takes no motion generation, so a failure stop that a
+// sync deferred stays pending through it and still goes out on a later poll tick.
+TEST_CASE("Celestron FindHome - the failure stops still go out after an Unpark",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->s_delay_ms = 300;
+    std::thread syncer;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!syncer.joinable()) {
+            const int before = st->s_count.load();
+            syncer = std::thread([&] { driver->sync_to_coordinates(1.5, 20.0); });
+            REQUIRE(snapshot_wait_for([&] { return st->s_count.load() > before; }));  // the sync owns initiator_mutex_
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(syncer.joinable());
+    syncer.join();
+    REQUIRE(st->m_count.load() == 0);
+    driver->unpark();
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// SlewToCoordinatesAsync takes a motion generation before its pier-side read. When that read fails no goto went out,
+// so a failure stop deferred meanwhile stays pending, through a poll tick in the window too, and still goes out.
+TEST_CASE("Celestron FindHome - the failure stops still go out when an async goto fails before it is sent",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->p_mute = true;  // the pier-side read times out, before the goto
+    std::thread slewer;
+    std::atomic<bool> refused{false};
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!slewer.joinable()) {
+            const int before = st->p_count.load();
+            slewer = std::thread([&] {
+                try {
+                    driver->slew_to_coordinates_async(1.5, 20.0);
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return st->p_count.load() > before; }));  // the slew owns the mount
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    (void)cel::poll_status_now_for_testing(*driver);  // a tick while the read is out keeps it pending
+    REQUIRE(slewer.joinable());
+    slewer.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// A poll tick reads the pending stop while the async goto still owns the mount. The goto then fails before it is sent
+// and hands the stop to its own generation, and a sync queued behind it takes the lock before the tick's try_lock: the
+// tick finds the lock busy again but must not move the stop back to the older generation, which the next free tick
+// would drop as superseded.
+TEST_CASE("Celestron FindHome - the failure stops still go out when a sync follows an async goto that was not sent",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    st->p_mute = true;     // the pier-side read times out, before the goto
+    st->s_delay_ms = 300;  // the sync holds the initiator lock through the retry's try_lock
+    std::thread slewer;
+    std::thread syncer;
+    std::atomic<bool> refused{false};
+    int calls = 0;
+    int s_before = 0;
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        ++calls;
+        if (calls == 1) {  // the third failure
+            const int p_before = st->p_count.load();
+            slewer = std::thread([&] {
+                try {
+                    driver->slew_to_coordinates_async(1.5, 20.0);
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return st->p_count.load() > p_before; }));  // the slew owns the mount
+            s_before = st->s_count.load();
+            syncer = std::thread([&] {
+                try {
+                    driver->sync_to_coordinates(1.5, 20.0);  // queues on the initiator lock
+                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): only its hold on the lock counts
+                }
+            });
+        } else if (calls == 2) {  // the retry tick, which read the stop before the hand-back
+            CHECK(snapshot_wait_for([&] { return refused.load(); }));                 // the stop was handed back
+            CHECK(snapshot_wait_for([&] { return st->s_count.load() > s_before; }));  // the sync owns the lock
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    (void)cel::poll_status_now_for_testing(*driver);  // the retry finds the lock busy again
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    REQUIRE(calls == 2);
+    REQUIRE(slewer.joinable());
+    REQUIRE(syncer.joinable());
+    slewer.join();
+    syncer.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// Park takes a motion generation before its body starts. When the slot refuses the start and no body was displaced no
+// goto went out, so a failure stop deferred meanwhile stays pending, through a poll tick in the window too.
+TEST_CASE("Celestron FindHome - the failure stops still go out when Park cannot start its body",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    driver->find_home();
+    st->level_mute = true;
+    CHECK(cel::poll_status_now_for_testing(*driver));
+    CHECK(cel::poll_status_now_for_testing(*driver));
+
+    std::atomic<bool> in_spawn{false};
+    std::atomic<bool> release{false};
+    cel::set_slew_spawn_for_testing(*driver, [&](std::function<void()>) -> std::thread {
+        in_spawn = true;  // Park owns the mount
+        while (!release.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        throw std::system_error(std::make_error_code(std::errc::resource_unavailable_try_again));
+    });
+    std::thread parker;
+    std::atomic<bool> refused{false};
+    cel::set_failure_stop_hook_for_testing(*driver, [&] {
+        if (!parker.joinable()) {
+            parker = std::thread([&] {
+                try {
+                    driver->park();
+                } catch (const std::exception&) {
+                    refused = true;
+                }
+            });
+            CHECK(snapshot_wait_for([&] { return in_spawn.load(); }));
+        }
+    });
+    (void)cel::poll_status_now_for_testing(*driver);  // third failure: the lock is busy, the stop stays pending
+    cel::set_failure_stop_hook_for_testing(*driver, nullptr);
+    (void)cel::poll_status_now_for_testing(*driver);  // a tick while the start is held keeps it pending
+    release = true;
+    REQUIRE(parker.joinable());
+    parker.join();
+    REQUIRE(refused.load());
+    REQUIRE(st->m_count.load() == 0);
+    for (int i = 0; i < 3; ++i) {
+        (void)cel::poll_status_now_for_testing(*driver);
+    }
+    CHECK(st->m_count.load() >= 1);
+    driver->set_connected(false);
+}
+
+// A connect whose post-open init throws (the time write goes unanswered) closes the link again and leaves
+// Connected false, so a retry opens it afresh.
+TEST_CASE("Celestron connect - a failed time write closes the link and leaves Connected false",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    cel::ConnectionInfo info;
+    info.type = cel::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = 300;
+    auto driver = cel::create_celestron_telescope_with_site(0, info, -33.856784, 151.215297, 42.0, true,
+                                                            cel::CelestronAlignmentSetting::Auto, clock);
+    st->h_mute = true;
+    CHECK_THROWS(driver->set_connected(true));
+    CHECK_FALSE(driver->get_connected());
+    st->h_mute = false;
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+// A slewing read taken with mutex_ free is not applied after a newer motion command took the mount. The hook stands in
+// for the client whose AbortSlew lands between the read and its publish: the read still says "slewing", and Slewing
+// must stay false.
+TEST_CASE("Celestron Slewing read - a read that lands after AbortSlew is not applied",
+          "[celestron][telescope][snapshot][iolock]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    st->slewing = true;
+    bool aborted = false;
+    cel::set_slewing_read_hook_for_testing(*driver, [&] {
+        if (!aborted) {
+            aborted = true;
+            driver->abort_slew();
+        }
+    });
+    std::atomic<bool> done{false};
+    std::thread slewer([&] {
+        try {
+            driver->slew_to_coordinates(1.5, 20.0);
+        } catch (const std::exception&) {
+            // superseded by the abort: the blocking slew ends with an error
+        }
+        done.store(true);
+    });
+    for (int i = 0; i < 400 && !done.load(); ++i) {  // past the forced-slewing window, to the first real read
+        clock.wait_for_waiters(1, std::chrono::milliseconds(100));
+        clock.advance(std::chrono::milliseconds(250));
+        clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    slewer.join();
+    cel::set_slewing_read_hook_for_testing(*driver, nullptr);
+    REQUIRE(aborted);
+    CHECK_FALSE(driver->get_slewing());
+    driver->set_connected(false);
+}
+
+// AbortSlew joins the slew body before its stops go out: the park body sends its GOTO with mutex_ free, so a stop sent
+// first could be followed by a GOTO that starts the mount again. The hook holds the park body past its last supersede
+// check, before its GOTO, until the cancel reaches the mount or 500 ms pass: with the join, AbortSlew sends nothing
+// until the body is done, so the GOTO lands first.
+TEST_CASE("Celestron AbortSlew - the cancel reaches the mount after the goto of a park in flight",
+          "[celestron][telescope][snapshot][iolock]") {
+    SlowMountDriver mount;
+    std::atomic<bool> in_dispatch{false};
+    cel::set_slew_dispatch_hook_for_testing(*mount.driver, [&] {
+        in_dispatch = true;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (mount.st->m_count.load() == 0 && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    });
+    mount.driver->park();
+    REQUIRE(snapshot_wait_for([&] { return in_dispatch.load(); }));
+    try {
+        mount.driver->abort_slew();
+    } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the case checks the exchange order
+    }
+    REQUIRE(snapshot_wait_for([&] { return mount.st->goto_last.load() > 0; }));
+    cel::set_slew_dispatch_hook_for_testing(*mount.driver, nullptr);
+    REQUIRE(mount.st->cancel_first.load() > 0);
+    CHECK(mount.st->goto_last.load() < mount.st->cancel_first.load());  // no goto after the first cancel
+}
+
 #endif  // _WIN32
+
+#ifndef _WIN32
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("Celestron spec audit - DestinationSideOfPier rejects out-of-range RA and Dec",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // ITelescopeV4.DestinationSideOfPier: InvalidValueException for RA outside 0..24 h or Dec outside -90..90.
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(25.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(-1.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(12.0, 91.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - SiteElevation never set throws InvalidOperation",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // ASCOM time-and-place FAQ: reading a site value that was never set throws InvalidOperationException.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - UTCDate throws InvalidOperation when the mount clock cannot be read",
+          "[celestron][telescope][unit][spec-audit]") {
+    // Only the position queries get the canned pair. Every other reply is a bare terminator, so no leftover bytes
+    // of a longer reply sit in the socket and answer the clock read ('h') as a time; the clock read gets no time.
+    std::atomic<int> clock_reads{0};
+    alpacacore::test::FakeMountServer server([&clock_reads](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        if (command == "e" || command == "z") return std::string("00000000,00000000#");
+        if (command == "h") ++clock_reads;
+        return std::string("#");
+    });
+    REQUIRE(server.ok());
+    alpacacore::vendor::celestron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 100;
+    auto driver = alpacacore::vendor::celestron::create_celestron_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    // Decision 0014 item 4 leaves seeding in the driver; the host clock must not stand in for the mount's.
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    // Getters never wait on device I/O: the failed connect-time read is remembered, so a poll sends no further 'h'.
+    const int reads_after_first = clock_reads.load();
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_utc_date(); }, alpacacore::AlpacaError::InvalidOperation);
+    INFO("h reads " << reads_after_first << " -> " << clock_reads.load());
+    CHECK(clock_reads.load() == reads_after_first);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - PulseGuide rejects a negative duration", "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    require_alpaca_error([&] { driver->pulse_guide(0, -5); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - DoesRefraction is not implemented", "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron spec audit - PulseGuide rejects a bad direction or duration before the connection check",
+          "[celestron][telescope][unit][spec-audit]") {
+    alpacacore::test::FakeMountServer server([](const std::string& command) {
+        if (const auto idle = pulse_mount_idle_reply(command)) return *idle;
+        return std::string("00000000,00000000#");
+    });
+    REQUIRE(server.ok());
+    auto driver = connect_pulse_guide_mount(server);
+    // MC_AUX_GUIDE chains 255 cs commands up to 2550 cs: a longer duration used to be cut to 25.5 s silently.
+    require_alpaca_error([&] { driver->pulse_guide(0, 25501); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(4, 100); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(-1, 100); }, alpacacore::AlpacaError::InvalidValue);
+    driver->set_connected(false);
+    // The range check precedes the connected check: a disconnected driver says InvalidValue, not NotConnected.
+    require_alpaca_error([&] { driver->pulse_guide(0, -5); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&] { driver->pulse_guide(0, 25501); }, alpacacore::AlpacaError::InvalidValue);
+}
+
+#endif  // _WIN32
+
+#ifndef _WIN32
+namespace {
+
+// 24-bit signed fraction of a full rotation, as the GPS module reports a latitude or longitude.
+int gps_raw_from_degrees(double degrees) {
+    return static_cast<int>(std::lround(degrees / 360.0 * 16777216.0)) & 0xFFFFFF;
+}
+
+}  // namespace
+
+// Issue #1277: Action("gps_status") reads the GPS module over the AUX bus (GPS_LINKED 0x37, then GPS_GET_LAT 0x01
+// and GPS_GET_LONG 0x02): the module's own reading, not the hand controller's stored site.
+TEST_CASE("Celestron snapshot - gps_status reports the GPS module's link and reading",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
+    CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
+    require_alpaca_error([&] { (void)driver->action("other_action", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+
+    SECTION("linked: fix with the module's latitude and longitude") {
+        st->gps_linked = true;
+        st->gps_lat_raw = gps_raw_from_degrees(-33.856784);
+        st->gps_long_raw = gps_raw_from_degrees(151.215297);
+        const std::string reply = driver->action("gps_status", "");
+        CHECK(reply.rfind("{\"fix\":true,", 0) == 0);
+        REQUIRE(alpacacore::test::gps_status_number(reply, "latitude").has_value());
+        // One count of the 24-bit fraction is 2.1e-5 degrees.
+        CHECK(*alpacacore::test::gps_status_number(reply, "latitude") == Catch::Approx(-33.856784).margin(3e-5));
+        CHECK(*alpacacore::test::gps_status_number(reply, "longitude") == Catch::Approx(151.215297).margin(3e-5));
+        CHECK(reply.find("\"elevation\":null") != std::string::npos);
+    }
+    SECTION("not linked: no fix, and no coordinates") {
+        st->gps_linked = false;
+        st->gps_lat_raw = gps_raw_from_degrees(51.477833);
+        st->gps_long_raw = gps_raw_from_degrees(-0.0015);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    driver->set_connected(false);
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Celestron snapshot - gps_status is not listed once the link is lost", "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(driver->can_action("gps_status"));
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+    st->mute = false;
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - gps_status is not listed on a mount without a GPS module",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    st->gps_absent = true;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+    driver->set_connected(false);
+}
+#endif

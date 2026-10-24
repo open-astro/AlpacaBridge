@@ -733,7 +733,12 @@ public:
         ensure_connected();
         throw AlpacaException("Cooler not supported", AlpacaError::PropertyNotImplemented);
     }
-    double get_electrons_per_adu() const override { return 1.0; }  // unknown; ConformU rejects 0
+    double get_electrons_per_adu() const override {
+        ensure_connected();
+        // libgphoto2 reports no e-/ADU, so there is no honest value (issue #1277).
+        throw AlpacaException("ElectronsPerADU is not available for DSLR / mirrorless cameras",
+                              AlpacaError::PropertyNotImplemented);
+    }
 
     double get_exposure_max() const override {
         ensure_connected();
@@ -761,7 +766,12 @@ public:
         throw AlpacaException("Fast readout not supported", AlpacaError::NotImplemented);
     }
 
-    double get_full_well_capacity() const override { return 0.0; }  // unknown for DSLR sensors
+    double get_full_well_capacity() const override {
+        ensure_connected();
+        // libgphoto2 reports no full well, so there is no honest value (issue #1277).
+        throw AlpacaException("FullWellCapacity is not available for DSLR / mirrorless cameras",
+                              AlpacaError::PropertyNotImplemented);
+    }
 
     int get_gain() const override {
         ensure_connected();
@@ -934,7 +944,7 @@ public:
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.model : "DSLR / Mirrorless Sensor";
+        return camera_info_valid_ ? camera_info_.model : std::string();  // unknown: "" (ICameraV4 SensorName)
     }
 
     SensorType get_sensor_type() const override {

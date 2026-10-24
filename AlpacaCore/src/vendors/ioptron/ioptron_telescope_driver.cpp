@@ -16,7 +16,9 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
@@ -83,7 +85,7 @@ public:
           site_longitude_cached_(0.0),
           site_info_valid_(false),
           hemisphere_north_(true),
-          site_elevation_m_(site_elevation_m.value_or(0.0)),
+          site_elevation_m_(site_elevation_m),
           timezone_offset_minutes_(0),
           timezone_offset_valid_(false),
           dst_observed_(false),
@@ -220,6 +222,19 @@ public:
 
     bool get_connecting() const override { return connection_task_active(); }
 
+    // The auto-detect factories need the driver's unique id inside the resolver,
+    // and the id is assigned only after the driver exists. Call before the first connect.
+    void set_location_index(int index) { location_index_ = index; }
+
+    void set_connection_resolver(util::ConnectionResolver<ConnectionInfo> resolver) {
+        connection_resolver_ = std::move(resolver);
+    }
+
+    static std::string location_of(const ConnectionInfo& info) {
+        return info.type == ConnectionType::Network ? util::network_location_for(info.host, info.tcp_port)
+                                                    : util::serial_location_for(info.port_path);
+    }
+
     void set_connected(bool connected) override {
         std::unique_lock<std::mutex> lock(mutex_);
 
@@ -253,7 +268,7 @@ public:
             // when a Wi-Fi mount has often not joined the network yet (#659).
             util::connect_resolved(
                 connection_info_, connection_resolved_, connection_resolver_,
-                [&protocol](const ConnectionInfo& info) {
+                [this, &protocol](const ConnectionInfo& info) {
                     ALPACA_LOG_INFO("iOptron", "Calling protocol.connect()...");
                     if (!protocol.connect(info)) {
                         ALPACA_LOG_ERROR("iOptron", "protocol.connect() returned false");
@@ -270,6 +285,13 @@ public:
                             throw util::StaleEndpoint(message);
                         }
                         throw AlpacaException(message);
+                    }
+                    // An auto-detected mount is remembered once it answered, so the next connect
+                    // tries this place first. A configured port or host has no resolver and is
+                    // never stored.
+                    if (connection_resolver_) {
+                        util::DeviceLocationStore::save(util::location_key(get_unique_id(), location_index_),
+                                                        location_of(info));
                     }
                 },
                 "iOptron");
@@ -430,19 +452,38 @@ public:
             ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
         }
     }
-    
+
+    // "gps_status": whether the mount's GPS receiver holds a fix, with the receiver's own latitude and
+    // longitude (issue #1277). Every iOptron mount answers :GLS#, so it is listed whenever connected.
+    static constexpr std::string_view kGpsStatusAction = "gps_status";
+
     std::vector<std::string> get_supported_actions() const override {
-        return {};  // No custom actions
+        // connected_ is atomic: no mutex_, so a command_* exchange holding it cannot stall this getter.
+        if (!connected_.load()) return {};
+        return {std::string(kGpsStatusAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;  // Unused - no actions supported
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+        (void)action_parameters;  // gps_status takes none
+        if (!util::is_gps_status_action(action_name)) {
+            throw AlpacaException("Action not supported: " + std::string(action_name),
+                                  AlpacaError::ActionNotImplemented);
+        }
+        {
+            // mutex_ guards state only; the wire has its own lock in the protocol wrapper (decision 0016).
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+        }
+        // :GLS# digit 17 is 2 only for valid GPS data; the site in the same reply is then the receiver's
+        // reading. Without a fix the reply holds the stored site, which must not be reported as GPS.
+        const SiteInfo site = iOptronProtocolWrapper::instance().get_site_location();
+        const bool fix = (site.gps_status == 2);
+        if (!fix) return util::format_gps_status(false, std::nullopt, std::nullopt);
+        return util::format_gps_status(true, site.latitude_degrees, site.longitude_degrees);
     }
-    
+
     bool can_action(std::string_view action_name) const override {
-        (void)action_name;  // Unused - no actions supported
-        return false;
+        return connected_.load() && util::is_gps_status_action(action_name);
     }
     
     std::string command_blind(std::string_view command, bool raw) override {
@@ -851,12 +892,13 @@ public:
         return EquatorialSystem::Topocentric;
     }
 
+    // The driver applies no refraction correction, so it neither knows nor computes the flag (ITelescopeV4).
     bool get_does_refraction() const override {
-        return does_refraction_;
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
-    void set_does_refraction(bool does_refraction) override {
-        does_refraction_ = does_refraction;
+    void set_does_refraction(bool) override {
+        throw AlpacaException("DoesRefraction is not implemented", AlpacaError::PropertyNotImplemented);
     }
 
     int get_slew_settle_time() const override {
@@ -891,7 +933,10 @@ public:
     
     double get_site_elevation() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return site_elevation_m_;
+        if (!site_elevation_m_) {
+            throw AlpacaException("SiteElevation has not been set", AlpacaError::InvalidOperation);
+        }
+        return *site_elevation_m_;
     }
     
     void set_site_elevation(double elevation) override {
@@ -2798,6 +2843,7 @@ private:
     // connection_resolved_ is true once a connect has run the resolver, so a
     // later connect retries that endpoint before scanning again.
     util::ConnectionResolver<ConnectionInfo> connection_resolver_;
+    int location_index_ = 0;  // the mount index the resolver searches, part of the location key
     bool connection_resolved_ = false;
     std::atomic<bool> connected_{false};
     mutable MountInfo mount_info_;
@@ -2812,7 +2858,6 @@ private:
     double focal_length_m_ = 0.0;
     int slew_settle_time_seconds_ = 0;
     double custom_tracking_rate_ = 1.0;
-    bool does_refraction_ = false;
     // open-astro#346 (the shape #304 fixed on the Sky-Watcher driver): ASCOM
     // treats the two target properties as independent, so each must throw
     // ValueNotSet until that property itself has been written. One shared flag
@@ -2849,7 +2894,7 @@ private:
     mutable double site_longitude_cached_;
     mutable bool site_info_valid_;
     mutable bool hemisphere_north_;
-    mutable double site_elevation_m_;
+    mutable std::optional<double> site_elevation_m_;  // nullopt until set or configured
     mutable int timezone_offset_minutes_;
     mutable bool timezone_offset_valid_;
     mutable bool dst_observed_;
@@ -2992,7 +3037,21 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_deferred(
                                                     std::function<void()>{}, std::function<void()>{}, clock);
 }
 
-ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
+ConnectionInfo resolve_ioptron_serial_auto(int mount_index, const std::string& location_key) {
+    // The port that worked last time goes first: one :MountInfo# instead of the full scan.
+    // :MountInfo# answers a model code only, so the check cannot tell two mounts of one model
+    // apart; a port a connected driver holds is never probed (decision 0017).
+    if (!location_key.empty()) {
+        if (const auto remembered = util::recall_serial_location(
+                location_key, [](const std::string& path) { return !probe_ioptron_serial_port(path).empty(); })) {
+            ALPACA_LOG_INFO("iOptron", "Mount answered on remembered port " + *remembered);
+            ConnectionInfo conn;
+            conn.type = ConnectionType::Serial;
+            conn.port_path = *remembered;
+            conn.baud_rate = 115200;
+            return conn;
+        }
+    }
     auto ports = enumerate_ioptron_ports();
     if (ports.empty()) {
         throw AlpacaException(util::serial_auto_detect_failed_message("iOptron mount"));
@@ -3015,7 +3074,24 @@ ConnectionInfo resolve_ioptron_serial_auto(int mount_index) {
     return conn;
 }
 
-ConnectionInfo resolve_ioptron_network_auto(int mount_index) {
+ConnectionInfo resolve_ioptron_network_auto(int mount_index, const std::string& location_key) {
+    // The address that worked last time goes first: one handshake instead of the 2-5 s sweep.
+    if (!location_key.empty()) {
+        std::string host;
+        int tcp_port = 0;
+        const auto remembered = util::DeviceLocationStore::load(location_key);
+        if (remembered && util::parse_network_location(*remembered, host, tcp_port)) {
+            if (!probe_ioptron_network_host(host, tcp_port).empty()) {
+                ALPACA_LOG_INFO("iOptron", "Mount answered at remembered address " + *remembered);
+                ConnectionInfo conn;
+                conn.type = ConnectionType::Network;
+                conn.host = host;
+                conn.tcp_port = tcp_port;
+                return conn;
+            }
+            ALPACA_LOG_INFO("iOptron", "Remembered address " + *remembered + " did not answer; searching");
+        }
+    }
     ALPACA_LOG_INFO("iOptron", "Starting network auto-discovery...");
     auto hosts = enumerate_ioptron_network_hosts();
     if (hosts.empty()) {
@@ -3050,9 +3126,16 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto(int device_number
                                                                std::optional<bool> sync_time_on_connect,
                                                                util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
-    return create_ioptron_telescope_deferred(
-        device_number, [mount_index] { return resolve_ioptron_serial_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
+    auto driver = std::make_unique<iOptronTelescopeDriver>(
+        device_number, ConnectionInfo{}, site_latitude_deg, site_longitude_deg, site_elevation_m, sync_time_on_connect,
+        util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{}, std::function<void()>{},
+        std::function<void()>{}, clock);
+    const iOptronTelescopeDriver* self = driver.get();
+    driver->set_location_index(mount_index);
+    driver->set_connection_resolver([self, mount_index] {
+        return resolve_ioptron_serial_auto(mount_index, util::location_key(self->get_unique_id(), mount_index));
+    });
+    return driver;
 }
 
 std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int device_number, int mount_index,
@@ -3063,9 +3146,16 @@ std::unique_ptr<TelescopeDriver> create_ioptron_telescope_auto_network(int devic
                                                                        util::TaskClock& clock) {
     // The subnet sweep runs at connect time (#659), not here: at server
     // start-up the mount is usually still joining the access point.
-    return create_ioptron_telescope_deferred(
-        device_number, [mount_index] { return resolve_ioptron_network_auto(mount_index); }, site_latitude_deg,
-        site_longitude_deg, site_elevation_m, sync_time_on_connect, clock);
+    auto driver = std::make_unique<iOptronTelescopeDriver>(
+        device_number, ConnectionInfo{}, site_latitude_deg, site_longitude_deg, site_elevation_m, sync_time_on_connect,
+        util::ConnectionResolver<ConnectionInfo>{}, std::function<void()>{}, std::function<void()>{},
+        std::function<void()>{}, clock);
+    const iOptronTelescopeDriver* self = driver.get();
+    driver->set_location_index(mount_index);
+    driver->set_connection_resolver([self, mount_index] {
+        return resolve_ioptron_network_auto(mount_index, util::location_key(self->get_unique_id(), mount_index));
+    });
+    return driver;
 }
 
 void set_slew_spawn_for_testing(TelescopeDriver& driver, std::function<std::thread(std::function<void()>)> spawn) {

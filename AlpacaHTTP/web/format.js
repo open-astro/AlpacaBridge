@@ -655,13 +655,95 @@ function thermalCameraHint(cameras, value, controls, listError, saved, taken) {
 
 // Saved-config keys the device card's settings list leaves out: the card shows
 // them in its own rows (type, number, vendor, and the Unique ID row for the
-// GUID stored as `uniqueId`, decision 0018) or derives them (aperture area
+// stored ID in `uniqueId`, decision 0018) or derives them (aperture area
 // and focal length).
 const HIDDEN_DEVICE_SETTING_KEYS = new Set(['vendor', 'deviceType', 'deviceNumber', 'uniqueId',
     'apertureDiameter', 'focalLength']);
 
 function deviceSettingShown(key) {
     return !HIDDEN_DEVICE_SETTING_KEYS.has(key);
+}
+
+// Celestron focus motor calibration (issue #1411). The driver's
+// CalibrationStatus action answers exactly "Calibrating", "Calibrated" or
+// "NotCalibrated"; anything else (an error, a disconnected device, an unknown
+// string) parses to 'unknown'. Abort is offered only for 'calibrating': the
+// motor firmware can lose a good calibration to an abort sent while idle.
+const CALIBRATION_STATUS_STATES = {
+    Calibrating: 'calibrating',
+    Calibrated: 'calibrated',
+    NotCalibrated: 'not-calibrated',
+};
+
+function showsCalibrationControls(device) {
+    if (!device) return false;
+    const vendor = String(device.Vendor || (device.Config && device.Config.vendor) || '').toLowerCase();
+    return vendor === 'celestron' && String(device.DeviceType || '').toLowerCase() === 'focuser';
+}
+
+function parseCalibrationStatus(value) {
+    if (typeof value !== 'string') return 'unknown';
+    return Object.prototype.hasOwnProperty.call(CALIBRATION_STATUS_STATES, value)
+        ? CALIBRATION_STATUS_STATES[value] : 'unknown';
+}
+
+function isCalibrationRunning(state) {
+    return state === 'calibrating';
+}
+
+function mayAbortCalibration(state) {
+    return state === 'calibrating';
+}
+
+// A fresh CalibrationStatus answer, read just before AbortCalibration is sent,
+// must still say "Calibrating"; a cached state is not enough.
+function mayAbortFromStatus(value) {
+    return mayAbortCalibration(parseCalibrationStatus(value));
+}
+
+// Whether to schedule another status read. Failed reads during a run keep
+// the poll going (Abort stays hidden meanwhile); a failure after any other
+// state ends it.
+function keepPollingCalibration(lastGoodState, nextState, failed) {
+    if (failed) return lastGoodState === 'calibrating';
+    return isCalibrationRunning(nextState);
+}
+
+function calibrationStatusClass(state) {
+    return state === 'not-calibrated' ? 'calibration-status calibration-status-warn' : 'calibration-status';
+}
+
+function mayStartCalibration(state) {
+    return state === 'calibrated' || state === 'not-calibrated';
+}
+
+function calibrationStatusText(state, errorText) {
+    if (state === 'calibrating') return 'Calibrating: the motor is driving between its end stops (about 5 minutes).';
+    if (state === 'calibrated') return 'Calibrated.';
+    if (state === 'not-calibrated') return 'Not calibrated.';
+    return errorText ? 'Calibration status unavailable: ' + errorText : 'Calibration status unknown.';
+}
+
+function calibrationHint(state) {
+    if (state === 'not-calibrated') {
+        return 'The motor is not calibrated, so Position, MaxStep and moves are refused. Press Calibrate.';
+    }
+    return '';
+}
+
+function calibrationConfirmText() {
+    return 'Calibrate the focus motor? It drives from one end of its travel to the other and back, ' +
+        'which takes about 5 minutes. Remove anything that could be hit by the focuser or its load first.';
+}
+
+// Body for PUT /api/v1/focuser/{n}/action (Alpaca form fields).
+function calibrationActionBody(actionName, clientTransactionId) {
+    return new URLSearchParams({
+        Action: actionName,
+        Parameters: '',
+        ClientID: '1',
+        ClientTransactionID: String(clientTransactionId),
+    }).toString();
 }
 
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
@@ -674,5 +756,9 @@ if (typeof module !== 'undefined' && module.exports) {
                         wifiSsidKey, wifiSsidLabel, asiairDuplicateGpioError,
                         normalizeAlignmentMode, deviceStatus, formatSiteCoordinate,
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
-                        deviceSettingShown };
+                        deviceSettingShown,
+                       showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
+                       mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,
+                       mayStartCalibration, calibrationStatusText, calibrationHint,
+                       calibrationConfirmText, calibrationActionBody };
 }

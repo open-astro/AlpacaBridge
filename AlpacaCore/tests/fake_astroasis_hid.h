@@ -39,6 +39,7 @@ struct FakeHidState {
     bool moving = false;
     bool dead = false;         // reads time out, as a pulled cable does
     bool fail_config = false;  // MaxStep (0x30) goes unanswered
+    bool fail_status = false;  // the state poll (0x32) goes unanswered
     bool fail_move = false;    // the device moves (0x36) but the reply is lost
     bool fail_halt = false;    // the device stops (0x37) but the reply is lost
     int closes = 0;
@@ -87,6 +88,7 @@ public:
                 break;
             case 0x32:
                 ++state_->status_reads;
+                if (state_->fail_status) break;
                 resp.push_back(14);
                 be32(2048);        // internal ADC
                 be32(0x80000000);  // no external probe

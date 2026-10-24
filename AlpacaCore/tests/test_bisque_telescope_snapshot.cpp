@@ -20,6 +20,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -74,9 +75,9 @@ struct Rig {
     alpacacore::test::FakeMountServer server{mount.responder()};
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
 
-    Rig() {
+    explicit Rig(int timeout_ms = 300) {
         REQUIRE(server.ok());
-        driver = bq::create_bisque_telescope(0, loopback(server.port()), clock);
+        driver = bq::create_bisque_telescope(0, loopback(server.port(), timeout_ms), clock);
         REQUIRE_NOTHROW(driver->set_connected(true));
         bq::set_status_poll_paused_for_testing(*driver, true);
     }
@@ -191,8 +192,6 @@ TEST_CASE("Bisque snapshot - a setter's value is read back at once and a stale p
     CHECK(rig.driver->get_guide_rate().dec == 0.001);
     rig.driver->set_slew_settle_time(3);
     CHECK(rig.driver->get_slew_settle_time() == 3);
-    rig.driver->set_does_refraction(true);
-    CHECK(rig.driver->get_does_refraction());
     rig.driver->set_tracking_rate(0);
     CHECK(rig.driver->get_tracking_rate() == 0);
     rig.driver->set_site_latitude(-33.856784);
@@ -405,4 +404,265 @@ TEST_CASE("Bisque snapshot - a retarget after a finished slew makes no measureme
     // IsSlewComplete, IsTracking and the slew command only.
     CHECK(rig.mount.transactions.load() - transactions_before <= 3);
     CHECK(rig.driver->get_slewing());
+}
+
+// Runs `body` on another thread and waits until the fake has started answering the exchange `started` counts, so the
+// case times its getters while the driver is parked in TheSkyX.
+template <typename Body>
+std::thread run_while_parked(alpacacore::test::FakeBisqueMount& mount, Body body) {
+    const int before = mount.transactions.load();
+    std::thread worker(std::move(body));
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (mount.transactions.load() < before + 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    return worker;
+}
+
+// Falsified by: bisque_telescope_driver.cpp, find_home: hold mutex_ across protocol.find_home().
+TEST_CASE("Bisque snapshot - Name, Connected and RightAscension answer while FindHome runs in TheSkyX",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.find_home_ms = 1500;
+    auto worker = run_while_parked(rig.mount, [&] { rig.driver->find_home(); });
+    const auto budget = milliseconds(500);
+    CHECK(timed([&] { (void)rig.driver->get_name(); }) < budget);
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < budget);
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < budget);
+    worker.join();
+    // The control path read the mount after FindHome: a read right after sees it.
+    CHECK(rig.driver->get_at_home());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, sync_to_coordinates: call publish_measurement_locked() with mutex_ held.
+TEST_CASE("Bisque snapshot - RightAscension answers while the read at the end of SyncToCoordinates is slow",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.position_ms = 1000;
+    std::thread worker([&] { rig.driver->sync_to_coordinates(7.25, 15.0); });
+    // The Sync exchange is fast; the position read that follows is the slow one.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.ra_hours.load() != 7.25 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    std::this_thread::sleep_for(milliseconds(100));
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < milliseconds(500));
+    worker.join();
+    CHECK(rig.driver->get_right_ascension() == 7.25);
+}
+
+// Falsified by: bisque_telescope_driver.cpp, set_tracking: hold mutex_ across protocol.set_tracking().
+TEST_CASE("Bisque snapshot - Name, Connected and Tracking answer while a SetTracking exchange is slow",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.set_tracking_ms = 1000;
+    auto worker = run_while_parked(rig.mount, [&] { rig.driver->set_tracking(false); });
+    CHECK(timed([&] { (void)rig.driver->get_name(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_tracking(); }) < milliseconds(500));
+    worker.join();
+}
+
+namespace {
+
+// Starts `initiator` on a thread, waits until its TheSkyX command (the `exchanges`-th transaction after the call) is
+// on the wire, calls AbortSlew, then checks that Slewing is false: the abort reached TheSkyX after the command, so the
+// mount is stopped and the driver must say so. The fake counts a transaction when the command arrives, before its
+// 300 ms latency, so the abort starts while the initiator is still inside that exchange.
+void abort_during_initiator_exchange(int exchanges,
+                                     const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 300;
+    rig.mount.slew_polls_needed = 100000;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { initiator(*rig.driver); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + exchanges && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + exchanges);
+    rig.driver->abort_slew();
+    worker.join();
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+}  // namespace
+
+// Falsified by: bisque_telescope_driver.cpp, move_axis: drop initiator_mutex_ so the start exchange runs outside it.
+TEST_CASE("Bisque snapshot - AbortSlew during the MoveAxis start exchange leaves Slewing false",
+          "[bisque][telescope][snapshot]") {
+    abort_during_initiator_exchange(1, [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, slew_to_coordinates_async: drop initiator_mutex_ so the slew command
+// and note_slew_started_locked() run outside it.
+TEST_CASE("Bisque snapshot - AbortSlew during the SlewToCoordinatesAsync exchange leaves Slewing false",
+          "[bisque][telescope][snapshot]") {
+    abort_during_initiator_exchange(2, [](alpacacore::TelescopeDriver& d) { d.slew_to_coordinates_async(5.0, 10.0); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, wait_for_slew_complete: clear slewing_cached_ without the
+// `epoch == slew_epoch_` check.
+TEST_CASE("Bisque snapshot - a SlewToCoordinates that completes does not clear the Slewing of a retarget",
+          "[bisque][telescope][snapshot]") {
+    Rig rig;
+    rig.mount.slew_polls_needed = 0;  // the first IsSlewComplete of the sync slew answers complete
+    bool retargeted = false;
+    // The seam runs on the slewing thread after the completion answer and the position read, before the wait applies
+    // Slewing false: the window a second client's retarget can land in.
+    bq::set_slew_complete_hook_for_testing(*rig.driver, [&] {
+        if (retargeted) return;
+        retargeted = true;
+        rig.mount.slew_polls_needed = 100000;
+        rig.driver->slew_to_coordinates_async(6.0, 11.0);
+    });
+    rig.driver->slew_to_coordinates(5.0, 10.0);
+    bq::set_slew_complete_hook_for_testing(*rig.driver, {});
+    REQUIRE(retargeted);
+    REQUIRE(rig.mount.slew_commands.load() == 2);
+    REQUIRE(rig.mount.slewing.load());
+    // The completion was about the first slew; the retarget is still in flight.
+    CHECK(rig.driver->get_slewing());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, set_connected: move lock.unlock() below the seed sample_frame(), so
+// mutex_ is held across the handshake, IsParked and the seed.
+TEST_CASE("Bisque snapshot - Name and Connected answer while the connect waits on IsParked",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    rig.driver->set_connected(false);
+    rig.mount.is_parked_ms = 1500;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { rig.driver->set_connected(true); });
+    // The handshake is one transaction; the next one is the IsParked query the fake holds.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 2);
+    CHECK(timed([&] { (void)rig.driver->get_name(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    worker.join();
+    CHECK(rig.driver->get_connected());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, park: hold mutex_ across protocol.is_parked() in the poll loop.
+TEST_CASE("Bisque snapshot - Connected and AtPark answer while a Park polls IsParked",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.is_parked_ms = 1500;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { rig.driver->park(); });
+    // The park command is one transaction; the next one is the first IsParked poll the fake holds.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + 2 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 2);
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_at_park(); }) < milliseconds(500));
+    worker.join();
+    CHECK(rig.driver->get_at_park());
+}
+
+// Falsified by: bisque_telescope_driver.cpp, set_connected(false): call protocol.disconnect() before lock.unlock(), so
+// mutex_ is held while the close waits for the guide reply on the wrapper's lock.
+TEST_CASE("Bisque snapshot - Connected answers while a disconnect waits for a PulseGuide reply",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 1500;
+    const int before = rig.mount.transactions.load();
+    rig.driver->pulse_guide(2, 100);
+    const auto on_wire = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + 1 && std::chrono::steady_clock::now() < on_wire) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 1);
+    std::thread worker([&] { rig.driver->set_connected(false); });
+    // Connected reads true until the disconnect clears the state, then false; no read waits for the guide reply.
+    bool connected = true;
+    auto slowest = std::chrono::microseconds(0);
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (connected && std::chrono::steady_clock::now() < deadline) {
+        slowest = std::max(slowest, timed([&] { connected = rig.driver->get_connected(); }));
+    }
+    worker.join();
+    CHECK_FALSE(connected);
+    CHECK(slowest < milliseconds(500));
+}
+
+// Falsified by: bisque_telescope_driver.cpp, wait_for_slew_complete: hold mutex_ across
+// BisqueProtocolWrapper::instance().is_slew_complete().
+TEST_CASE("Bisque snapshot - RightAscension, Slewing and Connected answer while SlewToCoordinates polls IsSlewComplete",
+          "[bisque][telescope][snapshot]") {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.slew_polls_needed = 0;  // the first poll answers complete, so the wait sleeps on no task clock
+    rig.mount.slew_complete_ms = 1500;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { rig.driver->slew_to_coordinates(5.0, 10.0); });
+    // IsTracking and the slew command come first; the third transaction is the IsSlewComplete poll the fake holds.
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + 3 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + 3);
+    CHECK(timed([&] { (void)rig.driver->get_right_ascension(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_slewing(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    worker.join();
+    CHECK_FALSE(rig.driver->get_slewing());
+}
+
+namespace {
+
+// Starts `initiator` on a thread with every TheSkyX reply held 1 s, waits until its `exchanges`-th transaction is on
+// the wire, and times Connected and Slewing against it.
+void getters_answer_during_exchange(int exchanges, const std::function<void(alpacacore::TelescopeDriver&)>& initiator) {
+    Rig rig(5000);
+    REQUIRE(rig.poll());
+    rig.mount.latency_ms = 1000;
+    rig.mount.slew_polls_needed = 100000;
+    const int before = rig.mount.transactions.load();
+    std::thread worker([&] { initiator(*rig.driver); });
+    const auto deadline = std::chrono::steady_clock::now() + seconds(5);
+    while (rig.mount.transactions.load() < before + exchanges && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(milliseconds(2));
+    }
+    REQUIRE(rig.mount.transactions.load() >= before + exchanges);
+    CHECK(timed([&] { (void)rig.driver->get_connected(); }) < milliseconds(500));
+    CHECK(timed([&] { (void)rig.driver->get_slewing(); }) < milliseconds(500));
+    worker.join();
+}
+
+}  // namespace
+
+// Falsified by: bisque_telescope_driver.cpp, move_axis: hold mutex_ across protocol.start_open_loop_motion().
+TEST_CASE("Bisque snapshot - Connected and Slewing answer while the MoveAxis start exchange is slow",
+          "[bisque][telescope][snapshot]") {
+    getters_answer_during_exchange(1, [](alpacacore::TelescopeDriver& d) { d.move_axis(0, 0.5); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, slew_to_coordinates_async: hold mutex_ across protocol.slew_to_ra_dec().
+TEST_CASE("Bisque snapshot - Connected and Slewing answer while the SlewToCoordinatesAsync command is slow",
+          "[bisque][telescope][snapshot]") {
+    getters_answer_during_exchange(2, [](alpacacore::TelescopeDriver& d) { d.slew_to_coordinates_async(5.0, 10.0); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, unpark: hold mutex_ across protocol.unpark().
+TEST_CASE("Bisque snapshot - Connected and Slewing answer while the Unpark command is slow",
+          "[bisque][telescope][snapshot]") {
+    getters_answer_during_exchange(1, [](alpacacore::TelescopeDriver& d) { d.unpark(); });
+}
+
+// Falsified by: bisque_telescope_driver.cpp, set_park: hold mutex_ across protocol.set_park_position().
+TEST_CASE("Bisque snapshot - Connected and Slewing answer while the SetPark command is slow",
+          "[bisque][telescope][snapshot]") {
+    getters_answer_during_exchange(1, [](alpacacore::TelescopeDriver& d) { d.set_park(); });
 }

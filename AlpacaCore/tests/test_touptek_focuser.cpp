@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
@@ -47,7 +48,147 @@ std::unique_ptr<alpacacore::FocuserDriver> make_connected(alpacacore::test::Fake
     return driver;
 }
 
+// Blocks the named SDK call for `delay` once armed, so a test holds a device transaction open. `entered` is set
+// when the call is in flight. Set before the driver call starts and cleared after it is joined (the fake's rule).
+void delay_call(alpacacore::test::FakeToupTekSDK& fake, const std::string& name, std::chrono::milliseconds delay,
+                std::atomic<bool>& entered) {
+    fake.before_call = [name, delay, &entered](const std::string& call) {
+        if (call == name) {
+            entered.store(true);
+            std::this_thread::sleep_for(delay);
+        }
+    };
+}
+
+void wait_entered(const std::atomic<bool>& entered) {
+    for (int i = 0; i < 400 && !entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(entered.load());
+}
+
+template <typename Fn>
+std::chrono::milliseconds elapsed_of(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        // Only the latency matters here.
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing
+// an exchange may refuse it with NotConnected but must never fail it on a closed handle (DriverException).
+template <typename Fn>
+int outcome_of(Fn&& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        return ex.error_code();
+    }
+    return 0;
+}
+
+constexpr std::chrono::milliseconds kDeviceDelay{300};
+constexpr std::chrono::milliseconds kGetterBound{20};
+
 } // namespace
+
+TEST_CASE("ToupTek AAF Focuser Driver - no-I/O getters do not wait on a status refill",
+          "[touptek][focuser][unit][io-lock]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    std::atomic<bool> entered{false};
+    delay_call(fake, "aaf_get", kDeviceDelay, entered);
+
+    std::thread refill([&] { (void)elapsed_of([&] { (void)driver->get_position(); }); });
+    wait_entered(entered);
+
+    CHECK(elapsed_of([&] { (void)driver->get_name(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_max_step(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_max_increment(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_connected(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_unique_id(); }) < kGetterBound);
+
+    refill.join();
+    fake.before_call = nullptr;
+}
+
+TEST_CASE("ToupTek AAF Focuser Driver - no-I/O getters do not wait on a connect", "[touptek][focuser][unit][io-lock]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::FakeToupTekSDK::ToupFocuserInfo focuser;
+    focuser.id = "fake-aaf-0";
+    focuser.name = "FakeAAF";
+    fake.focusers.push_back(focuser);
+    auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_id(0, "fake-aaf-0", fake);
+    std::atomic<bool> entered{false};
+    delay_call(fake, "aaf_range", kDeviceDelay, entered);
+
+    std::thread connect([&] { (void)elapsed_of([&] { driver->set_connected(true); }); });
+    wait_entered(entered);
+
+    CHECK(elapsed_of([&] { (void)driver->get_name(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_connected(); }) < kGetterBound);
+    CHECK(elapsed_of([&] { (void)driver->get_unique_id(); }) < kGetterBound);
+
+    connect.join();
+    fake.before_call = nullptr;
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek AAF Focuser Driver - disconnect with a refill in flight returns and closes after it",
+          "[touptek][focuser][unit][io-lock]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    std::atomic<bool> entered{false};
+    delay_call(fake, "aaf_get", kDeviceDelay, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread refill([&] { outcome = outcome_of([&] { (void)driver->get_position(); }); });
+    wait_entered(entered);
+
+    CHECK(elapsed_of([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    refill.join();
+    fake.before_call = nullptr;
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&]() { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("ToupTek AAF Focuser Driver - disconnect with a move in flight closes the handle after the move",
+          "[touptek][focuser][unit][io-lock]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    std::atomic<bool> entered{false};
+    delay_call(fake, "aaf_set", kDeviceDelay, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread mover([&] { outcome = outcome_of([&] { driver->move(10); }); });
+    wait_entered(entered);
+
+    CHECK(elapsed_of([&] { driver->set_connected(false); }) < std::chrono::seconds(5));
+    mover.join();
+    fake.before_call = nullptr;
+    // The close waits for the write: it never lands on a closed handle (the fake raises DriverException).
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Falsified by: touptek_focuser_driver.cpp connected_max_step() MUTATION: replaced the NotConnected throw with
+// return max_step_current_.load(), move() then reports InvalidValue for the zero limit instead of NotConnected. The
+// race itself is covered by the [stress] case "ToupTek AAF focuser - concurrent connect/disconnect/operate stress".
+TEST_CASE("ToupTek AAF Focuser Driver - a disconnected move or limit read is NotConnected, never out of range",
+          "[touptek][focuser][unit]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    auto driver = make_connected(fake);
+    driver->set_connected(false);
+
+    require_alpaca_error([&]() { driver->move(1000000000); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_max_step(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { (void)driver->get_max_increment(); }, alpacacore::AlpacaError::NotConnected);
+}
 
 TEST_CASE("ToupTek AAF Focuser Driver - Defaults", "[touptek][focuser][unit]") {
     auto driver = alpacacore::vendor::touptek::create_touptek_focuser_by_index(0, 0);
@@ -311,7 +452,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - A dead link refuses reads instead of ser
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
     CHECK(driver->get_connected() == true);
-    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+    CHECK(driver->get_device_state().empty());
 
     fake.throw_from.clear();
     CHECK(driver->get_position() == 0);

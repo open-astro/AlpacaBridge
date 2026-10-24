@@ -31,6 +31,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <vector>
 
 #include "catch2_compat.h"
 
@@ -41,6 +42,7 @@
 #include "fake_ioptron_mount.h"
 #include "fake_pty_write.h"
 #include "fake_task_clock.h"
+#include "gps_status_check.h"
 #include "sidereal_time_check.h"
 
 using alpacacore::DeviceType;
@@ -1183,5 +1185,125 @@ TEST_CASE("iOptron Telescope Driver - SiderealTime follows the clock to under a 
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     alpacacore::test::check_sidereal_time_follows_the_clock(*driver);
+    driver->set_connected(false);
+}
+
+// ── #1478 spec-audit items ───────────────────────────────────────────────────
+
+TEST_CASE("iOptron Telescope Driver spec audit - DoesRefraction is not implemented",
+          "[ioptron][telescope][unit][spec-audit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    // The driver applies no refraction correction: ITelescopeV4 has it raise on read and on write.
+    require_alpaca_error([&] { (void)driver->get_does_refraction(); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(true); }, alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { driver->set_does_refraction(false); }, alpacacore::AlpacaError::PropertyNotImplemented);
+}
+
+TEST_CASE("iOptron Telescope Driver spec audit - SiteElevation never set throws InvalidOperation",
+          "[ioptron][telescope][unit][spec-audit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    // ASCOM time-and-place FAQ (decision 0019): a site value never set reads as InvalidOperation, not 0 m.
+    require_alpaca_error([&] { (void)driver->get_site_elevation(); }, alpacacore::AlpacaError::InvalidOperation);
+    driver->set_site_elevation(42.0);
+    CHECK(driver->get_site_elevation() == 42.0);
+}
+
+// Issue #1277: Action("gps_status") reports whether the mount's GPS receiver holds a fix (:GLS# digit 2), with the
+// receiver's own latitude and longitude from the same reply. Without a fix the stored site in that reply is not
+// GPS data and is never reported.
+TEST_CASE("iOptron Telescope Driver - gps_status reports the GPS fix from :GLS#", "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+
+    // Not connected: not listed, not supported, and the call is NotConnected.
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&]() { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
+    CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
+    require_alpaca_error([&]() { (void)driver->action("other_action", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+
+    SECTION("valid GPS data is a fix with the receiver's site") {
+        mount.set_gps(2, -33.856784, 151.215297);
+        const std::string reply = driver->action("gps_status", "");
+        CHECK(reply.rfind("{\"fix\":true,", 0) == 0);
+        REQUIRE(alpacacore::test::gps_status_number(reply, "latitude").has_value());
+        CHECK(*alpacacore::test::gps_status_number(reply, "latitude") == Catch::Approx(-33.856784).margin(1e-6));
+        CHECK(*alpacacore::test::gps_status_number(reply, "longitude") == Catch::Approx(151.215297).margin(1e-6));
+        CHECK_FALSE(alpacacore::test::gps_status_number(reply, "elevation").has_value());
+        CHECK(reply.find("\"elevation\":null") != std::string::npos);
+    }
+    SECTION("a working receiver without valid data is no fix, and the stored site is withheld") {
+        mount.set_gps(1, 51.477833, -0.001500);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    SECTION("no or failed GPS module is no fix") {
+        mount.set_gps(0, 51.477833, -0.001500);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    driver->set_connected(false);
+}
+
+// Issue #1277, decision 0016: the gps_status action reads the wire without holding mutex_, so a mutex_ getter
+// answers at once while the :GLS# reply is held, and the action sends :GLS# only (no :GUT#).
+TEST_CASE("iOptron Telescope Driver - gps_status does not hold mutex_ across the :GLS# exchange",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    mount.set_gps(2, -33.856784, 151.215297);
+    const int gut_before = mount.count(":GUT");
+
+    mount.hold_next_reply(std::chrono::milliseconds(1000));
+    auto reply = std::async(std::launch::async, [&] { return driver->action("gps_status", ""); });
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_connected());  // takes mutex_
+    CHECK(driver->can_action("gps_status"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
+
+    CHECK(reply.get().rfind("{\"fix\":true,", 0) == 0);
+    CHECK(mount.count(":GUT") == gut_before);
+    driver->set_connected(false);
+}
+
+// Issue #1277, decision 0016: SupportedActions and CanAction read the atomic connected_ without mutex_, so
+// a CommandString exchange (which holds mutex_ across the wire) does not stall them.
+TEST_CASE("iOptron Telescope Driver - SupportedActions and CanAction do not wait on a held command exchange",
+          "[ioptron][telescope][unit][fake]") {
+    alpacacore::test::FakeIoptronMount mount("0012", /*landing_ra_error_arcsec=*/0.0);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, loopback_endpoint(mount.port()));
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+
+    mount.hold_next_reply(std::chrono::milliseconds(1000));
+    auto reply = std::async(std::launch::async, [&] { return driver->command_string(":GLS#", true); });
+    REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
+
+    (void)reply.get();
     driver->set_connected(false);
 }

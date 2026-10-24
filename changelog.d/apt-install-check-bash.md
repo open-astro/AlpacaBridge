@@ -1,0 +1,2 @@
+### Fixed (CI)
+- **APT install check runs its steps in bash** (`.github/workflows/apt-install-check.yml`, issue #1360): in a container job a step's default shell is `sh -e`, which is dash in `debian:trixie`, so the release comparison step stopped at its first `<<<` with "Syntax error: redirection unexpected" and the first run failed before comparing anything. The job now sets `bash` as the default shell for its steps.

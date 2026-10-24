@@ -12,9 +12,10 @@
 
 #pragma once
 
-#include <string>
-#include <memory>
 #include <chrono>
+#include <functional>
+#include <memory>
+#include <string>
 #include <vector>
 
 namespace alpacacore::vendor::ioptron {
@@ -39,6 +40,22 @@ std::vector<iOptronPortInfo> enumerate_ioptron_ports();
 std::string probe_ioptron_serial_port(const std::string& port_path);
 
 std::vector<iOptronNetworkHostInfo> enumerate_ioptron_network_hosts();
+
+/// The auto-detect probe of one network endpoint: :MountInfo# over a short TCP
+/// connection. Returns the 4-digit model code, or empty when no mount answers.
+std::string probe_ioptron_network_host(const std::string& host, int tcp_port);
+
+/// Test seam for the auto-detect search: @p on_probe sees every
+/// probe_ioptron_serial_port() and probe_ioptron_network_host() call (the
+/// endpoint as the path, or "host:port"); @p enumerate_ports and
+/// @p enumerate_hosts, when set, replace the full scans. Empty members restore
+/// the real behaviour.
+struct iOptronScanHooks {
+    std::function<void(const std::string&)> on_probe;
+    std::function<std::vector<iOptronPortInfo>()> enumerate_ports;
+    std::function<std::vector<iOptronNetworkHostInfo>()> enumerate_hosts;
+};
+void set_ioptron_scan_hooks_for_testing(iOptronScanHooks hooks);
 
 std::string model_code_to_name(const std::string& code);
 
@@ -127,6 +144,7 @@ struct SiteInfo {
     bool is_northern_hemisphere = true;
     int timezone_offset_minutes = 0;  // Minutes from UTC
     bool dst_observed = false;
+    int gps_status = 0;  // :GLS# GPS digit: 0 no or failed GPS module, 1 GPS works but no valid data, 2 valid GPS data
 };
 
 /**
@@ -204,7 +222,14 @@ public:
      * Sends :GLS# and :GUT# commands.
      */
     SiteInfo get_site_info();
-    
+
+    /**
+     * @brief Get the :GLS# part of the site information (longitude, latitude, GPS digit, hemisphere).
+     *
+     * Sends :GLS# only; timezone and DST stay at their defaults.
+     */
+    SiteInfo get_site_location();
+
     /**
      * @brief Get parking position.
      *

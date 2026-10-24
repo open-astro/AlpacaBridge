@@ -335,3 +335,30 @@ TEST_CASE("SVBONY Camera - cooler members work with the cooler capability", "[sv
     CHECK(camera->get_cooler_on());
     CHECK(camera->get_cooler_power() == 0.0);
 }
+
+// Issue #1277: the SVBONY SDK has no e-/ADU or full-well figure, so both raise PropertyNotImplemented instead of a
+// made-up 1.0 or the ADU saturation; an unknown SensorName is "", not a placeholder.
+TEST_CASE(
+    "SVBONY Camera Driver - ElectronsPerADU and FullWellCapacity are not implemented, SensorName has no placeholder",
+    "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("SVBONY Camera Driver - an unknown SensorName is empty", "[svbony][camera][unit]") {
+    alpacacore::test::FakeSVBSDK fake;
+    fake.set_camera_present(false);
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, fake);
+    CHECK(driver->get_sensor_name().empty());
+}

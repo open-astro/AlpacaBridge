@@ -73,6 +73,9 @@ public:
     /// Stop answering (a handset gone quiet); bytes are still recorded.
     void set_silent(bool silent) { silent_.store(silent); }
 
+    /// Writes bytes to the host unprompted (a mount that keeps talking).
+    void push(const std::string& bytes) { pty_write_bounded(pty_.master_fd(), bytes, stop_); }
+
 private:
     void run() {
         while (!stop_.load()) {

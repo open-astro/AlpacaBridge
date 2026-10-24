@@ -91,7 +91,8 @@ author must do. Read the docstring before changing a gate.
   blocking-`get_connected()` drivers, name them; and keep every `std::regex` in `router.cpp` `static`.
 - **Nightly optimized run** (`.github/workflows/nightly-build.yml`, job `test-optimized`, issue
   #1313): `build-vendors` is `-O0 --coverage`, so the all-vendors suite also runs `Release`
-  (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job also installs the `.deb` it
+  (`-DNDEBUG`) nightly, off the PR path. The nightly `build` job runs only after `test-optimized`
+  passes, so a red suite publishes nothing. It also installs the `.deb` it
   builds and runs `scripts/check_bundled_gphoto.sh` before it publishes, as `package-deb` does on
   every PR, so a nightly `.deb` that fails the check is never published.
 - **Weekly link check** (`.github/workflows/link-check.yml`, issue #1362): lychee over the Markdown

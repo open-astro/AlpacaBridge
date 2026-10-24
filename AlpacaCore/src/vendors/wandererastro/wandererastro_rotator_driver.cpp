@@ -69,7 +69,7 @@ public:
 
     // Decision 0018: the router calls this at the upgrade start only, so the
     // offset saved under the device-number ID moves to the device that held that
-    // number then. A client that connected first has read 0 from the GUID key,
+    // number then. A client that connected first has read 0 from the stored-ID key,
     // so a connected driver takes the moved offset too. Lock order:
     // transition_mutex_, sync_mutex_, state_mutex_.
     void adopt_legacy_state() override {
@@ -161,7 +161,7 @@ public:
             protocol_.connect(effective);
             {
                 // The Sync offset persists across reconnects and restarts (IRotatorV4).
-                // Keyed by the persisted GUID (decision 0018). The offset saved under
+                // Keyed by the stored ID (decision 0018). The offset saved under
                 // the device-number ID is moved by adopt_legacy_state(), never here: a
                 // rotator added later on the same number must not inherit it.
                 const double saved_offset = util::RotatorSyncOffsetStore::load(get_unique_id());
