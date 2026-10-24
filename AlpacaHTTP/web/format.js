@@ -701,7 +701,7 @@ function mayAbortFromStatus(value) {
     return mayAbortCalibration(parseCalibrationStatus(value));
 }
 
-// Whether to schedule another status read. One failed read during a run keeps
+// Whether to schedule another status read. Failed reads during a run keep
 // the poll going (Abort stays hidden meanwhile); a failure after any other
 // state ends it.
 function keepPollingCalibration(lastGoodState, nextState, failed) {
