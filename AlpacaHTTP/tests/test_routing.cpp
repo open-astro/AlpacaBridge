@@ -7396,7 +7396,7 @@ int main() {
 
         // The utcdate setter is the third caller (added by #401, because a
         // UTCDate write can step the host clock), and it is the one whose
-        // ClientTransactionID comes from dispatch_telescope_method far above
+        // ClientTransactionID comes from the DeviceCall built in handle_device
         // rather than from a line or two up -- so it is the easiest of the
         // three to leave on the hardcoded 0. It needs a registered telescope
         // to reach the setter at all.
