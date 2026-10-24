@@ -42,9 +42,11 @@ set(TEST_SOURCES
     test_utc_offset.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
+    test_capture_session.cpp
     test_connection_resolver.cpp
     test_serial_by_id_scan.cpp
     test_serial_link.cpp
+    test_serial_read.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_telescope_driver_watchdog.cpp
