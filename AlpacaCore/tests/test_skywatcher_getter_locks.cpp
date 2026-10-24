@@ -231,7 +231,7 @@ TEST_CASE("SkyWatcher getters - a connect on the wire holds up no getter and rea
 }
 
 TEST_CASE("SkyWatcher getters - SiderealTime and UTCDate read one client-clock state while it is written",
-          "[skywatcher][getter-locks][stress]") {
+          "[skywatcher][getter-locks][stress-guard]") {
     struct ProbeGuard {
         ProbeGuard() {
             sw::detail::set_host_synchronized_probe([] { return false; });
