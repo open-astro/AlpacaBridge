@@ -857,16 +857,15 @@ public:
         }
     }
 
-    bool slew_to_target() {
+    std::string slew_to_target() {
         // Same bare-digit-no-'#' ack as the :S-prefixed setters (see
         // set_latitude()) — confirmed against real firmware (Command.ino:
         // the :MS# handler explicitly sets supress_frame=true) and hardware
         // (the mount visibly started slewing while this call sat waiting
         // for a '#' that was never coming).
-        std::string response = send_command(":MS#", false, kSetAckTimeoutMs);
-        // LX200 convention: "0" means the slew was accepted; a non-"0"
-        // response (often "1<reason>") means the mount rejected the target.
-        return !response.empty() && response[0] == '0';
+        // LX200 convention: "0" means the slew was accepted; any other reply is
+        // the refusal reason, which the driver reports (#1379).
+        return send_command(":MS#", false, kSetAckTimeoutMs);
     }
 
     void sync_to_target() {
@@ -1541,7 +1540,7 @@ void OnStepProtocolWrapper::set_target_ra(double ra_hours) { pimpl_->set_target_
 
 void OnStepProtocolWrapper::set_target_dec(double dec_degrees) { pimpl_->set_target_dec(dec_degrees); }
 
-bool OnStepProtocolWrapper::slew_to_target() { return pimpl_->slew_to_target(); }
+std::string OnStepProtocolWrapper::slew_to_target() { return pimpl_->slew_to_target(); }
 
 void OnStepProtocolWrapper::sync_to_target() { pimpl_->sync_to_target(); }
 

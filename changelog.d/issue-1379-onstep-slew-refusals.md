@@ -1,0 +1,13 @@
+### Breaking changes
+
+- **OnStep `SlewToAltAz` and `SlewToAltAzAsync` throw `InvalidOperation` while `Tracking` is true** (issue #1377, ITelescopeV4): a tracking mount drifts off the requested Alt/Az, so the interface refuses the slew. The driver used to start it. **After upgrading:** a client turns `Tracking` off before an Alt/Az slew. Errors from the Alt/Az slews now carry their own names instead of `SlewToCoordinates`/`SlewToCoordinatesAsync`. Test: `test_onstep_telescope.cpp` "OnStep Telescope Driver - an Alt/Az slew is refused while Tracking is true".
+
+### Fixed
+
+- **OnStep: a slew sent while a GOTO runs no longer stops that GOTO** (issue #1379): OnStepX answers a second GOTO by stopping the running one and refusing the new one, so the first GOTO ended short of its target and the client got "below horizon or limit". Every slew now throws `InvalidOperation` while the mount shows a GOTO (the driver's own, a park or home already moving, or a handset GOTO) before it cancels or sends anything. Test: `test_onstep_telescope.cpp` "OnStep Telescope Driver - a slew while a GOTO runs is refused and the GOTO keeps going".
+- **OnStep: a refused GOTO names the mount's reason** (issue #1379): every `:MS#` refusal read "below horizon or limit". The error now gives the reply digit and its reason (below the horizon limit, above the overhead limit, standby, parked as `InvalidWhileParked`, GOTO already running, outside limits, hardware fault, already moving, unspecified). Test: `test_onstep_telescope.cpp` "OnStep Telescope Driver - a refused GOTO reports the mount's reason".
+- **OnStep: a slew refused for a link fault names the slew** (issue #1414 follow-up): the equatorial and Alt/Az slews refuse a faulted link before their Tracking read, so the error starts with the slew's name. Test: `test_onstep_link_loss.cpp` "OnStep link loss - a mount that stops answering latches a fault and a reply clears it".
+
+### Changed (docs)
+
+- `onstep.instructions.md`: OnStepX turns tracking on at a GOTO only on the first GOTO after a home reset or one that starts from home, not at every GOTO; `MoveAxis` from the home position does move; a GOTO during a GOTO stops the first one; the relink `:Q#` stops leave tracking as it was (HM-17, 2026-10-24).

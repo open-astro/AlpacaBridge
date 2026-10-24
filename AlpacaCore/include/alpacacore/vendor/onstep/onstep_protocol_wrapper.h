@@ -264,10 +264,11 @@ public:
     /**
      * @brief Slew to the previously set target RA/Dec.
      *
-     * Sends :MS#. Returns true if the mount accepted the slew (response "0"),
-     * false if it reported the target as unreachable.
+     * Sends :MS# and returns the mount's reply: "0" when it accepted the slew,
+     * otherwise the OnStepX refusal digit (1 below the horizon limit ... 9
+     * unspecified, see the OnStepX :MS# reference).
      */
-    bool slew_to_target();
+    std::string slew_to_target();
 
     /**
      * @brief Sync to the previously set target RA/Dec.

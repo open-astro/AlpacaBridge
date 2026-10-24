@@ -42,6 +42,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::vendor::onstep {
 
@@ -1005,30 +1006,27 @@ public:
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
+    // Under the target slew's own name, so a refusal names the member called (#1379).
     void slew_to_target() override {
-        double ra, dec;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-            }
-            ra = target_ra_hours_;
-            dec = target_dec_degrees_;
-        }
-        slew_to_coordinates(ra, dec);
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto [ra, dec] = target_or_throw_locked();
+        check_equatorial_slew_locked(ra, dec, "SlewToTarget");
+        start_slew_locked(ra, dec, "SlewToTarget");
+        wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_target_async() override {
-        double ra, dec;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-            }
-            ra = target_ra_hours_;
-            dec = target_dec_degrees_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto [ra, dec] = target_or_throw_locked();
+        check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
+        start_slew_locked(ra, dec, "SlewToTargetAsync");
+    }
+
+    std::pair<double, double> target_or_throw_locked() const {
+        if (!target_ra_set_ || !target_dec_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
-        slew_to_coordinates_async(ra, dec);
+        return {target_ra_hours_, target_dec_degrees_};
     }
 
     void sync_to_coordinates(double ra, double dec) override {
@@ -1296,16 +1294,15 @@ public:
         refuse_while_faulted_locked("AbortSlew");
     }
 
-    // An Alt/Az slew is not equatorial, so it skips the Tracking check
-    // (open-astro#1274) and goes straight to the GOTO.
+    // An Alt/Az slew is the opposite of an equatorial one (open-astro#1274): ITelescopeV4
+    // refuses it while Tracking is true (#1377), since a tracking mount drifts off the
+    // requested Alt/Az. It converts to RA/Dec and runs the same GOTO.
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        check_not_parked_locked("SlewToCoordinates");
-        start_slew_locked(ra, dec, "SlewToCoordinates");
+        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAz");
+        start_slew_locked(ra, dec, "SlewToAltAz");
         wait_for_slew_complete_locked(lock);
     }
 
@@ -1313,10 +1310,8 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        check_not_parked_locked("SlewToCoordinatesAsync");
-        start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
+        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAzAsync");
+        start_slew_locked(ra, dec, "SlewToAltAzAsync");
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1880,13 +1875,86 @@ private:
     // does (a :GU# query when the cache is stale), so a Tracking=false just
     // written counts as off.
     void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
+        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
         check_connected();
         check_not_parked_locked(who);
-        util::validate_ra_dec(ra, dec, who);
+        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
         refresh_status_cache_locked(false);
         if (!cached_status_.is_tracking) {
             throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
+    }
+
+    // (#1377). Same order as the equatorial check: arguments, connected, parked,
+    // fault, then Tracking read as the getter reads it, before anything is sent.
+    void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
+                                  const char* who) const {
+        validate_alt_az(altitude, azimuth);  // arguments first, even while disconnected (#1478)
+        check_connected();
+        check_not_parked_locked(who);
+        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out);
+        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
+        refresh_status_cache_locked(false);
+        if (cached_status_.is_tracking) {
+            throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // A GOTO sent while one runs makes OnStepX stop the running one and refuse the
+    // new one (Goto.cpp request(): CE_SLEW_IN_SLEW -> abort(), :MS# reply 5), so the
+    // driver refuses first and leaves it running (#1379): its own GOTO (also in the
+    // grace before :GU# shows it), a park or home already moving, or a handset GOTO.
+    void refuse_while_goto_running_locked(const char* who) const {
+        bool running = clock_.now() < slew_force_until_;
+        if (!running) {
+            refresh_status_cache_locked(false);
+            running = cached_status_.is_slewing;
+        }
+        if (running) {
+            throw AlpacaException(std::string(who) + " is not allowed while a GOTO is running",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // The :MS# refusal digit (OnStepX Goto.command.cpp) as the error the client sees (#1379).
+    static AlpacaException slew_refused(const char* who, const std::string& reply) {
+        const char code = reply.empty() ? '?' : reply[0];
+        const char* why = "an unknown reason";
+        switch (code) {
+            case '1':
+                why = "the target is below the horizon limit";
+                break;
+            case '2':
+                why = "the target is above the overhead limit";
+                break;
+            case '3':
+                why = "the controller is in standby";
+                break;
+            case '4':
+                why = "the mount is parked";
+                break;
+            case '5':
+                why = "a GOTO was already running, and the mount stopped it";
+                break;
+            case '6':
+                why = "the target is outside the limits";
+                break;
+            case '7':
+                why = "a hardware fault";
+                break;
+            case '8':
+                why = "the mount is already moving";
+                break;
+            case '9':
+                why = "an unspecified error";
+                break;
+            default:
+                break;
+        }
+        return AlpacaException(
+            std::string(who) + ": the mount refused the GOTO: " + why + " (:MS# reply '" + reply + "')",
+            code == '4' ? AlpacaError::InvalidWhileParked : AlpacaError::InvalidOperation);
     }
 
     void check_not_parked_locked(const char* operation) const {
@@ -1896,13 +1964,17 @@ private:
         }
     }
 
-    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
+    static void validate_alt_az(double altitude, double azimuth) {
         if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
             throw AlpacaException("Altitude out of range", AlpacaError::InvalidValue);
         }
         if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0) {
             throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
         }
+    }
+
+    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
+        validate_alt_az(altitude, azimuth);
         ensure_site_info_cached_locked();
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
@@ -1911,12 +1983,14 @@ private:
     void start_slew_locked(double ra, double dec, const char* context) {
         util::validate_ra_dec(ra, dec, context);
         refuse_while_faulted_locked(context);
-        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
+        supersede_park_or_home_locked();            // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
-        if (!protocol.slew_to_target()) {
-            throw AlpacaException("Mount rejected slew target (below horizon or limit)", AlpacaError::InvalidOperation);
+        const std::string reply = protocol.slew_to_target();
+        if (reply.empty() || reply[0] != '0') {
+            throw slew_refused(context, reply);
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;

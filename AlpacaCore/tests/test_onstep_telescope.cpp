@@ -1488,11 +1488,16 @@ namespace {
 struct ScriptedOnStep {
     std::mutex mutex;
     std::string status = "nNpEW180#";
+    std::string ms_reply = "0";  // slew accepted
     std::vector<std::string> log;
 
     void set_status(const std::string& s) {
         std::lock_guard<std::mutex> lock(mutex);
         status = s;
+    }
+    void set_ms_reply(const std::string& r) {
+        std::lock_guard<std::mutex> lock(mutex);
+        ms_reply = r;
     }
     std::size_t count(const char* needle) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -1508,7 +1513,7 @@ struct ScriptedOnStep {
         log.push_back(chunk);
         if (chunk.rfind(":GU", 0) == 0) return status;
         if (chunk.rfind(":S", 0) == 0) return "1";   // bare-digit set acks (:Sr/:Sd/:SL/:SC/:SG/:ST)
-        if (chunk.rfind(":MS", 0) == 0) return "0";  // slew accepted
+        if (chunk.rfind(":MS", 0) == 0) return ms_reply;  // bare digit, no '#'
         if (chunk.rfind(":hP", 0) == 0) return "1";  // park accepted (bare digit, #1430)
         if (chunk.rfind(":GRa", 0) == 0) return "12:00:00.0000#";
         if (chunk.rfind(":GDe", 0) == 0) return "+45*00:00.000#";
@@ -2864,8 +2869,8 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
 }
 
 // #1274: ITelescopeV4 refuses an equatorial slew while Tracking is false.
-// OnStepX itself turns tracking on at the end of a GOTO (HM-17, 2026-10-18),
-// so this is the interface contract, not a landing the mount gets wrong.
+// OnStepX turns tracking on at a GOTO only in some cases (the first GOTO after a
+// home reset, or one that starts from home), so this is the interface contract.
 TEST_CASE("OnStep Telescope Driver - an equatorial slew needs Tracking", "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("nNpEW180#");  // not tracking, not slewing, not parked
@@ -2936,8 +2941,23 @@ TEST_CASE("OnStep Telescope Driver - an equatorial slew needs Tracking", "[onste
     driver->set_connected(false);
 }
 
-// Alt/Az slews are not equatorial: ITelescopeV4 does not ask for Tracking there.
-TEST_CASE("OnStep Telescope Driver - an Alt/Az slew does not need Tracking", "[onstep][telescope][unit]") {
+namespace {
+
+// The error code and text an AlpacaException carries, or -1 when `fn` returns.
+std::pair<int, std::string> alpaca_error_of(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        return {ex.error_code(), ex.what()};
+    }
+    return {-1, ""};
+}
+
+}  // namespace
+
+// #1377: ITelescopeV4 refuses an Alt/Az slew while Tracking is true (a tracking
+// mount drifts off the requested Alt/Az). Without Tracking it goes out.
+TEST_CASE("OnStep Telescope Driver - an Alt/Az slew is refused while Tracking is true", "[onstep][telescope][unit]") {
     auto mount = std::make_shared<ScriptedOnStep>();
     mount->set_status("nNpEW180#");  // not tracking, not slewing, not parked
     alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
@@ -2952,8 +2972,190 @@ TEST_CASE("OnStep Telescope Driver - an Alt/Az slew does not need Tracking", "[o
     REQUIRE_FALSE(driver->get_tracking());
     mount->clear_log();
 
-    REQUIRE_NOTHROW(driver->slew_to_alt_az_async(45.0, 180.0));
-    CHECK(mount->count(":MS#") == 1);
+    const auto nothing_sent = [&]() {
+        CHECK(mount->count(":Sr") == 0);
+        CHECK(mount->count(":Sd") == 0);
+        CHECK(mount->count(":MS#") == 0);
+    };
+
+    SECTION("with Tracking off the slew goes out") {
+        REQUIRE_NOTHROW(driver->slew_to_alt_az_async(45.0, 180.0));
+        CHECK(mount->count(":MS#") == 1);
+    }
+
+    SECTION("with Tracking on both forms are InvalidOperation under their own names") {
+        REQUIRE_NOTHROW(driver->set_tracking(true));
+        mount->set_status("NpEW180#");  // tracking
+        mount->clear_log();
+        const auto async_error = alpaca_error_of([&]() { driver->slew_to_alt_az_async(45.0, 180.0); });
+        CHECK(async_error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(async_error.second.rfind("SlewToAltAzAsync ", 0) == 0);
+        const auto sync_error = alpaca_error_of([&]() { driver->slew_to_alt_az(45.0, 180.0); });
+        CHECK(sync_error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(sync_error.second.rfind("SlewToAltAz ", 0) == 0);
+        nothing_sent();
+    }
+
+    SECTION("a bad altitude is InvalidValue first") {
+        REQUIRE_NOTHROW(driver->set_tracking(true));
+        mount->clear_log();
+        require_alpaca_error([&]() { driver->slew_to_alt_az_async(91.0, 180.0); },
+                             alpacacore::AlpacaError::InvalidValue);
+        nothing_sent();
+    }
+
+    SECTION("parked is InvalidWhileParked first, under the Alt/Az name") {
+        mount->set_status("NPHEo180#");  // parked at home, tracking flag set
+        driver->set_connected(false);
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+        mount->clear_log();
+        const auto error = alpaca_error_of([&]() { driver->slew_to_alt_az_async(45.0, 180.0); });
+        CHECK(error.first == alpacacore::AlpacaError::InvalidWhileParked);
+        CHECK(error.second.rfind("SlewToAltAzAsync ", 0) == 0);
+        nothing_sent();
+    }
+
+    driver->set_connected(false);
+}
+
+// #1379: OnStepX answers a GOTO sent while one runs by stopping the running one
+// (Goto.cpp request(): CE_SLEW_IN_SLEW -> abort(), :MS# reply 5). The driver
+// refuses the new slew first, so the running GOTO, park or home keeps going.
+TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the GOTO keeps going",
+          "[onstep][telescope][unit]") {
+    alpacacore::test::FakeTaskClock clock;  // the slew grace and the 2 s cache (decision 0005); outlives the driver
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not slewing
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+    REQUIRE(driver->get_tracking());
+    driver->set_target_right_ascension(12.0);
+    driver->set_target_declination(45.0);
+
+    const auto refused_and_left_running = [&](const std::function<void()>& slew, const char* who) {
+        mount->clear_log();
+        const auto error = alpaca_error_of(slew);
+        INFO(error.second);
+        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+        CHECK(error.second == std::string(who) + " is not allowed while a GOTO is running");
+        CHECK(mount->count(":Sr") == 0);
+        CHECK(mount->count(":MS#") == 0);
+        CHECK(mount->count(":Q") == 0);  // nothing is stopped
+    };
+
+    SECTION("our own GOTO, before the mount shows it") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
+        CHECK(driver->get_slewing());
+    }
+
+    SECTION("our own GOTO the mount shows: every slew form") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");  // slewing, tracking
+        observe_slewing(*driver, *mount, clock);
+        refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
+        refused_and_left_running([&]() { driver->slew_to_target_async(); }, "SlewToTargetAsync");
+        refused_and_left_running([&]() { driver->slew_to_coordinates(13.0, 40.0); }, "SlewToCoordinates");
+        CHECK(driver->get_slewing());
+    }
+
+    SECTION("a GOTO started elsewhere (handset)") {
+        mount->set_status("pEW180#");                    // slewing, tracking: not ours
+        clock.advance(std::chrono::milliseconds(2100));  // past the status cache
+        refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
+    }
+
+    SECTION("a park already moving") {
+        REQUIRE_NOTHROW(driver->park());
+        mount->set_status("pIEW180#");  // parking: a GOTO to the park position
+        clock.advance(std::chrono::milliseconds(2100));
+        refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
+        CHECK(driver->get_slewing());
+    }
+
+    SECTION("once the GOTO has ended the next slew goes out") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("pEW180#");
+        observe_slewing(*driver, *mount, clock);
+        mount->set_status("NpEW180#");  // arrived, tracking
+        REQUIRE(wait_slew_done(*driver, clock));
+        mount->clear_log();
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 40.0));
+        CHECK(mount->count(":MS#") == 1);
+    }
+
+    SECTION("after an AbortSlew the next slew goes out") {
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
+        mount->set_status("NpEW180#");  // stopped
+        REQUIRE_NOTHROW(driver->abort_slew());
+        clock.advance(std::chrono::milliseconds(2100));
+        mount->clear_log();
+        REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 40.0));
+        CHECK(mount->count(":MS#") == 1);
+    }
+
+    driver->set_connected(false);
+}
+
+// AGENTS.md: InvalidValue precedes the connection check. The slews used to check
+// the connection (and the park state) before their coordinates.
+TEST_CASE("OnStep Telescope Driver - slews check their coordinates before the connection",
+          "[onstep][telescope][unit]") {
+    auto driver = make_driver(0);  // never connected
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(24.0, 0.0); },
+                         alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 90.1); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(91.0, 0.0); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_alt_az(45.0, nan); }, alpacacore::AlpacaError::InvalidValue);
+    require_alpaca_error([&]() { driver->slew_to_coordinates_async(12.0, 45.0); },
+                         alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&]() { driver->slew_to_alt_az_async(45.0, 180.0); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// #1379: every :MS# refusal used to read "below horizon or limit". The error now
+// names the reason from the reply digit (OnStepX Goto.command.cpp).
+TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason", "[onstep][telescope][unit]") {
+    auto mount = std::make_shared<ScriptedOnStep>();
+    mount->set_status("NpEW180#");  // tracking, not slewing
+    alpacacore::test::FakeMountServer server([mount](const std::string& chunk) { return mount->reply(chunk); });
+    REQUIRE(server.ok());
+    alpacacore::vendor::onstep::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::onstep::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 200;
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, conn);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    struct Case {
+        const char* reply;
+        int code;
+        const char* reason;
+    };
+    for (const Case& c : {Case{"1", alpacacore::AlpacaError::InvalidOperation, "below the horizon limit"},
+                          Case{"2", alpacacore::AlpacaError::InvalidOperation, "above the overhead limit"},
+                          Case{"4", alpacacore::AlpacaError::InvalidWhileParked, "the mount is parked"},
+                          Case{"5", alpacacore::AlpacaError::InvalidOperation, "the mount stopped it"},
+                          Case{"6", alpacacore::AlpacaError::InvalidOperation, "outside the limits"},
+                          Case{"8", alpacacore::AlpacaError::InvalidOperation, "already moving"},
+                          Case{"9", alpacacore::AlpacaError::InvalidOperation, "an unspecified error"}}) {
+        mount->set_ms_reply(c.reply);
+        const auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
+        INFO("reply " << c.reply << ": " << error.second);
+        CHECK(error.first == c.code);
+        CHECK(error.second.rfind("SlewToCoordinatesAsync: the mount refused the GOTO: ", 0) == 0);
+        CHECK(error.second.find(c.reason) != std::string::npos);
+        CHECK(error.second.find(std::string("reply '") + c.reply + "'") != std::string::npos);
+        CHECK_FALSE(driver->get_slewing());  // a refused GOTO is not a slew
+    }
 
     driver->set_connected(false);
 }

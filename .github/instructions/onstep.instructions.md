@@ -211,10 +211,12 @@ it is never reachable through `router.cpp` or the web UI.
   CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
   then reconnects. OnStepX keeps running a GOTO while the cable is out, and a `MoveAxis` for up to
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
-  2.5 degrees at 0.25 deg/s in #1241; from the home position it did not move at all, though the
-  call succeeded), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
+  2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
   loss, stops nothing (#521). The stops also end a park that was running, as AbortSlew's do.
+  They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
+  never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
+  `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
@@ -258,11 +260,27 @@ it is never reachable through `router.cpp` or the web UI.
   `Tracking` reads false, after the parked check and coordinate validation and before any target or
   GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
   just written counts as off. `SlewToAltAz(Async)` skips the check: it converts to RA/Dec and calls
-  `start_slew_locked()` directly. The firmware itself turns tracking on at the end of a GOTO (HM-17,
-  2026-10-18: tracking off, GOTO, `Tracking` read true after it), so the refusal is the interface
-  contract, not a fix for an untracked landing. No exception is needed for a retarget of a GOTO in
-  flight: `:GU#` kept the tracking flag through a whole GOTO, and OnStepX answers `:MS#` with an error
-  while a GOTO runs, so a second slew is refused by the mount either way.
+  `start_slew_locked()` directly. OnStepX turns tracking on at a GOTO only on the first GOTO after a
+  home reset (`firstGoto`) or one that starts from home (`Goto.cpp`; an HM-17 run on 2026-10-18 read `Tracking`
+  true after a GOTO, which fits one of these), otherwise it leaves tracking as it was, so the
+  refusal is the interface contract. `:GU#` keeps the tracking flag through a whole GOTO.
+- **A slew while a GOTO runs is refused** (#1379): OnStepX answers a second `:MS#` by stopping the
+  running GOTO and refusing the new one (`Goto.cpp` `request()`: `CE_SLEW_IN_SLEW` calls `abort()`,
+  reply `5`; seen on the HM-17 2026-10-18, the first GOTO stopped about 1 degree short). So every slew
+  (`SlewToCoordinates(Async)`, `SlewToTarget(Async)`, `SlewToAltAz(Async)`) throws
+  `InvalidOperation` ("<member> is not allowed while a GOTO is running") before it cancels or sends
+  anything while `:GU#` shows a GOTO, the driver's own within the 2 s slew grace included
+  (`refuse_while_goto_running_locked()`). That covers a park or home already moving and a handset GOTO
+  too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace, so a slew right
+  after it goes out. A `:MS#` the mount refuses reports its reply digit and reason (OnStepX
+  `Goto.command.cpp`: 1 below the horizon limit, 2 above the overhead limit, 3 standby, 4 parked
+  (`InvalidWhileParked`), 5 a GOTO was running and the mount stopped it, 6 outside limits, 7 hardware
+  fault, 8 already in motion, 9 unspecified), not "below horizon or limit" for every refusal.
+- **An Alt/Az slew is refused while Tracking is true** (#1377, ITelescopeV4 `SlewToAltAz`): both
+  forms throw `InvalidOperation` ("<member> is not allowed while Tracking is true") after the
+  Alt/Az validation and the parked check, before anything is sent, under their own names
+  (`check_alt_az_slew_locked()`). With Tracking off the driver converts to RA/Dec and runs the same
+  GOTO as an equatorial slew; it does not use OnStepX's `:MA#`.
 - **`Connected` is read lock-free** (#910): `set_connected(true)` holds `mutex_` for the whole connect
   (port open, handshake, site and time sync, cache warm-up, an auto-detect scan with no explicit port),
   so `get_connected()` reads the atomic `published_connected_` instead, plus `link_alive()`, which takes
