@@ -45,5 +45,5 @@ The rules a change is checked against. Each names where it applies and what chec
 ## Links
 
 - Issues [#287](https://github.com/open-astro/AlpacaBridge/issues/287), [#301](https://github.com/open-astro/AlpacaBridge/issues/301), [#1470](https://github.com/open-astro/AlpacaBridge/issues/1470) (item 2), [#1472](https://github.com/open-astro/AlpacaBridge/issues/1472); PRs [#291](https://github.com/open-astro/AlpacaBridge/pull/291), [#351](https://github.com/open-astro/AlpacaBridge/pull/351).
-- Implementation: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` (`utc_now_locked()`, `set_utc_date()`).
+- Implementation: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` (`utc_now()`, `set_utc_date()`).
 - Regression tests: `AlpacaCore/tests/test_skywatcher_async.cpp` cases for the one time source under both host-discipline states, the UTCDate readback on an undisciplined host, discipline gained after a write, and an external clock step.
