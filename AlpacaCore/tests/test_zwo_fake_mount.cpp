@@ -123,8 +123,10 @@ TEST_CASE("FakeZwoMount - Q freezes the position and clears slewing", "[zwo][fak
     rig.client.ask(":Sr06:00:00#");
     rig.client.ask(":Sd+30*00:00#");
     rig.client.ask(":MS#");
+    rig.client.send(":Me#");
     rig.client.send(":Q#");  // blind: no reply
     CHECK(rig.client.ask(":GU#") == "NG#");
+    CHECK_FALSE(rig.mount.jogging());  // ":Q" also ends a jog (fake contract; no rig evidence, see the fake's TODO)
     rig.clock.advance(60s);
     CHECK(rig.client.ask(":GR#") == "12:00:00#");  // the GOTO never landed
     CHECK(rig.client.ask(":GD#") == "+45*00:00#");
@@ -278,6 +280,49 @@ TEST_CASE("FakeZwoMount - override_reply answers the given reply the given numbe
     CHECK(rig.client.ask(":GD#") == "+45*00:00#");  // only the named prefix
     CHECK(rig.client.ask(":GR#") == "e2#");
     CHECK(rig.client.ask(":GR#") == "12:00:00#");
+}
+
+TEST_CASE("FakeZwoMount - override rules for different prefixes stack and go_silent withholds the reply",
+          "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.override_reply(":GR", "bad", 1);
+    rig.mount.override_reply(":GU", "e1");
+    rig.mount.go_silent(":GD", 1);
+    CHECK(rig.client.ask(":GU#") == "e1#");
+    CHECK(rig.client.ask(":GR#") == "bad#");
+    rig.client.send(":GD#");  // counted, no reply: the next reply on the wire is :GR's, not a stray one
+    CHECK(rig.client.ask(":GR#") == "12:00:00#");
+    CHECK(rig.mount.count(":GD") == 1);
+    CHECK(rig.client.ask(":GD#") == "+45*00:00#");  // one shot, spent
+    rig.mount.override_reply(":GU", "", 0);         // a count of 0 removes the rule
+    CHECK(rig.client.ask(":GU#") == "NG#");
+}
+
+TEST_CASE("FakeZwoMount - set_moving reports motion with no GOTO until cleared", "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.set_moving(true);
+    CHECK(rig.client.ask(":GU#") == "G#");
+    CHECK(rig.mount.slewing());
+    rig.clock.advance(3600s);
+    CHECK(rig.client.ask(":GU#") == "G#");
+    rig.mount.set_moving(false);
+    CHECK(rig.client.ask(":GU#") == "NG#");
+}
+
+TEST_CASE("FakeZwoMount - delay_next holds one reply and wait_for_delayed_reply returns once it is on the socket",
+          "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.delay_next(":GR", 400ms);
+    const auto start = std::chrono::steady_clock::now();
+    auto reply = std::async(std::launch::async, [&] { return rig.client.ask(":GR#"); });
+    REQUIRE(rig.mount.wait_for_count(":GR", 1, 5s));
+    CHECK_FALSE(rig.mount.wait_for_delayed_reply(10ms));  // still inside the delay
+    REQUIRE(rig.mount.wait_for_delayed_reply(5s));
+    CHECK(std::chrono::steady_clock::now() - start >= 400ms);
+    CHECK(reply.get() == "12:00:00#");
+    const auto second = std::chrono::steady_clock::now();
+    CHECK(rig.client.ask(":GR#") == "12:00:00#");
+    CHECK(std::chrono::steady_clock::now() - second < 300ms);  // one shot: the delay is spent
 }
 
 TEST_CASE("FakeZwoMount - set_reply_delay holds every reply for the real-time delay", "[zwo][fake][unit]") {

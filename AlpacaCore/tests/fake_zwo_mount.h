@@ -25,8 +25,8 @@
 // does not know gets no reply either, so a test that needs one times out
 // visibly instead of reading a guessed value.
 //
-// Real-time knobs (hold_reply, set_reply_delay) model transport latency, not a
-// driver timer; they never read the TaskClock.
+// Real-time knobs (hold_reply, set_reply_delay, delay_next) model transport latency,
+// not a driver timer; they never read the TaskClock.
 
 #ifndef _WIN32
 
@@ -37,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -90,13 +91,16 @@ public:
     }
 
     /// Answer the next @p times commands that start with @p prefix with @p reply (a negative count: every one),
-    /// whatever the mount's state, e.g. "e4" to ":SMMC" for a mount still settling.
+    /// whatever the mount's state, e.g. "e4" to ":SMMC" for a mount still settling. One rule per prefix: a second
+    /// call for the same prefix replaces it, and a count of 0 removes it. Rules for different prefixes stack.
     void override_reply(std::string prefix, std::string reply, int times = -1) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        override_prefix_ = std::move(prefix);
-        override_reply_ = std::move(reply);
-        override_times_ = times;
+        set_rule(std::move(prefix), std::move(reply), times, false);
     }
+
+    /// The next @p times commands that start with @p prefix are received and counted but get no reply, as when the
+    /// mount stops answering (a negative count: every one; 0 removes the rule). Shares the rule slot of
+    /// override_reply() for the same prefix.
+    void go_silent(std::string prefix, int times = -1) { set_rule(std::move(prefix), {}, times, true); }
 
     /// The reply to the next command that starts with @p prefix (and every later one until release()) blocks in
     /// the mount, so a test holds a transaction in flight. Transport latency in real time.
@@ -143,9 +147,36 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         alt_az_ = on;
     }
+    /// The mount moves with no GOTO, jog or park from the driver (a slew from the hand controller): ":GU" lacks 'N'
+    /// until cleared.
+    void set_moving(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        moving_ = on;
+    }
+
+    /// The next command that starts with @p prefix waits @p delay in real time before it is answered (one shot).
+    void delay_next(std::string prefix, std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(delay_mutex_);
+        delay_prefix_ = std::move(prefix);
+        delay_ms_ = static_cast<int>(delay.count());
+        delay_done_ = false;
+    }
+    /// True once the reply held by delay_next() has been written to the socket (not merely computed), so a test
+    /// can order a later exchange behind a late reply.
+    bool wait_for_delayed_reply(std::chrono::milliseconds real_timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + real_timeout;
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> lock(delay_mutex_);
+                if (delay_done_ && server_.replies_sent() >= replies_owed_.load()) return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::yield();
+        }
+    }
 
     /// RST every accepted connection; the listener stays up, so a reconnect is served.
-    void drop_link() { server_.drop_connections(); }
+    bool drop_link() { return server_.drop_connections(); }
     void reset_connections() { server_.reset_connections(); }
 
     void set_position(double ra_hours, double dec_degrees) {
@@ -245,10 +276,11 @@ public:
     }
 
 private:
-    // Slewing only while a GOTO / park is within its virtual window (or held running) or a jog is on.
+    // Slewing only while a GOTO / park is within its virtual window (or held running), a jog is on or the mount is
+    // set moving.
     bool slewing_locked() {
         settle_locked();
-        return slew_active_ || jog_[0] || jog_[1] || jog_[2] || jog_[3];
+        return moving_ || slew_active_ || jog_[0] || jog_[1] || jog_[2] || jog_[3];
     }
 
     // Lands a finished GOTO / park / home once virtual time reaches slew_end.
@@ -345,19 +377,51 @@ private:
                 if (const int delay = reply_delay_ms_.load(); delay > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(delay));
                 }
+                delay_once(command);
                 response += answer(command);
             }
         }
+        if (!response.empty()) replies_owed_.fetch_add(1);  // one send per chunk, in the server
+        finish_delay();
         return response;
+    }
+
+    // delay_next(): sleep once, in real time, for the first command with the armed prefix.
+    void delay_once(const std::string& command) {
+        int delay = 0;
+        {
+            std::lock_guard<std::mutex> lock(delay_mutex_);
+            if (delay_ms_ <= 0 || delay_prefix_.empty() || command.rfind(delay_prefix_, 0) != 0) return;
+            delay = delay_ms_;
+            delay_ms_ = 0;
+            delayed_command_ = true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+    }
+    void finish_delay() {
+        std::lock_guard<std::mutex> lock(delay_mutex_);
+        if (delayed_command_) {
+            delayed_command_ = false;
+            delay_done_ = true;
+        }
+    }
+
+    void set_rule(std::string prefix, std::string reply, int times, bool silent) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::erase_if(rules_, [&](const Rule& rule) { return rule.prefix == prefix; });
+        if (times != 0) rules_.push_back({std::move(prefix), std::move(reply), times, silent});
     }
 
     // One reply per command the wrapper reads a reply to; blind and unknown commands get none (header comment).
     std::string answer(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto starts = [&](const char* prefix) { return command.rfind(prefix, 0) == 0; };
-        if (override_times_ != 0 && !override_prefix_.empty() && starts(override_prefix_.c_str())) {
-            if (override_times_ > 0) --override_times_;
-            return override_reply_ + "#";
+        for (auto rule = rules_.begin(); rule != rules_.end(); ++rule) {
+            if (!starts(rule->prefix.c_str())) continue;
+            const bool silent = rule->silent;
+            std::string reply = rule->reply + "#";
+            if (rule->times > 0 && --rule->times == 0) rules_.erase(rule);
+            return silent ? std::string{} : reply;
         }
         if (command == ":GVP") return identity_ + "#";
         if (command == ":GMA") return "012345ABCDEF#";
@@ -425,6 +489,9 @@ private:
             return "0#";
         }
         if (command == ":Q") {
+            // TODO: no rig evidence confirms that ":Q" stops jogs; the fake clears them so an abort leaves nothing
+            // moving. Confirm on an AM mount before a test relies on it.
+            for (bool& jog : jog_) jog = false;
             settle_locked();
             if (slew_active_) {  // frozen where it is: the start position, as the fake reports it while moving
                 slew_active_ = false;
@@ -510,8 +577,13 @@ private:
     double land_short_by_arcsec_ = 0.0;
     std::string goto_reply_;
     int goto_rejections_ = 0;
-    std::string override_prefix_, override_reply_;
-    int override_times_ = 0;
+    struct Rule {
+        std::string prefix, reply;
+        int times;
+        bool silent;
+    };
+    std::vector<Rule> rules_;
+    bool moving_ = false;
     bool hold_running_ = false;
     bool slew_active_ = false;
     util::TaskClock::clock::time_point slew_end_{};
@@ -529,7 +601,7 @@ private:
     bool low_power_ = false, ra_stall_ = false, dec_stall_ = false, alt_az_ = false;
     util::TaskClock::clock::time_point ra_guide_end_{}, dec_guide_end_{};
     bool jog_[4] = {false, false, false, false};
-    std::string site_reply_ = "+30*00:00&+100*00:00";
+    std::string site_reply_ = "-33*51:24&-151*12:55";  // ":GMGE" lat&lon, west-positive: -33.856784, 151.215297 E
     std::string time_reply_ = "01/02/2026&03:04:05&+00:00";
 
     std::mutex frame_mutex_;  // one connection's partial command
@@ -544,6 +616,13 @@ private:
     bool held_ = false;
     bool released_ = true;
     std::atomic<int> reply_delay_ms_{0};
+
+    std::mutex delay_mutex_;
+    std::string delay_prefix_;
+    int delay_ms_ = 0;
+    bool delayed_command_ = false;  // a delay_next() command is being answered
+    bool delay_done_ = false;
+    std::atomic<std::uint64_t> replies_owed_{0};  // non-empty replies handed to the server
 
     FakeMountServer server_;  // last: its threads call receive() until this is destroyed first
 };

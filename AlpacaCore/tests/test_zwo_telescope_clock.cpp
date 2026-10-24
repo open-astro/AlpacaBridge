@@ -389,6 +389,7 @@ TEST_CASE("ZWO telescope clock - Park reports Slewing for the 5 s forced window 
     rig.advance(250ms);
     rig.driver->park();
     rig.advance(250ms);
+    // AtPark reads true while Slewing is still true: known base behaviour, tracked separately. This pins it.
     CHECK(rig.driver->get_at_park());
     for (int i = 0; i < 17; ++i) rig.advance(250ms);  // 4.5 s since the command
     CHECK(rig.driver->get_slewing());
@@ -410,6 +411,7 @@ TEST_CASE("ZWO telescope clock - Park infers completion 2 s after the command wh
     CHECK(rig.driver->get_slewing());  // the park command is still active
     rig.advance(250ms);
     rig.advance(250ms);  // 2.25 s
+    // AtPark reads true while Slewing is still true: known base behaviour, tracked separately. This pins it.
     CHECK(rig.driver->get_at_park());
 }
 
