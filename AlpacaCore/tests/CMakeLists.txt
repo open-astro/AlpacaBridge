@@ -67,6 +67,8 @@ if(TARGET alpacacore_zwo)
     list(APPEND TEST_SOURCES test_zwo_asiair_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_asiair_plus_switch.cpp)
     list(APPEND TEST_SOURCES test_zwo_telescope.cpp)
+    list(APPEND TEST_SOURCES test_zwo_fake_mount.cpp)
+    list(APPEND TEST_SOURCES test_zwo_telescope_clock.cpp)
     list(APPEND TEST_SOURCES test_zwo_telemetry_concurrency_stress.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_zwo_async_slew_failure.cpp)

@@ -1,0 +1,453 @@
+// AlpacaCore
+// Copyright (c) 2025-2026 Joey Troy and contributors
+//
+// This file is part of AlpacaCore.
+//
+// AlpacaCore is licensed under the GNU Affero General Public License,
+// version 3 or (at your option) any later version (AGPL-3.0-or-later),
+// with an additional permission allowing combination with proprietary
+// device-vendor SDKs. See the LICENSE file in this repository for the full
+// license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
+
+#pragma once
+
+// Stateful ZWO AM-mount fake for the telescope driver tests (decision 0005,
+// decision 0015). It answers the ZWO ":"-command dialect over the loopback
+// FakeMountServer, because the driver has no code-level transport seam, and
+// derives the mount's motion from the shared FakeTaskClock: a GOTO ends when
+// virtual time reaches slew_end, so a test advances the clock instead of
+// sleeping. Replies are the ones the driver's wrapper parses
+// (zwo_mount_protocol_wrapper.cpp), taken from the wrapper, not from memory.
+//
+// Real-time knobs (hold_reply, set_reply_delay) model transport latency, not a
+// driver timer; they never read the TaskClock.
+
+#ifndef _WIN32
+
+#include <alpacacore/util/task_clock.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "fake_mount_server.h"
+
+namespace alpacacore::test {
+
+class FakeZwoMount {
+public:
+    using virtual_duration = std::chrono::nanoseconds;
+
+    /// @param clock the TaskClock the driver under test also reads (a FakeTaskClock in every test)
+    /// @param identity the ":GVP#" reply, an AM-family model
+    explicit FakeZwoMount(util::TaskClock& clock, std::string identity = "AM5N")
+        : clock_(clock),
+          identity_(std::move(identity)),
+          server_([this](const std::string& chunk) { return receive(chunk); }) {}
+
+    ~FakeZwoMount() { release(); }
+
+    FakeZwoMount(const FakeZwoMount&) = delete;
+    FakeZwoMount& operator=(const FakeZwoMount&) = delete;
+
+    bool ok() const { return server_.ok(); }
+    int port() const { return server_.port(); }
+
+    // ---- Knobs ----------------------------------------------------------
+
+    /// Virtual time a ":MS#" GOTO (and a ":hP#" park) takes. Default 5 s.
+    void set_slew_duration(virtual_duration duration) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        slew_duration_ = duration;
+    }
+
+    /// The GOTO lands short of Dec by @p arcsec (RA exact).
+    void set_land_short_by(double arcsec) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        land_short_by_arcsec_ = arcsec;
+    }
+
+    /// Answer the next @p times ":MS#" with @p reply ("2", "e3", "e5", "e7"), then accept ("0"). A negative count
+    /// rejects every GOTO.
+    void reject_goto(std::string reply, int times = -1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        goto_reply_ = std::move(reply);
+        goto_rejections_ = times;
+    }
+
+    /// Answer the next @p times commands that start with @p prefix with @p reply (a negative count: every one),
+    /// whatever the mount's state, e.g. "e4" to ":SMMC" for a mount still settling.
+    void override_reply(std::string prefix, std::string reply, int times = -1) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        override_prefix_ = std::move(prefix);
+        override_reply_ = std::move(reply);
+        override_times_ = times;
+    }
+
+    /// The reply to the next command that starts with @p prefix (and every later one until release()) blocks in
+    /// the mount, so a test holds a transaction in flight. Transport latency in real time.
+    void hold_reply(std::string prefix) {
+        std::lock_guard<std::mutex> lock(hold_mutex_);
+        hold_prefix_ = std::move(prefix);
+        held_ = false;
+        released_ = false;
+    }
+    /// True once a held reply is waiting (the command is already counted).
+    bool wait_until_held(std::chrono::milliseconds real_timeout) {
+        std::unique_lock<std::mutex> lock(hold_mutex_);
+        return hold_cv_.wait_for(lock, real_timeout, [&] { return held_; });
+    }
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(hold_mutex_);
+            released_ = true;
+            hold_prefix_.clear();
+        }
+        hold_cv_.notify_all();
+    }
+
+    /// Every command waits this long (real time) before it is answered.
+    void set_reply_delay(std::chrono::milliseconds delay) { reply_delay_ms_.store(static_cast<int>(delay.count())); }
+
+    /// The mount keeps reporting "slewing" past slew_end until cleared (a GOTO that never settles).
+    void hold_running(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hold_running_ = on;
+    }
+
+    /// RST every accepted connection; the listener stays up, so a reconnect is served.
+    void drop_link() { server_.drop_connections(); }
+    void reset_connections() { server_.reset_connections(); }
+
+    void set_position(double ra_hours, double dec_degrees) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settle_locked();
+        ra_hours_ = ra_hours;
+        dec_degrees_ = dec_degrees;
+    }
+    void set_tracking(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tracking_ = on;
+    }
+    /// ":Gps#" digit: 0 not parked, 1 in progress, 2 parked, 3 error.
+    void set_park_state(int state) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        park_state_ = state;
+        park_pending_ = false;
+    }
+    /// The ":GMTI#" payload, "MM/DD/YYYY&HH:MM:SS&+HH:MM"; a ":SMTI" write replaces it.
+    void set_time_reply(std::string reply) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        time_reply_ = std::move(reply);
+    }
+
+    // ---- State ----------------------------------------------------------
+
+    bool slewing() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return slewing_locked();
+    }
+    double ra_hours() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settle_locked();
+        return ra_hours_;
+    }
+    double dec_degrees() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settle_locked();
+        return dec_degrees_;
+    }
+    bool tracking() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tracking_;
+    }
+    int park_state() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settle_locked();
+        return park_state_;
+    }
+    bool jogging() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return jog_[0] || jog_[1] || jog_[2] || jog_[3];
+    }
+
+    // ---- Command record ---------------------------------------------------
+
+    std::vector<std::string> commands() const {
+        std::lock_guard<std::mutex> lock(record_mutex_);
+        return commands_;
+    }
+    /// Commands received that start with @p prefix (the trailing '#' is not part of the match).
+    int count(const std::string& prefix) const {
+        std::lock_guard<std::mutex> lock(record_mutex_);
+        return static_cast<int>(std::count_if(commands_.begin(), commands_.end(), [&](const std::string& command) {
+            return command.rfind(prefix, 0) == 0;
+        }));
+    }
+    bool wait_for_count(const std::string& prefix, int n, std::chrono::milliseconds real_timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + real_timeout;
+        while (count(prefix) < n) {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        return true;
+    }
+
+private:
+    // Slewing only while a GOTO / park is within its virtual window (or held running) or a jog is on.
+    bool slewing_locked() {
+        settle_locked();
+        return slew_active_ || jog_[0] || jog_[1] || jog_[2] || jog_[3];
+    }
+
+    // Lands a finished GOTO / park once virtual time reaches slew_end.
+    void settle_locked() {
+        if (!slew_active_ || hold_running_ || clock_.now() < slew_end_) return;
+        slew_active_ = false;
+        ra_hours_ = target_ra_;
+        dec_degrees_ = std::clamp(target_dec_ - land_short_by_arcsec_ / 3600.0, -90.0, 90.0);
+        if (park_pending_) {
+            park_pending_ = false;
+            park_state_ = 2;
+        }
+    }
+
+    void start_slew_locked() {
+        settle_locked();
+        slew_active_ = true;
+        slew_end_ = clock_.now() + slew_duration_;
+    }
+
+    void maybe_hold(const std::string& command) {
+        std::unique_lock<std::mutex> lock(hold_mutex_);
+        if (hold_prefix_.empty() || released_ || command.rfind(hold_prefix_, 0) != 0) return;
+        held_ = true;
+        hold_cv_.notify_all();
+        hold_cv_.wait(lock, [&] { return released_; });
+    }
+
+    static std::string hms(double hours) {
+        const int total = static_cast<int>(std::lround(std::fmod(hours + 24.0, 24.0) * 3600.0)) % 86400;
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60);
+        return buf;
+    }
+    static std::string dms(double degrees) {
+        const int total = static_cast<int>(std::lround(std::abs(degrees) * 3600.0));
+        char buf[24];
+        std::snprintf(buf, sizeof(buf), "%c%02d*%02d:%02d", degrees < 0.0 ? '-' : '+', total / 3600,
+                      (total % 3600) / 60, total % 60);
+        return buf;
+    }
+    // "HH:MM:SS" or "+DD*MM:SS" / "+DD:MM:SS": sign, then up to three numbers split on any non-digit.
+    static double sexagesimal(const std::string& text) {
+        std::size_t pos = 0;
+        const bool negative = !text.empty() && text[0] == '-';
+        if (!text.empty() && (text[0] == '+' || text[0] == '-')) ++pos;
+        double value = 0.0, scale = 1.0;
+        while (pos < text.size() && scale >= 1.0 / 3600.0 * 0.5) {
+            std::size_t used = 0;
+            const int part = std::atoi(text.c_str() + pos);
+            while (pos + used < text.size() && std::isdigit(static_cast<unsigned char>(text[pos + used]))) ++used;
+            value += part * scale;
+            scale /= 60.0;
+            pos += used + 1;
+        }
+        return negative ? -value : value;
+    }
+
+    std::string receive(const std::string& chunk) {
+        std::string response;
+        std::string owed;
+        {
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            pending_ += chunk;
+            for (auto end = pending_.find('#'); end != std::string::npos; end = pending_.find('#')) {
+                owed = pending_.substr(0, end + 1);
+                pending_.erase(0, end + 1);
+                const std::string command = owed.substr(0, owed.size() - 1);
+                {
+                    std::lock_guard<std::mutex> record(record_mutex_);
+                    commands_.push_back(command);
+                }
+                maybe_hold(command);
+                if (const int delay = reply_delay_ms_.load(); delay > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                }
+                response += answer(command);
+            }
+        }
+        return response;
+    }
+
+    // One reply per command; blind commands (":Q", ":Mg", jogs, ":hP", ":hC") get none, as on the wire.
+    std::string answer(const std::string& command) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto starts = [&](const char* prefix) { return command.rfind(prefix, 0) == 0; };
+        if (override_times_ != 0 && !override_prefix_.empty() && starts(override_prefix_.c_str())) {
+            if (override_times_ > 0) --override_times_;
+            return override_reply_ + "#";
+        }
+        if (command == ":GVP") return identity_ + "#";
+        if (command == ":GMA") return "012345ABCDEF#";
+        if (command == ":GU") {
+            std::string flags;
+            if (!tracking_) flags += 'n';
+            if (!slewing_locked()) flags += 'N';
+            return flags + "G#";
+        }
+        if (command == ":GR") {
+            settle_locked();
+            return hms(ra_hours_) + "#";
+        }
+        if (command == ":GD") {
+            settle_locked();
+            return dms(dec_degrees_) + "#";
+        }
+        if (command == ":GAT") return tracking_ ? "1#" : "0#";
+        if (command == ":GT") return "0#";
+        if (command == ":Ggr") return "0.5#";
+        if (command == ":GA") return "+45*00:00#";
+        if (command == ":GZ") return "180*00:00#";
+        if (command == ":GMGE") return site_reply_ + "#";
+        if (command == ":GMTI") return time_reply_ + "#";
+        if (command == ":Gps") {
+            settle_locked();
+            return std::to_string(park_state_) + "#";
+        }
+        if (starts(":Sr") && command.size() > 3) {
+            target_ra_ = sexagesimal(command.substr(3));
+            return "1#";
+        }
+        if (starts(":Sd") && command.size() > 3) {
+            target_dec_ = sexagesimal(command.substr(3));
+            return "1#";
+        }
+        if (starts(":SMGE")) {
+            site_reply_ = command.substr(5);
+            return "1#";
+        }
+        if (starts(":SMTI")) {
+            time_reply_ = command.substr(5);
+            return "1#";
+        }
+        if (command == ":MS") {
+            if (goto_rejections_ != 0 && !goto_reply_.empty()) {
+                if (goto_rejections_ > 0) --goto_rejections_;
+                return goto_reply_ + "#";
+            }
+            park_state_ = park_state_ == 2 ? park_state_ : 0;
+            start_slew_locked();
+            return "0#";
+        }
+        if (command == ":Q") {
+            settle_locked();
+            if (slew_active_) {  // frozen where it is: the start position, as the fake reports it while moving
+                slew_active_ = false;
+                park_pending_ = false;
+            }
+            return {};
+        }
+        if (command == ":Qe" || command == ":Qw" || command == ":Qn" || command == ":Qs") {
+            jog_[jog_index(command[2])] = false;
+            return {};
+        }
+        if (command == ":Me" || command == ":Mw" || command == ":Mn" || command == ":Ms") {
+            jog_[jog_index(command[2])] = true;
+            return {};
+        }
+        if (starts(":Mg")) return {};
+        if (command == ":Te") {
+            tracking_ = true;
+            return "1#";
+        }
+        if (command == ":Td") {
+            tracking_ = false;
+            return "1#";
+        }
+        if (command == ":hP") {
+            park_state_ = 1;
+            park_pending_ = true;
+            target_ra_ = ra_hours_;
+            target_dec_ = dec_degrees_;
+            start_slew_locked();
+            return {};
+        }
+        if (command == ":hC") {
+            target_ra_ = 0.0;
+            target_dec_ = 0.0;
+            start_slew_locked();
+            return {};
+        }
+        if (command == ":Spu") {
+            park_state_ = 0;
+            return "1#";
+        }
+        if (starts(":SMMC")) return "N/A#";  // the wrapper accepts an empty or N/A answer to a sync
+        if (starts(":Sp") || command == ":CM") return "1#";
+        return "0#";
+    }
+
+    static std::size_t jog_index(char axis) {
+        switch (axis) {
+            case 'e':
+                return 0;
+            case 'w':
+                return 1;
+            case 'n':
+                return 2;
+            default:
+                return 3;
+        }
+    }
+
+    util::TaskClock& clock_;
+    const std::string identity_;
+
+    std::mutex mutex_;  // mount state (leaf: nothing is called while it is held but the clock's now())
+    virtual_duration slew_duration_ = std::chrono::seconds(5);
+    double land_short_by_arcsec_ = 0.0;
+    std::string goto_reply_;
+    int goto_rejections_ = 0;
+    std::string override_prefix_, override_reply_;
+    int override_times_ = 0;
+    bool hold_running_ = false;
+    bool slew_active_ = false;
+    util::TaskClock::clock::time_point slew_end_{};
+    double ra_hours_ = 12.0, dec_degrees_ = 45.0;
+    double target_ra_ = 12.0, target_dec_ = 45.0;
+    bool tracking_ = true;
+    int park_state_ = 0;
+    bool park_pending_ = false;
+    bool jog_[4] = {false, false, false, false};
+    std::string site_reply_ = "+30*00:00&+100*00:00";
+    std::string time_reply_ = "01/02/2026&03:04:05&+00:00";
+
+    std::mutex frame_mutex_;  // one connection's partial command
+    std::string pending_;
+
+    mutable std::mutex record_mutex_;
+    std::vector<std::string> commands_;
+
+    std::mutex hold_mutex_;
+    std::condition_variable hold_cv_;
+    std::string hold_prefix_;
+    bool held_ = false;
+    bool released_ = true;
+    std::atomic<int> reply_delay_ms_{0};
+
+    FakeMountServer server_;  // last: its threads call receive() until this is destroyed first
+};
+
+}  // namespace alpacacore::test
+
+#endif  // !_WIN32
