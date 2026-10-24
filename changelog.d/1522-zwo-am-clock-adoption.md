@@ -6,3 +6,6 @@
 
 ### Changed (tests)
 - **ZWO AM timer regressions use virtual time** (AlpacaCore, issue #1522): replace real waits for slew, tracking-cache and pulse deadlines with FakeTaskClock rendezvous, retaining deliberate transport latency and bounded concurrency observation.
+
+### Changed (docs)
+- **AM5 clock-adoption qualification refreshed** (issue #1522): publish privacy-reviewed USB and native handset Wi-Fi ConformU 4.5.2 reports from the same OPi6 arm64 binary on mount firmware 1.8.8; each preserves all 422 rows and 103 timing measurements with no errors, warnings, issues or timing violations.
