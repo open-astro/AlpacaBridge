@@ -16,6 +16,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 
 #include <chrono>
 #include <exception>
@@ -45,27 +46,31 @@ namespace alpacacore::util {
  *
  * Locking: the cache has its own mutex, held across the refill so concurrent
  * readers share one device round trip. Lock order is driver mutex (if held)
- * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch)
- * refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock when they call the cache.
- * Never call get() from inside the refill.
+ * -> cache mutex -> SDK mutex; the converted adopters (ZWO EAF, CAA, dew switch, ToupTek AAF, ToupTek thermal switch,
+ * ZWO EFW, Player One PW, ToupTek AFW) refill under cache mutex -> io_mutex_ -> mutex_ (leaf) and hold no driver lock
+ * when they call the cache. Never call get() from inside the refill.
+ *
+ * Clock: the TTL reads the TaskClock passed to the constructor (decision 0005), the real
+ * steady clock by default; a driver on an injected clock passes it so a test ages the frame with advance().
  * Writers call invalidate() after the write; connect/disconnect call reset().
  */
 template <typename Status>
 class TtlStatusCache {
 public:
-    using clock = std::chrono::steady_clock;
+    using clock = TaskClock::clock;
 
     TtlStatusCache(std::string device_label, std::chrono::milliseconds ttl, int fault_threshold = 3,
-                   std::string log_component = "Device")
+                   std::string log_component = "Device", const TaskClock& clock = default_task_clock())
         : label_(std::move(device_label)),
           log_component_(std::move(log_component)),
+          clock_(&clock),
           ttl_(ttl),
           fault_threshold_(fault_threshold) {}
 
     template <typename Fetch>
     Status get(Fetch&& fetch) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto now = clock::now();
+        const auto now = clock_->now();
         if (status_.has_value() && (now - filled_at_) < ttl_) {
             return *status_;
         }
@@ -75,7 +80,7 @@ public:
                 ALPACA_LOG_INFO(log_component_, label_ + " communications restored");
             }
             status_ = fresh;
-            filled_at_ = clock::now();
+            filled_at_ = clock_->now();
             return fresh;
         } catch (const std::exception& e) {
             status_.reset();
@@ -118,6 +123,7 @@ public:
 private:
     std::string label_;
     std::string log_component_;
+    const TaskClock* clock_;
     std::chrono::milliseconds ttl_;
     int fault_threshold_;
     mutable std::mutex mutex_;

@@ -15,6 +15,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/zwo_efw_sdk.h>
 
+#include <atomic>
 #include <chrono>
 #include <mutex>
 #include <stdexcept>
@@ -68,6 +69,14 @@ public:
     int last_set_position{-1};
     int calibrate_calls{0};
     int moving_refusals{0};
+    // get_position() sleeps this long, outside the fake's mutex, before answering (a slow Position refill).
+    // position_entered counts the calls that have started, so a test knows the refill is in flight.
+    std::chrono::milliseconds position_delay{0};
+    std::atomic<int> position_entered{0};
+    // open_wheel() calls that have started (counted before open_delay), so a test knows a connect is in flight.
+    std::atomic<int> open_entered{0};
+    // set_position() throws a DriverException after it is counted (a refused or failed move command).
+    bool fail_set_position{false};
 
     std::vector<Info> enumerate_wheels() override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -91,6 +100,7 @@ public:
         return true;
     }
     void open_wheel(int wheel_id) override {
+        ++open_entered;
         if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
@@ -103,6 +113,8 @@ public:
         ++close_calls;
     }
     int get_position(int wheel_id) override {
+        ++position_entered;
+        if (position_delay.count() > 0) std::this_thread::sleep_for(position_delay);
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++position_calls;
@@ -119,6 +131,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++set_position_calls;
+        if (fail_set_position) throw AlpacaException("scripted set_position failure", AlpacaError::DriverException);
         last_set_position = slot;
         if (slot < 0 || slot >= slot_count) {
             throw AlpacaException("EFWSetPosition: EFW_ERROR_INVALID_VALUE", AlpacaError::InvalidValue);
