@@ -106,19 +106,22 @@ void case_json_value_fallback() {
     EXPECT(text_call.get_string("Name") == "abc");
 }
 
-// Falsified by: trying the form body before the JSON body in find_raw (a body that is valid JSON is also no form).
+// Falsified by: trying the form body before the JSON body in find_raw (the body is a JSON object and also holds a form pair).
 void case_json_before_form() {
-    auto request = put_json("{\"Position\":3}");
+    auto request = put_json("{\"Position\":3,\"x\":\"&Position=4&\"}");
     DeviceCall call(*request, kServerTx);
     EXPECT(call.get_int("Position") == 3);
-    EXPECT(call.form_field("Position") == std::nullopt);
+    EXPECT(call.form_field("Position") == std::optional<std::string>("4"));
+    auto value = put_json("{\"Value\":3,\"x\":\"&Position=4&\"}");
+    DeviceCall value_call(*value, kServerTx);
+    EXPECT(value_call.get_int("Position") == 3);
 }
 
 // Falsified by: comparing form keys without to_lower_copy in get_form_value; dropping url_decode of the value.
 void case_form_case_insensitive_and_decoded() {
-    auto request = put_form("sitelatitude=-33.5&NAME=a%20b+c&Value=9");
+    auto request = put_form("sitelatitude=-33.856784&NAME=a%20b+c&Value=9");
     DeviceCall call(*request, kServerTx);
-    EXPECT(call.get_double("SiteLatitude") == -33.5);
+    EXPECT(call.get_double("SiteLatitude") == -33.856784);
     EXPECT(call.get_string("Name") == "a b c");
     // The form "Value" is the last resort.
     EXPECT(call.get_int("Other") == 9);
