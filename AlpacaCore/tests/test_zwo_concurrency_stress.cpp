@@ -440,6 +440,8 @@ alpacacore::test::FakeMountServer::Responder zwo_responder() {
     return [](const std::string& chunk) -> std::string {
         if (chunk == ":GVP#") return "AM5#";
         if (chunk == ":GMA#") return "012345ABCDEF#";
+        if (chunk.starts_with(":SMTI")) return "1#";
+        if (chunk == ":GMTI#") return "01/02/20&03:04:05&+00:00#";
         if (chunk.starts_with(":Sr") || chunk.starts_with(":Sd")) return "1#";
         if (chunk.find(":GU#") != std::string::npos) return "NG#";
         if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
@@ -483,6 +485,8 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
         guard([&] { static_cast<void>(scope.get_right_ascension()); });
         guard([&] { static_cast<void>(scope.get_declination()); });
         guard([&] { static_cast<void>(scope.get_slewing()); });
+        guard([&] { static_cast<void>(scope.get_utc_date()); });
+        guard([&] { scope.set_utc_date(std::chrono::system_clock::now()); });
         // The newly-fixed thread paths: async GOTO (goto_thread_) and pulse
         // guiding (pulse thread queue) issued while other threads disconnect.
         guard([&] { scope.slew_to_coordinates_async(5.0, 20.0); });
