@@ -192,6 +192,10 @@ public:
                 fresh.closed = true;
                 return fresh;
             }
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                fresh.move_seq = move_seq_;
+            }
             fresh.wire = protocol_.get_position();
             return fresh;
         });
@@ -208,7 +212,8 @@ public:
             if (status.wire < 0) {
                 result = -1;
             } else if (moving_) {
-                if (status.wire != target_) {
+                // A frame read before the latest move was commanded cannot show that move's arrival.
+                if (status.move_seq != move_seq_ || status.wire != target_) {
                     result = -1;
                 } else {
                     moving_ = false;
@@ -255,6 +260,7 @@ public:
                 previous_moving = moving_;
                 target_ = position;
                 moving_ = true;
+                ++move_seq_;
             }
             try {
                 protocol_.move_to(position);
@@ -372,8 +378,10 @@ private:
         std::lock_guard<std::mutex> lock(mutex_);
         slot_count_ = slots;
         firmware_ = std::move(firmware);
+        // A FocusOffsets write that landed during the :WF reads is kept (the check above ran unlocked).
+        const bool seed = !offsets_configured && focus_offsets_.empty();
         normalize_slot_data_locked();
-        if (!offsets_configured) {
+        if (seed) {
             focus_offsets_ = std::move(stored);
         }
         moving_ = false;
@@ -460,6 +468,7 @@ private:
     struct Status {
         std::int32_t wire = 0;
         bool closed = false;
+        std::uint64_t move_seq = 0;  // move_seq_ when the refill took the I/O lock; the latch needs a match
     };
     static constexpr std::chrono::milliseconds kStatusTtl{100};
 
@@ -488,6 +497,7 @@ private:
     // target. moving_ is mutable so the arrival latch can run in const get_position().
     mutable bool moving_ = false;
     std::int32_t target_ = 0;
+    std::uint64_t move_seq_ = 0;  // bumped with each latch set, under io_mutex_ and mutex_
 
     mutable util::TtlStatusCache<Status> status_cache_;
 };

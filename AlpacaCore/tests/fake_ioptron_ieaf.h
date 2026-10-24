@@ -96,6 +96,12 @@ public:
     /// :WP# polls that answer -1 after a :WM move to a different slot (default 0: the move settles at once).
     void set_wheel_moving_polls(int polls) { wheel_moving_polls_.store(polls); }
     void fail_wheel_position(bool fail) { fail_wp_.store(fail); }
+    /// A USB unplug: every driver write fails with EIO from here on, so a move throws. Not reversible.
+    void unplug() {
+        stop_.store(true);
+        if (reader_.joinable()) reader_.join();
+        pty_.sever();
+    }
     /// Model code answered in the handshake: 2 = iEAF (default), 3 = iAFS2/3.
     void set_model(int m) { model_.store(m); }
 

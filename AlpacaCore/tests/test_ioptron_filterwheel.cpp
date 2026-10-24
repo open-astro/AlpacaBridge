@@ -425,3 +425,41 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leav
     }
     CHECK(position == wheel.fake.wheel_slot());
 }
+
+// A FocusOffsets write that lands while the connect reads the wheel's stored offsets is kept, not replaced by them.
+// Falsified by: ioptron_filterwheel_driver.cpp publish_connect_state() overwriting focus_offsets_ with the stored
+// offsets without re-checking under mutex_ that they are still empty (Offsets read back as zeros).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a FocusOffsets write during connect is kept",
+          "[ioptron][filterwheel][unit][position-cache][timing]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 500 && fake.count(":FW1#") == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.count(":FW1#") == 1);
+    fake.hold_next_reply(400ms);  // holds the first :WF reply
+    for (int i = 0; i < 500 && fake.count(":WF00#") == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.count(":WF00#") == 1);
+    const std::vector<int> written{11, 22, 33, 44, 55};
+    driver->set_focus_offsets(written);
+    connect.get();
+    CHECK(driver->get_focus_offsets() == written);
+    driver->set_connected(false);
+}
+
+// Falsified by: ioptron_filterwheel_driver.cpp set_position() without status_cache_.invalidate() in the outer catch
+// (a Position read after the refused move is served from the frame cached before it and returns 3, not a wire error).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a refused move invalidates the cached Position",
+          "[ioptron][filterwheel][unit][position-cache]") {
+    ConnectedIefw wheel;
+    wheel.fake.set_wheel_slot(3);
+    REQUIRE(wheel.driver->get_position() == 3);
+
+    wheel.fake.unplug();  // the :WM write fails
+    CHECK_THROWS_AS(wheel.driver->set_position(4), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);  // reached the wire, not the cache
+}
