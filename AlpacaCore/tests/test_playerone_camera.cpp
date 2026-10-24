@@ -1176,6 +1176,90 @@ TEST_CASE("Player One Camera Driver - readiness poll gives up at the deadline on
     driver->set_connected(false);
 }
 
+namespace {
+
+// Runs `fn` while the readiness poll waits on the fake clock, and reports
+// whether it returned within 5 s of real time with no advance. If it did not,
+// advances the clock until it does, so the case fails instead of hanging.
+bool returns_without_advance(alpacacore::test::FakeTaskClock& clock, const std::function<void()>& fn) {
+    auto work = std::async(std::launch::async, fn);
+    if (work.wait_for(5s) == std::future_status::ready) {
+        work.get();
+        return true;
+    }
+    while (work.wait_for(1ms) != std::future_status::ready) {
+        clock.advance(50ms);
+    }
+    work.get();
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("Player One Camera Driver - AbortExposure wakes the readiness poll without a clock advance",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(10.0, true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));  // the readiness poll's wait
+    const int stops_before = sdk.stop_count();
+    CHECK(returns_without_advance(clock, [&] { driver->abort_exposure(); }));
+    CHECK(sdk.stop_count() > stops_before);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - disconnect wakes the readiness poll without a clock advance",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(10.0, true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    CHECK(returns_without_advance(clock, [&] { driver->set_connected(false); }));
+    CHECK_FALSE(driver->get_connected());
+    CHECK_FALSE(sdk.operation_after_close());
+    CHECK(sdk.open_count() == sdk.close_count());
+}
+
+TEST_CASE("Player One Camera Driver - destruction wakes the readiness poll without a clock advance",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(10.0, true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    CHECK(returns_without_advance(clock, [&] { driver.reset(); }));
+    CHECK_FALSE(sdk.operation_after_close());
+    CHECK(sdk.open_count() == sdk.close_count());
+}
+
+TEST_CASE("Player One Camera Driver - PercentCompleted follows the task clock",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_image_ready(false);
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock);
+
+    driver->start_exposure(10.0, true);
+    REQUIRE(clock.wait_for_wait_count(1, 5s));
+    CHECK(driver->get_percent_completed() == Catch::Approx(0.0).margin(1.0));
+    clock.advance(5s);  // half the exposure, well inside the 15 s grace
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK(driver->get_percent_completed() == Catch::Approx(50.0).margin(1.0));
+    // Bounded: the abort case above pins that abort needs no advance.
+    static_cast<void>(returns_without_advance(clock, [&] { driver->abort_exposure(); }));
+    driver->set_connected(false);
+}
+
 // --- SDK seam: LockedPlayerOneSDK (issue #1256) -------------------------------
 
 TEST_CASE("FakePlayerOneSDK-style recording SDK behind LockedPlayerOneSDK - forwards every entry point",
