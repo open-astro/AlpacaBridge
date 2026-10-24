@@ -14,7 +14,8 @@
 // device catalog (decision 0004: the form layout stays hand-written and a
 // drift check compares its fields to the catalog). Each named form field sits
 // in a data-vendor / data-device-type scope and names its catalog field with
-// data-config-key; every catalog field has a form field. The exceptions, each
+// data-config-key; every catalog field has a form field, through a control
+// that fits its type and role. The exceptions, each
 // with its reason, are in catalog_form_drift.json. The catalog side is the
 // committed fixture tests/fixtures/devicecatalog.json, which test_routing.cpp
 // holds equal to what the server serves.
@@ -129,6 +130,71 @@ function assertChecksCatchDrift() {
     ]);
 }
 
+// The control a catalog field needs: its type first (bool, stringList), then
+// its role (decision 0004: the drift check compares names and roles). null:
+// any input or select, but not a checkbox or a textarea.
+function expectedControl(c) {
+    if (c.type === 'bool') return 'checkbox';
+    if (c.type === 'stringList') return 'textarea';
+    if (c.role === 'EnumerationIndex') return 'number';
+    if (c.role === 'Discriminator') return 'select';
+    if (c.role === 'Secret') return 'password';
+    return null;
+}
+
+// A mapped form field whose control does not fit its catalog field.
+function controlProblems(formFieldList, descriptors) {
+    const problems = [];
+    for (const f of formFieldList) {
+        if (!f.configKey || f.vendor === null) continue;
+        const d = descriptors.find((x) => x.vendor === f.vendor && x.deviceType === f.deviceType);
+        const c = d && d.fields.find((x) => x.key === f.configKey);
+        if (!c || c.type === 'recordList') continue;  // unmapped: the named-field check; port tables: filled by hand
+        const expected = expectedControl(c);
+        const fits = expected ? f.control === expected : !['checkbox', 'textarea'].includes(f.control);
+        if (!fits) {
+            problems.push(`${f.id} (${fieldKey(f.vendor, f.deviceType, c.key)}, ${c.type} ${c.role}): ` +
+                `control ${f.control}, expected ${expected || 'an input or select'}`);
+        }
+    }
+    return problems;
+}
+
+// Self-test of controlProblems on a literal form: one field breaks each rule.
+function assertControlRulesCatchDrift() {
+    const snippet = `
+        <form id="device-form">
+          <div id="acme-config" data-vendor="acme" data-device-type="focuser">
+            <input type="text" id="acme-index" name="acmeIndex" data-config-key="focuserIndex">
+            <input type="text" id="acme-mode" name="acmeMode" data-config-key="mode">
+            <input type="text" id="acme-token" name="acmeToken" data-config-key="token">
+            <select id="acme-reverse" name="acmeReverse" data-config-key="reverse"><option value="1">On</option></select>
+            <input type="text" id="acme-names" name="acmeNames" data-config-key="names">
+            <textarea id="acme-note" name="acmeNote" data-config-key="note"></textarea>
+            <input type="number" id="acme-speed" name="acmeSpeed" data-config-key="speed">
+            <input type="password" id="acme-secret" name="acmeSecret" data-config-key="secret">
+          </div>
+        </form>`;
+    const cat = [{ vendor: 'acme', deviceType: 'focuser', fields: [
+        { key: 'focuserIndex', type: 'int', role: 'EnumerationIndex' },
+        { key: 'mode', type: 'string', role: 'Discriminator' },
+        { key: 'token', type: 'string', role: 'Secret' },
+        { key: 'reverse', type: 'bool', role: 'Plain' },
+        { key: 'names', type: 'stringList', role: 'Plain' },
+        { key: 'note', type: 'string', role: 'Plain' },
+        { key: 'speed', type: 'int', role: 'Plain' },
+        { key: 'secret', type: 'string', role: 'Secret' },
+    ] }];
+    assert.deepEqual(controlProblems(formFields(snippet), cat), [
+        'acme-index (acme/focuser/focuserIndex, int EnumerationIndex): control text, expected number',
+        'acme-mode (acme/focuser/mode, string Discriminator): control text, expected select',
+        'acme-token (acme/focuser/token, string Secret): control text, expected password',
+        'acme-reverse (acme/focuser/reverse, bool Plain): control select, expected checkbox',
+        'acme-names (acme/focuser/names, stringList Plain): control text, expected textarea',
+        'acme-note (acme/focuser/note, string Plain): control textarea, expected an input or select',
+    ]);
+}
+
 test('every named form field maps to a catalog field, a key the router keeps for every device, or a listed UI-only id', () => {
     assertChecksCatchDrift();
     assert.deepEqual(namedFieldProblems(fields, catalog, exemptions, agnostic), []);
@@ -168,22 +234,35 @@ test('every exemption in catalog_form_drift.json is still needed', () => {
     assert.deepEqual(stale, []);
 });
 
-test('each form field control fits its catalog field type', () => {
-    const problems = [];
-    const seen = new Set();
-    for (const f of fields) {
-        if (!f.configKey || f.vendor === null) continue;
+test('each form field control fits its catalog field type and role', () => {
+    assertControlRulesCatchDrift();
+    assert.deepEqual(controlProblems(fields, catalog), []);
+    const mapped = (pick) => fields.some((f) => {
         const d = catalog.find((x) => x.vendor === f.vendor && x.deviceType === f.deviceType);
-        const c = d && d.fields.find((x) => x.key === f.configKey);
-        if (!c) continue;  // reported by the named-field check
-        seen.add(c.type);
-        const where = `${f.id} (${fieldKey(f.vendor, f.deviceType, c.key)}, ${c.type})`;
-        if (c.type === 'recordList') continue;  // the port tables are filled by hand
-        if ((c.type === 'bool') !== (f.control === 'checkbox')) problems.push(`${where}: control ${f.control}`);
-        if ((c.type === 'stringList') !== (f.control === 'textarea')) problems.push(`${where}: control ${f.control}`);
+        const c = d && f.configKey && d.fields.find((x) => x.key === f.configKey);
+        return c && pick(c);
+    });
+    for (const type of ['bool', 'int', 'double', 'string', 'stringList', 'recordList']) {
+        assert.ok(mapped((c) => c.type === type), `no form field maps a catalog ${type} field`);
+    }
+    for (const role of ['EnumerationIndex', 'Discriminator', 'DeviceId', 'PortPath', 'Host']) {
+        assert.ok(mapped((c) => c.role === role), `no form field maps a catalog ${role} field`);
+    }
+});
+
+// The edit form opens an absent Discriminator on its catalog default, so the
+// select must offer that value.
+test('every Discriminator catalog default is an option of its select', () => {
+    const problems = [];
+    for (const d of catalog) {
+        for (const c of d.fields.filter((x) => x.role === 'Discriminator')) {
+            for (const f of fields.filter((x) => x.vendor === d.vendor && x.deviceType === d.deviceType && x.configKey === c.key)) {
+                const at = html.indexOf(`id="${f.id}"`);
+                const select = html.slice(at, html.indexOf('</select>', at));
+                if (!select.includes(`<option value="${c.default}"`)) problems.push(`${f.id}: no option "${c.default}"`);
+            }
+        }
     }
     assert.deepEqual(problems, []);
-    for (const type of ['bool', 'int', 'double', 'string', 'stringList', 'recordList']) {
-        assert.ok(seen.has(type), `no form field maps a catalog ${type} field`);
-    }
+    assert.ok(fields.some((f) => f.configKey === 'connectionType'), 'no select names a Discriminator');
 });

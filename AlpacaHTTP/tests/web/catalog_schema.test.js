@@ -11,10 +11,13 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Pins the web UI's reader of GET /management/v1/devicecatalog
-// (web/catalog_schema.js): it parses the management envelope, offers a vendor
-// for a device type only when the catalog has an available descriptor for the
-// pair, and derives the auto-numbered index fields from the EnumerationIndex
-// role instead of a hand-kept table in app.js.
+// (web/catalog_schema.js) and its wiring in app.js: the catalog is fetched
+// once per page load, before the devices, and a failed fetch is reported and
+// retried on the next form open (fail closed: no vendor offered, the vendor
+// select disabled). A vendor is offered for a device type only when the
+// catalog has an available descriptor for the pair, and the auto-numbered
+// index fields come from the EnumerationIndex role instead of a hand-kept
+// table in app.js.
 //
 // Run: node --test AlpacaHTTP/tests/web/catalog_schema.test.js
 
@@ -60,6 +63,37 @@ test('catalogFromResponse throws when Value is not a descriptor array', () => {
     }
 });
 
+const envelope = (Value) => ({ Value, ErrorNumber: 0, ErrorMessage: '' });
+
+test('catalogLoader fetches the catalog once and shares it', async () => {
+    let calls = 0;
+    const load = schema().catalogLoader(async () => {
+        calls += 1;
+        return envelope(catalog);
+    });
+    const [first, second] = await Promise.all([load(), load()]);
+    assert.equal(calls, 1, 'two calls in flight make one fetch');
+    assert.deepEqual(first, catalog);
+    assert.strictEqual(second, first);
+    assert.strictEqual(await load(), first);
+    assert.equal(calls, 1, 'a loaded catalog is not fetched again');
+});
+
+test('catalogLoader surfaces a failed load and fetches again on the next call', async () => {
+    const answers = [
+        () => Promise.reject(new Error('HTTP 503')),
+        () => Promise.resolve({ Value: [], ErrorNumber: 1035, ErrorMessage: 'catalog unavailable' }),
+        () => Promise.resolve(envelope(catalog)),
+    ];
+    let calls = 0;
+    const load = schema().catalogLoader(() => answers[calls++]());
+    await assert.rejects(load(), /HTTP 503/);
+    await assert.rejects(load(), /catalog unavailable/, 'an error envelope is a failed load too');
+    assert.deepEqual(await load(), catalog);
+    await load();
+    assert.equal(calls, 3, 'each failure is retried once, the success is kept');
+});
+
 // What updateVendorOptions offered per device type at upstream main bcb05e4975,
 // with the Gemini switch kept (see the next case).
 const OFFERED = {
@@ -82,12 +116,6 @@ test('offeredVendors offers each available vendor for the device types it has a 
     assert.deepEqual([...schema().offeredVendors(catalog, 'Switch')].sort(), OFFERED.switch, 'device type case');
 });
 
-// The hand-kept reset block cleared a Gemini vendor for a switch, so editing a
-// Gemini Power & Data Hub opened with no vendor selected.
-test('a Gemini switch keeps its vendor', () => {
-    assert.ok(schema().offeredVendors(catalog, 'switch').includes('gemini'));
-});
-
 test('offeredVendors drops a descriptor the build does not include', () => {
     assert.ok(!schema().offeredVendors(catalog, 'focuser').includes('zzz'), 'zzz focuser is available: false');
     const noZwoCamera = withAvailable('zwo', 'camera', false);
@@ -104,6 +132,26 @@ test('offeredVendors keeps the vendor of the edited device when the build lacks 
 
 test('with no catalog loaded no vendor is offered', () => {
     assert.deepEqual([...schema().offeredVendors(null, 'camera')], []);
+});
+
+// The hand-kept reset block cleared a Gemini vendor for a switch, so editing a
+// Gemini Power & Data Hub opened with no vendor selected.
+test('vendorSelectState clears a vendor the device type does not offer, and keeps a Gemini switch', () => {
+    const { vendorSelectState } = schema();
+    const state = vendorSelectState(catalog, 'Switch', 'gemini');
+    assert.deepEqual([...state.offered].sort(), OFFERED.switch);
+    assert.equal(state.value, 'gemini');
+    assert.equal(state.disabled, false);
+    assert.equal(vendorSelectState(catalog, 'camera', 'weewx').value, '', 'weewx has no camera');
+    assert.equal(vendorSelectState(catalog, 'camera', 'zwo').value, 'zwo');
+    assert.equal(vendorSelectState(withAvailable('zwo', 'camera', false), 'camera', 'zwo').value, '',
+        'a vendor the build lacks is cleared');
+    assert.equal(vendorSelectState(withAvailable('zwo', 'camera', false), 'camera', 'zwo', 'zwo').value, 'zwo',
+        'unless it is the vendor of the edited device');
+});
+
+test('with no catalog loaded the vendor select is disabled and empty', () => {
+    assert.deepEqual(schema().vendorSelectState(null, 'camera', 'zwo'), { offered: [], value: '', disabled: true });
 });
 
 test('deriveIndexFields takes EnumerationIndex number inputs and pairs the nearest DeviceId, else PortPath, field of the same appliesWhen', () => {
@@ -188,23 +236,69 @@ test('the index fields derived from index.html and the catalog are the ones app.
     assert.deepEqual(normalized(schema().deriveIndexFields(catalog, formFields(html))), normalized(INDEX_FIELDS_AT_BASE));
 });
 
+// The body of a top-level function declaration in app.js (its closing brace
+// is the first "}" at column 0).
+function functionBody(source, name) {
+    const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
+    assert.ok(start >= 0, `app.js has no function ${name}`);
+    return source.slice(start, source.indexOf('\n}\n', start) + 2);
+}
+
+const vendors = [...new Set(catalog.map((d) => d.vendor))];
+
+test('app.js keeps no hand-kept INDEX_FIELDS table and derives the index fields from the catalog', () => {
+    assert.doesNotMatch(app, /\bINDEX_FIELDS\b/);
+    assert.doesNotMatch(app, /\bfieldId\s*:/, 'an index-field entry written out in app.js');
+    assert.match(app, /^let indexFields = \[\];$/m);
+    assert.match(functionBody(app, 'ensureCatalog'), /\bindexFields = deriveIndexFields\(/);
+    assert.match(functionBody(app, 'maybeAutoFillIndexFields'), /\bindexFields\.forEach\(/);
+});
+
+test('updateVendorOptions takes the offered vendors from the catalog', () => {
+    const body = functionBody(app, 'updateVendorOptions');
+    assert.match(body, /\bvendorSelectState\(/, 'updateVendorOptions does not call vendorSelectState()');
+    assert.match(body, /\bvendorSelect\.disabled\s*=(?!=)/, 'updateVendorOptions never disables #vendor');
+    assert.match(body, /\bvendorSelect\.value\s*=(?!=)/, 'updateVendorOptions never clears a vendor not offered');
+    assert.match(body, /\.hidden\s*=(?!=)/, 'updateVendorOptions never hides a vendor option');
+    for (const vendor of vendors) {
+        assert.doesNotMatch(body, new RegExp(`['"\`]${vendor}['"\`]`), `updateVendorOptions names the vendor ${vendor}`);
+    }
+});
+
+test('app.js keeps one catalog loader on GET /management/v1/devicecatalog', () => {
+    assert.match(app, /^const loadCatalog = catalogLoader\([^;]*\bfetch\(\s*['"`]\/management\/v1\/devicecatalog['"`]/m);
+    assert.equal(app.match(/\bcatalogLoader\(/g).length, 1, 'a second catalogLoader is a second cache');
+});
+
+test('the page starts loading the catalog before it loads the devices', () => {
+    const start = app.indexOf("document.addEventListener('DOMContentLoaded', function() {");
+    assert.ok(start >= 0, 'no DOMContentLoaded handler');
+    const handler = app.slice(start, app.indexOf('\n});\n', start));
+    const catalogAt = handler.indexOf('ensureCatalog(');
+    assert.ok(catalogAt >= 0, 'DOMContentLoaded does not start the catalog load');
+    assert.ok(catalogAt < handler.indexOf('loadDevices('), 'the catalog load starts after loadDevices()');
+});
+
+test('a failed catalog load is shown as text and opening the Add form retries it', () => {
+    const body = functionBody(app, 'ensureCatalog');
+    assert.match(body, /\bawait loadCatalog\(\)/);
+    assert.match(body, /\.textContent\s*=\s*['"`]Could not load the device list: /);
+    assert.doesNotMatch(body, /innerHTML|insertAdjacentHTML/);
+    assert.match(body, /\bupdateVendorOptions\(\)/, 'ensureCatalog does not re-run updateVendorOptions()');
+    assert.match(functionBody(app, 'resetDeviceForm'), /\bensureCatalog\(\)/, 'opening the Add form does not retry');
+});
+
+test('startEditDevice awaits the catalog before it fills the form, and fills nothing without one', () => {
+    const body = functionBody(app, 'startEditDevice');
+    assert.match(body, /^async function startEditDevice\(/);
+    const wait = body.match(/const (\w+) = await ensureCatalog\(\);\s*if \(!\1\) \{?\s*return;/);
+    assert.ok(wait, 'startEditDevice does not await ensureCatalog() and return without a catalog');
+    assert.ok(wait.index < body.indexOf("setFormValue('vendor'"), 'startEditDevice fills the vendor before the catalog');
+});
+
 test('catalog_schema.js writes no markup', () => {
     const source = fs.readFileSync(SCHEMA_PATH, 'utf8');
     assert.doesNotMatch(source, /innerHTML|outerHTML|insertAdjacentHTML|document\.write/);
-});
-
-test('app.js keeps no hand-kept INDEX_FIELDS table', () => {
-    assert.doesNotMatch(app, /const INDEX_FIELDS = \[/);
-    assert.doesNotMatch(app, /\{ fieldId: '[a-z0-9-]+', vendor: '/);
-});
-
-test('updateVendorOptions keeps no per-vendor availability block', () => {
-    assert.doesNotMatch(app, /vendorSelect\.querySelector\('option\[value="[a-z]+"\]'\)/);
-    assert.doesNotMatch(app, /vendorSelect\.value === '[a-z]+'\) \{\s*vendorSelect\.value = '';/);
-});
-
-test('app.js reads the catalog from GET /management/v1/devicecatalog', () => {
-    assert.match(app, /['"`]\/management\/v1\/devicecatalog/);
 });
 
 test('index.html loads catalog_schema.js before app.js', () => {

@@ -17,7 +17,10 @@
 // markup default, except a Discriminator, which shows the catalog default
 // (the value the server reads for an absent key, so the form opens on the
 // branch the driver runs). The cases below are what the hand-written
-// startEditDevice chain showed at upstream main bcb05e4975.
+// startEditDevice chain showed at upstream main bcb05e4975. The drift check's
+// app.js half lives here too, because the per-field chain it forbids goes in
+// the same change: startEditDevice fills by hand only the fields marked
+// data-config-fill="manual", and fills each of them.
 //
 // Run: node --test AlpacaHTTP/tests/web/catalog_edit_fill.test.js
 
@@ -85,26 +88,35 @@ test('editAssignments fills saved values, leaves absent ones to the markup, and 
     ]);
 });
 
-test('an absent Discriminator opens on its catalog default', () => {
+test('an absent or null Discriminator opens on its catalog default', () => {
     const d = descriptor('touptek', 'switch');
-    const mode = schema().editAssignments(d, {}, fields).find((a) => a.key === 'switchType');
-    assert.equal(mode.value, 'stellavita', 'a ToupTek switch saved before switchType existed is a StellaVita PowerBox');
-    assert.equal(shown('touptek', 'switch', {})('touptek-switch-type'), 'stellavita');
+    for (const config of [{}, { switchType: null }]) {
+        const mode = schema().editAssignments(d, config, fields).find((a) => a.key === 'switchType');
+        assert.equal(mode.value, 'stellavita',
+            `${JSON.stringify(config)}: a ToupTek switch saved before switchType existed is a StellaVita PowerBox`);
+        assert.equal(shown('touptek', 'switch', config)('touptek-switch-type'), 'stellavita');
+    }
     assert.equal(shown('zwo', 'switch', {})('zwo-switch-type'), 'dewheater');
 });
 
-test('every Discriminator catalog default is an option of its select', () => {
-    const problems = [];
-    for (const d of catalog) {
-        for (const c of d.fields.filter((x) => x.role === 'Discriminator')) {
-            for (const f of fields.filter((x) => x.vendor === d.vendor && x.deviceType === d.deviceType && x.configKey === c.key)) {
-                const select = html.slice(html.indexOf(`id="${f.id}"`), html.indexOf('</select>', html.indexOf(`id="${f.id}"`)));
-                if (!select.includes(`<option value="${c.default}"`)) problems.push(`${f.id}: no option "${c.default}"`);
-            }
-        }
-    }
-    assert.deepEqual(problems, []);
-    assert.ok(fields.some((f) => f.configKey === 'connectionType'), 'no select names a Discriminator');
+// A saved false or 0 is a value, not an absent key: the markup default must
+// not replace it.
+test('a saved false or 0 is shown as saved, not as the markup default', () => {
+    const mount = shown('zwo', 'telescope', { syncTimeOnConnect: false });
+    assert.equal(mount('zwo-mount-sync-time-on-connect'), false, 'the checkbox markup is checked');
+    assert.equal(shown('zwo', 'telescope', {})('zwo-mount-sync-time-on-connect'), true, 'absent: markup default');
+    const focuser = shown('qhy', 'focuser', { holdIhold: 0, maxStep: 0 });
+    assert.equal(focuser('qhy-focuser-hold-ihold'), '0', 'the markup value is 4');
+    assert.equal(focuser('qhy-focuser-max-step'), '0', 'the markup value is 64000');
+    const values = new Map(schema().editAssignments(descriptor('qhy', 'focuser'), { holdIhold: 0, reverse: false }, fields)
+        .map((a) => [a.id, a.value]));
+    assert.strictEqual(values.get('qhy-focuser-hold-ihold'), 0);
+    assert.strictEqual(values.get('qhy-focuser-reverse'), false);
+});
+
+test('a device whose vendor and type have no descriptor fills and hides nothing', () => {
+    assert.deepEqual(schema().editAssignments(undefined, { cameraIndex: 1 }, fields), []);
+    assert.deepEqual(schema().applicability(undefined, fields, {}), {});
 });
 
 test('editing a Gemini flat panel v2 on serial loads the v2 block', () => {
@@ -209,9 +221,92 @@ test('appliesWhen chains: a field under a hidden discriminator is hidden too', (
     assert.equal(cfw3['qhy-cfw3-port-path'], true);
 });
 
-test('startEditDevice keeps no per-field fill for catalog fields', () => {
-    for (const id of ['camera-index', 'gemini-flatpanel-v2-port-path', 'qhy-cfw3-port-path', 'wandererastro-box-index',
-        'weewx-url', 'touptek-focuser-id', 'skywatcher-backlash-steps-ra', 'gemini-pdh-baud-rate']) {
-        assert.ok(!app.includes(`setFormValue('${id}'`), `app.js still fills #${id} by hand`);
+// The mapped form fields app.js fills by hand (data-config-fill="manual"),
+// each because the catalog cannot express it: the aperture diameter and focal
+// length (metres saved, millimetres shown), the alignment mode
+// (normalizeAlignmentMode), the Celestron connection type (direct CGX USB
+// forces serial), learnSiteFromClient (a key the router keeps for every
+// device, absent means on) and the ZWO camera identity (issue #914).
+const MANUAL_FIELDS = [
+    'aperture-diameter', 'focal-length',
+    'bisque-aperture-diameter', 'bisque-focal-length',
+    'celestron-aperture-diameter', 'celestron-focal-length',
+    'onstep-aperture-diameter', 'onstep-focal-length',
+    'skywatcher-aperture-diameter', 'skywatcher-focal-length',
+    'synscan-aperture-diameter', 'synscan-focal-length',
+    'zwo-mount-aperture-diameter', 'zwo-mount-focal-length',
+    'celestron-alignment-mode', 'synscan-alignment-mode',
+    'celestron-connection-type',
+    'skywatcher-learn-site-from-client', 'zwo-mount-learn-site-from-client',
+    'zwo-camera-name', 'zwo-camera-serial',
+];
+
+test('the fields app.js fills by hand are exactly the ones marked manual', () => {
+    const manual = fields.filter((f) => f.manual);
+    assert.deepEqual(manual.map((f) => f.id).sort(), [...MANUAL_FIELDS].sort());
+    for (const f of manual) assert.ok(f.configKey, `#${f.id} is marked manual but names no catalog field`);
+});
+
+// The body of a top-level function declaration in app.js (its closing brace
+// is the first "}" at column 0).
+function functionBody(source, name) {
+    const start = source.search(new RegExp(`^(?:async )?function ${name}\\(`, 'm'));
+    assert.ok(start >= 0, `app.js has no function ${name}`);
+    return source.slice(start, source.indexOf('\n}\n', start) + 2);
+}
+
+// The element ids a piece of app.js sets a value on: setFormValue('<id>', ...),
+// document.getElementById('<id>').value / .checked = ..., or a const / let
+// bound to getElementById('<id>') whose .value / .checked is then assigned.
+function handFilledIds(body) {
+    const ids = new Set();
+    for (const m of body.matchAll(/setFormValue\(\s*'([a-z0-9-]+)'/g)) ids.add(m[1]);
+    for (const m of body.matchAll(/getElementById\('([a-z0-9-]+)'\)\??\.(?:value|checked)\s*=(?!=)/g)) ids.add(m[1]);
+    for (const m of body.matchAll(/(?:const|let) (\w+) = document\.getElementById\('([a-z0-9-]+)'\);/g)) {
+        if (new RegExp(`\\b${m[1]}\\.(?:value|checked)\\s*=(?!=)`).test(body)) ids.add(m[2]);
     }
+    return ids;
+}
+
+test('the drift check reads app.js: startEditDevice fills by hand only the fields marked manual', () => {
+    // Self-test on a literal body (decision 0003: extractor logic has literal fixtures).
+    assert.deepEqual([...handFilledIds(`
+        setFormValue('a-id', config.a);
+        document.getElementById('b-id').checked = config.b === true;
+        const cEl = document.getElementById('c-id');
+        if (cEl) cEl.value = config.c;
+        const dEl = document.getElementById('d-id');
+        if (dEl.value === 'x') dEl.dispatchEvent(new Event('change'));
+    `)].sort(), ['a-id', 'b-id', 'c-id']);
+
+    const body = functionBody(app, 'startEditDevice');
+    const handFilled = handFilledIds(body);
+    const typeOf = (f) => {
+        const d = descriptor(f.vendor, f.deviceType);
+        const c = d && d.fields.find((x) => x.key === f.configKey);
+        return c ? c.type : null;
+    };
+    // Port tables (recordList) are filled by hand through computed ids.
+    const mapped = fields.filter((f) => f.configKey && f.vendor !== null && typeOf(f) !== 'recordList');
+    const generic = mapped.filter((f) => !f.manual).map((f) => f.id);
+    for (const id of ['camera-index', 'gemini-flatpanel-v2-port-path', 'qhy-cfw3-port-path', 'wandererastro-box-index',
+        'weewx-url', 'touptek-focuser-id', 'skywatcher-backlash-steps-ra', 'zwo-mount-sync-time-on-connect']) {
+        assert.ok(generic.includes(id), `#${id} is not a mapped field the generic fill owns`);
+    }
+    assert.deepEqual(generic.filter((id) => handFilled.has(id)), [], 'filled by hand but not marked manual');
+    assert.deepEqual(mapped.filter((f) => f.manual && !handFilled.has(f.id)).map((f) => f.id), [],
+        'marked manual but startEditDevice does not fill it');
+});
+
+test('startEditDevice and every discriminator change re-run the appliesWhen hiding', () => {
+    const pass = functionBody(app, 'updateFieldApplicability');
+    assert.match(pass, /\bapplicability\(/, 'updateFieldApplicability does not call applicability()');
+    assert.match(pass, /\.hidden\s*=(?!=)/, 'updateFieldApplicability does not set hidden');
+    const edit = functionBody(app, 'startEditDevice');
+    const fill = edit.search(/\beditAssignments\(/);
+    assert.ok(fill >= 0, 'startEditDevice does not call editAssignments()');
+    assert.ok(edit.indexOf('updateFieldApplicability(', fill) > fill,
+        'startEditDevice does not re-run updateFieldApplicability() after the fill');
+    assert.match(app, /addEventListener\(\s*'change',[^\n]*\n?[^\n]*updateFieldApplicability\b/,
+        'no change listener runs updateFieldApplicability');
 });
