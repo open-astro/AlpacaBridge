@@ -19,6 +19,11 @@
 // virtual time reaches slew_end, so a test advances the clock instead of
 // sleeping. Replies are the ones the driver's wrapper parses
 // (zwo_mount_protocol_wrapper.cpp), taken from the wrapper, not from memory.
+// A command the wrapper sends blind (send_command_blind: ":Q", ":TQ"/":TL"/":TS",
+// ":Rv", ":Rg", ":Mg", jogs, ":hP", ":hC") gets no reply, as on the wire; a
+// stray reply would be read as the next exchange's answer. A command the fake
+// does not know gets no reply either, so a test that needs one times out
+// visibly instead of reading a guessed value.
 //
 // Real-time knobs (hold_reply, set_reply_delay) model transport latency, not a
 // driver timer; they never read the TaskClock.
@@ -64,7 +69,7 @@ public:
 
     // ---- Knobs ----------------------------------------------------------
 
-    /// Virtual time a ":MS#" GOTO (and a ":hP#" park) takes. Default 5 s.
+    /// Virtual time a ":MS#" GOTO, a ":hP#" park and a ":hC#" home take. Default 5 s.
     void set_slew_duration(virtual_duration duration) {
         std::lock_guard<std::mutex> lock(mutex_);
         slew_duration_ = duration;
@@ -124,6 +129,21 @@ public:
         hold_running_ = on;
     }
 
+    /// ":GU#" flags with no motion behind them: 'L' low power, 'S' / 's' RA / Dec stall, 'Z' instead of 'G'.
+    void set_low_power(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        low_power_ = on;
+    }
+    void set_stall(bool ra, bool dec) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ra_stall_ = ra;
+        dec_stall_ = dec;
+    }
+    void set_alt_az(bool on) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        alt_az_ = on;
+    }
+
     /// RST every accepted connection; the listener stays up, so a reconnect is served.
     void drop_link() { server_.drop_connections(); }
     void reset_connections() { server_.reset_connections(); }
@@ -133,6 +153,7 @@ public:
         settle_locked();
         ra_hours_ = ra_hours;
         dec_degrees_ = dec_degrees;
+        at_home_ = false;
     }
     void set_tracking(bool on) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -179,6 +200,27 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         return jog_[0] || jog_[1] || jog_[2] || jog_[3];
     }
+    /// At the home position: a ":hC" slew has landed and nothing has moved the mount since.
+    bool at_home() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        settle_locked();
+        return at_home_;
+    }
+    /// ":TQ" 0 sidereal, ":TL" 1 lunar, ":TS" 2 solar; ":GT#" reports it.
+    int tracking_rate() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return tracking_rate_;
+    }
+    /// The last ":Rv" move rate, a sidereal multiple (the wire sends "NNNN.NN", not an index).
+    double move_rate() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return move_rate_;
+    }
+    /// The last ":Rg" payload; ":Ggr#" answers it.
+    std::string guide_rate() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return guide_rate_;
+    }
 
     // ---- Command record ---------------------------------------------------
 
@@ -209,7 +251,7 @@ private:
         return slew_active_ || jog_[0] || jog_[1] || jog_[2] || jog_[3];
     }
 
-    // Lands a finished GOTO / park once virtual time reaches slew_end.
+    // Lands a finished GOTO / park / home once virtual time reaches slew_end.
     void settle_locked() {
         if (!slew_active_ || hold_running_ || clock_.now() < slew_end_) return;
         slew_active_ = false;
@@ -219,12 +261,32 @@ private:
             park_pending_ = false;
             park_state_ = 2;
         }
+        if (home_pending_) {
+            home_pending_ = false;
+            at_home_ = true;
+            homed_ = true;
+        }
     }
 
+    // Any new motion leaves home and ends a pending park or home.
     void start_slew_locked() {
         settle_locked();
         slew_active_ = true;
         slew_end_ = clock_.now() + slew_duration_;
+        at_home_ = false;
+        park_pending_ = false;
+        home_pending_ = false;
+    }
+
+    // ":Mg" + direction (n, s, e, w) + four-digit milliseconds: n/s guide Dec ('t'), e/w guide RA ('T').
+    void start_guide_locked(const std::string& command) {
+        if (command.size() < 5) return;
+        const auto end = clock_.now() + std::chrono::milliseconds(std::atoi(command.c_str() + 4));
+        if (command[3] == 'e' || command[3] == 'w') {
+            ra_guide_end_ = end;
+        } else {
+            dec_guide_end_ = end;
+        }
     }
 
     void maybe_hold(const std::string& command) {
@@ -289,7 +351,7 @@ private:
         return response;
     }
 
-    // One reply per command; blind commands (":Q", ":Mg", jogs, ":hP", ":hC") get none, as on the wire.
+    // One reply per command the wrapper reads a reply to; blind and unknown commands get none (header comment).
     std::string answer(const std::string& command) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto starts = [&](const char* prefix) { return command.rfind(prefix, 0) == 0; };
@@ -299,11 +361,19 @@ private:
         }
         if (command == ":GVP") return identity_ + "#";
         if (command == ":GMA") return "012345ABCDEF#";
-        if (command == ":GU") {
+        if (command == ":GU") {  // the wrapper's table: n N L H S s T t, then G or Z
+            const bool moving = slewing_locked();
+            const auto now = clock_.now();
             std::string flags;
             if (!tracking_) flags += 'n';
-            if (!slewing_locked()) flags += 'N';
-            return flags + "G#";
+            if (!moving) flags += 'N';
+            if (low_power_) flags += 'L';
+            if (at_home_ && !moving) flags += 'H';
+            if (ra_stall_) flags += 'S';
+            if (dec_stall_) flags += 's';
+            if (now < ra_guide_end_) flags += 'T';
+            if (now < dec_guide_end_) flags += 't';
+            return flags + (alt_az_ ? "Z#" : "G#");
         }
         if (command == ":GR") {
             settle_locked();
@@ -313,9 +383,14 @@ private:
             settle_locked();
             return dms(dec_degrees_) + "#";
         }
+        if (command == ":Gr") return hms(target_ra_) + "#";
+        if (command == ":Gd") return dms(target_dec_) + "#";
         if (command == ":GAT") return tracking_ ? "1#" : "0#";
-        if (command == ":GT") return "0#";
-        if (command == ":Ggr") return "0.5#";
+        if (command == ":GT") return std::to_string(tracking_rate_) + "#";
+        if (command == ":Ggr") return guide_rate_ + "#";
+        if (command == ":GS") return "00:00:00#";
+        if (command == ":Gm") return "W#";
+        if (command == ":Gh") return homed_ ? "1#" : "0#";
         if (command == ":GA") return "+45*00:00#";
         if (command == ":GZ") return "180*00:00#";
         if (command == ":GMGE") return site_reply_ + "#";
@@ -363,9 +438,25 @@ private:
         }
         if (command == ":Me" || command == ":Mw" || command == ":Mn" || command == ":Ms") {
             jog_[jog_index(command[2])] = true;
+            at_home_ = false;
             return {};
         }
-        if (starts(":Mg")) return {};
+        if (starts(":Mg")) {
+            start_guide_locked(command);
+            return {};
+        }
+        if (command == ":TQ" || command == ":TL" || command == ":TS") {
+            tracking_rate_ = command == ":TQ" ? 0 : command == ":TL" ? 1 : 2;
+            return {};
+        }
+        if (starts(":Rv")) {
+            move_rate_ = std::atof(command.c_str() + 3);
+            return {};
+        }
+        if (starts(":Rg")) {
+            guide_rate_ = command.substr(3);
+            return {};
+        }
         if (command == ":Te") {
             tracking_ = true;
             return "1#";
@@ -375,17 +466,18 @@ private:
             return "1#";
         }
         if (command == ":hP") {
-            park_state_ = 1;
-            park_pending_ = true;
             target_ra_ = ra_hours_;
             target_dec_ = dec_degrees_;
             start_slew_locked();
+            park_state_ = 1;
+            park_pending_ = true;
             return {};
         }
         if (command == ":hC") {
             target_ra_ = 0.0;
             target_dec_ = 0.0;
             start_slew_locked();
+            home_pending_ = true;
             return {};
         }
         if (command == ":Spu") {
@@ -393,8 +485,8 @@ private:
             return "1#";
         }
         if (starts(":SMMC")) return "N/A#";  // the wrapper accepts an empty or N/A answer to a sync
-        if (starts(":Sp") || command == ":CM") return "1#";
-        return "0#";
+        if (command == ":Sp01" || command == ":CM") return "1#";
+        return {};
     }
 
     static std::size_t jog_index(char axis) {
@@ -426,8 +518,16 @@ private:
     double ra_hours_ = 12.0, dec_degrees_ = 45.0;
     double target_ra_ = 12.0, target_dec_ = 45.0;
     bool tracking_ = true;
+    int tracking_rate_ = 0;
+    double move_rate_ = 0.0;
+    std::string guide_rate_ = "0.50";
     int park_state_ = 0;
     bool park_pending_ = false;
+    bool home_pending_ = false;
+    bool at_home_ = false;
+    bool homed_ = false;  // ":Gh#": a home search has completed since power-on
+    bool low_power_ = false, ra_stall_ = false, dec_stall_ = false, alt_az_ = false;
+    util::TaskClock::clock::time_point ra_guide_end_{}, dec_guide_end_{};
     bool jog_[4] = {false, false, false, false};
     std::string site_reply_ = "+30*00:00&+100*00:00";
     std::string time_reply_ = "01/02/2026&03:04:05&+00:00";

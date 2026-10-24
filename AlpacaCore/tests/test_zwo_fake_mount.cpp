@@ -21,10 +21,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <future>
 #include <string>
+#include <vector>
 
 #include "catch2_compat.h"
 #include "fake_task_clock.h"
@@ -67,6 +69,13 @@ public:
     std::string ask(const std::string& command) {
         send(command);
         return read_reply();
+    }
+    /// True once the peer has closed or reset the connection: recv sees end of file or an error, not the receive
+    /// timeout.
+    bool closed() {
+        char ch = 0;
+        const auto n = ::recv(fd_, &ch, 1, 0);
+        return n == 0 || (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
     }
 
 private:
@@ -194,6 +203,106 @@ TEST_CASE("FakeZwoMount - count matches what was sent, and a write replaces the 
     CHECK(rig.mount.count(":SMTI") == 1);
     CHECK(rig.mount.wait_for_count(":GR", 2, 1s));
     CHECK_FALSE(rig.mount.wait_for_count(":GR", 3, 50ms));
+}
+
+TEST_CASE("FakeZwoMount - commands the wrapper sends blind get no reply", "[zwo][fake][unit]") {
+    Rig rig;
+    // send_command_blind() in zwo_mount_protocol_wrapper.cpp: abort, tracking rates, move and guide rates, jogs,
+    // guide pulses, home and park. A stray reply would be read as the next command's answer.
+    const std::vector<std::string> blind = {":Q#",  ":TQ#", ":TL#",      ":TS#", ":Rv0001.00#", ":Rg0.50#", ":Me#",
+                                            ":Qe#", ":Mw#", ":Qw#",      ":Mn#", ":Qn#",        ":Ms#",     ":Qs#",
+                                            ":hC#", ":Q#",  ":Mgn0100#", ":hP#", ":Q#"};
+    for (const auto& command : blind) {
+        rig.client.send(command);
+        CHECK(rig.client.ask(":GVP#") == "AM5N#");
+    }
+    CHECK(rig.mount.count(":GVP") == static_cast<int>(blind.size()));
+}
+
+TEST_CASE("FakeZwoMount - an unknown command gets no reply", "[zwo][fake][unit]") {
+    Rig rig;
+    rig.client.send(":Xyz#");
+    CHECK(rig.client.ask(":GVP#") == "AM5N#");
+    CHECK(rig.mount.count(":Xyz") == 1);
+}
+
+TEST_CASE("FakeZwoMount - :GU reports home, guide pulses and the fault and mode flags", "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.set_slew_duration(10s);
+    CHECK(rig.client.ask(":Gh#") == "0#");
+    rig.client.send(":hC#");
+    CHECK(rig.client.ask(":GU#") == "G#");  // homing: moving, not yet at home
+    rig.clock.advance(10s);
+    CHECK(rig.client.ask(":GU#") == "NHG#");
+    CHECK(rig.mount.at_home());
+    CHECK(rig.client.ask(":Gh#") == "1#");
+    rig.client.send(":Mge0500#");
+    rig.client.send(":Mgn0200#");
+    CHECK(rig.client.ask(":GU#") == "NHTtG#");
+    rig.clock.advance(200ms);
+    CHECK(rig.client.ask(":GU#") == "NHTG#");  // the Dec pulse ended first
+    rig.clock.advance(300ms);
+    CHECK(rig.client.ask(":GU#") == "NHG#");
+    CHECK(rig.client.ask(":MS#") == "0#");
+    CHECK(rig.client.ask(":GU#") == "G#");  // a GOTO leaves home
+    CHECK_FALSE(rig.mount.at_home());
+    CHECK(rig.client.ask(":Gh#") == "1#");  // a completed home search stays reported
+    rig.clock.advance(10s);
+    rig.mount.set_low_power(true);
+    rig.mount.set_stall(true, true);
+    rig.mount.set_alt_az(true);
+    CHECK(rig.client.ask(":GU#") == "NLSsZ#");
+}
+
+TEST_CASE("FakeZwoMount - rate commands set the state that :GT and :Ggr report", "[zwo][fake][unit]") {
+    Rig rig;
+    CHECK(rig.client.ask(":GT#") == "0#");
+    CHECK(rig.client.ask(":Ggr#") == "0.50#");
+    rig.client.send(":TS#");
+    CHECK(rig.client.ask(":GT#") == "2#");
+    rig.client.send(":TL#");
+    CHECK(rig.client.ask(":GT#") == "1#");
+    CHECK(rig.mount.tracking_rate() == 1);
+    rig.client.send(":Rg0.30#");
+    CHECK(rig.client.ask(":Ggr#") == "0.30#");
+    CHECK(rig.mount.guide_rate() == "0.30");
+    rig.client.send(":Rv0012.50#");
+    CHECK(rig.client.ask(":GVP#") == "AM5N#");
+    CHECK(rig.mount.move_rate() == 12.5);
+}
+
+TEST_CASE("FakeZwoMount - override_reply answers the given reply the given number of times", "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.override_reply(":GR", "e2", 2);
+    CHECK(rig.client.ask(":GR#") == "e2#");
+    CHECK(rig.client.ask(":GD#") == "+45*00:00#");  // only the named prefix
+    CHECK(rig.client.ask(":GR#") == "e2#");
+    CHECK(rig.client.ask(":GR#") == "12:00:00#");
+}
+
+TEST_CASE("FakeZwoMount - set_reply_delay holds every reply for the real-time delay", "[zwo][fake][unit]") {
+    Rig rig;
+    rig.mount.set_reply_delay(100ms);
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(rig.client.ask(":GVP#") == "AM5N#");
+    CHECK(std::chrono::steady_clock::now() - start >= 100ms);
+    CHECK(rig.clock.now() == FakeTaskClock::clock::time_point{});  // real time only: the task clock did not move
+    rig.mount.set_reply_delay(0ms);
+    CHECK(rig.client.ask(":GVP#") == "AM5N#");
+}
+
+TEST_CASE("FakeZwoMount - drop_link and reset_connections close the link and a new connection is served",
+          "[zwo][fake][unit]") {
+    Rig rig;
+    CHECK(rig.client.ask(":GVP#") == "AM5N#");
+    rig.mount.drop_link();
+    CHECK(rig.client.closed());
+    Client second{rig.mount.port()};
+    CHECK(second.ask(":GVP#") == "AM5N#");
+    rig.mount.reset_connections();
+    CHECK(second.closed());
+    Client third{rig.mount.port()};
+    CHECK(third.ask(":GVP#") == "AM5N#");
 }
 
 #endif  // !_WIN32
