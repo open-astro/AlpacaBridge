@@ -227,7 +227,7 @@ TEST_CASE("iOptron iGuider Camera Driver - State machine", "[ioptron][iguider][c
     CHECK(c.get_image_ready() == false);
     CHECK(c.get_is_pulse_guiding() == false);
     alpacacore::test::require_percent_completed_unavailable(c);  // Idle: InvalidOperation, not 0 (#1477)
-    require_alpaca_error([&] { (void)c.get_last_exposure_duration(); }, AlpacaError::ValueNotSet);
+    require_alpaca_error([&] { (void)c.get_last_exposure_duration(); }, AlpacaError::InvalidOperation);
     try {
         (void)c.get_image_array();
         FAIL("Expected AlpacaException");
@@ -462,6 +462,37 @@ TEST_CASE("iOptron iGuider Camera Driver - A stalled stream latches a link fault
     REQUIRE(wait_until([&] { return c.get_link_fault().empty(); }));
     CHECK(c.get_camera_state() == CameraState::Idle);
     expose(c, 0.01);
+}
+
+// ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired, and a failed
+// exposure never publishes them or erases an earlier success (issue #1477).
+TEST_CASE("iOptron iGuider Camera Driver - LastExposure values follow successful images only",
+          "[ioptron][iguider][camera][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    Rig rig("", clock);
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    REQUIRE(rig.fake.wait_for_frames(3, std::chrono::seconds(2)));
+    const auto fail_exposure = [&](double seconds) {
+        rig.fake.stalled = true;
+        c.start_exposure(seconds, true);
+        clock.advance(std::chrono::seconds(11));
+        REQUIRE(wait_until([&] { return !c.get_link_fault().empty(); }));
+        require_alpaca_error([&] { (void)c.get_image_ready(); }, AlpacaError::DriverException);
+    };
+
+    SECTION("a failed first exposure publishes nothing") {
+        fail_exposure(0.01);
+        alpacacore::test::require_last_exposure_unset(c);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        expose(c, 0.01);
+        const auto start = c.get_last_exposure_start_time();
+        CHECK(c.get_last_exposure_duration() == 0.01);
+        fail_exposure(0.02);
+        CHECK(c.get_last_exposure_duration() == 0.01);
+        CHECK(c.get_last_exposure_start_time() == start);
+    }
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera is a lost link", "[ioptron][iguider][camera][unit]") {

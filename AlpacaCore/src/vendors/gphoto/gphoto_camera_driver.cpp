@@ -12,6 +12,7 @@
 
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gphoto/gphoto_camera_driver.h>
@@ -865,19 +866,15 @@ public:
     bool get_is_pulse_guiding() const override { return false; }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        return published_exposure_.start_time();
     }
 
     int get_max_adu() const override {
@@ -1056,6 +1053,16 @@ public:
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
+            // ICameraV4 LastExposureDuration is the actual duration: a native exposure runs at the shutter speed
+            // written, which is the nearest choice, not the requested value. A bulb exposure is held for the
+            // duration the driver times itself, and a body that owns its shutter (B mode) writes none, so both
+            // report the requested value. PercentCompleted keeps the requested duration for progress.
+            pending_actual_duration_ = duration;
+            if (!use_bulb && !shutter_choice.empty()) {
+                if (const auto set_speed = parse_shutter_speed_seconds(shutter_choice)) {
+                    pending_actual_duration_ = *set_speed;
+                }
+            }
             last_exposure_start_ = std::chrono::system_clock::now();
             last_exposure_valid_ = true;
             image_ready_ = false;
@@ -1177,9 +1184,13 @@ private:
     mutable bool image_ready_{false};
     mutable bool image_cached_{false};
     mutable ImageArray last_image_{};
-    double last_exposure_duration_{0.0};
+    double last_exposure_duration_{0.0};  // requested; PercentCompleted's denominator
+    double pending_actual_duration_{0.0};
     std::chrono::system_clock::time_point last_exposure_start_{};
     bool last_exposure_valid_{false};
+    // What LastExposureDuration / LastExposureStartTime report: the exposure in flight (the pending fields above)
+    // copied here only when its image is acquired (issue #1477).
+    util::LastExposure published_exposure_;
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
@@ -1239,6 +1250,8 @@ private:
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
+        pending_actual_duration_ = 0.0;
+        published_exposure_.clear();
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
         exposure_failed_ = false;
@@ -1533,9 +1546,15 @@ private:
             DecodedFrame decoded = decoder_.decode(capture.data);
 
             std::lock_guard<std::mutex> lock(mutex_);
+            if (!exposure_active_.load()) {
+                // Aborted while the frame was decoding: the image is discarded,
+                // so nothing is applied or published.
+                return;
+            }
             apply_decoded_frame_locked(decoded);
             image_cached_ = true;
             image_ready_ = true;
+            published_exposure_.commit(pending_actual_duration_, last_exposure_start_);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogTag, "Exposure failed: " + std::string(e.what()));
             record_exposure_failure(handle, e.what(), dynamic_cast<const GPhotoDeviceGoneException*>(&e) != nullptr);

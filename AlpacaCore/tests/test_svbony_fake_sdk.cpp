@@ -633,7 +633,7 @@ TEST_CASE("SVBONY Camera - close and reopen clears an unconfirmed capture stop",
     camera->set_connected(true);
     CHECK_FALSE(camera->get_image_ready());
     require_alpaca_error([&] { static_cast<void>(camera->get_last_exposure_duration()); },
-                         alpacacore::AlpacaError::ValueNotSet);
+                         alpacacore::AlpacaError::InvalidOperation);
     camera->start_exposure(0.001, true);
     wait_until_ready(*camera);
     CHECK(camera->get_image_array().data.size() == 128);
