@@ -18,6 +18,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/device_location_store.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
@@ -451,19 +452,38 @@ public:
             ALPACA_LOG_INFO("iOptron", "Disconnected from mount");
         }
     }
-    
+
+    // "gps_status": whether the mount's GPS receiver holds a fix, with the receiver's own latitude and
+    // longitude (issue #1277). Every iOptron mount answers :GLS#, so it is listed whenever connected.
+    static constexpr std::string_view kGpsStatusAction = "gps_status";
+
     std::vector<std::string> get_supported_actions() const override {
-        return {};  // No custom actions
+        // connected_ is atomic: no mutex_, so a command_* exchange holding it cannot stall this getter.
+        if (!connected_.load()) return {};
+        return {std::string(kGpsStatusAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;  // Unused - no actions supported
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+        (void)action_parameters;  // gps_status takes none
+        if (!util::is_gps_status_action(action_name)) {
+            throw AlpacaException("Action not supported: " + std::string(action_name),
+                                  AlpacaError::ActionNotImplemented);
+        }
+        {
+            // mutex_ guards state only; the wire has its own lock in the protocol wrapper (decision 0016).
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+        }
+        // :GLS# digit 17 is 2 only for valid GPS data; the site in the same reply is then the receiver's
+        // reading. Without a fix the reply holds the stored site, which must not be reported as GPS.
+        const SiteInfo site = iOptronProtocolWrapper::instance().get_site_location();
+        const bool fix = (site.gps_status == 2);
+        if (!fix) return util::format_gps_status(false, std::nullopt, std::nullopt);
+        return util::format_gps_status(true, site.latitude_degrees, site.longitude_degrees);
     }
-    
+
     bool can_action(std::string_view action_name) const override {
-        (void)action_name;  // Unused - no actions supported
-        return false;
+        return connected_.load() && util::is_gps_status_action(action_name);
     }
     
     std::string command_blind(std::string_view command, bool raw) override {

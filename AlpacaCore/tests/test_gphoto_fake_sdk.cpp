@@ -1693,3 +1693,25 @@ TEST_CASE("GPhoto camera fake - MLU read finding the camera gone from the USB bu
     driver->set_connected(false);
     CHECK(fake.close_count == fake.open_count);
 }
+
+// Issue #1277: libgphoto2 reports neither e-/ADU nor a full well, so both raise PropertyNotImplemented once connected
+// (NotConnected first while disconnected), never the old 1.0 / 0.0 sentinels.
+TEST_CASE("GPhoto camera fake - ElectronsPerADU and FullWellCapacity raise PropertyNotImplemented",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}

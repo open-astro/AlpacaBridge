@@ -79,7 +79,7 @@ TEST_CASE("Altair Camera Driver - Defaults", "[altair][camera][unit]") {
     REQUIRE(driver->get_device_number() == 0);
     REQUIRE(driver->get_connected() == false);
     CHECK(driver->get_name() == "Altair Camera");
-    CHECK(driver->get_sensor_name() == "Altair Sensor");
+    CHECK(driver->get_sensor_name().empty());  // unknown: "" (ICameraV4), never a placeholder
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);
     CHECK(driver->get_can_asymmetric_bin() == false);
