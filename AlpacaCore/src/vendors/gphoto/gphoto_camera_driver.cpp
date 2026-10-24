@@ -907,8 +907,8 @@ public:
             return image_ready_ ? 100.0 : 0.0;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (last_exposure_duration_ <= 0.0) return 0.0;
-        double elapsed = std::chrono::duration<double>(clock_.now() - pending_progress_start_).count();
+        if (last_exposure_duration_ <= 0.0 || !pending_progress_start_) return 0.0;
+        double elapsed = std::chrono::duration<double>(clock_.now() - *pending_progress_start_).count();
         double percent = (elapsed / last_exposure_duration_) * 100.0;
         return std::clamp(percent, 0.0, 100.0);
     }
@@ -1043,7 +1043,7 @@ public:
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
-            pending_progress_start_ = clock_.now();
+            pending_progress_start_.reset();
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
@@ -1162,7 +1162,7 @@ private:
     mutable bool image_cached_{false};
     mutable ImageArray last_image_{};
     double last_exposure_duration_{0.0};  // requested; PercentCompleted's denominator
-    util::TaskClock::clock::time_point pending_progress_start_{};
+    std::optional<util::TaskClock::clock::time_point> pending_progress_start_;
     bool last_exposure_valid_{false};
     // Last successful image only; in-flight timing stays local to the exposure worker.
     util::LastExposure published_exposure_;
@@ -1223,7 +1223,7 @@ private:
         image_ready_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;
-        pending_progress_start_ = {};
+        pending_progress_start_.reset();
         last_exposure_valid_ = false;
         published_exposure_.clear();
         exposure_active_.store(false);
@@ -1555,7 +1555,11 @@ private:
                 capture = bulb_capture_with_abort(handle, duration, timing);
             } else {
                 // Host trigger-call boundary, not a measured photon edge; the camera clock's EXIF time is not UTC.
-                timing.start = std::chrono::system_clock::now();
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pending_progress_start_ = clock_.now();
+                    timing.start = std::chrono::system_clock::now();
+                }
                 capture = sdk.capture_and_download(handle);
             }
 
@@ -1681,8 +1685,13 @@ private:
         };
         // Elapsed host open/close command boundaries include event-pump overruns, not file wait or decode.
         // Physical shutter latency is camera-dependent and needs rig measurement.
-        timing.start = std::chrono::system_clock::now();
-        const auto opened_at = clock_.now();
+        util::TaskClock::clock::time_point opened_at;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            opened_at = clock_.now();
+            timing.start = std::chrono::system_clock::now();
+            pending_progress_start_ = opened_at;
+        }
         const auto shutter_close = [&] {
             timing.duration = std::chrono::duration<double>(clock_.now() - opened_at).count();
             if (use_remote_release) {
@@ -1715,8 +1724,13 @@ private:
         press();
         release();  // the mirror is up
         hold_with_events(handle, options_.mirror_lockup_settle, [] {});
-        timing.start = std::chrono::system_clock::now();
-        const auto opened_at = clock_.now();
+        util::TaskClock::clock::time_point opened_at;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            opened_at = clock_.now();
+            timing.start = std::chrono::system_clock::now();
+            pending_progress_start_ = opened_at;
+        }
         press();
         if (hold) {
             hold_with_events(

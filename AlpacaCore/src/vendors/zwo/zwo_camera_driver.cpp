@@ -784,7 +784,7 @@ public:
             return image_ready_ ? 100.0 : 0.0;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (pending_exposure_duration_ <= 0.0) {
+        if (exposure_starting_ || pending_exposure_duration_ <= 0.0) {
             return 0.0;
         }
         auto elapsed = std::chrono::duration<double>(clock_.now() - exposure_started_monotonic_).count();

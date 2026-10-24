@@ -1161,16 +1161,26 @@ TEST_CASE("Player One Camera Driver - readiness poll sleeps on the task clock",
     alpacacore::test::FakeTaskClock clock;
     auto driver = make_clocked_driver(sdk, clock);
 
-    driver->start_exposure(0.001, true);
+    const auto before_start = std::chrono::system_clock::now();
+    driver->start_exposure(1.0, true);
     REQUIRE(clock.wait_for_wait_count(1, 5s));  // the poll's 50 ms sleep
+    const auto after_start = std::chrono::system_clock::now();
+    CHECK(driver->get_percent_completed() == Catch::Approx(0.0));
+    clock.advance(250ms);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));
+    CHECK(driver->get_percent_completed() == Catch::Approx(25.0));
     sdk.set_image_ready(true);
     // Real time passes, virtual time does not: the poll must not look again.
     std::this_thread::sleep_for(200ms);
     CHECK_FALSE(driver->get_image_ready());
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK(driver->get_percent_completed() == Catch::Approx(25.0));
     clock.advance(50ms);
     CHECK(eventually([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(1.0));
+    CHECK(driver->get_last_exposure_start_time() >= before_start);
+    CHECK(driver->get_last_exposure_start_time() <= after_start);
     driver->set_connected(false);
 }
 

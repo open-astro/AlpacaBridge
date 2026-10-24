@@ -1092,7 +1092,7 @@ public:
         if (exposure_status_ != QHYExposureStatus::Working) {
             return 0.0;
         }
-        if (last_exposure_duration_ <= 0.0) {
+        if (!exposure_armed_ || last_exposure_duration_ <= 0.0) {
             return 0.0;
         }
         auto now = clock_.now();
@@ -1494,6 +1494,7 @@ public:
             last_exposure_duration_ = exposure_us / 1'000'000.0;
             last_exposure_start_ = clock_.now();
             last_exposure_valid_ = true;
+            exposure_armed_ = false;
             image_ready_ = false;
             exposure_failure_.clear();
             exposure_status_ = QHYExposureStatus::Working;
@@ -1610,6 +1611,7 @@ public:
                     return;
                 }
                 last_exposure_start_ = acquisition_tick;
+                exposure_armed_ = true;
             }
 
             // Per QHY's own SingleFrameMode.cpp sample: when ExpQHYCCDSingleFrame
@@ -1986,6 +1988,7 @@ private:
     double last_exposure_duration_;
     std::chrono::steady_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
+    bool exposure_armed_{false};  // Progress only; last_exposure_valid_ also exposes pre-arm failures.
     // Applied duration and worker-local UTC arm time, published only with an accepted image (issue #1477).
     util::LastExposure published_exposure_;
     std::thread exposure_thread_;
@@ -2237,6 +2240,7 @@ private:
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::steady_clock::time_point{};
         last_exposure_valid_    = false;
+        exposure_armed_ = false;
         published_exposure_.clear();
         exposure_buffer_.clear();
         exposure_width_    = 0;

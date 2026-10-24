@@ -1329,6 +1329,8 @@ TEST_CASE("QHY Camera Driver - metadata is tied to worker arm not request or rea
     JoinPumped joiner{clock, starter, &gate};
     REQUIRE(eventually([&] { return gate.entered.load(); }));
     alpacacore::test::require_last_exposure_unset(*driver);
+    clock.advance(milliseconds(500));
+    CHECK(driver->get_percent_completed() == 0.0);
     const auto arm_lower = std::chrono::system_clock::now();
     gate.release = true;
     starter.join();
@@ -1377,7 +1379,7 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
     if (previous_success) {
         driver->start_exposure(0.02, true);
         REQUIRE(eventually([&] { return driver->get_image_ready(); }));
-        previous_start = driver->get_last_exposure_start_time();
+        REQUIRE_NOTHROW(previous_start = driver->get_last_exposure_start_time());
         driver->set_connected(true);  // redundant connect keeps the pair
     }
     const auto unchanged = [&] {
@@ -1397,11 +1399,17 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
     unchanged();
     SECTION("abort rejects even a late successful SDK frame") {
         cancelled = false;
-        std::thread aborter([&] { driver->abort_exposure(); });
+        std::atomic<bool> abort_done{false};
+        std::thread aborter([&] {
+            driver->abort_exposure();
+            abort_done = true;
+        });
         JoinPumped joiner{clock, aborter, &gate};
         REQUIRE(eventually([&] { return cancelled.load(); }));
         gate.release = true;
-        step_until(clock, [&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; });
+        // A broken worker can report Idle before the aborter's clock-driven reap has finished.
+        step_until(clock, [&] { return abort_done.load(); });
+        REQUIRE(abort_done.load());
         aborter.join();
         CHECK_FALSE(driver->get_image_ready());
     }
@@ -1421,7 +1429,6 @@ TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot pub
         REQUIRE(eventually([&] { return driver->get_image_ready(); }));
         CHECK(driver->get_last_exposure_duration() == 2.0);
         CHECK(driver->get_last_exposure_start_time() >= previous_start);
-        previous_start = driver->get_last_exposure_start_time();
         CHECK(disconnect_stepping(clock, *driver) < seconds(2));
         not_connected();
         driver->set_connected(true);

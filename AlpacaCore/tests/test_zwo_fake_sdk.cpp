@@ -136,8 +136,13 @@ TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
     connect_camera(*camera);
     std::chrono::system_clock::time_point setup_finished, trigger_entered;
+    bool observe_retry_setup = false;
+    double retry_setup_progress = -1.0;
     sdk.before_call = [&](const std::string& call) {
-        if (call == "set_control_value") setup_finished = std::chrono::system_clock::now();
+        if (call == "set_control_value") {
+            if (observe_retry_setup) retry_setup_progress = camera->get_percent_completed();
+            setup_finished = std::chrono::system_clock::now();
+        }
         if (call == "start_exposure") trigger_entered = std::chrono::system_clock::now();
     };
     camera->start_exposure(0.0200006, true);
@@ -149,8 +154,11 @@ TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][
 
     sdk.auto_complete_exposure = false;
     camera->start_exposure(2.0000006, true);
+    clock.advance(std::chrono::seconds(3));
+    observe_retry_setup = true;
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
     CHECK_FALSE(camera->get_image_ready());  // retry applies the register before its timestamp
+    CHECK(retry_setup_progress == 0.0);
     CHECK(camera->get_last_exposure_start_time() == start_a);
     clock.advance(std::chrono::milliseconds(500));
     CHECK(camera->get_percent_completed() == Catch::Approx(50.0 / 2.000001));
