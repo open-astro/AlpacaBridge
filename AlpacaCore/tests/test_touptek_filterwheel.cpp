@@ -180,8 +180,9 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - homing poll sleeps on the task cloc
 }
 
 // --- Position served through util::TtlStatusCache (issue #1072) ---
-// The cache TTL is 100 ms; kPastTtl clears it. The connect homes the wheel over the real task clock (about
-// 300 ms of settled reads), so every case counts get_filter_wheel_position from after the connect.
+// The cache TTL is 100 ms and reads the driver's task clock (decision 0005): kPastTtl is a FakeTaskClock
+// advance(), never a sleep. The connect homes the wheel on that clock, so connect() steps it until the connect
+// returns, and every case counts get_filter_wheel_position from after the connect.
 
 namespace {
 
@@ -190,6 +191,7 @@ constexpr auto kPastTtl = 150ms;
 constexpr const char* kPositionCall = "get_filter_wheel_position";
 
 struct ConnectedAfw {
+    alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeToupTekSDK fake;
     std::unique_ptr<alpacacore::FilterWheelDriver> driver;
     int base = 0;
@@ -200,8 +202,14 @@ struct ConnectedAfw {
         wheel.name = "FakeAFW";
         wheel.model_name = "AFW-M";
         fake.wheels.push_back(wheel);
-        driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
-        driver->set_connected(true);
+        driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake, clock);
+        connect();
+    }
+    // Connect, stepping the homing polls (100 ms each) on the fake clock until the connect returns.
+    void connect() {
+        auto done = std::async(std::launch::async, [this] { driver->set_connected(true); });
+        while (done.wait_for(1ms) != std::future_status::ready) clock.advance(100ms);
+        done.get();
         base = fake.call_count(kPositionCall);
     }
     ~ConnectedAfw() {
@@ -227,8 +235,22 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - two Position reads inside the TTL c
     CHECK(wheel.driver->get_position() == 3);
     CHECK(wheel.reads() == 1);
 
-    std::this_thread::sleep_for(kPastTtl);
+    wheel.clock.advance(kPastTtl);
     CHECK(wheel.driver->get_position() == 3);
+    CHECK(wheel.reads() == 2);
+}
+
+// Falsified by: touptek_filterwheel_driver.cpp building status_cache_ without the driver's task clock (the frame
+// ages on the real clock: the read after advance(100ms) is served from the cache, one SDK read, not two).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - the Position TTL follows the injected task clock",
+          "[touptek][filterwheel][unit][position-cache][taskclock]") {
+    ConnectedAfw wheel;
+    CHECK(wheel.driver->get_position() == 0);
+    wheel.clock.advance(99ms);
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.reads() == 1);
+    wheel.clock.advance(1ms);
+    CHECK(wheel.driver->get_position() == 0);
     CHECK(wheel.reads() == 2);
 }
 
@@ -261,7 +283,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a reconnect clears the Position lin
     wheel.fake.throw_from.erase(kPositionCall);
 
     wheel.driver->set_connected(false);
-    wheel.driver->set_connected(true);
+    wheel.connect();
     wheel.fake.throw_from.insert(kPositionCall);
     CHECK_THROWS(wheel.driver->get_position());
     try {
@@ -280,7 +302,7 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - failed Position reads are not serve
           "[touptek][filterwheel][unit][position-cache]") {
     ConnectedAfw wheel;
     CHECK(wheel.driver->get_position() == 0);
-    std::this_thread::sleep_for(kPastTtl);
+    wheel.clock.advance(kPastTtl);
 
     wheel.fake.throw_from.insert(kPositionCall);
     for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch

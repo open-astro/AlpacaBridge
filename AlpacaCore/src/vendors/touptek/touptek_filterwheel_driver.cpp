@@ -51,7 +51,7 @@ public:
           device_number_(device_number),
           wheel_index_(wheel_index),
           wheel_id_(std::move(wheel_id)),
-          status_cache_("ToupTek AFW", kStatusTtl, 3, kLogTag) {}
+          status_cache_("ToupTek AFW", kStatusTtl, 3, kLogTag, clock) {}
 
     ~ToupTekFilterWheelDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be

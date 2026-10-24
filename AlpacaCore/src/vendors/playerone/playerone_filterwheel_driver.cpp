@@ -191,7 +191,14 @@ public:
                 fresh.closed = true;
                 return fresh;
             }
-            fresh.position = sdk_.get_position(handle);
+            try {
+                fresh.position = sdk_.get_position(handle);
+            } catch (const AlpacaException&) {
+                throw;
+            } catch (const std::exception& e) {
+                // Convert a vendor failure to AlpacaException (AGENTS.md); the cache counts it either way.
+                throw AlpacaException(e.what(), AlpacaError::DriverException);
+            }
             return fresh;
         });
         if (status.closed) {
