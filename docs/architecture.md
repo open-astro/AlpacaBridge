@@ -280,7 +280,7 @@ AlpacaBridge/
 ## Modules
 
 The HTTP → contract → vendor driver → SDK boundary above is being deepened into
-six named modules, one PR-sized slice at a time ([design review #584](https://github.com/open-astro/AlpacaBridge/issues/584)).
+seven named modules, one PR-sized slice at a time ([design review #584](https://github.com/open-astro/AlpacaBridge/issues/584)).
 Use these names in issues, PRs and records. Domain terms are defined in
 [CONTEXT.md](../CONTEXT.md).
 
@@ -291,6 +291,7 @@ Use these names in issues, PRs and records. Domain terms are defined in
 | Task clock | Every driver wait and deadline, through one injectable clock with a fake for tests | Utility landed (#697); the drivers on it are the Adoption table of [decision 0005](decisions/0005-task-clock.md) |
 | Async operation slot | One cancellable, generation-tagged background body per slot, telling cancelled from superseded; piloted on the SkyWatcher telescope | Utility landed (#717); on `main` only (not `stable/5.0`); the drivers on it are the Adoption table of [decision 0006](decisions/0006-async-operation-ownership.md) |
 | State snapshot | Device state measured once and served to getters and DeviceState without a device transaction | Utility landed (#998); the drivers served from it are the Adoption table of [decision 0010](decisions/0010-snapshot-served-state.md) |
+| Polled state | One value a poll-fed driver owns: the poll cadence, the fault latch, stale-to-lost and the frame served to getters, composed from the state snapshot, the link-health latch and an async operation slot | Utility landed (#1597); Astroasis and QHY focusers on it, the rest are `PolledState` rows in the Adoption table of [decision 0010](decisions/0010-snapshot-served-state.md) as they move |
 | SDK seams | An abstract SDK interface per vendor library with real, fake and locked adapters, so driver paths test without hardware | The seams in place are the Adoption table of [decision 0015](decisions/0015-sdk-seams.md); rules in [the testing instructions](../.github/instructions/testing.instructions.md#hardware-free-driver-tests-via-the-sdk-seam-touptek-qhy-gphoto-and-svbony-camera--extend-to-other-vendors) |
 
 ## Threading model

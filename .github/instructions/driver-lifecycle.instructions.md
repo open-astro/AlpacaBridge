@@ -108,8 +108,9 @@ vendor-agnostic; do them in the driver from the start.
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
-  slot mutex and the `StateSnapshot` mutex are leaves that nest under `mutex_`
-  (decisions 0006, 0010). Never acquire in reverse, and
+  slot mutex, the `StateSnapshot` mutex and the `util::PolledState` mutexes (a driver
+  that composes `PolledState` for its poll-fed frame) are leaves that nest under `mutex_`
+  (decisions 0006, 0010, 0016). Never acquire in reverse, and
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed

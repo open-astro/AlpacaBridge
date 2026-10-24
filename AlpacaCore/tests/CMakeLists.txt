@@ -37,6 +37,7 @@ set(TEST_SOURCES
     test_device_location_store.cpp
     test_rotator_sync_offset_store.cpp
     test_unique_id.cpp
+    test_polled_state.cpp
     test_state_snapshot.cpp
     test_task_clock.cpp
     test_utc_offset.cpp
