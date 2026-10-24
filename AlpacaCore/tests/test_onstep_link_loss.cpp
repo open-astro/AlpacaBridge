@@ -905,6 +905,20 @@ TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a
             CHECK(std::string(ex.what()).rfind(what + ": ", 0) == 0);
         }
     };
+    // A bad argument is still InvalidValue while faulted: the arguments are
+    // checked before the fault (#1478).
+    const auto require_invalid = [](const std::function<void()>& fn, const char* what) {
+        try {
+            fn();
+            FAIL(what);
+        } catch (const alpacacore::AlpacaException& ex) {
+            INFO(ex.what());
+            CHECK(ex.error_code() == alpacacore::AlpacaError::InvalidValue);
+        }
+    };
+    require_invalid([&] { driver->pulse_guide(4, 100); }, "a bad PulseGuide direction succeeded during a fault");
+    require_invalid([&] { driver->pulse_guide(0, 10000); }, "a long PulseGuide succeeded during a fault");
+    require_invalid([&] { driver->sync_to_coordinates(24.0, 10.0); }, "a bad Sync RA succeeded during a fault");
     require_refused([&] { driver->pulse_guide(0, 100); }, "PulseGuide");
     require_refused([&] { driver->set_park(); }, "SetPark");
     require_refused([&] { driver->unpark(); }, "Unpark");
