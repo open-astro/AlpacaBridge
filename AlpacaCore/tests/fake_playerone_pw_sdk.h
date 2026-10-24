@@ -18,6 +18,7 @@
 #include <chrono>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -227,6 +228,13 @@ public:
     void fail_next(const std::string& call) {
         std::lock_guard<std::mutex> lock(mutex_);
         fail_next_ = call;
+        fail_non_alpaca_ = false;
+    }
+    // Like fail_next, but the call throws a std::runtime_error (a vendor failure that is not an AlpacaException).
+    void fail_next_non_alpaca(const std::string& call) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fail_next_ = call;
+        fail_non_alpaca_ = true;
     }
 
     int open_count() const {
@@ -273,6 +281,9 @@ private:
     void maybe_fail_locked(const std::string& call) {
         if (fail_next_ == call) {
             fail_next_.clear();
+            if (fail_non_alpaca_) {
+                throw std::runtime_error("FakePlayerOnePWSDK: non-Alpaca failure in " + call);
+            }
             throw AlpacaException("FakePlayerOnePWSDK: scripted failure in " + call, AlpacaError::DriverException);
         }
     }
@@ -283,6 +294,7 @@ private:
     std::vector<int> offsets_;
     std::map<std::string, int> calls_;
     std::string fail_next_;
+    bool fail_non_alpaca_{false};
     std::chrono::milliseconds open_delay_{0};
     std::chrono::milliseconds position_delay_{0};
     int open_count_{0};

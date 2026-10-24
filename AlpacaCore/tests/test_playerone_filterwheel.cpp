@@ -427,6 +427,24 @@ TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not ser
     driver->set_connected(false);
 }
 
+// Falsified by: playerone_filterwheel_driver.cpp get_position() refill without the catch (const std::exception&)
+// branch (a std::runtime_error from the SDK escapes as-is instead of an AlpacaException with DriverException).
+TEST_CASE("Player One PW Filter Wheel Driver - a non-Alpaca SDK failure in Position becomes DriverException",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    fake.fail_next_non_alpaca("get_position");
+    try {
+        driver->get_position();
+        FAIL("a failed read must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+        CHECK(std::string(ex.what()).find("non-Alpaca failure") != std::string::npos);
+    }
+    driver->set_connected(false);
+}
+
 // Falsified by: playerone_filterwheel_driver.cpp caching a -1 frame (the second poll is served -1 from the
 // cache: one SDK read for two polls), or mapping -1 to a slot (Position reads 0, not the ASCOM moving sentinel).
 TEST_CASE("Player One PW Filter Wheel Driver - Position reads -1 while moving and the move end is seen at once",
