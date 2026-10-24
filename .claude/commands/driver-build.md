@@ -803,7 +803,7 @@ full hard rule.
 
 After the driver builds and unit tests pass, the user MUST run ConformU against the driver with real hardware on **Linux arm64**, the only supported target. A driver is NOT complete until it has arm64 ConformU results.
 
-**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.2 (build 56139) on arm64, the current standard (`/conformu` installs it); 4.5.0 has a known arm64 timing defect (see "ConformU version" in `.github/instructions/testing.instructions.md`).
+**ConformU**: https://github.com/ASCOMInitiative/ConformU — the official ASCOM conformance test suite. Use 4.5.3 (build 56334) on arm64, the current standard (`/conformu` installs it); 4.5.0 has a known arm64 timing defect (see "ConformU version" in `.github/instructions/testing.instructions.md`).
 
 ### Required validation matrix
 
