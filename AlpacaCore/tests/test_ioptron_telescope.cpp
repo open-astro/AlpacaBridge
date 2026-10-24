@@ -1276,7 +1276,7 @@ TEST_CASE("iOptron Telescope Driver - gps_status does not hold mutex_ across the
     REQUIRE(mount.wait_until_holding(std::chrono::seconds(5)));
 
     const auto start = std::chrono::steady_clock::now();
-    CHECK(driver->get_connected());  // takes mutex_
+    CHECK(driver->get_connected());  // lock-free (#910)
     CHECK(driver->can_action("gps_status"));
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(250));
 

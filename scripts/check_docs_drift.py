@@ -445,13 +445,14 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
-# lock-free majority is not named anywhere, by design. The four
+# lock-free majority is not named anywhere, by design. Two groups are the
+# exception, and both keep their entries although the header's list is empty:
+# the Bisque and iOptron telescopes (lock-free since #910) and the four
 # wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
-# ASIAIR, ASIAIR Plus) are the exception: they keep their entries although
-# they answer get_connected() lock-free since #382, because the entry is what
-# lets the gate report MISSING FROM THE BLOCKING LIST if one of their wrappers
-# ever re-locks is_open(). Do not remove them on the STALE BLOCKING-LIST ENTRY
-# advice.
+# ASIAIR, ASIAIR Plus; lock-free since #382). The entry is what lets the gate
+# report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
+# (or a wrapper re-locks is_open()). Do not remove them on the STALE
+# BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
 # header names these in TWO sentences, and one name is a prefix of another
 # across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
@@ -475,7 +476,7 @@ DRIVER_PROSE_NAMES = {
 # Both must be found or the check fails loudly: a header rewrite that moves
 # them must not silently turn this gate into a no-op.
 BLOCKING_LIST_SPANS = {
-    "telescopes": ("create that hazard are the", "telescopes."),
+    "telescopes": ("The blocking telescopes (", ")"),
     "switches": ("The wrapper-backed switch drivers (", ")"),
 }
 
@@ -504,11 +505,7 @@ def _blocking_list_spans(header):
 
 def _names_in_span(which, span):
     """The driver names a blocking-list sentence actually lists."""
-    if which == "telescopes":
-        body = span.split("create that hazard are the", 1)[1]
-        body = body.rsplit("telescopes.", 1)[0]
-    else:
-        body = span.split("(", 1)[1].rsplit(")", 1)[0]
+    body = span.split("(", 1)[1].rsplit(")", 1)[0]
     # "A, B, C and D" -> [A, B, C, D]
     parts = []
     for chunk in body.split(","):
