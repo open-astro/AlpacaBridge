@@ -91,7 +91,9 @@ public:
     /// so no body runs against a camera the driver is closing.
     void disconnect_and_join() {}
     /// Reopens the session that disconnect_and_join() closed (the driver's
-    /// connect); waits for a disconnect_and_join() in flight. A no-op when open.
+    /// connect); may be called under the driver mutex. Throws
+    /// InvalidOperation while a disconnect_and_join() is still running, and
+    /// changes nothing then. A no-op when open.
     void open() {}
     /// Drops a ready frame (a geometry change); keeps the last exposure.
     void discard_image() {}

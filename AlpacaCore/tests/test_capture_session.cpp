@@ -690,8 +690,9 @@ TEST_CASE("CaptureSession - disconnect_and_join closes the session: start raises
     h.session->open();
     h.session->open();  // already open: a no-op
     CHECK(error_of([&] { h.session->start(1.0, instant_body(late, 6)); }) == -1);
-    REQUIRE(eventually([&] { return h.session->image_ready(); }));
+    REQUIRE(eventually([&] { return late->exited.load(); }));
     CHECK(late->accepted == 1);
+    CHECK(h.session->image_ready());
     CHECK(h.session->image()->data.front() == 6);
 }
 
@@ -753,6 +754,9 @@ TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is r
     // SDK and the disconnect still joins it.
     CHECK(starting.wait_for(kBound) == std::future_status::ready);
     CHECK(disconnecting.wait_for(0s) == std::future_status::timeout);
+    // No reopen while that disconnect still joins: its clear would wipe the
+    // new connection's exposure.
+    CHECK(error_of([&] { h.session->open(); }) == AlpacaError::InvalidOperation);
 
     sdk->open();  // the old body returns; the join ends
     REQUIRE(disconnecting.wait_for(kBound) == std::future_status::ready);
@@ -764,6 +768,7 @@ TEST_CASE("CaptureSession - a start waiting when disconnect_and_join begins is r
     CHECK(h.session->camera_state() == CameraState::Idle);
     CHECK_FALSE(h.session->busy());
     CHECK_FALSE(h.session->failure().has_value());
+    CHECK(error_of([&] { h.session->start(1.0, instant_body(next, 2)); }) == AlpacaError::NotConnected);
 }
 
 TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][capture-session]") {
@@ -849,9 +854,9 @@ TEST_CASE("CaptureSession - destruction joins a body blocked in the SDK once it 
 // Tagged [stress-guard]: the sanitizers-tsan job runs it under ThreadSanitizer,
 // which reports a data race, or a lock-order inversion between `driver` (a
 // test mutex standing in for the driver's mutex_), the session mutex and the
-// slot mutex. Getters, fail() and discard_image() run under `driver`, and so
-// does a body's publish, as the driver calls them; start(), abort(),
-// disconnect_and_join() and open() run without it (decision 0006 rule 4).
+// slot mutex. Getters, fail(), discard_image() and open() run under
+// `driver`, and so does a body's publish, as the driver calls them; start(),
+// abort() and disconnect_and_join() run without it (decision 0006 rule 4).
 // disconnect_and_join() runs on its own thread, racing abort()'s join: when
 // it returns, no body may still be inside (docs/failures/0011).
 TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex race every session call",
@@ -944,6 +949,7 @@ TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex rac
                 if (s.inside != 0) {
                     ++s.inside_after_disconnect;
                 }
+                std::lock_guard<std::mutex> lock(s.driver);
                 h.session->open();
             }
         });
