@@ -199,14 +199,30 @@ public:
                     // SDK directly, never through status_cache_: a good homing read
                     // through the cache would clear the failure count.
                     const bool settled = wait_for_home(sdk, handle);
-                    if (consume_pending_disconnect(connected_.load())) {
-                        // A set_connected(false) landed during the homing poll. Honor
-                        // it: close the just-opened handle and stay disconnected rather
-                        // than publishing handle_/connected_. This is a requested
-                        // disconnect, not a failure — return cleanly (no throw).
+                    {
+                        // The consume and the flag clear are one mutex_ hold: a disconnect recorded
+                        // between them (the gate in the top of set_connected reads connecting_homing_
+                        // under mutex_) would be reported successful and then lost, leaving the wheel
+                        // Connected and the flag set for the next connect. I/O lock then mutex_ is the
+                        // decision 0016 order. A set_connected(false) that landed during the homing
+                        // poll is honoured: nothing is published and the handle is closed below.
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        superseded = consume_pending_disconnect(connected_.load());
+                        connecting_homing_ = false;
+                        if (!superseded && settled) {
+                            handle_ = handle;
+                            info_ = info;
+                            slot_count_ = slots;
+                            normalize_slot_data_locked();
+                        }
+                    }
+                    if (superseded) {
+                        // A requested disconnect, not a failure: close the just-opened handle and
+                        // return cleanly (handle_/info_ were never published).
                         sdk.close_filter_wheel(handle);
-                        superseded = true;
-                    } else if (!settled) {
+                        return;
+                    }
+                    if (!settled) {
                         // Neither a moving->settled nor a stable-slot signal in 6 s:
                         // the wheel is obstructed or the firmware is stuck. Fail the
                         // connect rather than report Connected on a wheel whose slot
@@ -214,18 +230,6 @@ public:
                         throw AlpacaException("Filter wheel did not settle after homing", AlpacaError::DriverException);
                     }
                 }
-                std::lock_guard<std::mutex> lock(mutex_);
-                connecting_homing_ = false;
-                if (superseded) {
-                    handle_ = nullptr;
-                    info_ = {};
-                    slot_count_ = 0;
-                    return;
-                }
-                handle_ = handle;
-                info_ = info;
-                slot_count_ = slots;
-                normalize_slot_data_locked();
             } catch (...) {
                 if (handle && !superseded) {  // null if resolve/open itself threw — nothing to close
                     std::lock_guard<std::mutex> io(io_mutex_);

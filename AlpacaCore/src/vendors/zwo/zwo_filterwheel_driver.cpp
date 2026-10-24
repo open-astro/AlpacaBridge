@@ -163,7 +163,12 @@ public:
                     } catch (const std::exception& e) {
                         ALPACA_LOG_WARN("ZWO", "EFW serial number unavailable: " + std::string(e.what()));
                     }
+                    // Identity and limits publish here, at the end of connect (decision 0016 rule 3):
+                    // a connect that throws before this hold leaves the pre-connect values.
                     std::lock_guard<std::mutex> lock(mutex_);
+                    if (wheel_index_.has_value()) {
+                        wheel_id_ = resolved_id;
+                    }
                     wheel_info_ = info;
                     wheel_info_valid_ = true;
                     normalize_slot_data_locked();
@@ -341,7 +346,8 @@ private:
         }
     }
 
-    // Caller holds io_mutex_ (the enumeration is a device call); the id and info publish under mutex_.
+    // Caller holds io_mutex_ (the enumeration is a device call). Publishes nothing: set_connected
+    // stores the id and info at the end of a successful connect (decision 0016 rule 3).
     int resolve_wheel_id() {
         if (wheel_index_.has_value()) {
             auto wheels = sdk_.enumerate_wheels();
@@ -355,13 +361,7 @@ private:
                                          " (count=" + std::to_string(wheels.size()) + ")");
                 throw AlpacaException("Filter wheel index not found", AlpacaError::InvalidValue);
             }
-            const auto& info = wheels[static_cast<std::size_t>(index)];
-            std::lock_guard<std::mutex> lock(mutex_);
-            wheel_id_ = info.wheel_id;
-            wheel_info_ = info;
-            wheel_info_valid_ = true;
-            normalize_slot_data_locked();
-            return wheel_id_.value();
+            return wheels[static_cast<std::size_t>(index)].wheel_id;
         }
 
         std::lock_guard<std::mutex> lock(mutex_);

@@ -117,10 +117,11 @@ public:
         if (connected) {
             {
                 std::lock_guard<std::mutex> io(io_mutex_);
-                const int handle = resolve_handle();
+                PlayerOnePWInfo info;
+                const int handle = resolve_handle(info);
                 sdk.open_wheel(handle);
                 try {
-                    seed_slot_data(handle);
+                    seed_slot_data(handle, info);
                 } catch (...) {
                     {
                         std::lock_guard<std::mutex> lock(mutex_);
@@ -276,8 +277,9 @@ private:
         }
     }
 
-    // Caller holds io_mutex_ (the enumeration is a device call); the info publishes under mutex_.
-    int resolve_handle() {
+    // Caller holds io_mutex_ (the enumeration is a device call). Publishes nothing: seed_slot_data
+    // stores the info at the end of a successful connect (decision 0016 rule 3).
+    int resolve_handle(PlayerOnePWInfo& out_info) {
         auto wheels = sdk_.enumerate_wheels();
         if (wheels.empty()) {
             ALPACA_LOG_WARN("PlayerOne", "No Player One filter wheels detected by SDK");
@@ -288,11 +290,8 @@ private:
                                              " (count=" + std::to_string(wheels.size()) + ")");
             throw AlpacaException("Filter wheel index not found", AlpacaError::InvalidValue);
         }
-        const auto& info = wheels[static_cast<std::size_t>(wheel_index_)];
-        std::lock_guard<std::mutex> lock(mutex_);
-        wheel_info_ = info;
-        wheel_info_valid_ = true;
-        return info.handle;
+        out_info = wheels[static_cast<std::size_t>(wheel_index_)];
+        return out_info.handle;
     }
 
     int handle_value() const {
@@ -307,16 +306,16 @@ private:
     // wheel itself. Use them as defaults at connect; names/offsets supplied via
     // config (set_names/set_focus_offsets) take precedence. Caller holds io_mutex_: the SDK reads run
     // off mutex_, and the result (with handle_) publishes under it.
-    void seed_slot_data(int handle) {
+    void seed_slot_data(int handle, const PlayerOnePWInfo& info) {
         std::size_t slots = 0;
         bool want_names = false;
         bool want_offsets = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!wheel_info_valid_ || wheel_info_.position_count <= 0) {
+            if (info.position_count <= 0) {
                 throw AlpacaException("Filter wheel reported no filter positions", AlpacaError::DriverException);
             }
-            slots = static_cast<std::size_t>(wheel_info_.position_count);
+            slots = static_cast<std::size_t>(info.position_count);
             want_names = filter_names_.empty();
             want_offsets = focus_offsets_.empty();
         }
@@ -347,8 +346,12 @@ private:
             }
         }
 
+        // Identity and limits publish here with handle_, at the end of connect: a connect that throws
+        // earlier leaves the pre-connect values.
         std::lock_guard<std::mutex> lock(mutex_);
         handle_ = handle;
+        wheel_info_ = info;
+        wheel_info_valid_ = true;
         if (filter_names_.empty()) {
             filter_names_ = aliases.empty() ? std::vector<std::string>(slots) : std::move(aliases);
         } else if (filter_names_.size() != slots) {
