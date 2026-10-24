@@ -333,9 +333,11 @@ public:
 
             ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
                             std::string(parked_ ? "true" : "false"));
+            // Raised under mutex_, so a link-loss declaration (also under mutex_) cannot be
+            // overwritten by this store (decision 0009 rule 3).
+            published_connected_ = true;  // the connect is complete (#910)
             lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
             start_status_poller();
-            published_connected_ = true;  // the connect is complete (#910)
         } else {
             ++pulse_request_;
             pulse_generation_.bump();
