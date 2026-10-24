@@ -609,6 +609,16 @@ async function loadDevices() {
                     ` : ''}
                 </div>
                 ${settingsHtml}
+                ${showsCalibrationControls(device) ? `
+                <div class="calibration-controls" data-device-number="${escapeHtml(String(device.DeviceNumber))}">
+                    <div class="calibration-status" role="status" aria-live="polite">Checking calibration...</div>
+                    <div class="calibration-hint"></div>
+                    <div class="calibration-buttons">
+                        <button class="btn btn-secondary btn-small btn-calibrate" type="button" disabled>Calibrate</button>
+                        <button class="btn btn-danger btn-small btn-abort-calibration" type="button" disabled hidden>Abort</button>
+                    </div>
+                </div>
+                ` : ''}
                 <div class="device-actions">
                     <button class="btn btn-secondary btn-small btn-edit-device" data-device-index="${index}" type="button">Edit</button>
                     <button class="btn btn-danger btn-small btn-delete-device" data-device-index="${index}" type="button">Delete</button>
@@ -633,6 +643,7 @@ async function loadDevices() {
                 button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
             });
         });
+        document.querySelectorAll('.calibration-controls').forEach(initCalibrationControls);
         updateAutoNumbering();
     } catch (error) {
         console.error('Error loading devices:', error);
@@ -650,6 +661,109 @@ async function loadDevices() {
         }
         devicesList.innerHTML = `<p class="error">Error loading devices: ${escapeHtml(errorMsg)}</p>`;
     }
+}
+
+// ---- Celestron focus motor calibration (issue #1411) ----
+// Uses the generic Alpaca action endpoint; parsing and wording live in
+// format.js. Abort is sent only while the last CalibrationStatus said
+// "Calibrating". The poll stops when the run ends, an error comes back or the
+// card leaves the page, and never has two requests in flight.
+const CALIBRATION_POLL_MS = 2000;
+let calibrationTransactionId = 0;
+
+async function calibrationAction(deviceNumber, actionName) {
+    calibrationTransactionId += 1;
+    const response = await fetch(API_BASE + '/api/v1/focuser/' + encodeURIComponent(deviceNumber) + '/action', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: calibrationActionBody(actionName, calibrationTransactionId),
+    });
+    if (!response.ok) {
+        throw new Error('HTTP error! status: ' + response.status);
+    }
+    const data = await response.json();
+    if (data.ErrorNumber) {
+        throw new Error(data.ErrorMessage || ('Error ' + data.ErrorNumber));
+    }
+    return data.Value;
+}
+
+function initCalibrationControls(box) {
+    const deviceNumber = box.dataset.deviceNumber;
+    const statusEl = box.querySelector('.calibration-status');
+    const hintEl = box.querySelector('.calibration-hint');
+    const startBtn = box.querySelector('.btn-calibrate');
+    const abortBtn = box.querySelector('.btn-abort-calibration');
+    let state = 'unknown';
+    let timer = null;
+    let inFlight = false;
+    let busy = false;
+
+    const render = (errorText) => {
+        statusEl.textContent = calibrationStatusText(state, errorText);
+        hintEl.textContent = calibrationHint(state);
+        startBtn.disabled = busy || !mayStartCalibration(state);
+        abortBtn.hidden = !mayAbortCalibration(state);
+        abortBtn.disabled = busy || !mayAbortCalibration(state);
+    };
+    const stop = () => {
+        if (timer !== null) {
+            clearTimeout(timer);
+            timer = null;
+        }
+    };
+    const refresh = async () => {
+        timer = null;
+        if (inFlight) return;
+        if (!box.isConnected) return;
+        inFlight = true;
+        let errorText = '';
+        try {
+            state = parseCalibrationStatus(await calibrationAction(deviceNumber, 'CalibrationStatus'));
+        } catch (e) {
+            state = 'unknown';
+            errorText = e.message || String(e);
+        } finally {
+            inFlight = false;
+        }
+        if (!box.isConnected) return;
+        render(errorText);
+        if (isCalibrationRunning(state)) {
+            timer = setTimeout(refresh, CALIBRATION_POLL_MS);
+        }
+    };
+    const act = async (actionName) => {
+        busy = true;
+        render('');
+        stop();
+        let failure = '';
+        try {
+            await calibrationAction(deviceNumber, actionName);
+        } catch (e) {
+            failure = actionName + ' failed: ' + (e.message || String(e));
+        }
+        busy = false;
+        // Wait for any status read already running, then read the real state.
+        while (inFlight) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        await refresh();
+        if (failure && box.isConnected) {
+            statusEl.textContent = failure + ' ' + statusEl.textContent;
+        }
+    };
+
+    startBtn.addEventListener('click', () => {
+        if (!mayStartCalibration(state)) return;
+        if (!window.confirm(calibrationConfirmText())) return;
+        act('Calibrate');
+    });
+    abortBtn.addEventListener('click', () => {
+        if (!mayAbortCalibration(state)) return;
+        act('AbortCalibration');
+    });
+    render('');
+    refresh();
 }
 
 async function handleEditDeviceClick(event) {
