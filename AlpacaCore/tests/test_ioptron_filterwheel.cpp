@@ -464,3 +464,38 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a refused move invalidates the cac
     CHECK_THROWS_AS(wheel.driver->set_position(4), alpacacore::AlpacaException);
     CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);  // reached the wire, not the cache
 }
+
+// A wheel that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: ioptron_iefw_protocol_wrapper.cpp read_response() sending ReadOutcome::LinkDead to the timeout
+// branch (the message reads "iEFW read timeout" and the call takes the full 4 s).
+TEST_CASE("iOptron iEFW protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[ioptron][filterwheel][unit][link-dead]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    alpacacore::vendor::ioptron::IefwProtocolWrapper wrapper;
+    alpacacore::vendor::ioptron::IefwConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    wrapper.connect(config);
+
+    fake.hold_next_reply(300ms);  // the fake sits on the :WP# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(60ms);
+        fake.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_position();
+        FAIL("a hung-up port must not return a slot");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "iEFW serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < 2s);
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
+}

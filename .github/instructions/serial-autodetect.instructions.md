@@ -34,6 +34,13 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
+- **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written
+  loop around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a
+  length or an idle gap, drops CR/LF, caps the length, keeps one `steady_clock` deadline and returns `LinkDead` with
+  the errno for a hangup. It never latches, closes, throws, sleeps or flushes: the wrapper keeps its flush, command
+  delay and exception text and decides what `LinkDead` means. It is two concrete overloads, not a `ByteChannel`
+  (decision 0013 section 7). The Sky-Watcher and Celestron CGX loops (decision 0017 rule 9) and the stream readers
+  (Wanderer, Gemini PDH) keep their own shape.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
   pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
