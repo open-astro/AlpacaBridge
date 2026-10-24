@@ -157,6 +157,8 @@ if(TARGET alpacacore_ioptron)
     list(APPEND TEST_SOURCES test_ioptron_async_slew_failure.cpp)
     # Clock-sync body runs on an operation slot (issue #1368).
     list(APPEND TEST_SOURCES test_ioptron_clock_sync_slot.cpp)
+    # Connected takes no lock the connect holds (issue #910).
+    list(APPEND TEST_SOURCES test_ioptron_getter_locks.cpp)
     # AbortSlew fences the async dispatch thread (issue #768).
     list(APPEND TEST_SOURCES test_ioptron_abort_slew.cpp)
     # Auto-detect resolves at connect time (issue #659): mount and iEAF.
@@ -252,8 +254,10 @@ endif()
 if(TARGET alpacacore_bisque)
     list(APPEND TEST_SOURCES test_bisque_telescope.cpp)
     list(APPEND TEST_SOURCES test_bisque_telescope_snapshot.cpp)
-    # Covers the mutex-guarded get_connected() driver shape in the [stress]
-    # pool (PR #115 round-2 ABBA regression coverage).
+    # Connected takes no lock the connect holds (issue #910).
+    list(APPEND TEST_SOURCES test_bisque_getter_locks.cpp)
+    # In the [stress] pool for the connect/disconnect lifecycle (PR #115
+    # round-2 ABBA regression coverage), not for a locking getter.
     list(APPEND TEST_SOURCES test_bisque_concurrency_stress.cpp)
 endif()
 if(TARGET alpacacore_touptek)

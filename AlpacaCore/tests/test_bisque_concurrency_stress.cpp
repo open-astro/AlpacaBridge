@@ -11,21 +11,18 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 // Connect/disconnect/operate concurrency stress for the Bisque telescope
-// (issue #101). This driver is deliberately in the pool for its SHAPE, not
-// its vendor: get_connected() takes the driver state mutex_ (unlike the
-// atomic-connected_ drivers the rest of the suite covers), so it exercises
-// the AsyncConnectable base against mutex-guarded state reads — the exact
-// combination behind the PR #115 round-2 ABBA finding (get_connected()
-// formerly called under pending_mutex_ vs the sync setter's
-// mutex_ -> pending_mutex_ order). TSan's lock-order analysis sees the
-// inversion on this driver even when no run actually deadlocks.
+// (issue #101). This driver is in the pool for the lifecycle, not for a
+// locking getter: its get_connected() reads an atomic published at the end of
+// a connect (issue #910), so the base's get_connected() call is lock-free. The
+// case still storms set_connected() (mutex_ -> pending_mutex_ order, the PR
+// #115 round-2 ABBA finding) against the base machinery, where TSan's
+// lock-order analysis would see the inversion if a getter took mutex_ again.
 //
 // Hardware-free: connects fail fast (TCP connection refused on the loopback
 // port below), which still storms the base machinery, the failure-path
-// cleanup, and the mutex-guarded getters racing the lifecycle. Celestron,
-// iOptron, OnStep and Sky-Watcher share this shape; SynScan does NOT -- its
-// getter became a bare atomic load with the issue #130 fix. The current list
-// lives in async_connectable.h; do not restate it here.
+// cleanup, and the getters racing the lifecycle. Whether any driver is a
+// blocking-getter shape is decided in async_connectable.h; do not restate it
+// here.
 
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>

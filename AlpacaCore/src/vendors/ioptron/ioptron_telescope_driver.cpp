@@ -188,10 +188,10 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_;
-    }
+    // Reads published_connected_, raised only at the end of a connect and dropped first on a
+    // disconnect, so it takes no lock set_connected() holds and stays false while Connecting
+    // is true (#910). The blocking-driver list lives in async_connectable.h.
+    bool get_connected() const override { return published_connected_.load(); }
 
     // Reads only the published copy under its own narrow mutex, never the coarse
     // mutex_ that set_connected() holds across the connect.
@@ -370,9 +370,11 @@ public:
                     "iOptron",
                     "Connected to " + mount_desc + " over " +
                         std::string(connection_info_.type == ConnectionType::Serial ? "Serial/USB" : "Network"));
+                published_connected_ = true;  // the connect is complete (#910)
             }
         } else {
             ALPACA_LOG_INFO("iOptron", "Disconnecting...");
+            published_connected_ = false;
             connected_ = false;
             site_info_valid_ = false;
             position_cache_valid_ = false;
@@ -2846,6 +2848,8 @@ private:
     int location_index_ = 0;  // the mount index the resolver searches, part of the location key
     bool connection_resolved_ = false;
     std::atomic<bool> connected_{false};
+    // What get_connected() reads: true only once a connect has fully finished (#910).
+    std::atomic<bool> published_connected_{false};
     mutable MountInfo mount_info_;
     mutable std::mutex mutex_;
     bool client_disagreement_warned_ = false;  // open-astro#409, re-armed on connect

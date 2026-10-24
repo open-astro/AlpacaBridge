@@ -445,13 +445,14 @@ GET_CONNECTED_RE = re.compile(r"bool\s+get_connected\s*\(\s*\)\s*const\s+overrid
 
 # Driver file basename -> the name the async_connectable.h comment uses for it.
 # Only the drivers that CAN be classified as blocking need an entry; the
-# lock-free majority is not named anywhere, by design. The four
+# lock-free majority is not named anywhere, by design. Two groups are the
+# exception, and both keep their entries although the header's list is empty:
+# the Bisque and iOptron telescopes (lock-free since #910) and the four
 # wrapper-backed switch drivers (iOptron iMate PowerBox, ToupTek StellaVita,
-# ASIAIR, ASIAIR Plus) are the exception: they keep their entries although
-# they answer get_connected() lock-free since #382, because the entry is what
-# lets the gate report MISSING FROM THE BLOCKING LIST if one of their wrappers
-# ever re-locks is_open(). Do not remove them on the STALE BLOCKING-LIST ENTRY
-# advice.
+# ASIAIR, ASIAIR Plus; lock-free since #382). The entry is what lets the gate
+# report MISSING FROM THE BLOCKING LIST if one of them re-locks get_connected()
+# (or a wrapper re-locks is_open()). Do not remove them on the STALE
+# BLOCKING-LIST ENTRY advice.
 # The value is (prose name, which list it belongs to). The list matters: the
 # header names these in TWO sentences, and one name is a prefix of another
 # across them -- "iOptron" (telescope) inside "iOptron iMate PowerBox"
@@ -475,7 +476,7 @@ DRIVER_PROSE_NAMES = {
 # Both must be found or the check fails loudly: a header rewrite that moves
 # them must not silently turn this gate into a no-op.
 BLOCKING_LIST_SPANS = {
-    "telescopes": ("create that hazard are the", "telescopes."),
+    "telescopes": ("The blocking telescopes (", ")"),
     "switches": ("The wrapper-backed switch drivers (", ")"),
 }
 
@@ -504,11 +505,7 @@ def _blocking_list_spans(header):
 
 def _names_in_span(which, span):
     """The driver names a blocking-list sentence actually lists."""
-    if which == "telescopes":
-        body = span.split("create that hazard are the", 1)[1]
-        body = body.rsplit("telescopes.", 1)[0]
-    else:
-        body = span.split("(", 1)[1].rsplit(")", 1)[0]
+    body = span.split("(", 1)[1].rsplit(")", 1)[0]
     # "A, B, C and D" -> [A, B, C, D]
     parts = []
     for chunk in body.split(","):
@@ -640,12 +637,10 @@ def classify_get_connected_bodies():
     return kinds, failures
 
 
-def check_blocking_get_connected_list():
-    kinds, failures = classify_get_connected_bodies()
-    if not kinds:
-        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
-
-    header = read("AlpacaCore/include/alpacacore/async_connectable.h")
+def blocking_list_findings(header, kinds):
+    """Check 5's comparison over (async_connectable.h text, {basename: kind}). Pure, so
+    --self-test can drive it."""
+    failures = []
     spans, span_failures = _blocking_list_spans(header)
     failures.extend(span_failures)
     if span_failures:
@@ -681,6 +676,41 @@ def check_blocking_get_connected_list():
                     "driver with that name has a blocking get_connected(). Either it was made "
                     "lock-free and the name must come out, or the name does not match "
                     "DRIVER_PROSE_NAMES." % (which, listed))
+
+    for basename, kind in sorted(kinds.items()):
+        if kind == "lock-free":
+            # The lock-free majority is deliberately unnamed. What matters is
+            # that it is not named as blocking: a driver made lock-free (as
+            # SynScan was by #130) must come OUT of the list.
+            entry = DRIVER_PROSE_NAMES.get(basename)
+            if entry and named(entry):
+                failures.append(
+                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
+                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
+                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
+            continue
+        entry = DRIVER_PROSE_NAMES.get(basename)
+        if entry is None:
+            failures.append(
+                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
+                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
+                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
+                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
+            continue
+        if not named(entry):
+            failures.append(
+                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
+                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
+    return failures
+
+
+def check_blocking_get_connected_list():
+    kinds, failures = classify_get_connected_bodies()
+    if not kinds:
+        return ["No get_connected() overrides found under AlpacaCore/src/vendors -- the scan is broken."]
+
+    failures.extend(blocking_list_findings(
+        read("AlpacaCore/include/alpacacore/async_connectable.h"), kinds))
 
     # The counts this PR removed must not creep back. A number in front of
     # "telescopes"/"wrapper-backed switch(es)" is exactly the thing nothing
@@ -722,30 +752,6 @@ def check_blocking_get_connected_list():
                 "second source of truth that nothing checks and that has gone stale before "
                 "(issue #381). Refer to the named list instead." % (path, match.group(0)))
 
-    for basename, kind in sorted(kinds.items()):
-        if kind == "lock-free":
-            # The lock-free majority is deliberately unnamed. What matters is
-            # that it is not named as blocking: a driver made lock-free (as
-            # SynScan was by #130) must come OUT of the list.
-            entry = DRIVER_PROSE_NAMES.get(basename)
-            if entry and named(entry):
-                failures.append(
-                    "STALE BLOCKING-LIST ENTRY: %s's get_connected() is lock-free, but "
-                    "async_connectable.h still names '%s' among the drivers that block. Remove it there "
-                    "and from DRIVER_PROSE_NAMES." % (basename, entry[0]))
-            continue
-        entry = DRIVER_PROSE_NAMES.get(basename)
-        if entry is None:
-            failures.append(
-                "UNNAMED BLOCKING DRIVER: %s's get_connected() is %s, so it blocks behind its connect "
-                "sequence, but no prose name is registered for it. Add it to DRIVER_PROSE_NAMES in %s "
-                "and to the list in async_connectable.h -- the router rule and the pending_mutex_ "
-                "ordering both depend on that list being complete." % (basename, kind, Path(__file__).name))
-            continue
-        if not named(entry):
-            failures.append(
-                "MISSING FROM THE BLOCKING LIST: %s's get_connected() is %s, but async_connectable.h's "
-                "%s list does not name '%s'." % (basename, kind, entry[1], entry[0]))
     return failures
 
 
@@ -3351,6 +3357,23 @@ def self_test():
     lines = readme_headline_counts_summary(comma_readme, hl_supported, comma_map, hl_extras)
     check("counts: the summary keeps a declared comma item whole in the paste-ready headline",
           lines[1] == "brands: 4 (Four)" and "Canon, Nikon and Sony DSLRs" in lines[3])
+
+    # check 5 (blocking get_connected() lists) over a literal header and kinds.
+    bl_header = ("// The blocking telescopes () list is empty on purpose.\n"
+                 "// The wrapper-backed switch drivers () list is empty too.\n")
+    bl_kinds = {"bisque_telescope_driver.cpp": "lock-free", "ioptron_telescope_driver.cpp": "lock-free"}
+    check("blocking list: an empty telescopes list with every telescope lock-free reports nothing",
+          blocking_list_findings(bl_header, bl_kinds) == [])
+    f = blocking_list_findings(bl_header, dict(bl_kinds, **{"bisque_telescope_driver.cpp": "driver-mutex"}))
+    check("blocking list: a re-locked Bisque getter against an empty list is MISSING FROM THE BLOCKING LIST",
+          len(f) == 1 and f[0].startswith("MISSING FROM THE BLOCKING LIST") and "'Bisque'" in f[0])
+    f = blocking_list_findings(bl_header.replace("telescopes ()", "telescopes (Bisque and iOptron)"), bl_kinds)
+    check("blocking list: Bisque and iOptron named while lock-free is STALE BLOCKING-LIST ENTRY for each",
+          all(sum(("'%s'" % n) in x and x.startswith("STALE BLOCKING-LIST ENTRY") for x in f) >= 1
+              for n in ("Bisque", "iOptron")))
+    f = blocking_list_findings(bl_header.replace("The blocking telescopes (", "The telescopes ("), bl_kinds)
+    check("blocking list: a header without the telescopes span is BLOCKING-LIST SPAN NOT FOUND",
+          len(f) == 1 and f[0].startswith("BLOCKING-LIST SPAN NOT FOUND"))
 
     # check 4: VERSION vs README badge, with the ~betaN suffix.
     b_readme = "#### [5.0.0~beta2] - 2026-11-01 &middot; [Changelog](CHANGELOG.md)\n"

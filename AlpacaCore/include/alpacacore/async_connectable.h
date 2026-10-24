@@ -345,15 +345,16 @@ private:
             // Read connected-now BEFORE taking pending_mutex_: get_connected()
             // may take the driver state mutex, and the sync set_connected path
             // takes driver mutex -> pending_mutex_ (obligations 4/5) — calling
-            // it under pending_mutex_ is an ABBA deadlock. The drivers that
-            // create that hazard are the Bisque and iOptron
-            // telescopes. (Celestron's and Sky-Watcher's get_connected() are
-            // lock-free since #1437 and #1530.) The wrapper-backed switch drivers
+            // it under pending_mutex_ is an ABBA deadlock. No driver creates
+            // that hazard today. The blocking telescopes
+            // () list is empty on purpose: Celestron's, Sky-Watcher's,
+            // OnStep's, Bisque's and iOptron's get_connected() are lock-free
+            // (#1437, #1530, #1375, #910). The wrapper-backed switch drivers
             // () used to lock in get_connected() via the wrapper's is_open();
             // since open-astro#382 every wrapper publishes an atomic instead,
-            // so that list is empty on purpose and the gate below keeps it
-            // that way (a wrapper is_open() that takes a lock again puts its
-            // driver back in). The read here is a
+            // so that list is empty on purpose too, and the gate below keeps
+            // both empty (a telescope get_connected() or a wrapper is_open()
+            // that takes a lock again puts its driver back in). The read here is a
             // momentary snapshot whichever driver answers it -- nothing holds
             // a driver lock across the call, so the value cannot be pinned by
             // this thread -- and a stale value is benign: the deferred

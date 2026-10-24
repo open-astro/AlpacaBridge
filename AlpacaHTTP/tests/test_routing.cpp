@@ -613,8 +613,9 @@ private:
     bool connected_ = false;
 };
 
-// Mirrors the Celestron / OnStep / Bisque / iOptron / Sky-Watcher telescopes:
-// an AsyncConnectable driver whose get_connected() takes the state mutex that
+// Mirrors the shape the blocking-driver list in async_connectable.h guards
+// against (that list is empty today; no real driver has it): an
+// AsyncConnectable driver whose get_connected() takes the state mutex that
 // set_connected() holds for the whole (slow) connect. The router must never
 // read it while a connection task is in flight, or its own connect-wait
 // deadline cannot fire and a polling GET connected stalls for the entire
@@ -7107,9 +7108,9 @@ int main() {
     }
 
     // Issue #130: a driver whose get_connected() blocks behind an in-flight
-    // connect -- the telescopes listed in async_connectable.h. SynScan
-    // produced #130 and is deliberately NOT one of them any more: that fix
-    // made its getter a bare atomic load. The router must poll
+    // connect (async_connectable.h's blocking list is empty today; no real
+    // driver has this shape). SynScan produced #130 and its getter has been a
+    // bare atomic load since that fix. The router must poll
     // get_connecting(), the non-blocking signal, so GET connected/connecting
     // answer at once mid-connect and the PUT connected wait honours its
     // deadline instead of stalling for the whole handshake.

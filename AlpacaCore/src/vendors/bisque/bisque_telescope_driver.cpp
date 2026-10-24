@@ -209,10 +209,10 @@ public:
     int get_interface_version() const override { return 4; }
 
     // A lost link (decision 0009) reads as not connected until the client's Connected=true relinks.
-    bool get_connected() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return connected_ && !link_lost_;
-    }
+    // Reads published_connected_: raised only at the end of a connect, dropped when the session ends or
+    // the link is declared lost, so it takes no lock set_connected() holds and stays false while
+    // Connecting is true (#910). The blocking-driver list lives in async_connectable.h.
+    bool get_connected() const override { return published_connected_.load(); }
 
     std::string get_link_fault() const override {
         std::lock_guard<std::mutex> lock(link_fault_mutex_);
@@ -246,6 +246,7 @@ public:
         if (connected == effectively_connected) {
             if (!connected && connected_) {
                 // A disconnect of a lost link: the transport is closed already; drop the rest of the session.
+                published_connected_ = false;
                 connected_ = false;
                 link_lost_ = false;
                 ++pulse_request_;
@@ -264,6 +265,7 @@ public:
         if (connected && connected_) {
             // Relink after a lost link: retire the dead session, then connect as a fresh one. Only the client's
             // Connected=true gets here; the driver never reopens on its own (decision 0009 point 4).
+            published_connected_ = false;
             connected_ = false;
             link_lost_ = false;
             ++pulse_request_;
@@ -331,11 +333,15 @@ public:
 
             ALPACA_LOG_INFO("Bisque", "Connected to TheSkyX, parked=" +
                             std::string(parked_ ? "true" : "false"));
+            // Raised under mutex_, so a link-loss declaration (also under mutex_) cannot be
+            // overwritten by this store (decision 0009 rule 3).
+            published_connected_ = true;  // the connect is complete (#910)
             lock.unlock();  // the poll slot starts without mutex_ held (AsyncOperation rule 10)
             start_status_poller();
         } else {
             ++pulse_request_;
             pulse_generation_.bump();
+            published_connected_ = false;
             connected_ = false;
             target_ra_set_ = false;
             target_dec_set_ = false;
@@ -1425,6 +1431,7 @@ private:
                 std::to_string(std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
                 " s without a reply; reconnect to resume (" + position_link_health_.fault() + ")");
         link_lost_ = true;
+        published_connected_ = false;
         close_lost_transport_ = true;
         return true;
     }
@@ -1642,6 +1649,9 @@ private:
     std::mutex initiator_mutex_;
     mutable std::mutex mutex_;
     bool connected_ = false;
+    // What get_connected() reads: true only once a connect has fully finished and the link is not
+    // lost. Written under mutex_ or transition_mutex_, read with no lock (#910).
+    std::atomic<bool> published_connected_{false};
 
     double target_ra_hours_ = 0.0;
     double target_dec_degrees_ = 0.0;
