@@ -2868,6 +2868,20 @@ TEST_CASE("OnStep Telescope Driver - the tracking restore never outlives its sle
     driver->set_connected(false);
 }
 
+namespace {
+
+// The error code and text an AlpacaException carries, or -1 when `fn` returns.
+std::pair<int, std::string> alpaca_error_of(const std::function<void()>& fn) {
+    try {
+        fn();
+    } catch (const alpacacore::AlpacaException& ex) {
+        return {ex.error_code(), ex.what()};
+    }
+    return {-1, ""};
+}
+
+}  // namespace
+
 // #1274: ITelescopeV4 refuses an equatorial slew while Tracking is false.
 // OnStepX turns tracking on at a GOTO only in some cases (the first GOTO after a
 // home reset, or one that starts from home), so this is the interface contract.
@@ -2900,8 +2914,14 @@ TEST_CASE("OnStep Telescope Driver - an equatorial slew needs Tracking", "[onste
                              alpacacore::AlpacaError::InvalidOperation);
         require_alpaca_error([&]() { driver->slew_to_coordinates(12.0, 45.0); },
                              alpacacore::AlpacaError::InvalidOperation);
-        require_alpaca_error([&]() { driver->slew_to_target_async(); }, alpacacore::AlpacaError::InvalidOperation);
-        require_alpaca_error([&]() { driver->slew_to_target(); }, alpacacore::AlpacaError::InvalidOperation);
+        // Each form refuses under its own name (#1379).
+        for (const auto& [form, who] : std::vector<std::pair<std::function<void()>, std::string>>{
+                 {[&]() { driver->slew_to_target_async(); }, "SlewToTargetAsync"},
+                 {[&]() { driver->slew_to_target(); }, "SlewToTarget"}}) {
+            const auto error = alpaca_error_of(form);
+            CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
+            CHECK(error.second == who + " requires Tracking to be true");
+        }
         nothing_sent();
     }
 
@@ -2940,20 +2960,6 @@ TEST_CASE("OnStep Telescope Driver - an equatorial slew needs Tracking", "[onste
 
     driver->set_connected(false);
 }
-
-namespace {
-
-// The error code and text an AlpacaException carries, or -1 when `fn` returns.
-std::pair<int, std::string> alpaca_error_of(const std::function<void()>& fn) {
-    try {
-        fn();
-    } catch (const alpacacore::AlpacaException& ex) {
-        return {ex.error_code(), ex.what()};
-    }
-    return {-1, ""};
-}
-
-}  // namespace
 
 // #1377: ITelescopeV4 refuses an Alt/Az slew while Tracking is true (a tracking
 // mount drifts off the requested Alt/Az). Without Tracking it goes out.
