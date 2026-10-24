@@ -846,7 +846,7 @@ public:
                 // init_done bit above and discard `running` in the same reply,
                 // so an axis still turning after a cable pull was neither
                 // stopped nor reported.
-                adopt_surviving_motion_locked(lock, entry_status);
+                adopt_surviving_motion_locked(entry_status);
             } catch (const AlpacaException& e) {
                 session_open_.store(false);
                 protocol.disconnect();
@@ -3061,7 +3061,7 @@ private:
     // cable was pulled and replaced, ":f1" then read "=111" (speed mode,
     // running, initialized) while the driver reported Slewing false, and no
     // ":K" was sent anywhere in the relink.
-    void adopt_surviving_motion_locked(StateLock& lock, const AxisStatus (&entry_status)[2]) {
+    void adopt_surviving_motion_locked(const AxisStatus (&entry_status)[2]) {
         const auto lost_at = protocol_->consume_link_lost_at();
         const auto now = clock_.now();
         // A stop is only justified when we have POSITIVE evidence of a long,
@@ -3168,7 +3168,7 @@ private:
                 message += where;
                 message += " still running and nobody in control; stopping it";
                 ALPACA_LOG_WARN("SkyWatcher", message);
-                stop_surviving_axis_locked(lock, channel, stop_confirm_deadline);
+                stop_surviving_axis_locked(channel, stop_confirm_deadline);
             }
         }
     }
@@ -3179,11 +3179,12 @@ private:
     // is SHARED with the other axis, so this must never extend it: the stop
     // itself always goes out, only the waiting for rest is bounded.
     //
-    // The sleeps between polls run with the state lock released (decision 0016
-    // rule 1): the connect still holds the transition and I/O locks, so no
-    // other mutator can run in the gap, and a getter reads NotConnected
-    // (session_connecting_) instead of waiting for up to the whole budget.
-    void stop_surviving_axis_locked(StateLock& lock, int channel, std::chrono::steady_clock::time_point deadline) {
+    // The sleeps between polls run with the state lock released, as an
+    // exchange does (decision 0016 rule 1): the connect keeps the transition
+    // and I/O locks, so no other mutator can run in the gap, and a getter
+    // reads NotConnected (session_connecting_) instead of waiting for up to
+    // the whole budget.
+    void stop_surviving_axis_locked(int channel, std::chrono::steady_clock::time_point deadline) {
         const Wire protocol = wire();
         try {
             protocol.stop_motion(channel);
@@ -3204,9 +3205,7 @@ private:
                 message += e.what();
                 ALPACA_LOG_TRACE("SkyWatcher", message);
             }
-            lock.unlock();
-            clock_.sleep_for(std::chrono::milliseconds(50));
-            lock.lock();
+            protocol.call([&](auto&) { clock_.sleep_for(std::chrono::milliseconds(50)); });
         }
         // The stop was sent and accepted; we simply ran out of the shared
         // connect budget before seeing it come to rest. Say both halves, so

@@ -421,6 +421,18 @@ TEST_CASE("SkyWatcher getters - the connect's stop-confirm wait holds up no stat
             std::this_thread::sleep_for(milliseconds(2));
         }
     });
+    // A client mutator arriving in the gap must wait for the connect: only the state lock is free there, the
+    // operation lock is not. Admitted early it would command the board while Connected reads false, and the
+    // connect's own rate reset would then overwrite what it set.
+    std::atomic<long long> mover_ms{-1};
+    const auto mover_start = steady_clock::now();
+    std::thread mover([&] {
+        try {
+            second->move_axis(1, 1.0);
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the wait is timed
+        }
+        mover_ms = std::chrono::duration_cast<milliseconds>(steady_clock::now() - mover_start).count();
+    });
     const std::vector<Getter> state_getters = {
         {"Slewing", [](auto& d) { (void)d.get_slewing(); }},
         {"Tracking", [](auto& d) { (void)d.get_tracking(); }},
@@ -436,8 +448,11 @@ TEST_CASE("SkyWatcher getters - the connect's stop-confirm wait holds up no stat
         INFO(g.name << " took " << spent.count() << " ms during the stop-confirm sleep");
         CHECK(spent < kGetterBudget);
     }
+    mover.join();
     connecting.join();
     ticker.join();
+    INFO("MoveAxis returned after " << mover_ms.load() << " ms; the clock was held for 300 ms");
+    CHECK(mover_ms.load() >= 250);
     second->set_connected(false);
     first->set_connected(false);
 }
