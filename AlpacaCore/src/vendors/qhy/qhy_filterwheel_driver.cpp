@@ -106,7 +106,10 @@ public:
     bool get_connecting() const override { return connection_task_active(); }
 
     void set_connected(bool connected) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        // Whole transitions are serialised here, and no getter takes this lock
+        // (decision 0016): the connect handshake below runs under it and the
+        // I/O lock, never under mutex_.
+        std::lock_guard<std::mutex> transition(transition_mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
@@ -122,90 +125,33 @@ public:
         }
 
         if (connected) {
-            const std::string& id = resolve_camera_id_locked();
-
-            // Shared, reference-counted open — coexists with the paired camera
-            // driver on the same physical handle (see qhy_sdk_wrapper.h).
-            // Deliberately no init_camera(): the CFW port works on the raw
-            // opened handle (per the 25.09.29 SDK's ControlCFW.cpp sample,
-            // which never calls InitQHYCCD; validated on real miniCam8M
-            // hardware -- see .github/instructions/qhy.instructions.md), so the wheel doesn't need
-            // to wait on -- or trigger -- the imaging chip's init sequence.
-            sdk_.open_camera(id);
-            try {
-                if (!sdk_.is_control_available(id, control::CFWPORT)) {
-                    throw AlpacaException("No CFW detected on this QHY camera", AlpacaError::NotConnected);
-                }
-                const double raw_slots = sdk_.get_param(id, control::CFWSLOTSNUM);
-                int slots = 0;
-                try {
-                    slots = param_to_int(raw_slots, "CFW slot count");
-                } catch (const AlpacaException&) {
-                    // Unreadable (the QHYCCD_ERROR sentinel, issue #510): refused
-                    // below with the same text as a zero count.
-                    slots = 0;
-                }
-                if (slots <= 0) {
-                    throw AlpacaException("QHY CFW reported an invalid slot count", AlpacaError::DriverException);
-                }
-                slot_count_ = slots;
-                slot_count_valid_ = true;
-                normalize_slot_data_locked();
-
-                std::string model;
-                if (sdk_.get_camera_model(id, model) && !model.empty()) {
-                    camera_model_ = model;
-                }
-
-                // Warm-up read: GetQHYCCDCFWStatus is a genuine hardware round
-                // trip on this SDK (~100-130ms measured on real miniCam8M
-                // hardware -- consistent per-call, not a one-time cold-start
-                // cost), which blows the ASCOM FAST (0.1s) target for the
-                // first Position/DeviceState read after Connect if done
-                // lazily. Doing it here spends that cost against Connect's
-                // STANDARD (1.0s) budget instead, and seeds cached_position_
-                // (see get_position) so the read right after connect is fast.
-                int initial_pos = sdk_.get_cfw_position(id);
-                if (initial_pos >= 0) {
-                    cached_position_ = initial_pos;
-                } else {
-                    // mid-move at connect time -- rare; get_position() falls back to a live read
-                    cached_position_.reset();
-                }
-            } catch (...) {
-                // Copy before the reset below: `id` is a reference into
-                // camera_id_ and must stay valid for the close call.
-                const std::string close_id = id;
-                if (camera_index_.has_value()) {
-                    // A failed index-based connect must not pin the resolved
-                    // ID: the next connect re-resolves from the index (same
-                    // rule as the disconnect path below), so a USB
-                    // re-enumeration between attempts can't leave us reusing
-                    // a stale ID.
-                    camera_id_.reset();
-                }
-                sdk_.close_camera(close_id);
-                throw;
-            }
-            connected_.store(true);
+            connect_locked();
             return;
         }
 
-        // Clear driver state before the SDK close: if the close throws (e.g.
-        // device unplugged) the error still surfaces, but the driver must not
-        // stay half-connected.
-        const std::optional<std::string> close_id = camera_id_;
-        if (camera_index_.has_value()) {
-            // Re-resolved from the index on the next connect (matches the ZWO
-            // EFW / QHY camera pattern); an explicit camera_id_ config stays
-            // fixed across reconnects instead.
-            camera_id_.reset();
+        // Clear driver state under mutex_ and release it BEFORE the SDK close:
+        // if the close throws (e.g. device unplugged) the error still surfaces,
+        // but the driver must not stay half-connected. The close then takes the
+        // I/O lock, so a Position read or a move in flight never sees a closed
+        // handle (the camera driver shares it; see get_position()).
+        std::optional<std::string> close_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            close_id = camera_id_;
+            if (camera_index_.has_value()) {
+                // Re-resolved from the index on the next connect (matches the ZWO
+                // EFW / QHY camera pattern); an explicit camera_id_ config stays
+                // fixed across reconnects instead.
+                camera_id_.reset();
+            }
+            slot_count_valid_ = false;
+            cached_position_.reset();
+            pending_target_.reset();
+            rest_candidate_.reset();
+            connected_.store(false);
         }
-        slot_count_valid_ = false;
-        cached_position_.reset();
-        pending_target_.reset();
-        connected_.store(false);
         if (close_id.has_value()) {
+            std::lock_guard<std::mutex> io(io_mutex_);
             sdk_.close_camera(close_id.value());
         }
     }
@@ -234,14 +180,6 @@ public:
 
     int get_position() const override {
         ensure_connected();
-        // Hold mutex_ across the SDK call: set_connected(false) closes the
-        // shared handle under mutex_, so serialising here prevents a
-        // concurrent disconnect from invalidating camera_id_ mid-call
-        // (matches the ZWO EFW / ToupTek thermal-switch pattern).
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
-        }
         // GetQHYCCDCFWStatus is a genuine ~100-130ms hardware round trip on
         // this SDK (measured on real miniCam8M hardware, consistent per call
         // -- ConformU flags it OUTSIDE the FAST 0.1s target). Only serve the
@@ -263,10 +201,28 @@ public:
         // a live read matches the commanded target, or the wheel rests on
         // another slot (below), do we consider it settled and start serving
         // it from cache.
-        if (cached_position_.has_value() && !pending_target_.has_value()) {
-            return cached_position_.value();
+        std::string id;
+        if (const auto cached = cached_or_id(id)) {
+            return *cached;
         }
-        int pos = sdk_.get_cfw_position(camera_id_.value());
+        // The live read runs under the I/O lock, not mutex_. set_connected(false)
+        // clears state under mutex_ and then closes the shared handle under this
+        // same lock, so a concurrent disconnect cannot close it mid-call (the
+        // reason this read once held mutex_), and the getters stay free.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        // Another reader may have settled the move while this one waited for the
+        // lock, and a disconnect may have run: look again.
+        if (const auto cached = cached_or_id(id)) {
+            return *cached;
+        }
+        const int pos = sdk_.get_cfw_position(id);
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A disconnect between the check above and here cleared the state; do
+        // not write a reading back into it. A reconnect cannot have run: it
+        // needs the I/O lock this read holds.
+        if (!connected_.load()) {
+            throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
         if (pending_target_.has_value()) {
             if (pos == pending_target_.value()) {
                 cached_position_ = pos;
@@ -310,43 +266,36 @@ public:
             throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
         }
         ensure_connected();
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_id_.has_value()) {
-            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        validate_position(position);
+        // Serialise the move against live reads and the close (I/O lock), then
+        // validate again under both locks: a disconnect and a reconnect to a
+        // wheel with fewer slots can run between the early check above and here.
+        std::lock_guard<std::mutex> io(io_mutex_);
+        std::string id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            validate_position_locked(position);
+            if (!camera_id_.has_value()) {
+                throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+            }
+            id = *camera_id_;
+            // Set BEFORE issuing the move (not after): if move_cfw throws mid-
+            // call the catch below clears it again. Assumption: a failing
+            // SendOrder2QHYCCDCFW means the order never reached the wheel, so
+            // Position goes back to live reads. If the wheel did start moving,
+            // the first live read of 0 or more is cached and Position can sit on
+            // a transit slot until the next move; that trade-off is accepted
+            // over reporting -1 forever for a target no read can match.
+            cached_position_.reset();
+            pending_target_ = position;
+            rest_candidate_.reset();
         }
-        if (!slot_count_valid_ || slot_count_ <= 0) {
-            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
-        }
-        if (position >= slot_count_) {
-            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
-        }
-        // Protocol ceiling, checked BEFORE any state mutation (PR #142 bot
-        // review): the CFW wire protocol is a single ASCII digit, so slots
-        // above 9 are unreachable even if a future wheel reports a larger
-        // slot count. move_cfw() has the same guard, but throwing from there
-        // would leave pending_target_ set for a move that was never issued —
-        // a target no live read can ever match, silently degrading every
-        // later Position poll to a ~100-130ms hardware read for the rest of
-        // the connection.
-        if (position > 9) {
-            throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)",
-                                  AlpacaError::InvalidValue);
-        }
-        // Set BEFORE issuing the move (not after): if move_cfw throws mid-
-        // call the catch below clears it again. Assumption: a failing
-        // SendOrder2QHYCCDCFW means the order never reached the wheel, so
-        // Position goes back to live reads. If the wheel did start moving,
-        // the first live read of 0 or more is cached and Position can sit on
-        // a transit slot until the next move; that trade-off is accepted
-        // over reporting -1 forever for a target no read can match.
-        cached_position_.reset();
-        pending_target_ = position;
-        rest_candidate_.reset();
         try {
-            sdk_.move_cfw(camera_id_.value(), position);
+            sdk_.move_cfw(id, position);
         } catch (...) {
             // The move failed, so no pending target exists: Position goes back
             // to live reads instead of -1 until a slot that can never match.
+            std::lock_guard<std::mutex> lock(mutex_);
             pending_target_.reset();
             throw;
         }
@@ -388,8 +337,66 @@ private:
         }
     }
 
-    const std::string& resolve_camera_id_locked() {
-        if (camera_index_.has_value() && !camera_id_.has_value()) {
+    // Under mutex_: the connection check, then the settled-position cache, else
+    // the id for a live read. Throws NotConnected (also for a disconnect that ran
+    // since the caller's ensure_connected()).
+    std::optional<int> cached_or_id(std::string& id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_.load() || !camera_id_.has_value()) {
+            throw AlpacaException("Filter wheel not connected", AlpacaError::NotConnected);
+        }
+        if (cached_position_.has_value() && !pending_target_.has_value()) {
+            return cached_position_;
+        }
+        id = camera_id_.value();
+        return std::nullopt;
+    }
+
+    void validate_position(int position) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        validate_position_locked(position);
+    }
+
+    // Caller holds mutex_.
+    void validate_position_locked(int position) const {
+        // A disconnect since ensure_connected() clears the slot count: report it as
+        // NotConnected, not as a missing slot count.
+        if (!connected_.load() || !camera_id_.has_value()) {
+            throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
+        }
+        if (!slot_count_valid_ || slot_count_ <= 0) {
+            throw AlpacaException("Filter wheel slot count unavailable", AlpacaError::DriverException);
+        }
+        if (position >= slot_count_) {
+            throw AlpacaException("Filter position out of range", AlpacaError::InvalidValue);
+        }
+        // Protocol ceiling, checked BEFORE any state mutation (PR #142 bot
+        // review): the CFW wire protocol is a single ASCII digit, so slots
+        // above 9 are unreachable even if a future wheel reports a larger
+        // slot count. move_cfw() has the same guard, but throwing from there
+        // would leave pending_target_ set for a move that was never issued —
+        // a target no live read can ever match, silently degrading every
+        // later Position poll to a ~100-130ms hardware read for the rest of
+        // the connection.
+        if (position > 9) {
+            throw AlpacaException("Filter position out of range for QHY CFW protocol (max 9)",
+                                  AlpacaError::InvalidValue);
+        }
+    }
+
+    // Connect handshake. Caller holds transition_mutex_. Every SDK call runs
+    // under the I/O lock with mutex_ free; identity, limits and names are
+    // published under mutex_ at the end, then Connected flips (decision 0016).
+    void connect_locked() {
+        std::lock_guard<std::mutex> io(io_mutex_);
+        std::optional<std::string> known_id;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            known_id = camera_id_;
+        }
+        std::string id;
+        std::string enumerated_model;
+        if (camera_index_.has_value() && !known_id.has_value()) {
             auto cameras = sdk_.enumerate_cameras();
             if (cameras.empty()) {
                 throw AlpacaException("No QHY cameras detected", AlpacaError::NotConnected);
@@ -400,15 +407,96 @@ private:
             }
             const auto& info = cameras[static_cast<std::size_t>(index)];
             ALPACA_LOG_INFO("QHY", "CFW resolved camera index " + std::to_string(index) + " → ID: " + info.camera_id);
-            camera_id_ = info.camera_id;
-            if (!info.model.empty()) {
-                camera_model_ = info.model;
-            }
-        }
-        if (!camera_id_.has_value()) {
+            id = info.camera_id;
+            enumerated_model = info.model;
+        } else if (known_id.has_value()) {
+            id = known_id.value();
+        } else {
             throw AlpacaException("Camera ID not specified", AlpacaError::InvalidValue);
         }
-        return camera_id_.value();
+
+        // Shared, reference-counted open — coexists with the paired camera
+        // driver on the same physical handle (see qhy_sdk_wrapper.h).
+        // Deliberately no init_camera(): the CFW port works on the raw
+        // opened handle (per the 25.09.29 SDK's ControlCFW.cpp sample,
+        // which never calls InitQHYCCD; validated on real miniCam8M
+        // hardware -- see .github/instructions/qhy.instructions.md), so the wheel doesn't need
+        // to wait on -- or trigger -- the imaging chip's init sequence.
+        sdk_.open_camera(id);
+        try {
+            if (!sdk_.is_control_available(id, control::CFWPORT)) {
+                throw AlpacaException("No CFW detected on this QHY camera", AlpacaError::NotConnected);
+            }
+            const double raw_slots = sdk_.get_param(id, control::CFWSLOTSNUM);
+            int slots = 0;
+            try {
+                slots = param_to_int(raw_slots, "CFW slot count");
+            } catch (const AlpacaException&) {
+                // Unreadable (the QHYCCD_ERROR sentinel, issue #510): refused
+                // below with the same text as a zero count.
+                slots = 0;
+            }
+            if (slots <= 0) {
+                throw AlpacaException("QHY CFW reported an invalid slot count", AlpacaError::DriverException);
+            }
+
+            std::string model;
+            if (sdk_.get_camera_model(id, model) && !model.empty()) {
+                enumerated_model = model;
+            }
+
+            // Warm-up read: GetQHYCCDCFWStatus is a genuine hardware round
+            // trip on this SDK (~100-130ms measured on real miniCam8M
+            // hardware -- consistent per-call, not a one-time cold-start
+            // cost), which blows the ASCOM FAST (0.1s) target for the
+            // first Position/DeviceState read after Connect if done
+            // lazily. Doing it here spends that cost against Connect's
+            // STANDARD (1.0s) budget instead, and seeds cached_position_
+            // (see get_position) so the read right after connect is fast.
+            const int initial_pos = sdk_.get_cfw_position(id);
+
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Publish with a rollback: normalize_slot_data_locked() can throw
+            // (allocation), and a half-published slot count must not outlive a
+            // connect that fails.
+            const auto saved_id = camera_id_;
+            const auto saved_model = camera_model_;
+            const auto saved_names = filter_names_;
+            const auto saved_offsets = focus_offsets_;
+            try {
+                camera_id_ = id;
+                if (!enumerated_model.empty()) {
+                    camera_model_ = enumerated_model;
+                }
+                slot_count_ = slots;
+                slot_count_valid_ = true;
+                normalize_slot_data_locked();
+            } catch (...) {
+                camera_id_ = saved_id;
+                camera_model_ = saved_model;
+                filter_names_ = saved_names;
+                focus_offsets_ = saved_offsets;
+                slot_count_valid_ = false;
+                slot_count_ = 0;
+                throw;
+            }
+            if (initial_pos >= 0) {
+                cached_position_ = initial_pos;
+            } else {
+                // mid-move at connect time -- rare; get_position() falls back to a live read
+                cached_position_.reset();
+            }
+            pending_target_.reset();
+            rest_candidate_.reset();
+            connected_.store(true);
+        } catch (...) {
+            // Nothing was published, so a failed index-based connect pins no
+            // resolved ID: the next connect re-resolves from the index, and a
+            // USB re-enumeration between attempts can't leave us reusing a
+            // stale one.
+            sdk_.close_camera(id);
+            throw;
+        }
     }
 
     void normalize_slot_data_locked() {
@@ -499,6 +587,15 @@ private:
     mutable util::TaskClock::clock::time_point rest_since_{};
     mutable int rest_reads_ = 0;
     std::atomic<bool> connected_;
+    // Lock order (decision 0016): transition_mutex_ -> io_mutex_ -> mutex_ -> SDK wrapper.
+    // transition_mutex_ serialises whole connect/disconnect transitions; no getter takes it.
+    std::mutex transition_mutex_;
+    // The per-link I/O lock: every SDK call on the shared handle (status read, move, connect
+    // handshake, close) runs under it. The close takes it too, so a call in flight never sees a
+    // closed handle; it is never taken under mutex_.
+    mutable std::mutex io_mutex_;
+    // Short state lock, a leaf: guards the fields above except connected_, never held across an
+    // SDK call.
     mutable std::mutex mutex_;
 };
 
