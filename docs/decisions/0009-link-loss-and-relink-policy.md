@@ -36,7 +36,7 @@ The rules a change is checked against. Each names where it applies and what chec
 2. A link is lost at once on positive evidence that the transport is gone, and when a fault has stood past `util::kLinkStalenessBound`; a driver never sets a bound shorter than its own latch threshold. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/link_health.h`. Checked by: `AlpacaCore/tests/test_skywatcher_link_loss.cpp`, `AlpacaCore/tests/test_onstep_link_loss.cpp`, review.
 3. While lost: `Connected` reads false, operations throw `NotConnected`, `DeviceState` is the empty list, the transport is closed and the loss time is stamped once. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
 4. A driver never reopens a lost link on its own; only the client's Connect relinks, and it re-runs the connect probe. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
+5. `get_link_fault()` is the one fault text, and it keeps the last text after a loss until the next Connect or Disconnect. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review. <!-- allowed -->
 
 ## Alternatives rejected
 
