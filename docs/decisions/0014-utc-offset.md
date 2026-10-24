@@ -50,7 +50,7 @@ Symbol: `UtcOffset`
 | Driver | Source | State | Issue | Notes |
 | --- | --- | --- | --- | --- |
 | Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1385 | pilot |
-| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | planned | #1409 | |
+| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1409 | TaskClock elapsed time; clears on connect and now on disconnect too |
 | Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | planned | #1409 | |
 | iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | with its clock ticket |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | with its clock ticket; clears on disconnect too |
