@@ -139,6 +139,9 @@ if(TARGET alpacacore_skywatcher)
     list(APPEND TEST_SOURCES test_skywatcher_backlash.cpp)
     # Telescope [stress] coverage over the loopback UDP fake (issue #271).
     list(APPEND TEST_SOURCES test_skywatcher_concurrency_stress.cpp)
+    # Getters never wait behind a command on the wire; client-clock snapshot race
+    # (decision 0016, issue #1530).
+    list(APPEND TEST_SOURCES test_skywatcher_getter_locks.cpp)
     # Async slew failure surfaces through Slewing (issue #575).
     list(APPEND TEST_SOURCES test_skywatcher_async_slew_failure.cpp)
     # Auto-detect resolves at connect time (issue #659).

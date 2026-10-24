@@ -1,0 +1,3 @@
+### Changed
+
+- **Device config reads in the router**, AlpacaHTTP, issue #1589. The router's file-local `config_get()` and `config_has()` are gone. `vendor`, `deviceType` and `deviceNumber` are read through `catalog_json::get_string()`, `get_int()` and `has_value()`, which give the same messages for a wrong-typed field and still refuse 4294967299 and 3.5 as a device number (`AlpacaHTTP/tests/test_catalog_json.cpp`, case 7). Docs and comments that named the deleted functions are reworded. A JSON boolean `deviceNumber` (`true`) is now refused with InvalidValue on `configuredevice` and `removedevice` (`AlpacaHTTP/tests/test_routing.cpp`, the `deviceNumber` outside int case).

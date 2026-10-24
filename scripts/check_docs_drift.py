@@ -465,7 +465,6 @@ DRIVER_PROSE_NAMES = {
     "bisque_telescope_driver.cpp": ("Bisque", "telescopes"),
     "ioptron_telescope_driver.cpp": ("iOptron", "telescopes"),
     "onstep_telescope_driver.cpp": ("OnStep", "telescopes"),
-    "skywatcher_telescope_driver.cpp": ("Sky-Watcher", "telescopes"),
     "ioptron_switch_driver.cpp": ("iOptron iMate PowerBox", "switches"),
     "touptek_switch_driver.cpp": ("ToupTek StellaVita", "switches"),
     "zwo_asiair_switch_driver.cpp": ("ZWO ASIAIR", "switches"),

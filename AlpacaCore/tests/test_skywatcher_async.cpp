@@ -3942,7 +3942,7 @@ TEST_CASE("SkyWatcher - the pointing clock ignores a client offset on an NTP-dis
     // No surviving offset: nothing to apply, whatever the host is doing. That
     // covers both "the client never wrote one" and "the host clock was
     // stepped afterwards, so the delta describes a clock that no longer
-    // exists" (#291 review) -- client_offset_survives_locked() collapses the
+    // exists" (#291 review) -- client_offset_survives() collapses the
     // two before the rule is asked.
     CHECK_FALSE(pointing_uses_client_offset(false, false));
     CHECK_FALSE(pointing_uses_client_offset(false, true));
@@ -4131,7 +4131,7 @@ TEST_CASE("SkyWatcher - a host clock step drops the client UTCDate offset (#291 
     // The offset is a delta against the host clock at write time. When the
     // host clock is corrected afterwards (Sync Time, NTP, `date`), applying
     // the stale delta on top of it would move every LST-derived value by the
-    // old error, so client_offset_survives_locked() drops it -- for the
+    // old error, so client_offset_survives() drops it -- for the
     // UTCDate readback as well as for pointing, since both time paths ask it
     // (#301). The rule is pure: the system clock and the steady clock must
     // have advanced by the same amount.
