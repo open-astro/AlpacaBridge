@@ -969,6 +969,51 @@ TEST_CASE("Player One Camera Driver - Download SDK exceptions are reported and r
     driver->set_connected(false);
 }
 
+// The reconnect clear site on its own (ascom-contract: "test each clear site
+// on its own"); StartExposure's clear is the case "StartExposure after a
+// failed exposure succeeds".
+TEST_CASE("Player One Camera Driver - Reconnect clears a kept exposure failure and the last exposure",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_frame_data(std::vector<std::uint8_t>(16 * 8 * 2, 0));
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] {
+        try {
+            return driver->get_image_ready();
+        } catch (...) {
+            return false;
+        }
+    }));
+
+    sdk.set_download_failure(true);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] {
+        try {
+            static_cast<void>(driver->get_image_ready());
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    }));
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.001));  // the failure keeps the earlier success
+    sdk.set_download_failure(false);
+
+    driver->set_connected(false);
+    driver->set_connected(true);
+    CHECK_NOTHROW(static_cast<void>(driver->get_image_ready()));
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_duration()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_start_time()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
 TEST_CASE("Player One Camera Driver - Validates RGB24 frames", "[playerone][camera][unit]") {
     using ImageFormat = alpacacore::vendor::playerone::PlayerOneImageFormat;
     alpacacore::test::FakePlayerOneSDK sdk;

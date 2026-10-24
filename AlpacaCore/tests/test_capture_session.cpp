@@ -16,7 +16,8 @@
 // Every case runs on a FakeTaskClock: time moves only through advance(), and
 // every blocking step on the test thread has a real-time bound (a future
 // waited for 2 s, or a yield loop with a 2 s deadline), so a defect fails the
-// case instead of hanging the binary.
+// case instead of hanging the binary. The lock-order storm is the exception:
+// its threads cannot unwind from a deadlock, so it aborts the binary instead.
 //
 // "Blocked in the SDK" means a body waiting on a test-owned Gate that ignores
 // the session's cancel, the shape of a vendor call blocked until its own
@@ -30,6 +31,8 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <future>
 #include <memory>
@@ -151,6 +154,21 @@ CaptureSession::Body sdk_blocked_body(const ProbePtr& p, const GatePtr& g, std::
         p->reason = c.stop_reason();
         p->accepted = c.image_ready(frame(pixel)) ? 1 : 0;
         p->exited = true;
+    };
+}
+
+// Waits on the clock until told to stop, then throws, the way the Player One
+// download throws once POAStopExposure has run (fake_playerone_sdk.h,
+// get_image_data).
+CaptureSession::Body throws_when_stopped(const ProbePtr& p) {
+    return [p](CaptureControl& c) {
+        c.exposure_started();
+        p->entered = true;
+        while (c.wait_for(50ms)) {
+        }
+        p->reason = c.stop_reason();
+        p->exited = true;
+        throw std::runtime_error("late SDK failure after the stop");
     };
 }
 
@@ -445,6 +463,61 @@ TEST_CASE("CaptureSession - start refuses after kStartTimeout when the old body 
     CHECK(eventually([&] { return h.session->image_ready(); }));
 }
 
+TEST_CASE("CaptureSession - two starts over a body still in the SDK start one body and getters never wait",
+          "[util][capture-session]") {
+    Harness h;
+    auto stale = std::make_shared<Probe>();
+    auto sdk = h.gate();
+    h.session->start(1.0, sdk_blocked_body(stale, sdk));
+    REQUIRE(eventually([&] { return stale->entered.load(); }));
+    h.clock.advance(3s);  // the watchdog fails it; the body stays in the SDK
+    REQUIRE(h.session->failure().has_value());
+
+    auto a = std::make_shared<Probe>();
+    auto b = std::make_shared<Probe>();
+    auto start_a =
+        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(a)); }); });
+    auto start_b =
+        std::async(std::launch::async, [&] { return error_of([&] { h.session->start(10.0, polling_body(b)); }); });
+    const auto ready = [](std::future<int>& f) { return f.wait_for(0s) == std::future_status::ready; };
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+    // Both wait on the clock, or one was refused at once: either way the
+    // session is settled before the getters are read.
+    REQUIRE(eventually([&] { return h.clock.waiter_count() >= 2 || ready(start_a) || ready(start_b); }));
+
+    // Getters while start() waits: none waits for it (decision 0016 rule 1),
+    // and a start that has not started changes nothing.
+    CameraState state = CameraState::Exposing;
+    int ready_error = -1;
+    bool busy = false;
+    CHECK(h.returns_without_advance([&] {
+        state = h.session->camera_state();
+        ready_error = error_of([&] { (void)h.session->image_ready(); });
+        busy = h.session->busy();
+        (void)h.session->percent_completed();
+        (void)h.session->failure();
+    }));
+    CHECK(state == CameraState::Idle);
+    CHECK(ready_error == AlpacaError::DriverException);
+    CHECK(busy);
+    CHECK_FALSE(a->entered);
+    CHECK_FALSE(b->entered);
+
+    sdk->open();  // the stale body returns
+    REQUIRE(start_a.wait_for(kBound) == std::future_status::ready);
+    REQUIRE(start_b.wait_for(kBound) == std::future_status::ready);
+    const int result_a = start_a.get();
+    const int result_b = start_b.get();
+    // Exactly one start succeeds; the other sees it exposing and is refused.
+    CHECK(((result_a == -1 && result_b == AlpacaError::InvalidOperation) ||
+           (result_b == -1 && result_a == AlpacaError::InvalidOperation)));
+    CHECK(eventually([&] { return a->entered.load() || b->entered.load(); }));
+    CHECK(a->entered.load() != b->entered.load());  // never two bodies on one camera
+    CHECK(stale->accepted == 0);
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.session->abort();
+}
+
 TEST_CASE("CaptureSession - disconnect_and_join cancels the body and clears the session", "[util][capture-session]") {
     Harness h;
     auto first = std::make_shared<Probe>();
@@ -510,6 +583,68 @@ TEST_CASE("CaptureSession - fail ends the exposure with the driver's failure and
     CHECK(*h.session->failure() == "scripted stop failure");
 }
 
+TEST_CASE("CaptureSession - a stale body's late throw is never kept", "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+
+    SECTION("after abort") {
+        h.session->start(10.0, throws_when_stopped(p));
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(h.clock.wait_for_waiters(1, kBound));
+        h.session->abort();  // joins: the throw has happened when it returns
+        CHECK(p->exited);
+        CHECK(p->reason == StopReason::Cancelled);
+        CHECK_FALSE(h.session->failure().has_value());
+        CHECK(error_of([&] { CHECK_FALSE(h.session->image_ready()); }) == -1);
+        CHECK(h.session->camera_state() == CameraState::Idle);
+    }
+
+    SECTION("after fail") {
+        h.session->start(10.0, throws_when_stopped(p));
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(h.clock.wait_for_waiters(1, kBound));
+        h.session->fail("scripted stop failure");
+        REQUIRE(eventually([&] { return p->exited.load() && !h.session->busy(); }));
+        REQUIRE(h.session->failure().has_value());
+        CHECK(*h.session->failure() == "scripted stop failure");
+        std::string message;
+        CHECK(error_of([&] { (void)h.session->image_ready(); }, &message) == AlpacaError::DriverException);
+        CHECK(message.find("late SDK failure") == std::string::npos);
+    }
+
+    SECTION("after the watchdog") {
+        auto sdk = h.gate();
+        h.session->start(1.0, [p, sdk](CaptureControl& c) {
+            c.exposure_started();
+            p->entered = true;
+            sdk->wait();
+            p->exited = true;
+            throw std::runtime_error("late SDK failure after the stop");
+        });
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        h.clock.advance(3s);  // 1 s exposure + 2 s margin
+        REQUIRE(h.session->failure().has_value());
+        const auto deadline_failure = *h.session->failure();
+        CHECK(deadline_failure.find("late SDK failure") == std::string::npos);
+
+        sdk->open();
+        REQUIRE(eventually([&] { return p->exited.load() && !h.session->busy(); }));
+        REQUIRE(h.session->failure().has_value());
+        CHECK(*h.session->failure() == deadline_failure);
+    }
+
+    SECTION("after disconnect_and_join") {
+        h.session->start(10.0, throws_when_stopped(p));
+        REQUIRE(eventually([&] { return p->entered.load(); }));
+        REQUIRE(h.clock.wait_for_waiters(1, kBound));
+        h.session->disconnect_and_join();
+        CHECK(p->exited);
+        CHECK(p->reason == StopReason::Cancelled);
+        CHECK_FALSE(h.session->failure().has_value());
+        CHECK(error_of([&] { CHECK_FALSE(h.session->image_ready()); }) == -1);
+    }
+}
+
 // Tagged [stress-guard]: the sanitizers-tsan job runs it under ThreadSanitizer.
 TEST_CASE("CaptureSession - destruction joins a body blocked in the SDK once it returns",
           "[util][capture-session][stress-guard]") {
@@ -526,4 +661,108 @@ TEST_CASE("CaptureSession - destruction joins a body blocked in the SDK once it 
     REQUIRE(work.wait_for(kBound) == std::future_status::ready);
     work.get();
     CHECK(p->exited);
+}
+
+// Tagged [stress-guard]: the sanitizers-tsan job runs it under ThreadSanitizer,
+// which reports a data race, or a lock-order inversion between `driver` (a
+// test mutex standing in for the driver's mutex_), the session mutex and the
+// slot mutex. Getters, fail() and discard_image() run under `driver`, and so
+// does a body's publish, as the driver calls them; start(), abort() and
+// disconnect_and_join() run without it (decision 0006 rule 4).
+TEST_CASE("CaptureSession - lock-order storm: getters under the driver mutex race every session call",
+          "[util][capture-session][stress-guard]") {
+    struct Shared {
+        std::mutex driver;
+        std::atomic<bool> done{false};
+        std::atomic<int> starts{0};
+        std::atomic<int> bodies{0};
+        std::atomic<long> seen{0};
+    };
+    Shared s;  // declared before the Harness, so it outlives every body
+    Harness h;
+
+    const auto body = [&s](int kind) -> CaptureSession::Body {
+        return [&s, kind](CaptureControl& c) {
+            c.exposure_started();
+            ++s.bodies;
+            if (kind == 0) {  // until abort, fail or the watchdog
+                while (c.wait_for(20ms)) {
+                }
+                return;
+            }
+            (void)c.wait_for(20ms);
+            if (kind == 1) {
+                throw std::runtime_error("scripted storm failure");
+            }
+            std::lock_guard<std::mutex> lock(s.driver);
+            c.reading_out();
+            (void)c.image_ready(frame(kind));
+        };
+    };
+
+    auto storm = std::async(std::launch::async, [&] {
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 2; ++i) {
+            threads.emplace_back([&] {
+                // Every result feeds `seen`, so no read is optimised away.
+                while (!s.done) {
+                    std::lock_guard<std::mutex> lock(s.driver);
+                    int seen = static_cast<int>(h.session->camera_state());
+                    seen += h.session->busy() ? 1 : 0;
+                    seen += error_of([&] { seen += h.session->image_ready() ? 1 : 0; });
+                    seen += error_of([&] {
+                        const auto image = h.session->image();
+                        seen += image ? image->data.front() : 0;
+                    });
+                    seen += static_cast<int>(h.session->percent_completed());
+                    seen += h.session->failure().has_value() ? 1 : 0;
+                    seen += error_of([&] { seen += static_cast<int>(h.session->last_exposure_duration()); });
+                    s.seen += seen;
+                }
+            });
+        }
+        threads.emplace_back([&] {
+            for (int i = 0; !s.done; ++i) {
+                if (i % 2 == 0) {
+                    h.session->abort();
+                } else {
+                    std::lock_guard<std::mutex> lock(s.driver);
+                    h.session->fail("scripted storm stop failure");
+                    h.session->discard_image();
+                }
+                std::this_thread::yield();
+            }
+        });
+        threads.emplace_back([&] {  // moves the watchdog and start()'s bounded wait
+            while (!s.done) {
+                h.clock.advance(50ms);
+                std::this_thread::yield();
+            }
+        });
+        for (int i = 0; i < 300; ++i) {
+            if (error_of([&] { h.session->start(0.05, body(i % 3)); }) == -1) {
+                ++s.starts;
+            }
+        }
+        s.done = true;
+        for (auto& t : threads) {
+            t.join();
+        }
+    });
+    if (storm.wait_for(30s) != std::future_status::ready) {
+        // A deadlock: its threads still use the session, so the case cannot
+        // unwind; end the binary instead of hanging it.
+        std::fputs("CaptureSession lock-order storm deadlocked\n", stderr);
+        std::abort();
+    }
+    storm.get();
+    CHECK(s.starts > 0);
+    CHECK(s.bodies > 0);
+
+    h.session->disconnect_and_join();
+    CHECK_FALSE(h.session->busy());
+    auto p = std::make_shared<Probe>();
+    h.session->start(10.0, polling_body(p));
+    CHECK(h.session->camera_state() == CameraState::Exposing);
+    h.session->abort();
 }
