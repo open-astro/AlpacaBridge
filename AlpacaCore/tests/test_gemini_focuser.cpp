@@ -314,3 +314,36 @@ TEST_CASE("Gemini protocol wrapper - a late reply to the previous command is dis
 }
 
 #endif  // _WIN32
+
+// A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: gemini_protocol_wrapper.cpp:767 read_response() sending ReadOutcome::LinkDead to the timeout branch
+// (the message reads "Read timeout" and the call takes the full serial_timeout_s).
+TEST_CASE("Gemini protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[gemini][focuser][unit][link-dead]") {
+    alpacacore::test::FakeGeminiFocuser fake;
+    alpacacore::vendor::gemini::GeminiProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::ConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    wrapper.connect(config);
+    fake.hold_next_reply(std::chrono::milliseconds(300));  // the fake sits on the :00# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        fake.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_position();
+        FAIL("a hung-up port must not return a value");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "Serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
+}

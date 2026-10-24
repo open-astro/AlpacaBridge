@@ -565,6 +565,10 @@ All 9 steps required for end-to-end functionality:
      per-slot filter name dropdowns, and the advanced names textarea. Instantiate
      `createFilterwheelSlotUI({...})` in `app.js` with vendor-prefixed element IDs and
      copy the markup pattern from an existing filterwheel vendor in `index.html`.
+   - **Catalog keys**: put each field inside a `data-vendor` / `data-device-type` scope
+     `<div>` and give it `data-config-key="<catalog key>"`; `catalog_form_drift.test.js`
+     fails on a named field without one, on a catalog field no form field names, and on a
+     control that does not fit the field type or role.
 6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
    filterwheel/rotator), add an entry to the `INDEX_FIELDS` array in `app.js`
    (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That wires up
