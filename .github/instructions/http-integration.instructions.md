@@ -16,7 +16,7 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 2. **No vendor include in `router.cpp`** — the router includes no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` baseline 0); the factory file is the only place the driver header is included.
 3. **Config sanitization fields** — a declared, non-secret field is preserved by the catalog's sanitize; an undeclared key is dropped, so declare every persisted field.
 4. **Web UI vendor dropdown** — add the vendor to the device-type dropdown in the web frontend (`AlpacaHTTP/web/app.js`) so users can select it.
-5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form.
+5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form. Put each field inside a `data-vendor` / `data-device-type` scope `<div>` and give it `data-config-key="<catalog field key>"`; `AlpacaHTTP/tests/web/catalog_form_drift.test.js` fails on a form field the catalog does not declare, on a catalog field no form field names, and on a control that does not fit the field's type or role.
 6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and register it in the `INDEX_FIELDS` array so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; a missing registry entry reuses index 0 on the next device).
 7. **Frontend validation** — add any related validation logic in frontend JS.
 8. **Build-flag propagation** — ensure `ALPACACORE_ENABLE_<VENDOR>` compile definitions propagate from AlpacaCore to AlpacaHTTP.
@@ -78,6 +78,7 @@ vendor that ignores either ships a silently broken form:
   reason; a bare `name="focuserId"` on a non-ZWO input silently returns ZWO's value. When you add
   ANY input whose name matches a field ZWO already uses, prefix it and read the prefixed name in
   the submit handler.
+- **Give the input `data-config-key`** naming its catalog field, inside a `data-vendor` / `data-device-type` scope `<div>`, so the form drift check finds it.
 - **Register the field in the `INDEX_FIELDS` array** in `AlpacaHTTP/web/app.js`
   (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That one entry
   drives auto-increment (so a second device of the same vendor/type doesn't reuse index 0)
