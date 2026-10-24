@@ -216,15 +216,9 @@ public:
 
     bool get_is_moving() const override { return read_status().moving; }
 
-    int get_max_step() const override {
-        ensure_connected();
-        return max_step_current_.load();
-    }
+    int get_max_step() const override { return connected_max_step(); }
 
-    int get_max_increment() const override {
-        ensure_connected();
-        return max_step_current_.load();
-    }
+    int get_max_increment() const override { return connected_max_step(); }
 
     int get_position() const override { return read_status().position; }
 
@@ -283,8 +277,8 @@ public:
     void move(int position) override {
         // Exception ordering is unchanged (NotConnected, then InvalidValue). The write runs under the I/O
         // lock, which a disconnect takes before it closes the handle (no use-after-close).
-        ensure_connected();
-        if (position < 0 || position > max_step_current_.load()) {
+        const int max_step = connected_max_step();
+        if (position < 0 || position > max_step) {
             throw AlpacaException("Focuser position out of range",
                                   AlpacaError::InvalidValue);
         }
@@ -297,6 +291,20 @@ public:
     }
 
 private:
+    // The connection flag and the limit are read in one state-lock hold: connect and disconnect change
+    // both under it, so a racing reconnect or disconnect never yields a connected flag with a stale limit
+    // (a zero limit would turn NotConnected into an out-of-range InvalidValue).
+    int connected_max_step() const {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (connected_.load()) {
+                return max_step_current_.load();
+            }
+        }
+        ensure_connected();  // throws NotConnected
+        return max_step_current_.load();
+    }
+
     // One refill reads IsMoving, Position and Temperature in a burst; every
     // getter and DeviceState reads a field of it (open-astro#294). 100 ms as the
     // other cached request/response drivers: a SetPosition write drops the frame,
