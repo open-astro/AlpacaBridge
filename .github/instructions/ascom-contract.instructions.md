@@ -143,8 +143,9 @@ ASCOM treats `SelectWheel`, `selectwheel` and `SELECTWHEEL` as the same action: 
 `SupportedActions` may use any casing. Match the requested name against the supported
 list without regard to case, in `action()` and in `can_action()` alike, and throw
 `ActionNotImplemented` only when no supported name matches. The two drivers with
-actions already do this: the Player One camera (`to_lower_copy`) and the Celestron
-focuser (`same_action`). A new driver with actions does the same.
+actions already do this: the Player One camera (`to_lower_copy`), the Celestron
+focuser (`same_action`) and the iOptron and Celestron mounts' `gps_status`
+(`util::is_gps_status_action`). A new driver with actions does the same.
 
 ### Camera ROI alignment (all camera vendors)
 
@@ -170,6 +171,29 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   control, Player One and QHY: the camera's cooler flag, GPhoto: none). Never answer `false` or `0.0` for a
   member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
 - **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
+
+### Camera values the SDK cannot give (all camera vendors)
+
+- **`ElectronsPerADU` and `FullWellCapacity` raise `PropertyNotImplemented` when the SDK has no figure that follows the
+  current gain and mode** (ICameraV4: "if not available"); never `1.0`, `0.0`, the ADU saturation (MaxADU) or a static
+  figure. Once connected they raise it (`NotConnected` first while disconnected). Today: QHY, ToupTek (and Altair),
+  SVBONY, GPhoto and ZWO (the SDK's `ElecPerADU` is one static number) raise it for both; Player One raises it for
+  `FullWellCapacity` and returns the real per-gain `POA_EGAIN` for `ElectronsPerADU`, raising it only when the camera
+  lacks `POA_EGAIN` or the read fails. A client such as Ara stores whatever it is told, so a missing value beats a false
+  one. Restore a return only when a per-gain source turns up.
+- **`SensorName` is never a placeholder**: ICameraV4 makes it mandatory and says to "return an empty string if the name
+  is not known". It never raises PropertyNotImplemented, and a literal such as `"<vendor> Sensor"` is a made-up
+  name. Return `""`.
+
+### Mount `gps_status` action (iOptron, Celestron)
+
+`Action("gps_status")` returns the JSON string `{"fix":<bool>,"latitude":<deg|null>,"longitude":<deg|null>,
+"elevation":<m|null>}` so a client can tell that the site came from the mount's own GPS receiver, not from the bridge
+config. `latitude` and `longitude` are the receiver's reading and are `null` unless `fix` is true; `elevation` is `null`
+where the mount does not report one (iOptron and Celestron never do). It is listed in `SupportedActions` only while
+connected, and on Celestron only when the bus probe found the GPS module; `NotConnected` otherwise. The format lives in
+`util::format_gps_status` (`util/gps_status.h`); iOptron reads the `:GLS#` GPS digit and site, Celestron the AUX 0xB0
+GPS module (see the vendor files). OnStep does not offer it yet.
 
 ### Camera-attached thermal switches pick their camera (ZWO, ToupTek, Player One)
 

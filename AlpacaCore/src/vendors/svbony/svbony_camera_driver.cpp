@@ -527,9 +527,10 @@ public:
     }
 
     double get_electrons_per_adu() const override {
-        // SVBONY SDK does not expose electrons per ADU; return 1.0 as a
-        // safe default (ConformU rejects 0).
-        return 1.0;
+        ensure_connected();
+        // The SVBONY SDK does not expose electrons per ADU, so there is no honest value (issue #1277).
+        throw AlpacaException("ElectronsPerADU is not available for SVBONY cameras",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     double get_exposure_max() const override {
@@ -580,12 +581,10 @@ public:
     }
 
     double get_full_well_capacity() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || camera_info_.bit_depth <= 0) {
-            return 0.0;
-        }
-        // Without electrons_per_adu, return max ADU as an approximation
-        return static_cast<double>((1ULL << camera_info_.bit_depth) - 1ULL);
+        ensure_connected();
+        // The SVBONY SDK has no full-well figure; the ADU saturation is not electrons (issue #1277).
+        throw AlpacaException("FullWellCapacity is not available for SVBONY cameras",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain() const override {
@@ -824,7 +823,7 @@ public:
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.name : "SVBONY Sensor";
+        return camera_info_valid_ ? camera_info_.name : std::string();  // unknown: "" (ICameraV4 SensorName)
     }
 
     SensorType get_sensor_type() const override {

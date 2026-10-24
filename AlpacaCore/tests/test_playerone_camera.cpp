@@ -1393,3 +1393,52 @@ TEST_CASE("Player One Camera Driver - an SDK failure reading CoolerPower is not 
         CHECK(entry.name != "CoolerPower");
     }
 }
+
+// Issue #1277: Player One reports a real per-gain e-/ADU (POA_EGAIN) when the camera has it; without it, or when the
+// read fails, ElectronsPerADU raises PropertyNotImplemented instead of answering 1.0. The SDK has no full-well figure.
+TEST_CASE("Player One Camera Driver - ElectronsPerADU is the POA_EGAIN read or PropertyNotImplemented",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    SECTION("camera with POA_EGAIN") {
+        sdk.set_egain(0.37);
+        auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+        require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); }, alpacacore::AlpacaError::NotConnected);
+        driver->set_connected(true);
+        CHECK(driver->get_electrons_per_adu() == Catch::Approx(0.37));
+        driver->set_connected(false);
+    }
+    SECTION("camera without POA_EGAIN") {
+        auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+        driver->set_connected(true);
+        require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        driver->set_connected(false);
+    }
+    SECTION("the SDK read fails") {
+        sdk.set_egain(0.37);
+        auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+        driver->set_connected(true);
+        sdk.set_egain_failure(true);
+        require_alpaca_error([&] { (void)driver->get_electrons_per_adu(); },
+                             alpacacore::AlpacaError::PropertyNotImplemented);
+        driver->set_connected(false);
+    }
+}
+
+TEST_CASE("Player One Camera Driver - FullWellCapacity is not implemented, SensorName has no placeholder",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    require_alpaca_error([&] { (void)driver->get_full_well_capacity(); },
+                         alpacacore::AlpacaError::PropertyNotImplemented);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - an unknown SensorName is empty", "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_no_cameras(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    CHECK(driver->get_sensor_name().empty());
+}
