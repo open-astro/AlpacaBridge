@@ -914,6 +914,59 @@ TEST_CASE("ZWO an old UTC writer cannot replace an offline write after disconnec
     CHECK(rig.driver->get_utc_date() == offline);
 }
 
+TEST_CASE("ZWO UTC refuses a lost link and starts fresh on explicit reconnect",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    const bool transport_loss = GENERATE(false, true);
+    Rig rig;
+    rig.connect();
+    const auto old = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(old);
+    REQUIRE(rig.driver->get_utc_date() == old);
+    if (transport_loss) {
+        REQUIRE(rig.server.drop_connections());
+        rig.tick();
+    } else {
+        rig.silent.store(true);
+        rig.tick();
+        rig.tick();
+        rig.tick();
+        REQUIRE(rig.driver->get_connected());
+        error([&] { rig.driver->get_utc_date(); }, AlpacaError::DriverException);
+        rig.tick(30s);
+        rig.silent.store(false);
+    }
+    REQUIRE_FALSE(rig.driver->get_connected());
+    // Loss keeps its reason: unlike a deliberate disconnect, it refuses offline UTC access.
+    error([&] { rig.driver->get_utc_date(); }, AlpacaError::NotConnected);
+    error([&] { rig.driver->set_utc_date(old + 24h); }, AlpacaError::NotConnected);
+    CHECK(rig.driver->get_device_state().empty());
+    rig.connect();  // No intervening Disconnect that could hide a stale session.
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    CHECK(rig.gotos.load() == 0);
+}
+
+TEST_CASE("ZWO disconnect during GOTO time synchronization leaves UTC unanchored",
+          "[zwo][telescope][utc][issue1522][stress]") {
+    Rig rig(1000, 0, true);
+    rig.connect();
+    rig.hold_time_write.store(true);
+    rig.driver->slew_to_coordinates_async(6.0, 20.0);
+    REQUIRE(eventually([&] { return rig.time_write_entered.load(); }));
+    rig.driver->set_connected(false);  // Cancels the exchange and joins the GOTO worker.
+    rig.release_time.store(true);
+    rig.clock.advance(10s);
+    const auto before = std::chrono::system_clock::now();
+    CHECK(rig.driver->get_utc_date() >= before);
+    CHECK(rig.driver->get_utc_date() <= std::chrono::system_clock::now());
+    const auto offline = std::chrono::sys_days{std::chrono::year{2001} / 1 / 2};
+    rig.driver->set_utc_date(offline);
+    rig.clock.advance(1234ms);
+    CHECK(rig.driver->get_utc_date() == offline + 1234ms);
+    CHECK(rig.gotos.load() == 0);
+}
+
 TEST_CASE("ZWO host time synchronization seeds UTC at connect refresh and before GOTO",
           "[zwo][telescope][utc][issue1522]") {
     const bool sync_time = GENERATE(false, true);
