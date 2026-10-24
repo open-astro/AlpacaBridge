@@ -102,7 +102,7 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 //
 // `offset_survives` folds in both "an offset was written" and "the host clock
 // has not been stepped since", because the caller's
-// client_offset_survives_locked() already answers exactly that and the two
+// client_offset_survives() already answers exactly that and the two
 // can never disagree at the call site.
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail

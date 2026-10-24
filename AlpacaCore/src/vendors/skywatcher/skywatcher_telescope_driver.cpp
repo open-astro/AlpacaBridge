@@ -6450,7 +6450,7 @@ private:
     std::atomic<bool> site_latitude_set_;
     std::atomic<bool> site_elevation_set_;  // decision 0019: SiteElevation reads as unset until written
     // The client-clock state one SiderealTime or UTCDate read needs, published as one snapshot (decision
-    // 0016): the client's UTCDate offset with the anchors client_offset_survives_locked() uses to notice a
+    // 0016): the client's UTCDate offset with the anchors client_offset_survives() uses to notice a
     // host clock step underneath it (both clocks answer that question, and both time paths ask it), the
     // discipline flags, and the site longitude the sidereal time is computed at. A reader takes
     // client_clock_mutex_ once and sees the offset and the longitude of the same moment, never an old offset

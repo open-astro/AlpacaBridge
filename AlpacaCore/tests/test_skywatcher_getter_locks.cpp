@@ -246,7 +246,10 @@ TEST_CASE("SkyWatcher getters - SiderealTime and UTCDate read one client-clock s
     // Two writers' worth of states: the UTCDate offset is 0 or +1 h, the
     // longitude 151.215297 or -0.0015 degrees. A reader may see any pairing of
     // one offset with one longitude (the two setters are separate calls), and
-    // nothing else.
+    // nothing else. The two setters are separate calls, so no value check can
+    // tell a torn snapshot from a legal pairing: the case guards the
+    // client_clock_mutex_ locking, and only the TSan run (`[stress-guard]`)
+    // fails when a reader drops that lock.
     constexpr double kOtherLongitude = -0.001500;
     constexpr auto kOffset = std::chrono::hours(1);
     std::atomic<bool> stop{false};
