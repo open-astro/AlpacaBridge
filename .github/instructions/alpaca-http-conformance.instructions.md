@@ -46,11 +46,9 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   the wrong flag.
 - **The router must never call `get_connected()` while `get_connecting()` is
   true — the connect side of the rule above** (SynScan hand controller,
-  2026-09, issue #130). The telescope drivers named in
-  `async_connectable.h`'s blocking list -- **that comment is the list; this
-  paragraph deliberately does not repeat it, because a second copy is what
-  went stale for SynScan** -- answer `get_connected()` under the state mutex that their
-  `set_connected(true)` holds for the entire handshake, so a
+  2026-09, issue #130). A driver that answered `get_connected()` under the
+  state mutex that its `set_connected(true)` holds for the entire handshake
+  would make a
   `get_connected()` call from the `PUT connected` wait or from a `GET
   connected` blocked for the whole connect and the wait's deadline (8 s then)
   never fired (25 s on a silent handset: five 5 s query timeouts). The
@@ -59,17 +57,19 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   each wrapper publishes its open state as an atomic written only inside its
   own `open()`/`close()` critical sections, `is_open()` is a lock-free read,
   and `check_docs_drift.py` classifies those drivers as lock-free only while
-  that stays true. The rule applies to every driver; only the mutex-holding
-  telescopes make it urgent. Every router
+  that stays true. The rule applies to every driver; it would turn urgent for any
+  driver whose getter took the mutex again (the blocking list is empty
+  today). Every router
   site now reads `get_connecting()` first and short-circuits; while a task
   is in flight `Connected` reports false. A connect request that arrives
   mid-task is still passed to `device->connect()` so `AsyncConnectable` can
   queue it against an in-flight disconnect or drop it against an in-flight
   connect. Driver side, prefer an atomic `connected_` with a lock-free
-  getter (every driver does except the ones `async_connectable.h` names --
-  SynScan is among those that DO have a lock-free getter, since the #130 fix) —
-  the telescopes it lists still take the mutex and rely on the router rule; the
-  wrapper-backed switch list is empty since #382 and the gate keeps it so.
+  getter (every driver does; `async_connectable.h`'s blocking telescope list is
+  empty today, as the Bisque and iOptron getters became lock-free in #910, and
+  the drift gate keeps it empty; a driver that took the mutex again would
+  rely on the router rule). The wrapper-backed switch list is empty since #382
+  and the gate keeps it so.
   **`async_connectable.h`'s comment is the single source for both lists, it is
   gated, and no count is stated anywhere** (issue #381):
   `scripts/check_docs_drift.py` classifies every `get_connected()` override
@@ -96,7 +96,7 @@ These rules come straight from the ASCOM Alpaca API definition (https://ascom-st
   **Known gap (narrow, code review on PR #3):** `get_connecting()` and
   `get_connected()` are two separate calls, not one atomic snapshot — if a
   connect task starts in the gap between them, the `get_connected()` call
-  can still block on a mutex-holding driver's handshake for the telescopes above.
+  could still block on a mutex-holding driver's handshake (none today; the list is empty).
   Far narrower than the bug this rule fixes (needs a second request to land
   in a specific few-instruction window, not just a slow connect), and not
   worth a structural fix here: closing it means every driver exposing one

@@ -36,10 +36,10 @@
 
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
-#include "fake_mount_server.h"
 #include "fake_zwo_caa_sdk.h"
 #include "fake_zwo_eaf_sdk.h"
 #include "fake_zwo_efw_sdk.h"
+#include "fake_zwo_mount.h"
 #include "fake_zwo_sdk.h"
 #include "locked_zwo_caa_sdk.h"
 #include "locked_zwo_eaf_sdk.h"
@@ -409,8 +409,8 @@ TEST_CASE("ZWO dew heater switch over a fake SDK - destruction races an in-fligh
 // review findings were detached-thread lifecycle bugs — the GOTO setup
 // thread, the async disconnect teardown thread, and the poll/pulse threads
 // racing set_connected(false) and destruction. Those threads only exist on a
-// CONNECTED driver, so these tests connect through a FakeMountServer (the
-// responder supplies the mandatory AM identity and valid telemetry).
+// CONNECTED driver, so these tests connect through a FakeZwoMount (the
+// mount supplies the mandatory AM identity and valid telemetry).
 // The operate callback drives the exact newly-fixed paths: async GOTO and
 // pulse guiding racing disconnects.
 #ifndef _WIN32
@@ -426,52 +426,33 @@ alpacacore::vendor::zwo::ConnectionInfo zwo_endpoint(int port) {
     return info;
 }
 
-// LX200-flavored canned replies: report tracking ON so PulseGuide gets past
-// its tracking gate and actually queues work onto the pulse thread; answer
-// the guide-rate query with a NON-ZERO rate (open-astro#714): with the
-// default "0#" the driver read a zero guide rate at connect and returned
-// from pulse_guide() before ever touching pulse_mutex_, so the storm never
-// exercised the pulse_mutex_ -> mutex_ acquisition that inverts the
-// connect path's mutex_ -> pulse_mutex_ order, and TSan had nothing to
-// report. :GVP# supplies the mandatory AM5 identity; default "0#" terminates the rest
-// (":MS#" -> "0" is a GOTO accept, so the GOTO thread completes its protocol
-// round-trip too).
-alpacacore::test::FakeMountServer::Responder zwo_responder() {
-    return [](const std::string& chunk) -> std::string {
-        if (chunk == ":GVP#") return "AM5#";
-        if (chunk == ":GMA#") return "012345ABCDEF#";
-        if (chunk.starts_with(":SMTI")) return "1#";
-        if (chunk == ":GMTI#") return "01/02/20&03:04:05&+00:00#";
-        if (chunk.starts_with(":Sr") || chunk.starts_with(":Sd")) return "1#";
-        if (chunk.find(":GU#") != std::string::npos) return "NG#";
-        if (chunk.find(":GR#") != std::string::npos) return "12:00:00#";
-        if (chunk.find(":GD#") != std::string::npos) return "+45*00:00#";
-        if (chunk.find(":GAT") != std::string::npos) {
-            return "1#";
-        }
-        if (chunk.find(":Ggr") != std::string::npos) {
-            return "0.50#";
-        }
-        return "0#";
-    };
-}
+// The AM mount for the telescope storms below, on the real clock: the storms exercise scheduling and lock order, and
+// a wait on a driver timer is the driver's own (the fake's GOTO and park end at once, so a storm never waits for a
+// slew). The fake reports tracking on, so PulseGuide gets past its tracking gate and queues work onto the pulse
+// thread, and a non-zero guide rate (open-astro#714): with a zero rate the driver read a zero guide rate at connect
+// and returned from pulse_guide() before ever touching pulse_mutex_, so the storm never exercised the
+// pulse_mutex_ -> mutex_ acquisition that inverts the connect path's mutex_ -> pulse_mutex_ order, and TSan had
+// nothing to report. ":GVP" supplies the mandatory AM identity, and ":MS" accepts, so the GOTO thread completes its
+// protocol round-trip too.
+void configure_storm_mount(alpacacore::test::FakeZwoMount& mount) { mount.set_slew_duration(std::chrono::seconds(0)); }
 
 }  // namespace
 
 TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][telescope][stress]") {
-    alpacacore::test::FakeMountServer server(zwo_responder());
-    REQUIRE(server.ok());
-    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(server.port()));
+    alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
+    configure_storm_mount(mount);
+    REQUIRE(mount.ok());
+    auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
     REQUIRE(alpacacore::test::settle_connected(*driver, true));
     REQUIRE(driver->get_tracking());
 
     // open-astro#326: one guard per call -- before this the callback stopped at
     // the first throw, so only the first getter was ever storm-tested.
     // Unlike the other five storms in this file, this one runs CONNECTED over
-    // FakeMountServer, so the set is widened per ci-gates.instructions.md. The set REPLACES
-    // the default {NotConnected}. DriverException is here for the FAKE rather
-    // than the driver: the canned replies cannot answer a position query, so
-    // the driver correctly reports "Invalid RA response from ZWO mount".
+    // FakeZwoMount, so the set is widened per ci-gates.instructions.md. The set REPLACES
+    // the default {NotConnected}. DriverException is here for the storm rather
+    // than a defect: a getter that races a link teardown reports its
+    // unavailable telemetry as DriverException.
     // InvalidValue/InvalidOperation cover a slew or pulse racing another
     // motion. A real defect shows up as a code outside this set, and
     // guard.report() names every distinct one it saw.
@@ -512,11 +493,10 @@ TEST_CASE("ZWO mount - concurrent connect/disconnect/slew/pulse stress", "[zwo][
 TEST_CASE("ZWO mount - sibling lifecycle storms cannot redirect a connected telescope",
           "[zwo][telescope][stress][isolation]") {
     using namespace alpacacore;
-    test::FakeMountServer a(
-        [](const std::string& command) { return command == ":GVP#" ? std::string("AM5#") : zwo_responder()(command); });
-    test::FakeMountServer b([](const std::string& command) {
-        return command == ":GVP#" ? std::string("AM5N#") : zwo_responder()(command);
-    });
+    test::FakeZwoMount a(util::default_task_clock(), "AM5");
+    test::FakeZwoMount b(util::default_task_clock(), "AM5N");
+    configure_storm_mount(a);
+    configure_storm_mount(b);
     REQUIRE(a.ok());
     REQUIRE(b.ok());
     auto stable = vendor::zwo::create_zwo_telescope(3, zwo_endpoint(a.port()));
@@ -565,9 +545,10 @@ TEST_CASE("ZWO mount - sibling lifecycle storms cannot redirect a connected tele
 }
 
 TEST_CASE("ZWO mount - destruction races an in-flight connect", "[zwo][telescope][stress]") {
-    alpacacore::test::FakeMountServer server(zwo_responder());
-    REQUIRE(server.ok());
-    const int port = server.port();
+    alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
+    configure_storm_mount(mount);
+    REQUIRE(mount.ok());
+    const int port = mount.port();
     {
         auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(port));
         REQUIRE(alpacacore::test::settle_connected(*driver, true));
@@ -578,11 +559,12 @@ TEST_CASE("ZWO mount - destruction races an in-flight connect", "[zwo][telescope
 }
 
 TEST_CASE("ZWO mount - destruction mid-operation (GOTO/pulse threads live)", "[zwo][telescope][stress]") {
-    alpacacore::test::FakeMountServer server(zwo_responder());
-    REQUIRE(server.ok());
+    alpacacore::test::FakeZwoMount mount(alpacacore::util::default_task_clock(), "AM5");
+    configure_storm_mount(mount);
+    REQUIRE(mount.ok());
 
     for (int i = 0; i < 25; ++i) {
-        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(server.port()));
+        auto driver = alpacacore::vendor::zwo::create_zwo_telescope(0, zwo_endpoint(mount.port()));
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(5.0, 20.0));
         REQUIRE_NOTHROW(driver->pulse_guide(0, 300));
