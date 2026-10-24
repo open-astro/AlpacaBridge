@@ -259,7 +259,8 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - two Position reads inside the TTL 
 }
 
 // Falsified by: ioptron_filterwheel_driver.cpp set_position() without status_cache_.invalidate() after
-// :WM (the read after the move is served from the pre-move frame: one :WP#, position 3, not 2 and 4).
+// :WM (the read after the move is served from the pre-move frame: one :WP#, and the latch reads -1 over the cached
+// old slot instead of the target 4).
 TEST_CASE("iOptron iEFW Filter Wheel Driver - a Position read after set_position goes to the wire",
           "[ioptron][filterwheel][unit][position-cache]") {
     ConnectedIefw wheel;
@@ -274,21 +275,31 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a Position read after set_position
     CHECK(wheel.fake.count(":WM04#") == 1);
 }
 
-// Falsified by: ioptron_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the
-// first read after the reconnect is served from the frame of the previous session: one :WP#, not 2).
-TEST_CASE("iOptron iEFW Filter Wheel Driver - a reconnect drops the cached Position",
+// The iEFW connect sleeps 100 ms before its handshake, so a stale frame cannot outlive a reconnect here; the
+// link-health record can. Two failures before the reconnect and two after must not add up to the three that
+// latch the fault.
+// Falsified by: ioptron_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the second
+// failed read after the reconnect throws "communications compromised").
+TEST_CASE("iOptron iEFW Filter Wheel Driver - a reconnect clears the Position link-health count",
           "[ioptron][filterwheel][unit][position-cache]") {
     ConnectedIefw wheel;
     wheel.fake.set_wheel_slot(3);
-    const int before = wheel.fake.count(":WP#");
-    CHECK(wheel.driver->get_position() == 3);
-    CHECK(wheel.driver->get_position() == 3);
+    wheel.fake.fail_wheel_position(true);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    wheel.fake.fail_wheel_position(false);
 
     wheel.driver->set_connected(false);
-    wheel.fake.set_wheel_slot(2);
     wheel.driver->set_connected(true);
-    CHECK(wheel.driver->get_position() == 2);
-    CHECK(wheel.fake.count(":WP#") == before + 2);
+    wheel.fake.fail_wheel_position(true);
+    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    try {
+        wheel.driver->get_position();
+        FAIL("a failed read must throw");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+    }
+    wheel.fake.fail_wheel_position(false);
 }
 
 // Falsified by: ioptron_filterwheel_driver.cpp reading Position without the cache's fault threshold (the
@@ -302,8 +313,14 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - failed Position reads are not serv
     std::this_thread::sleep_for(kPastTtl);
 
     wheel.fake.fail_wheel_position(true);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch
+        try {
+            wheel.driver->get_position();
+            FAIL("a failed read must throw");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+        }
+    }
     try {
         wheel.driver->get_position();
         FAIL("third consecutive failure must throw");
@@ -354,4 +371,57 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - get_names does not wait behind a s
     CHECK(wheel.driver->get_name() == "iOptron iEFW-15");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
+}
+
+// Decision 0016 rules 1 and 4: the connect handshake runs off the state lock.
+// Falsified by: ioptron_filterwheel_driver.cpp set_connected(true) holding mutex_ across the handshake
+// (get_names() and get_name() wait the whole 400 ms hold).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - get_names does not wait behind a held connect",
+          "[ioptron][filterwheel][unit][position-cache][timing]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    fake.set_model(99);
+    auto driver = alpacacore::vendor::ioptron::create_iefw_filterwheel(0, fake.slave_path());
+    fake.hold_next_reply(400ms);
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 500 && fake.connects() == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.connects() == 1);  // :DeviceInfo# is on the wire and its reply is held
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_NOTHROW(driver->get_names());
+    CHECK_NOTHROW(driver->get_name());
+    CHECK(std::chrono::steady_clock::now() - start < 150ms);
+    connect.get();
+    driver->set_connected(false);
+}
+
+// Two writers race: the latch (target_/moving_), :WM and the restore on a throw are one step under the per-link
+// move lock. Without it a PUT can leave target_ on a slot the wheel did not reach, and Position reads -1 until
+// the next move. Passes today (mutex_ covers the whole move); it guards the conversion.
+// Falsified by: ioptron_filterwheel_driver.cpp set_position() setting target_ and calling :WM without one lock
+// held across both (after the writers finish, Position stays -1 although the wheel settled on a slot).
+TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leave Position on the wheel slot",
+          "[ioptron][filterwheel][unit][position-cache]") {
+    ConnectedIefw wheel;
+    wheel.fake.set_wheel_moving_polls(1);
+    auto writer = [&](int first) {
+        for (int i = 0; i < 20; ++i) {
+            try {
+                wheel.driver->set_position((first + i) % 5);
+            } catch (const alpacacore::AlpacaException&) {
+            }
+        }
+    };
+    auto a = std::async(std::launch::async, writer, 1);
+    auto b = std::async(std::launch::async, writer, 3);
+    a.get();
+    b.get();
+
+    int position = -1;
+    for (int i = 0; i < 20 && position < 0; ++i) {
+        position = wheel.driver->get_position();
+        std::this_thread::sleep_for(kPastTtl);
+    }
+    CHECK(position == wheel.fake.wheel_slot());
 }
