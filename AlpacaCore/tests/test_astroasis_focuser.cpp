@@ -112,7 +112,7 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:102 start() delete the first poll_once() at connect.
+// Falsified by: polled_state.h:102 start() delete the first poll_once() at connect.
 TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -243,7 +243,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:201 poll_once() take begin_poll() after the device read instead of
+// Falsified by: polled_state.h:201 poll_once() take begin_poll() after the device read instead of
 // before.
 TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its frame",
           "[astroasis][focuser][snapshot][unit]") {
@@ -285,7 +285,7 @@ TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp polled_state.h:72 fault_threshold raised from 3 to 100 (the link never latches).
+// Falsified by: polled_state.h:72 fault_threshold raised from 3 to 100 (the link never latches).
 TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link latches",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -347,7 +347,7 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:218 note_failure() delete the lost_ latch past kLinkStalenessBound.
+// Falsified by: polled_state.h:218 note_failure() delete the lost_ latch past kLinkStalenessBound.
 TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound drops Connected",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
