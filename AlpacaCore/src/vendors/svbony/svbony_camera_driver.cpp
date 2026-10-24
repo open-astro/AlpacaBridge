@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/svbony/svbony_camera_driver.h>
@@ -677,19 +678,15 @@ public:
     }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        return published_exposure_.start_time();
     }
 
     int get_max_adu() const override {
@@ -1027,6 +1024,7 @@ public:
 
             frame_config = frame_config_locked();
             last_exposure_duration_ = duration;
+            // Provisional: the worker re-stamps it when capture actually starts, after the deferred writes.
             last_exposure_start_ = std::chrono::system_clock::now();
             last_exposure_valid_ = true;
             image_ready_ = false;
@@ -1151,6 +1149,9 @@ public:
                                 AlpacaError::DriverException);
                         }
                         capture_start_attempted = true;
+                        // ICameraV4: the time the camera started to collect photons, not the StartExposure call;
+                        // the deferred FrameSpeedMode write above can take about a second (issue #1477).
+                        last_exposure_start_ = std::chrono::system_clock::now();
                         sdk.start_video_capture(active_camera_id);
                     }
 
@@ -1223,6 +1224,7 @@ public:
                         last_image_ = std::move(published_image);
                         image_cached_ = true;
                         image_ready_ = true;
+                        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
                         exposure_failure_.clear();
                         exposure_deadline_valid_ = false;
                         exposure_active_.store(false);
@@ -1335,6 +1337,9 @@ private:
     double last_exposure_duration_;
     std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
+    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
+    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    util::LastExposure published_exposure_;
 
     bool roi_dirty_{true};
     bool frame_speed_dirty_{false};
@@ -1384,6 +1389,7 @@ private:
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = std::chrono::system_clock::time_point{};
         last_exposure_valid_ = false;
+        published_exposure_.clear();
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
     }

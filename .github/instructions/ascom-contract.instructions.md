@@ -172,6 +172,21 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
   member the camera does not have. With the cooler, `CoolerPower` is `0` when `CoolerOn` is false.
 - **An SDK failure reading `CoolerPower` is the driver's normal error, never `0.0`.**
 
+### Camera LastExposureDuration and LastExposureStartTime (all camera vendors)
+
+- **Both raise `InvalidOperation` until an image has been successfully acquired** (ICameraV4: "if no image has yet
+  been successfully acquired"), never `ValueNotSet`. A failed exposure publishes nothing and never erases the
+  values of an earlier success; only a new success replaces them. Keep the exposure in flight in pending fields
+  (`PercentCompleted` reads them) and commit them to `util::LastExposure` (`util/last_exposure.h`) at the point
+  the image is acquired; clear it on disconnect. While disconnected both raise `NotConnected` first
+  (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
+- **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): GPhoto reports the
+  parsed shutter speed it wrote (`1/200` is 0.005), the bulb or B-mode requested value when the driver times the
+  exposure itself, and iGuider the step taken. `PercentCompleted` keeps the requested duration for progress.
+- **The start time is when the camera started to collect photons**, not the `StartExposure` call: SVBONY stamps
+  it in the worker after the deferred `FrameSpeedMode` write. QHY, Player One, GPhoto and iGuider still stamp at
+  the request or just before their trigger (no timing seam yet; measure on a rig before changing them).
+
 ### Camera values the SDK cannot give (all camera vendors)
 
 - **`ElectronsPerADU` and `FullWellCapacity` raise `PropertyNotImplemented` when the SDK has no figure that follows the

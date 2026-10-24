@@ -36,6 +36,7 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -410,7 +411,6 @@ public:
         exposure_failure_.clear();
         last_exposure_duration_ = taken;
         last_exposure_start_ = std::chrono::system_clock::now();
-        last_exposure_valid_ = true;
     }
 
     void abort_exposure() override {
@@ -479,19 +479,13 @@ public:
     double get_last_exposure_duration() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        return published_exposure_.start_time();
     }
 
     // ---- Guiding (through the mount, not the camera) -----------------------
@@ -555,7 +549,9 @@ private:
     std::shared_ptr<const ImageArray> last_image_;
     double last_exposure_duration_ = 0.0;
     std::chrono::system_clock::time_point last_exposure_start_{};
-    bool last_exposure_valid_ = false;
+    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
+    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    util::LastExposure published_exposure_;
 
     // Last members: destroyed first, so the worker is joined before anything it touches.
     util::OperationGeneration stream_generation_;
@@ -630,7 +626,7 @@ private:
         retired_image = std::move(last_image_);
         last_exposure_duration_ = 0.0;
         last_exposure_start_ = {};
-        last_exposure_valid_ = false;
+        published_exposure_.clear();
     }
 
     // ---- Connect / disconnect (under transition_mutex_, never mutex_) ------
@@ -847,6 +843,7 @@ private:
         if (!exposure_pending_ || exposure_token_ != token) return;  // aborted or superseded meanwhile
         last_image_ = std::move(image);
         image_ready_ = true;
+        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
         exposure_pending_ = false;
         exposure_failure_.clear();
     }

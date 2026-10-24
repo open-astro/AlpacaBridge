@@ -202,6 +202,76 @@ TEST_CASE("SVBONY Camera Driver - exposure delivers the fake frame", "[svbony][c
     driver->set_connected(false);
 }
 
+namespace {
+// Polls until ImageReady is true or raises; returns true when it raised (the exposure failed).
+bool image_ready_raises_eventually(alpacacore::CameraDriver& driver) {
+    for (int i = 0; i < 400; ++i) {
+        try {
+            if (driver.get_image_ready()) return false;
+        } catch (const alpacacore::AlpacaException&) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return false;
+}
+}  // namespace
+
+// ICameraV4: LastExposure* raise InvalidOperation until an image has been successfully acquired (issue #1477).
+TEST_CASE("SVBONY Camera Driver - LastExposure values follow successful images only",
+          "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    alpacacore::test::LockedSVBSDK sdk(fake);
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    driver->set_connected(true);
+
+    SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*driver); }
+    SECTION("a failed first exposure publishes nothing") {
+        fake.fail_next("get_video_data");
+        driver->start_exposure(0.05, true);
+        REQUIRE(image_ready_raises_eventually(*driver));
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    SECTION("a later failure keeps the earlier success") {
+        driver->start_exposure(0.05, true);
+        for (int i = 0; i < 400 && !driver->get_image_ready(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        REQUIRE(driver->get_image_ready());
+        const auto start = driver->get_last_exposure_start_time();
+        CHECK(driver->get_last_exposure_duration() == 0.05);
+        fake.fail_next("get_video_data");
+        driver->start_exposure(0.07, true);
+        REQUIRE(image_ready_raises_eventually(*driver));
+        CHECK(driver->get_last_exposure_duration() == 0.05);
+        CHECK(driver->get_last_exposure_start_time() == start);
+    }
+    driver->set_connected(false);
+}
+
+// ICameraV4: the start time is when the camera started to collect photons. The deferred FrameSpeedMode write runs
+// in the worker before capture starts, so it must precede the stamp (issue #1477).
+TEST_CASE("SVBONY Camera Driver - LastExposureStartTime is stamped after the deferred FrameSpeedMode write",
+          "[svbony][camera][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK fake;
+    alpacacore::test::LockedSVBSDK sdk(fake);
+    auto driver = alpacacore::vendor::svbony::create_svbony_camera(0, 0, sdk);
+    driver->set_connected(true);
+    REQUIRE(driver->get_can_fast_readout());
+    driver->set_fast_readout(true);
+    fake.set_frame_speed_write_delay(std::chrono::milliseconds(150));
+    const auto writes_before = fake.call_count("set_control_value.FrameSpeedMode");
+
+    driver->start_exposure(0.01, true);
+    for (int i = 0; i < 400 && !driver->get_image_ready(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(driver->get_image_ready());
+    REQUIRE(fake.call_count("set_control_value.FrameSpeedMode") == writes_before + 1);
+    CHECK(driver->get_last_exposure_start_time() >= fake.frame_speed_written_at());
+    driver->set_connected(false);
+}
+
 TEST_CASE("FakeSVBSDK behind LockedSVBSDK - forwards every entry point", "[svbony][unit][fake-sdk]") {
     using namespace alpacacore::vendor::svbony;
     alpacacore::test::FakeSVBSDK fake;
