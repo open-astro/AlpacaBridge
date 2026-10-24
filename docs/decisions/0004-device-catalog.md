@@ -14,7 +14,7 @@ The descriptor is two files in the vendor's directory. The schema half compiles 
 
 AlpacaHTTP bridges JSON to the typed config in one place and includes no vendor headers; the layering gate enforces zero once the migration is done. It serves the schema at /management/v1/devicecatalog in the management envelope, as a compact custom shape pinned by a committed fixture.
 
-API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router's `reject_invalid_config()` did (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
+API configs are rejected on validation failure; persisted configs are normalized with a warning, as the router did before the catalog (#380, PR #353). Sanitize keeps every declared non-secret field; only the UI honours applies_when. Aliases, such as iOptron's iCAM routed to the Player One camera driver, are explicit descriptors that delegate construction. Test descriptors register through the same catalog.
 
 ## Rules
 
@@ -37,5 +37,5 @@ The router's registration and sanitize arms, and its vendor includes, went away 
 ## Links
 
 - Upstream design review [#584](https://github.com/open-astro/AlpacaBridge/issues/584) (candidate 1); issues [#508](https://github.com/open-astro/AlpacaBridge/issues/508), [#380](https://github.com/open-astro/AlpacaBridge/issues/380), [#577](https://github.com/open-astro/AlpacaBridge/issues/577), [#572](https://github.com/open-astro/AlpacaBridge/issues/572); PR [#353](https://github.com/open-astro/AlpacaBridge/pull/353).
-- Current owners of the rule this replaces: `AlpacaHTTP/src/http/router.cpp` (`register_device_from_config()`, `reject_invalid_config()`, `normalize_persisted_connection_type()`, `sanitize_device_config()`), `AlpacaHTTP/web/app.js` (`INDEX_FIELDS`, `updateVendorOptions`, `startEditDevice`).
+- Current owners of the rule this replaces: `AlpacaHTTP/src/http/router.cpp` (`register_device_from_config()`, `sanitize_device_config()`), `AlpacaHTTP/web/app.js` (`INDEX_FIELDS`, `updateVendorOptions`, `startEditDevice`).
 - Module overview: [architecture](../architecture.md#modules).

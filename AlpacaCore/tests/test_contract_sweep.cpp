@@ -671,8 +671,8 @@ ConnectObservation connect_and_observe(AlpacaDriver& d, std::chrono::millisecond
         const bool connected = d.get_connected();
         if (first) {
             o.first_sample_in_flight = connecting || connected;
-            // Connected is not part of this: on the drivers whose get_connected() blocks behind the connect
-            // (async_connectable.h), that read only returns once the connect has finished.
+            // Connected is not part of this: a get_connected() that blocked behind the connect
+            // (async_connectable.h; no driver does today) would only return once the connect has finished.
             o.first_sample_connecting = connecting;
         }
         first = false;
@@ -724,9 +724,9 @@ Hosted connected_host(const Tier2Host& h) {
             CHECK(o.connect_call < kConnectCallBound);
             CHECK(o.first_sample_connecting);
             CHECK(o.saw_connecting);
-            // On rows whose get_connected() blocks behind the connect (async_connectable.h) this check cannot fail:
-            // that read only returns after the hold. It is load-bearing on the rows whose get_connected() does
-            // not block (red with the holds set to 0), OnStep among them since #910.
+            // On a row whose get_connected() blocked behind the connect (async_connectable.h; none does today) this
+            // check could not fail: that read would only return after the hold. It is load-bearing on every
+            // row since the getters are lock-free (red with the holds set to 0).
             CHECK_FALSE(o.connected_early);
         }
         CHECK(Clock::now() - t0 < std::chrono::seconds(30));

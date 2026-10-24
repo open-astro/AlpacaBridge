@@ -3,13 +3,13 @@
 
 The cross-driver contract sweep (AlpacaCore/tests/contract_sweep.h +
 test_contract_sweep.cpp) runs the ASCOM contract cases over one registry entry
-per (vendor, device type) pair the server can construct, through either a
-Router::register_device_from_config() arm or a device-catalog factory
-(AlpacaCore/src/vendors/*/*_catalog.cpp). Nothing else makes a new driver join
+per (vendor, device type) pair the server can construct, through a device-catalog
+factory (AlpacaCore/src/vendors/*/*_catalog.cpp); the catalog constructs every pair now
+and the router has no vendor arm left. Nothing else makes a new driver join
 it: without this gate an 8th telescope driver inherits no contract coverage and
 CI stays green, which is the failure the sweep exists to end.
 
-Rules (a "constructed" pair is a router arm's pair; the catalog's pairs are
+Rules (a "constructed" pair is a router arm's pair, none left now; the catalog's pairs are
 checked in C++ by the "Contract sweep - every available catalog descriptor has a
 registry entry" case and its reverse in test_contract_sweep.cpp, which read
 DeviceCatalog::describe() instead of parsing the *_catalog.cpp files):
