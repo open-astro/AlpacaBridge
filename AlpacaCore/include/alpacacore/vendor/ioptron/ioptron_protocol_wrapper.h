@@ -144,6 +144,7 @@ struct SiteInfo {
     bool is_northern_hemisphere = true;
     int timezone_offset_minutes = 0;  // Minutes from UTC
     bool dst_observed = false;
+    int gps_status = 0;  // :GLS# GPS digit: 0 no or failed GPS module, 1 GPS works but no valid data, 2 valid GPS data
 };
 
 /**
@@ -221,7 +222,14 @@ public:
      * Sends :GLS# and :GUT# commands.
      */
     SiteInfo get_site_info();
-    
+
+    /**
+     * @brief Get the :GLS# part of the site information (longitude, latitude, GPS digit, hemisphere).
+     *
+     * Sends :GLS# only; timezone and DST stay at their defaults.
+     */
+    SiteInfo get_site_location();
+
     /**
      * @brief Get parking position.
      *

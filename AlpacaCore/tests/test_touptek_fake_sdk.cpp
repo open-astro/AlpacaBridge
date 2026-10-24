@@ -21,6 +21,7 @@
 #include <alpacacore/vendor/touptek/touptek_focuser_driver.h>
 #include <alpacacore/vendor/touptek/touptek_thermal_switch_driver.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -777,4 +778,195 @@ TEST_CASE("ToupTek AFW - DeviceState is one device read and static members cost 
     }
     CHECK(fake.call_count("get_filter_wheel_position") - base == 1);
     driver->set_connected(false);
+}
+
+namespace {
+
+// Blocks the named SDK call for `delay` once armed; `entered` is set while it is in flight.
+void delay_sdk_call(FakeToupTekSDK& fake, const std::string& name, std::chrono::milliseconds delay,
+                    std::atomic<bool>& entered) {
+    fake.before_call = [name, delay, &entered](const std::string& call) {
+        if (call == name) {
+            entered.store(true);
+            std::this_thread::sleep_for(delay);
+        }
+    };
+}
+
+void wait_for_entered(const std::atomic<bool>& entered) {
+    for (int i = 0; i < 400 && !entered.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(entered.load());
+}
+
+template <typename Fn>
+std::chrono::milliseconds time_of(Fn&& fn) {
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        fn();
+    } catch (const AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+        // Only the latency matters here.
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+// The error code a call ends with: 0 when it succeeds, else the AlpacaException code. A disconnect racing
+// an exchange may refuse it with NotConnected but must never fail it on a closed handle (DriverException).
+template <typename Fn>
+int outcome_of(Fn&& fn) {
+    try {
+        fn();
+    } catch (const AlpacaException& ex) {
+        return ex.error_code();
+    }
+    return 0;
+}
+
+constexpr std::chrono::milliseconds kSlowDevice{300};
+constexpr std::chrono::milliseconds kNoIoBound{20};
+
+}  // namespace
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a heater read",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::thread read([&] { (void)time_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_switch_name(0); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    read.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - no-I/O getters do not wait on a connect",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat_max", kSlowDevice, entered);
+
+    std::thread connect([&] { (void)time_of([&] { thermal->set_connected(true); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { (void)thermal->get_max_switch(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_unique_id(); }) < kNoIoBound);
+    CHECK(time_of([&] { (void)thermal->get_connected(); }) < kNoIoBound);
+
+    connect.join();
+    fake.before_call = nullptr;
+    thermal->set_connected(false);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a read in flight returns and closes after it",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "get_heat", kSlowDevice, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread read([&] { outcome = outcome_of([&] { (void)thermal->get_switch_value(0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    read.join();
+    fake.before_call = nullptr;
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+TEST_CASE("ToupTek thermal switch - disconnect with a write in flight closes the handle after the write",
+          "[touptek][switch][unit][fakesdk][io-lock]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    std::atomic<bool> entered{false};
+    delay_sdk_call(fake, "put_heat", kSlowDevice, entered);
+
+    std::atomic<int> outcome{-1};
+    std::thread write([&] { outcome = outcome_of([&] { thermal->set_switch_value(0, 1.0); }); });
+    wait_for_entered(entered);
+
+    CHECK(time_of([&] { thermal->set_connected(false); }) < std::chrono::seconds(5));
+    write.join();
+    fake.before_call = nullptr;
+    // The close waits for the write: it never lands on a closed handle (the fake raises DriverException).
+    CHECK((outcome == 0 || outcome == alpacacore::AlpacaError::NotConnected));
+    CHECK_FALSE(thermal->get_connected());
+    CHECK(fake.underflow_closes == 0);
+    CHECK(fake.physical_opens == fake.physical_closes);
+}
+
+// Falsified by: touptek_thermal_switch_driver.cpp read_value() reading the SDK directly instead of through
+// status_cache_ (get_heat is called again on the second read inside the 100 ms TTL).
+TEST_CASE("ToupTek thermal switch - reads inside the TTL share one cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    (void)thermal->get_switch_value(0);
+    const int base = fake.call_count("get_heat");
+    (void)thermal->get_switch_value(0);
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") == base);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    (void)thermal->get_switch_value(0);
+    CHECK(fake.call_count("get_heat") - base == 1);
+    thermal->set_connected(false);
+}
+
+// Falsified by: touptek_thermal_switch_driver.cpp write_element_value() dropping its
+// status_cache_.invalidate() (the read after a write serves the pre-write frame).
+TEST_CASE("ToupTek thermal switch - a write drops the cached frame", "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_switch_value(0, 1.0);
+    CHECK(thermal->get_switch_value(0) == 1.0);  // inside the TTL: only a refill can show the write
+    thermal->set_connected(false);
+}
+
+// Falsified by: ttl_status_cache.h get() dropping its health_.faulted() throw, or read_value() bypassing the
+// cache (the third failure reports the raw SDK error, not "communications compromised").
+TEST_CASE("ToupTek thermal switch - a dead link refuses reads after three failed refills",
+          "[touptek][switch][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    auto thermal = alpacacore::vendor::touptek::create_touptek_thermal_switch(0, 0, fake);
+    thermal->set_connected(true);
+    (void)thermal->get_switch_value(0);
+
+    fake.throw_from.insert("get_heat");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    for (int i = 0; i < 2; ++i) {
+        CHECK_THROWS(thermal->get_switch_value(0));
+    }
+    try {
+        (void)thermal->get_switch_value(0);
+        FAIL("expected a throw");
+    } catch (const AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("communications compromised") != std::string::npos);
+        CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
+    }
+    CHECK(thermal->get_connected());
+
+    fake.throw_from.clear();
+    CHECK(thermal->get_switch_value(0) == 0.0);
+    thermal->set_connected(false);
 }

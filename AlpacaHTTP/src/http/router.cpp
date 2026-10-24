@@ -1183,13 +1183,8 @@ std::string build_image_array_payload(const alpacacore::ImageArray& image,
 
 constexpr std::uint32_t kImageTypeInt16 = 1;
 constexpr std::uint32_t kImageTypeInt32 = 2;
-constexpr std::uint32_t kImageTypeDouble = 3;
-constexpr std::uint32_t kImageTypeSingle = 4;
-constexpr std::uint32_t kImageTypeUInt64 = 5;
 constexpr std::uint32_t kImageTypeByte = 6;
-constexpr std::uint32_t kImageTypeInt64 = 7;
 constexpr std::uint32_t kImageTypeUInt16 = 8;
-constexpr std::uint32_t kImageTypeUInt32 = 9;
 
 constexpr std::uint32_t kImageBytesMetadataVersion = 1;
 constexpr std::size_t kImageBytesMetadataSize = 11 * sizeof(std::uint32_t);
@@ -1236,41 +1231,6 @@ bool accepts_imagebytes(const alpacahttp::Request& request) {
     }
     std::string accept = to_lower_copy(request.get_header("accept"));
     return accept.find("application/imagebytes") != std::string::npos;
-}
-
-std::uint32_t image_element_type_from_variant(const std::string& variant, std::uint32_t fallback) {
-    if (variant.empty()) {
-        return fallback;
-    }
-    std::string lowered = to_lower_copy(variant);
-    if (lowered == "int16" || lowered == "short") {
-        return kImageTypeInt16;
-    }
-    if (lowered == "uint16" || lowered == "ushort") {
-        return kImageTypeUInt16;
-    }
-    if (lowered == "byte" || lowered == "uint8") {
-        return kImageTypeByte;
-    }
-    if (lowered == "double") {
-        return kImageTypeDouble;
-    }
-    if (lowered == "single" || lowered == "float") {
-        return kImageTypeSingle;
-    }
-    if (lowered == "uint32") {
-        return kImageTypeUInt32;
-    }
-    if (lowered == "uint64" || lowered == "ulong") {
-        return kImageTypeUInt64;
-    }
-    if (lowered == "int64" || lowered == "long") {
-        return kImageTypeInt64;
-    }
-    if (lowered == "int32") {
-        return kImageTypeInt32;
-    }
-    return fallback;
 }
 
 ImageBytesFormat choose_image_bytes_format(const alpacacore::ImageArray& image,
@@ -4873,31 +4833,12 @@ Response Router::dispatch_camera_method(
                 response.set_body(build_image_array_payload(image, 2, client_tx_id, server_tx_id));
                 return response;
             } else if (method_name == "imagearrayvariant") {
-                util::log_debug(
-                    "Camera imagearrayvariant Accept: " +
-                    (request.has_header("accept") ? util::escape_for_log(request.get_header("accept")) : "<none>") +
-                    ", imagebytes=" + std::string(accepts_imagebytes(request) ? "true" : "false"));
-                if (accepts_imagebytes(request)) {
-                    auto image = camera->get_image_array();
-                    auto variant = camera->get_image_array_variant();
-                    auto element_type = image_element_type_from_variant(variant, kImageTypeInt32);
-                    auto format = choose_image_bytes_format(image, element_type);
-                    response.set_content_type("application/imagebytes");
-                    response.set_body(build_image_bytes_payload(image, format, client_tx_id, server_tx_id));
-                    return response;
+                if (camera->get_connecting() || !camera->get_connected()) {
+                    throw alpacacore::AlpacaException("Camera is not connected", alpacacore::AlpacaError::NotConnected);
                 }
-
-                auto image = camera->get_image_array();
-                auto variant = camera->get_image_array_variant();
-                int type = 2;
-                if (variant == "Int16" || variant == "UInt16" || variant == "Short") {
-                    type = 1;
-                } else if (variant == "Double") {
-                    type = 3;
-                }
-                response.set_content_type("application/json");
-                response.set_body(build_image_array_payload(image, type, client_tx_id, server_tx_id));
-                return response;
+                // ImageArrayVariant is COM-only; Alpaca must refuse it without retrieving a frame.
+                throw alpacacore::AlpacaException("ImageArrayVariant is not supported by Alpaca; use ImageArray",
+                                                  alpacacore::AlpacaError::PropertyNotImplemented);
             } else if (method_name == "imageready") {
                 AlpacaResponse alpaca_response = make_success_response(
                     client_tx_id, server_tx_id, camera->get_image_ready());

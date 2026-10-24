@@ -595,13 +595,19 @@ public:
     }
 
     double get_electrons_per_adu() const override {
-        if (!connected_.load()) return 1.0;
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!caps_.has_egain) return 1.0;
+        // POA_EGAIN is the per-gain e-/ADU; without it, or when the read fails, there is no honest value
+        // (issue #1277), never a 1.0 stand-in.
+        if (!caps_.has_egain) {
+            throw AlpacaException("ElectronsPerADU is not available for this Player One camera",
+                                  AlpacaError::PropertyNotImplemented);
+        }
         try {
             return sdk_.get_egain(camera_info_.camera_id);
         } catch (const std::exception&) {
-            return 1.0;
+            throw AlpacaException("ElectronsPerADU could not be read from this Player One camera",
+                                  AlpacaError::PropertyNotImplemented);
         }
     }
 
@@ -633,9 +639,10 @@ public:
     }
 
     double get_full_well_capacity() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || camera_info_.bit_depth <= 0) return 0.0;
-        return static_cast<double>((1ULL << camera_info_.bit_depth) - 1ULL);
+        ensure_connected();
+        // The Player One SDK has no full-well figure; the ADU saturation is not electrons (issue #1277).
+        throw AlpacaException("FullWellCapacity is not available for Player One cameras",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain() const override {
@@ -849,7 +856,7 @@ public:
         if (camera_info_valid_ && !camera_info_.sensor_model.empty()) {
             return camera_info_.sensor_model;
         }
-        return "Player One Sensor";
+        return std::string();  // unknown: "" (ICameraV4 SensorName)
     }
     SensorType get_sensor_type() const override {
         std::lock_guard<std::mutex> lock(mutex_);

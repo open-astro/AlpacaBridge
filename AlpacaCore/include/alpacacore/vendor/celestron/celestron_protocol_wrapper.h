@@ -178,6 +178,16 @@ public:
     // MC_SET_POSITION (0x04) — set position counter without moving (pass-through Sync).
     void mc_set_position(int axis, uint32_t position);
 
+    // GPS module on the AUX bus (device 0xB0) via pass-through: GPS_LINKED (0x37) and the receiver's own
+    // GPS_GET_LAT (0x01) / GPS_GET_LONG (0x02). Unlike get_location() (the hand controller's stored site),
+    // these read the GPS module. The coordinates are valid only while linked is true.
+    struct GpsReading {
+        bool linked = false;
+        double latitude_degrees = 0.0;   // north positive
+        double longitude_degrees = 0.0;  // east positive
+    };
+    GpsReading get_gps_reading();
+
     LocationInfo get_location();
     void set_location(const LocationInfo& info);
     TimeInfo get_time();
