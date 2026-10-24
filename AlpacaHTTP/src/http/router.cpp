@@ -3276,7 +3276,6 @@ Response Router::dispatch_telescope_method(std::shared_ptr<alpacacore::Telescope
     const Request& request = call.request();
 
     return call.run("telescope method '" + method_name + "'", [&]() -> Response {
-
         // GET-only boolean properties
         if (request.method() == HttpMethod::GET) {
             if (method_name == "cansetrightascensionrate") {
