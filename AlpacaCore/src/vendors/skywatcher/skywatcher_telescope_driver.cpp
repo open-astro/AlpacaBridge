@@ -336,6 +336,12 @@ class SkyWatcherTelescopeDriver : public TelescopeDriver, protected alpacacore::
             free_slot->driver = driver;
             return free_slot;
         }
+        if (create) {
+            // More than eight drivers locked at once on this thread: Wire cannot tell it to drop the state
+            // lock, so an exchange would hold it. Never expected; say so rather than stall silently.
+            ALPACA_LOG_ERROR("SkyWatcher",
+                             "Lock table full on this thread; the state lock stays held across exchanges");
+        }
         return nullptr;
     }
     static void release_slot(HeldLocks* slot) {
@@ -713,32 +719,38 @@ public:
             // Decision 0019 (#1474): no site is needed to connect. The members
             // that point by the site refuse until it is set (require_site_locked()),
             // and the connect sends nothing whose meaning depends on it.
-            // An auto-detected mount resolves its port or host here, not in the factory (#659).
-            util::connect_resolved(
-                connection_info_, connection_resolved_, connection_resolver_,
-                [&protocol](const ConnectionInfo& info) {
-                    if (!protocol.connect(info)) {
-                        std::string reason = protocol.connect_failure();
-                        if (reason.empty()) {
-                            reason = "unknown error";
+            // An auto-detected mount resolves its port or host here, not in the factory (#659). The scan
+            // (serial probe, UDP discovery) goes through Wire like every exchange: the state lock is
+            // released for it, so a Slewing, Tracking or AtPark read meanwhile answers NotConnected at once,
+            // and is taken back before the outcome or its exception leaves. The connection members the scan
+            // writes are read only under transition_mutex_, which this call holds; io_mutex_ stays held.
+            protocol.call([&](auto&) {
+                util::connect_resolved(
+                    connection_info_, connection_resolved_, connection_resolver_,
+                    [&protocol](const ConnectionInfo& info) {
+                        if (!protocol.connect(info)) {
+                            std::string reason = protocol.connect_failure();
+                            if (reason.empty()) {
+                                reason = "unknown error";
+                            }
+                            const bool serial = info.type == ConnectionType::Serial;
+                            const std::string where =
+                                serial ? info.port_path : info.host + ":" + std::to_string(info.udp_port);
+                            const std::string text =
+                                serial ? "Could not open " + where + " for the Sky-Watcher mount: " + reason +
+                                             ". Check the Serial Port setting."
+                                       : "Could not reach the Sky-Watcher mount at " + where + ": " + reason +
+                                             ". Check the Host setting and that the mount is on.";
+                            // Unanswered UDP endpoint, vanished serial node, or a port another
+                            // connected device now holds (#1202): stale, re-scan.
+                            if (!serial || util::serial_endpoint_stale(info.port_path)) {
+                                throw util::StaleEndpoint(text);
+                            }
+                            throw AlpacaException(text);
                         }
-                        const bool serial = info.type == ConnectionType::Serial;
-                        const std::string where =
-                            serial ? info.port_path : info.host + ":" + std::to_string(info.udp_port);
-                        const std::string text =
-                            serial ? "Could not open " + where + " for the Sky-Watcher mount: " + reason +
-                                         ". Check the Serial Port setting."
-                                   : "Could not reach the Sky-Watcher mount at " + where + ": " + reason +
-                                         ". Check the Host setting and that the mount is on.";
-                        // Unanswered UDP endpoint, vanished serial node, or a port another
-                        // connected device now holds (#1202): stale, re-scan.
-                        if (!serial || util::serial_endpoint_stale(info.port_path)) {
-                            throw util::StaleEndpoint(text);
-                        }
-                        throw AlpacaException(text);
-                    }
-                },
-                "SkyWatcher");
+                    },
+                    "SkyWatcher");
+            });
             // The session is open for the connect's own exchanges, but not yet for a client: a getter reads
             // NotConnected until the connect has finished (see check_connected()), as when mutex_ was held
             // across the whole connect.
@@ -3416,16 +3428,11 @@ private:
     }
 
     // Local sidereal time now, in hours: the time source and the longitude read from one snapshot.
-    // Throws InvalidOperation while the longitude was never set.
+    // Does not throw: a caller checks the site first (require_site_locked()).
     double local_sidereal_hours() const {
         std::lock_guard<std::mutex> lock(client_clock_mutex_);
         const auto utc = utc_now_in_clock();
         return compute_local_sidereal_time_hours(utc, client_clock_.site_longitude);
-    }
-
-    double site_longitude_degrees() const {
-        std::lock_guard<std::mutex> lock(client_clock_mutex_);
-        return client_clock_.site_longitude;
     }
 
     // open-astro#405: a host that was undisciplined at the write and acquires
@@ -4004,8 +4011,6 @@ private:
         }
     }
 
-    // Test seam: called between a poll's sample and its publish, with no lock
-    // held, so a case can land a client write in that window.
     // Test seam: runs in spawn_rate_verify_task_locked()'s unlocked gap, before start().
     void run_rate_verify_before_start_hook() {
         std::function<void()> hook;
@@ -4018,6 +4023,8 @@ private:
         }
     }
 
+    // Test seam: called between a poll's sample and its publish, with no lock
+    // held, so a case can land a client write in that window.
     void run_status_poll_after_sample_hook() {
         std::function<void()> hook;
         {

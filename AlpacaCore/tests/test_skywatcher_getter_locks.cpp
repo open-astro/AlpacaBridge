@@ -331,4 +331,42 @@ TEST_CASE("SkyWatcher getters - a reconnect does not race the rate-applied check
     driver->set_connected(false);
 }
 
+TEST_CASE("SkyWatcher getters - an auto-detect scan on the connect holds up no state getter",
+          "[skywatcher][getter-locks]") {
+    // The resolver of an auto-detect mount scans serial ports and probes UDP hosts. It runs inside the connect,
+    // so the state lock must be free while it runs: Slewing, Tracking and AtPark read it and must answer
+    // NotConnected at once instead of waiting out the scan.
+    FakeSkyWatcherMount mount;
+    REQUIRE(mount.ok());
+    const sw::ConnectionInfo info = endpoint(mount);
+    std::atomic<bool> scanning{false};
+    auto driver = sw::create_skywatcher_telescope_deferred(
+        0,
+        [&]() {
+            scanning = true;
+            std::this_thread::sleep_for(milliseconds(1000));
+            return info;
+        },
+        kSiteLatitude, kSiteLongitude, kSiteElevation);
+    std::thread connecting([&] { driver->set_connected(true); });
+    while (!scanning) {
+        std::this_thread::yield();
+    }
+    const std::vector<Getter> state_getters = {
+        {"Slewing", [](auto& d) { (void)d.get_slewing(); }},
+        {"Tracking", [](auto& d) { (void)d.get_tracking(); }},
+        {"AtPark", [](auto& d) { (void)d.get_at_park(); }},
+    };
+    for (const auto& g : state_getters) {
+        const auto start = steady_clock::now();
+        CHECK_THROWS_AS(g.read(*driver), alpacacore::AlpacaException);
+        const auto spent = std::chrono::duration_cast<milliseconds>(steady_clock::now() - start);
+        INFO(g.name << " took " << spent.count() << " ms during the scan");
+        CHECK(spent < kGetterBudget);
+    }
+    connecting.join();
+    CHECK(driver->get_connected());
+    driver->set_connected(false);
+}
+
 #endif  // !_WIN32
