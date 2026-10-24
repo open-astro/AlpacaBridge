@@ -106,7 +106,7 @@ void case_json_value_fallback() {
     EXPECT(text_call.get_string("Name") == "abc");
 }
 
-// Falsified by: trying the form body before the JSON body in find_raw (the body is a JSON object and also holds a form pair).
+// Falsified by: trying the form body before the JSON body in find_raw (the body is JSON and holds a form pair).
 void case_json_before_form() {
     auto request = put_json("{\"Position\":3,\"x\":\"&Position=4&\"}");
     DeviceCall call(*request, kServerTx);
