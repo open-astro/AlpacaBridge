@@ -1535,7 +1535,7 @@ private:
     }
 
     struct ExposureTiming {
-        double duration;
+        double duration{0.0};
         std::chrono::system_clock::time_point start;
     };
 
