@@ -17,6 +17,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/park_slew.h>
@@ -348,18 +349,39 @@ public:
         start_status_poller();
     }
 
+    // "gps_status": whether the mount's GPS module holds a link, with the module's own latitude and longitude
+    // (issue #1277). Listed only when the bus probe found the GPS module (has_gps_) at connect.
+    static constexpr std::string_view kGpsStatusAction = "gps_status";
+
     std::vector<std::string> get_supported_actions() const override {
-        return {};
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!connected_ || link_lost_.load() || !has_gps_) return {};
+        return {std::string(kGpsStatusAction)};
     }
 
     std::string action(std::string_view action_name, std::string_view action_parameters) override {
-        (void)action_parameters;
-        throw AlpacaException("Action not supported: " + std::string(action_name), AlpacaError::ActionNotImplemented);
+        (void)action_parameters;  // gps_status takes none
+        if (!util::is_gps_status_action(action_name)) {
+            throw AlpacaException("Action not supported: " + std::string(action_name),
+                                  AlpacaError::ActionNotImplemented);
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            check_connected();
+            if (!has_gps_) {
+                throw AlpacaException("Action not supported: " + std::string(action_name),
+                                      AlpacaError::ActionNotImplemented);
+            }
+        }
+        // The pass-through exchanges run outside mutex_ (the wrapper serialises the wire).
+        const auto reading = CelestronProtocolWrapper::instance().get_gps_reading();
+        if (!reading.linked) return util::format_gps_status(false, std::nullopt, std::nullopt);
+        return util::format_gps_status(true, reading.latitude_degrees, reading.longitude_degrees);
     }
 
     bool can_action(std::string_view action_name) const override {
-        (void)action_name;
-        return false;
+        std::lock_guard<std::mutex> lock(mutex_);
+        return connected_ && !link_lost_.load() && has_gps_ && util::is_gps_status_action(action_name);
     }
 
     std::string command_blind(std::string_view command, bool raw) override {

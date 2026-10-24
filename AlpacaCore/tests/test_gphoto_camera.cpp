@@ -41,7 +41,7 @@ TEST_CASE("GPhoto Camera Driver - Defaults", "[gphoto][camera][unit]") {
     // autodetect always comes back empty and the driver serves this literal
     // fallback name (see get_name()/preload_camera_info_locked).
     CHECK(driver->get_name() == "DSLR / Mirrorless Camera");
-    CHECK(driver->get_sensor_name() == "DSLR / Mirrorless Sensor");
+    CHECK(driver->get_sensor_name().empty());  // unknown: "" (ICameraV4), never a placeholder
     CHECK(driver->get_has_shutter() == true);  // DSLRs have a real mechanical shutter
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == true);

@@ -507,7 +507,12 @@ public:
         }
     }
 
-    double get_electrons_per_adu() const override { return 1.0; }
+    double get_electrons_per_adu() const override {
+        ensure_connected();
+        // The ToupTek SDK exposes no e-/ADU, so there is no honest value (issue #1277).
+        throw AlpacaException("ElectronsPerADU is not available for " + branding_.label + " cameras",
+                              AlpacaError::PropertyNotImplemented);
+    }
 
     double get_exposure_max() const override {
         ensure_connected();
@@ -531,9 +536,11 @@ public:
     }
 
     double get_full_well_capacity() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || camera_info_.bit_depth_max <= 0) return 0.0;
-        return static_cast<double>((1ULL << camera_info_.bit_depth_max) - 1ULL);
+        ensure_connected();
+        // The SDK exposes no full-well figure (only the High Full Well mode switch); the ADU saturation is not
+        // electrons, so there is no honest value (issue #1277).
+        throw AlpacaException("FullWellCapacity is not available for " + branding_.label + " cameras",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain() const override {
@@ -862,7 +869,7 @@ public:
         if (camera_info_valid_ && !camera_info_.model_name.empty()) {
             return camera_info_.model_name;
         }
-        return branding_.label + " Sensor";
+        return std::string();  // unknown: "" (ICameraV4 SensorName)
     }
     SensorType get_sensor_type() const override {
         std::lock_guard<std::mutex> lock(mutex_);
