@@ -18,6 +18,7 @@
 #include <chrono>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -95,8 +96,14 @@ public:
 
     // -1 while moving, as the real wrapper reports PW_ERROR_IS_MOVING.
     int get_position(int handle) override {
+        std::chrono::milliseconds delay;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            record("get_position");
+            delay = position_delay_;
+        }
+        if (delay.count() > 0) std::this_thread::sleep_for(delay);
         std::lock_guard<std::mutex> lock(mutex_);
-        record("get_position");
         check_open_locked(handle);
         maybe_fail_locked("get_position");
         if (moving_reads_left_ > 0) {
@@ -207,6 +214,12 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         open_delay_ = delay;
     }
+    // get_position() sleeps this long (outside the mutex, after it is counted) before answering: a slow Position
+    // refill.
+    void set_position_delay(std::chrono::milliseconds delay) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        position_delay_ = delay;
+    }
     // get_position() reads that report -1 after a goto to a different slot.
     void set_moving_reads(int reads) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -215,6 +228,13 @@ public:
     void fail_next(const std::string& call) {
         std::lock_guard<std::mutex> lock(mutex_);
         fail_next_ = call;
+        fail_non_alpaca_ = false;
+    }
+    // Like fail_next, but the call throws a std::runtime_error (a vendor failure that is not an AlpacaException).
+    void fail_next_non_alpaca(const std::string& call) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fail_next_ = call;
+        fail_non_alpaca_ = true;
     }
 
     int open_count() const {
@@ -261,6 +281,9 @@ private:
     void maybe_fail_locked(const std::string& call) {
         if (fail_next_ == call) {
             fail_next_.clear();
+            if (fail_non_alpaca_) {
+                throw std::runtime_error("FakePlayerOnePWSDK: non-Alpaca failure in " + call);
+            }
             throw AlpacaException("FakePlayerOnePWSDK: scripted failure in " + call, AlpacaError::DriverException);
         }
     }
@@ -271,7 +294,9 @@ private:
     std::vector<int> offsets_;
     std::map<std::string, int> calls_;
     std::string fail_next_;
+    bool fail_non_alpaca_{false};
     std::chrono::milliseconds open_delay_{0};
+    std::chrono::milliseconds position_delay_{0};
     int open_count_{0};
     int position_{0};
     int target_{0};
