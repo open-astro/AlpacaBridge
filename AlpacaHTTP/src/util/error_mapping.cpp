@@ -10,13 +10,11 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacahttp/util/error_mapping.h>
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacahttp/util/error_mapping.h>
+
 #include <stdexcept>
-#include <sstream>
-#include <algorithm>
-#include <cctype>
 
 namespace alpacahttp::util {
 
@@ -24,48 +22,9 @@ std::int32_t exception_to_error_code(const std::exception& e) {
     if (const auto* alpaca_ex = dynamic_cast<const alpacacore::AlpacaException*>(&e)) {
         return map_error_code(alpaca_ex->error_code());
     }
-
-    // Try to map common exception types to Alpaca error codes
-    const std::string& what = e.what();
-    std::string what_lower = what;
-    std::transform(what_lower.begin(), what_lower.end(), what_lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    
-    // Check for common error patterns
-    if (what_lower.find("not connected") != std::string::npos) {
-        return ErrorCode::NOT_CONNECTED;
-    }
-    
-    if (what_lower.find("not implemented") != std::string::npos) {
-        return ErrorCode::NOT_IMPLEMENTED;
-    }
-
-    if (what_lower.find("not supported") != std::string::npos) {
-        return ErrorCode::NOT_IMPLEMENTED;
-    }
-
-    if (what_lower.find("value not set") != std::string::npos ||
-        what_lower.find("not been set") != std::string::npos ||
-        what_lower.find("not set") != std::string::npos) {
-        return ErrorCode::VALUE_NOT_SET;
-    }
-    
-    if (what_lower.find("invalid value") != std::string::npos ||
-        what_lower.find("invalid form value") != std::string::npos ||
-        what_lower.find("invalid json value") != std::string::npos ||
-        what_lower.find("missing parameter") != std::string::npos ||
-        what_lower.find("missing '") != std::string::npos ||
-        what_lower.find("missing \"") != std::string::npos ||
-        what_lower.find("invalid utc date format") != std::string::npos) {
-        return ErrorCode::INVALID_VALUE;
-    }
-    
-    // Default to driver error
+    // Any other exception is a driver failure. The old tail guessed a code from
+    // substrings of e.what(); no in-tree throw reached it (#1476).
     return ErrorCode::DRIVER_ERROR;
-}
-
-std::string exception_to_error_message(const std::exception& e) {
-    return e.what();
 }
 
 std::int32_t map_error_code(int error_code) {
