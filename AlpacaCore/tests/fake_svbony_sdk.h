@@ -225,6 +225,12 @@ public:
         maybe_fail_locked("start_video_capture");
         require_open_locked(camera_id);
         capture_ids_.insert(camera_id);
+        if (hold_next_capture_) {
+            hold_next_capture_ = false;
+            block_video_data_ = true;
+            release_read_ = false;
+            video_data_held_ = false;
+        }
     }
     void stop_video_capture(int camera_id) override {
         std::lock_guard lock(mutex_);
@@ -423,7 +429,9 @@ public:
     }
     void block_video_data() {
         std::lock_guard lock(mutex_);
-        block_video_data_ = true;
+        // An idle stop while the driver reaps its previous worker must not consume the next capture's hold.
+        hold_next_capture_ = capture_ids_.empty();
+        block_video_data_ = !hold_next_capture_;
         release_read_ = false;
         video_data_held_ = false;
     }
@@ -437,6 +445,7 @@ public:
     }
     void release_video_data() {
         std::lock_guard lock(mutex_);
+        hold_next_capture_ = false;
         release_read_ = true;
         block_video_data_ = false;
         video_data_cv_.notify_all();
@@ -520,6 +529,7 @@ private:
     int open_count_{0};
     bool camera_present_{true};
     bool block_video_data_{false};
+    bool hold_next_capture_{false};
     bool timeout_video_data_{false};
     bool fail_after_held_read_{false};
     bool release_read_{false};

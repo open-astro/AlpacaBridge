@@ -134,6 +134,32 @@ struct ReleaseSetupOnExit {
 
 }  // namespace
 
+TEST_CASE("FakeSVBSDK - idle stop preserves next capture read hold", "[svbony][unit][fake-sdk]") {
+    alpacacore::test::FakeSVBSDK sdk;
+    sdk.open_camera(17);
+    std::vector<std::uint8_t> buffer(16 * 8 * 2);
+    sdk.start_video_capture(17);
+    REQUIRE(sdk.get_video_data(17, buffer.data(), static_cast<long>(buffer.size()), 500) ==
+            alpacacore::vendor::svbony::SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+
+    sdk.set_max_read_wait(5s);
+    sdk.block_video_data();
+    sdk.stop_video_capture(17);  // StartExposure reaps the previous, already stopped capture's worker.
+    sdk.start_video_capture(17);
+    auto read = std::async(std::launch::async, [&] {
+        return sdk.get_video_data(17, buffer.data(), static_cast<long>(buffer.size()), 500);
+    });
+    ReleaseVideoDataOnExit release{sdk};
+    REQUIRE(sdk.wait_for_video_data(2s));
+    CHECK(read.wait_for(0s) == std::future_status::timeout);
+    sdk.release_video_data();
+    REQUIRE(read.wait_for(2s) == std::future_status::ready);
+    CHECK(read.get() == alpacacore::vendor::svbony::SVBVideoDataResult::Frame);
+    sdk.stop_video_capture(17);
+    sdk.close_camera(17);
+}
+
 TEST_CASE("SVBONY Camera - metadata stays unset until the first accepted frame", "[svbony][camera][unit][metadata]") {
     alpacacore::test::FakeTaskClock clock;
     alpacacore::test::FakeSVBSDK sdk;

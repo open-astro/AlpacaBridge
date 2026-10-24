@@ -257,9 +257,9 @@ TEST_CASE("Altair Camera Driver - LastExposure follows successful frames across 
     driver->set_num_y(2);
     check_error(AlpacaError::InvalidOperation);
     fake.deliver_frame = true;
-    fake.hold_wait_image(true);
+    fake.hold_next_wait_image();
     driver->start_exposure(0.0123456, true);
-    REQUIRE(wait_for([&] { return fake.call_count("wait_image") == 1; }));
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
     check_error(AlpacaError::InvalidOperation);
     fake.release_wait_image();
     REQUIRE(wait_for([&] { return driver->get_image_ready(); }));
@@ -269,9 +269,10 @@ TEST_CASE("Altair Camera Driver - LastExposure follows successful frames across 
     CHECK(driver->get_last_exposure_start_time() == start);
     driver->abort_exposure();  // reap before installing the next held wait
 
-    fake.hold_wait_image(true);
+    fake.hold_next_wait_image();
+    CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
     driver->start_exposure(1.0, true);
-    REQUIRE(wait_for([&] { return fake.call_count("wait_image") == 2; }));
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
     CHECK(driver->get_last_exposure_duration() == 0.012346);
     CHECK(driver->get_last_exposure_start_time() == start);
     driver->abort_exposure();
@@ -279,9 +280,10 @@ TEST_CASE("Altair Camera Driver - LastExposure follows successful frames across 
     CHECK(driver->get_last_exposure_duration() == 0.012346);
     CHECK(driver->get_last_exposure_start_time() == start);
 
-    fake.hold_wait_image(true);
+    fake.hold_next_wait_image();
+    CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
     driver->start_exposure(1.0, true);
-    REQUIRE(wait_for([&] { return fake.call_count("wait_image") == 3; }));
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
     // Disconnect releases a valid fake frame too; it must never publish into
     // the next session while the disconnect joins the old worker.
     driver->set_connected(false);

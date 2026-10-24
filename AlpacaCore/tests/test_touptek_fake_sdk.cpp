@@ -59,6 +59,33 @@ bool eventually(const std::function<bool()>& predicate, std::chrono::millisecond
 
 }  // namespace
 
+TEST_CASE("FakeToupTekSDK - next image hold survives restart and resets its rendezvous",
+          "[touptek][camera][unit][fakesdk][last-exposure]") {
+    auto fake = make_fake_with_camera();
+    const auto handle = fake.open_camera_by_id("fake-cam-0");
+    fake.deliver_frame = true;
+    for (int acquisition = 0; acquisition < 2; ++acquisition) {
+        fake.hold_next_wait_image();
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        fake.stop(handle);  // the driver's format restart happens before WaitImage
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+        bool delivered = false;
+        std::thread worker([&] {
+            unsigned width = 0;
+            unsigned height = 0;
+            delivered = fake.wait_image(handle, 2000, nullptr, 8, 1920, width, height);
+        });
+        const bool entered = fake.wait_for_held_image(std::chrono::seconds(1));
+        // Always release and join before an assertion can unwind the test.
+        fake.stop(handle);  // an actual active abort must still release WaitImage
+        worker.join();
+        REQUIRE(entered);
+        CHECK(delivered);
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+    }
+    fake.close_camera(handle);
+}
+
 TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and survives unsuccessful acquisitions",
           "[touptek][camera][unit][fakesdk][last-exposure]") {
     auto fake = make_fake_with_camera();
@@ -130,10 +157,10 @@ TEST_CASE("ToupTek camera - LastExposure publishes only accepted frames and surv
         fake.deliver_frame = outcome != "missing";
         fake.delivered_dimensions.reset();
         if (outcome == "malformed") fake.delivered_dimensions = std::pair<unsigned, unsigned>{0, 2};
-        fake.hold_wait_image(true);
-        const int waits = fake.call_count("wait_image");
+        fake.hold_next_wait_image();
+        CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
         driver->start_exposure(2.0, true);
-        REQUIRE(wait_for([&] { return fake.call_count("wait_image") > waits; }));
+        REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
         check_metadata();
         CHECK_FALSE(driver->get_image_ready());
         CHECK(error([&] { driver->get_image_array(); }) == alpacacore::AlpacaError::InvalidOperation);
@@ -202,7 +229,7 @@ TEST_CASE("ToupTek camera - LastExposure start follows deferred setup and progre
     driver->set_num_x(2);
     driver->set_num_y(2);
     fake.deliver_frame = true;
-    fake.hold_wait_image(true);
+    fake.hold_next_wait_image();
     driver->start_exposure(2.0, true);
     {
         std::unique_lock<std::mutex> lock(gate_mutex);
@@ -222,7 +249,7 @@ TEST_CASE("ToupTek camera - LastExposure start follows deferred setup and progre
         while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
         return predicate();
     };
-    REQUIRE(wait_for([&] { return fake.call_count("wait_image") == 1; }));
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
     const auto latest_start = std::chrono::system_clock::now();
     clock.advance(std::chrono::seconds(1));
     CHECK(driver->get_percent_completed() == 50.0);

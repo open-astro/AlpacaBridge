@@ -82,6 +82,17 @@ public:
         if (!hold) sync_->wait_cv.notify_all();
     }
     void release_wait_image() { hold_wait_image(false); }
+    // Arm only after joining the previous acquisition. A stream-restart stop()
+    // before wait_image must not release the next acquisition's hold.
+    void hold_next_wait_image() {
+        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+        sync_->hold_next_wait = true;
+        sync_->held_wait_entered = false;
+    }
+    bool wait_for_held_image(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+        return sync_->wait_cv.wait_for(lock, timeout, [this] { return sync_->held_wait_entered && sync_->wait_hold; });
+    }
     bool deliver_frame = false;
     // What is_guiding() answers: the SDK side of a pulse the driver started.
     bool guiding = false;
@@ -180,6 +191,12 @@ public:
         require_open(h);
         {
             std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+            if (sync_->hold_next_wait) {
+                sync_->hold_next_wait = false;
+                sync_->wait_hold = true;
+                sync_->held_wait_entered = true;
+                sync_->wait_cv.notify_all();
+            }
             sync_->wait_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !sync_->wait_hold; });
         }
         if (!deliver_frame) {
@@ -543,6 +560,8 @@ private:
         std::mutex wait_mutex;
         std::condition_variable wait_cv;
         bool wait_hold = false;
+        bool hold_next_wait = false;
+        bool held_wait_entered = false;
     };
     std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
 
