@@ -3639,10 +3639,11 @@ private:
     }
 
     std::chrono::system_clock::time_point current_utc_time_locked() const {
+        const auto task_now = clock_.now();
         if (!utc_offset_.valid()) {
-            utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
+            utc_offset_.set(std::chrono::system_clock::now(), task_now);
         }
-        return *utc_offset_.current(clock_.now());
+        return utc_offset_.current(task_now).value_or(std::chrono::system_clock::now());
     }
 
     static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,

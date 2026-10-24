@@ -415,7 +415,7 @@ TEST_CASE(
         std::nullopt, alpacacore::vendor::synscan::SynScanAlignmentSetting::Auto, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
-    const std::chrono::system_clock::time_point written{std::chrono::seconds(1800000000)};
+    const std::chrono::system_clock::time_point written{std::chrono::seconds(4102444800)};
     driver->set_utc_date(written);
     CHECK(driver->get_utc_date() == written);
     clock.advance(std::chrono::seconds(90));
@@ -427,7 +427,7 @@ TEST_CASE(
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     const auto after = driver->get_utc_date();
     CHECK(after != written + std::chrono::seconds(90));
-    CHECK(after < written);  // the host/mount clock (2026), not the 2027 client write
+    CHECK(after < written);  // the host/mount clock, not the year-2100 client write
     driver->set_connected(false);
 }
 
