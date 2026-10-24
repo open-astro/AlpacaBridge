@@ -3039,9 +3039,35 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
     driver->set_target_right_ascension(12.0);
     driver->set_target_declination(45.0);
 
+    // A synchronous slew that is wrongly sent waits for the GOTO on the fake clock,
+    // so each call runs on a thread with a real-time bound: a regression fails
+    // here instead of hanging (the thread is released by ending the GOTO).
+    const auto call_bounded = [&](const std::function<void()>& slew) {
+        std::pair<int, std::string> error{-1, ""};
+        std::atomic<bool> done{false};
+        std::thread caller([&] {
+            error = alpaca_error_of(slew);
+            done = true;
+        });
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!done && std::chrono::steady_clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const bool returned = done;
+        if (!returned) {
+            mount->set_status("NpEW180#");  // end the GOTO so the waiting slew returns
+            for (int i = 0; i < 200 && !done; ++i) {
+                clock.advance(std::chrono::milliseconds(250));
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
+        caller.join();
+        CHECK(returned);  // a refused slew returns at once
+        return error;
+    };
     const auto refused_and_left_running = [&](const std::function<void()>& slew, const char* who) {
         mount->clear_log();
-        const auto error = alpaca_error_of(slew);
+        const auto error = call_bounded(slew);
         INFO(error.second);
         CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
         CHECK(error.second == std::string(who) + " is not allowed while a GOTO is running");
