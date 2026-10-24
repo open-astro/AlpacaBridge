@@ -54,7 +54,7 @@ public:
         try {
             count = get_max_switch();
         } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-            // MaxSwitch itself unavailable -- report TimeStamp only.
+            // MaxSwitch itself unavailable -- no operational values can be collected.
         }
         for (int id = 0; id < count; ++id) {
             try {
@@ -72,7 +72,9 @@ public:
                 // Omit this id's members per the DeviceState contract.
             }
         }
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 

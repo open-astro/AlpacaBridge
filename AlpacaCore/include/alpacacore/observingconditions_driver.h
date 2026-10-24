@@ -60,7 +60,9 @@ public:
         add("WindDirection", [this] { return get_wind_direction(); });
         add("WindGust", [this] { return get_wind_gust(); });
         add("WindSpeed", [this] { return get_wind_speed(); });
-        state.push_back({"TimeStamp", device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back({"TimeStamp", device_state_timestamp()});
+        }
         return state;
     }
 
