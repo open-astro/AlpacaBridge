@@ -25,9 +25,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -70,6 +72,19 @@ struct FakeCelestronState {
     std::atomic<int> gate_ms{0};
     std::atomic<Clock::rep> gate_entered{0};
     std::atomic<Clock::rep> gate_left{0};
+    // Failure-stop case: >0 holds the next cancel-GOTO exchange (a stop) this long; reject_goto swallows the GOTO, so
+    // the wrapper times out and the slew body fails.
+    std::atomic<int> stop_gate_ms{0};
+    std::atomic<Clock::rep> stop_gate_entered{0};
+    std::atomic<Clock::rep> stop_gate_left{0};
+    std::atomic<bool> reject_goto{false};
+    void hold_stop() {
+        const int hold = stop_gate_ms.exchange(0);
+        if (hold <= 0) return;
+        stop_gate_entered.store(Clock::now().time_since_epoch().count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+        stop_gate_left.store(Clock::now().time_since_epoch().count());
+    }
     void hold_goto() {
         const int hold = gate_ms.exchange(0);
         if (hold <= 0) return;
@@ -105,6 +120,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                     st->silent.store(true);
                     return "";
                 }
+                if (st->reject_goto.load()) return "";
                 st->hold_goto();
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_seen.store(true);
@@ -113,6 +129,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'L':
                 return st->goto_in_progress() ? "1#" : "0#";
             case 'M':  // cancel goto
+                st->hold_stop();
                 st->cancel_goto_count.fetch_add(1);
                 st->goto_seen.store(false);
                 return "#";
@@ -148,6 +165,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                         st->silent.store(true);
                         return "";
                     }
+                    if (st->reject_goto.load()) return "";
                     st->hold_goto();
                     st->goto_started.store(st->now().time_since_epoch().count());
                     st->goto_seen.store(true);
@@ -652,23 +670,26 @@ struct SupersedeRig {
     std::shared_ptr<FakeCelestronState> st = std::make_shared<FakeCelestronState>();
     std::unique_ptr<alpacacore::test::FakeMountServer> server;
     std::unique_ptr<alpacacore::TelescopeDriver> driver;
-    SupersedeRig() {
+    std::atomic<int> bodies_done{0};  // slew-slot bodies that have returned (counted by the spawn seam)
+    explicit SupersedeRig(int response_timeout_ms = 6000) {
         st->clock = &clock;
         st->tracking_on.store(true);  // a slew needs tracking on
         server = std::make_unique<alpacacore::test::FakeMountServer>(celestron_responder(st));
         REQUIRE(server->ok());
-        driver = make_driver(server->port(), clock, 6000);  // longer than the hold, so the exchange does not time out
+        driver = make_driver(server->port(), clock, response_timeout_ms);  // default: longer than the hold
         REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
         cel::set_status_poll_paused_for_testing(*driver, true);  // the poll sends no position read of its own
     }
-    // The first body the slew slot starts keeps its thread alive kTailMs after the body returned.
+    // The first body the slew slot starts keeps its thread alive tail_ms after the body returned; every body that
+    // returns is counted in bodies_done.
     void keep_first_body_thread_alive(int tail_ms) {
         auto spawns = std::make_shared<std::atomic<int>>(0);
-        cel::set_slew_spawn_for_testing(*driver, [spawns, tail_ms](std::function<void()> body) {
+        cel::set_slew_spawn_for_testing(*driver, [this, spawns, tail_ms](std::function<void()> body) {
             const bool first = spawns->fetch_add(1) == 0;
-            return std::thread([body = std::move(body), first, tail_ms] {
+            return std::thread([this, body = std::move(body), first, tail_ms] {
                 body();
-                if (first) std::this_thread::sleep_for(std::chrono::milliseconds(tail_ms));
+                bodies_done.fetch_add(1);
+                if (first && tail_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(tail_ms));
             });
         });
     }
@@ -714,13 +735,6 @@ long time_second_initiator(const char* name, const std::function<void(alpacacore
 
 }  // namespace
 
-TEST_CASE("Celestron initiator supersede - SlewToCoordinatesAsync does not join the old slew body",
-          "[celestron][telescope][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->slew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
-              [](auto& d) { d.slew_to_coordinates_async(6.5, 25.0); }) < kPastHoldMarginMs);
-}
-
 TEST_CASE("Celestron initiator supersede - MoveAxis does not join the old slew body",
           "[celestron][telescope][initiator-supersede]") {
     CHECK(time_second_initiator(
@@ -733,13 +747,6 @@ TEST_CASE("Celestron initiator supersede - AbortSlew does not join the old slew 
     CHECK(time_second_initiator(
               "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
               [](auto& d) { d.abort_slew(); }) < kPastHoldMarginMs);
-}
-
-TEST_CASE("Celestron initiator supersede - Park does not join the old slew body",
-          "[celestron][telescope][initiator-supersede]") {
-    CHECK(time_second_initiator(
-              "slew->Park", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); }) <
-          kPastHoldMarginMs);
 }
 
 TEST_CASE("Celestron initiator supersede - Unpark does not join the old Park body",
@@ -773,6 +780,7 @@ TEST_CASE("Celestron initiator supersede - disconnect still joins the old slew b
 TEST_CASE("Celestron initiator supersede - a superseded slew body sends nothing after MoveAxis",
           "[celestron][telescope][initiator-supersede]") {
     SupersedeRig rig;
+    rig.keep_first_body_thread_alive(0);
     rig.driver->slew_to_coordinates_async(5.5, 20.0);
     REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
     REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
@@ -784,7 +792,7 @@ TEST_CASE("Celestron initiator supersede - a superseded slew body sends nothing 
         rig.clock.advance(std::chrono::milliseconds(250));
         rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() == 1; }, 5000));  // the old body has returned
     CHECK(rig.st->position_reads.load() == reads);
     CHECK(rig.st->t_count.load() == tracking_writes);
     CHECK(rig.st->goto_count.load() == gotos);
@@ -808,6 +816,212 @@ TEST_CASE("Celestron initiator supersede - a held slew body does not overwrite t
     CHECK(rig.driver->get_target_declination() == Catch::Approx(25.0));
     CHECK(rig.driver->get_slewing());
     CHECK_FALSE(rig.driver->get_at_park());
+}
+
+// ---- A body held after its GOTO exchange (the body hook) ----
+//
+// `start()` joins a body that has already returned, so a tail after the body proves nothing for an initiator that
+// starts a body of its own (a slew, a Park). These cases hold the body itself, inside the hook that runs right after
+// its GOTO exchange, with mutex_ free. An initiator that joins the body cannot return until the hook is released; one
+// that claims the slot returns at once. After the release the body must see that it was Superseded (never Cancelled)
+// and write nothing.
+namespace {
+
+constexpr int kInitiatorReturnMs = 2500;
+
+struct HeldBody {
+    std::mutex m;
+    std::condition_variable cv;
+    bool entered = false;
+    bool released = false;
+    std::atomic<int> reason{-1};  // the body's StopReason once released
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            released = true;
+        }
+        cv.notify_all();
+    }
+    bool wait_entered(int ms) {
+        std::unique_lock<std::mutex> lock(m);
+        return cv.wait_for(lock, std::chrono::milliseconds(ms), [&] { return entered; });
+    }
+    ~HeldBody() { release(); }
+};
+
+// Releases the held body when a case ends early (a failed REQUIRE), so the rig's disconnect cannot hang on it.
+struct ReleaseOnExit {
+    std::shared_ptr<HeldBody> held;
+    ~ReleaseOnExit() { held->release(); }
+};
+
+void hold_slew_body(SupersedeRig& rig, const std::shared_ptr<HeldBody>& held) {
+    cel::set_slew_body_hook_for_testing(*rig.driver, [held](const cel::SlewBodyStopReason& stop_reason) {
+        std::unique_lock<std::mutex> lock(held->m);
+        held->entered = true;
+        held->cv.notify_all();
+        held->cv.wait(lock, [&] { return held->released; });
+        held->reason.store(static_cast<int>(stop_reason()));
+    });
+}
+
+// Runs `first`, waits until its body is held after the GOTO, runs `second` on another thread and checks that it
+// returned while the body was still held; then releases the body and returns what it saw as its stop reason.
+int second_initiator_with_held_body(const std::function<void(alpacacore::TelescopeDriver&)>& first,
+                                    const std::function<void(alpacacore::TelescopeDriver&)>& second, SupersedeRig& rig,
+                                    const std::shared_ptr<HeldBody>& held) {
+    rig.keep_first_body_thread_alive(0);
+    hold_slew_body(rig, held);
+    ReleaseOnExit release_on_exit{held};
+    first(*rig.driver);
+    REQUIRE(held->wait_entered(5000));
+    std::atomic<bool> returned{false};
+    std::atomic<bool> threw{false};
+    std::thread t([&] {
+        try {
+            second(*rig.driver);
+        } catch (...) {
+            threw = true;
+        }
+        returned = true;
+    });
+    const bool in_time = wait_until([&] { return returned.load(); }, kInitiatorReturnMs);
+    CHECK(in_time);  // false: the initiator waited for the body
+    held->release();
+    t.join();
+    CHECK_FALSE(threw.load());
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
+    return held->reason.load();
+}
+
+constexpr int kSuperseded = static_cast<int>(alpacacore::util::StopReason::Superseded);
+
+}  // namespace
+
+TEST_CASE("Celestron initiator supersede - a new slew supersedes the held slew body without joining it",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+                                          [](auto& d) { d.slew_to_coordinates_async(6.5, 25.0); }, rig,
+                                          held) == kSuperseded);
+}
+
+TEST_CASE("Celestron initiator supersede - Park supersedes the held slew body without joining it",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+                                          [](auto& d) { d.park(); }, rig, held) == kSuperseded);
+}
+
+TEST_CASE("Celestron initiator supersede - MoveAxis ends the held slew body Superseded",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+                                          [](auto& d) { d.move_axis(0, 0.5); }, rig, held) == kSuperseded);
+}
+
+TEST_CASE("Celestron initiator supersede - AbortSlew ends the held slew body Superseded",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+                                          [](auto& d) { d.abort_slew(); }, rig, held) == kSuperseded);
+}
+
+TEST_CASE("Celestron initiator supersede - Unpark ends the held Park body Superseded",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.park(); }, [](auto& d) { d.unpark(); }, rig, held) ==
+          kSuperseded);
+}
+
+TEST_CASE("Celestron initiator supersede - AbortSlew ends the held Park body Superseded",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    auto held = std::make_shared<HeldBody>();
+    CHECK(second_initiator_with_held_body([](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }, rig, held) ==
+          kSuperseded);
+}
+
+// ---- The Park body's dispatch writes state around two reads (decision 0006, rule 6) ----
+//
+// do_slew_to_coordinates() reads J and the pier side with mutex_ free, then publishes Slewing, clears the stored
+// errors and sends the GOTO. The dispatch hook sits between the reads and the publish. An initiator that takes the
+// Park over while the body is there owns the state: after the release the body sends no GOTO and leaves Slewing,
+// AtPark and the stored error as the claimer left them.
+namespace {
+
+void park_dispatch_held_then(const std::function<void(alpacacore::TelescopeDriver&)>& takeover) {
+    SupersedeRig rig;
+    rig.keep_first_body_thread_alive(0);
+    auto held = std::make_shared<HeldBody>();
+    ReleaseOnExit release_on_exit{held};
+    cel::set_slew_dispatch_hook_for_testing(*rig.driver, [held] {
+        std::unique_lock<std::mutex> lock(held->m);
+        held->entered = true;
+        held->cv.notify_all();
+        held->cv.wait(lock, [&] { return held->released; });
+    });
+    rig.driver->park();
+    REQUIRE(held->wait_entered(5000));
+    std::atomic<bool> returned{false};
+    std::thread t([&] {
+        try {
+            takeover(*rig.driver);
+        } catch (...) {
+        }
+        returned = true;
+    });
+    CHECK(wait_until([&] { return returned.load(); }, kInitiatorReturnMs));
+    held->release();
+    t.join();
+    REQUIRE(wait_until([&] { return rig.bodies_done.load() >= 1; }, 5000));
+    CHECK(rig.st->goto_count.load() == 0);
+    CHECK_FALSE(rig.driver->get_at_park());
+    bool slewing = true;
+    CHECK_NOTHROW(slewing = rig.driver->get_slewing());  // a stored error would make this throw
+    CHECK_FALSE(slewing);
+}
+
+}  // namespace
+
+TEST_CASE("Celestron initiator supersede - AbortSlew over a Park body in its dispatch keeps its state",
+          "[celestron][telescope][initiator-supersede]") {
+    park_dispatch_held_then([](auto& d) { d.abort_slew(); });
+}
+
+TEST_CASE("Celestron initiator supersede - Unpark over a Park body in its dispatch keeps its state",
+          "[celestron][telescope][initiator-supersede]") {
+    park_dispatch_held_then([](auto& d) { d.unpark(); });
+}
+
+// An Unpark with no park in flight sends nothing and starts nothing, so it claims nothing: a slew body that failed
+// and is inside its stops finishes its own failure, and Slewing reads false once the stops are answered. (An Unpark
+// that superseded the failing body would lose the body's Slewing=false write and leave Slewing true with no owner.)
+TEST_CASE("Celestron initiator supersede - Unpark does not take over a failing slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig(1200);  // the swallowed GOTO times out after 1.2 s; the held stop (0.8 s) is answered in time
+    rig.st->reject_goto.store(true);
+    rig.st->stop_gate_ms.store(800);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->stop_gate_entered.load() != 0; }, 15000));  // the body is in its stop
+    rig.st->reject_goto.store(false);
+    REQUIRE_NOTHROW(rig.driver->unpark());
+    CHECK(rig.st->stop_gate_left.load() == 0);  // returned while the stop was still held: no join
+    REQUIRE(wait_until([&] { return rig.st->stop_gate_left.load() != 0; }, 5000));
+    CHECK(wait_until(
+        [&] {
+            try {
+                return !rig.driver->get_slewing();
+            } catch (...) {
+                return false;
+            }
+        },
+        5000));
 }
 
 // AbortSlew supersedes the Park body, which then leaves the park state alone, so a failed stop must end the park

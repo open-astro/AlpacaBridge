@@ -1123,7 +1123,10 @@ public:
                         parking_ = false;
                     }
                 };
-                hooks.dispatch = [&] { do_slew_to_coordinates(lock, park_ra, park_dec); };
+                hooks.dispatch = [&] {
+                    do_slew_to_coordinates(lock, park_ra, park_dec);
+                    without_lock(lock, [&] { run_slew_body_hook(ctx); });  // test seam, as in the slew body
+                };
                 hooks.poll_slewing = [&] { return poll_hardware_slewing(lock); };
                 hooks.stop_tracking = [&] {
                     without_lock(lock, [] { CelestronProtocolWrapper::instance().set_tracking_mode(0); });
@@ -1720,6 +1723,7 @@ public:
                             } else {
                                 protocol.goto_ra_dec_raw(ra_raw, dec_raw, precise);
                             }
+                            run_slew_body_hook(ctx);  // test seam: the GOTO is out, mutex_ is free
                         });
                     } catch (const std::exception& ex) {
                         // open-astro#575: a reap by a newer initiator or AbortSlew is not a
@@ -2963,6 +2967,17 @@ private:
         }
     }
 
+    void run_slew_body_hook(const util::OperationContext& ctx) const {
+        SlewBodyHook hook;
+        {
+            std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+            hook = slew_body_hook_;
+        }
+        if (hook) {
+            hook([&ctx] { return ctx.stop_reason(); });
+        }
+    }
+
     void run_status_poll_after_sample_hook() {
         std::function<void()> hook;
         {
@@ -3025,6 +3040,11 @@ public:
     void set_slew_dispatch_hook_for_testing(std::function<void()> hook) {
         std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
         slew_dispatch_hook_ = std::move(hook);
+    }
+
+    void set_slew_body_hook_for_testing(SlewBodyHook hook) {
+        std::lock_guard<std::mutex> lock(status_poll_hook_mutex_);
+        slew_body_hook_ = std::move(hook);
     }
 
     void set_status_poll_after_sample_hook_for_testing(std::function<void()> hook) {
@@ -3837,6 +3857,7 @@ private:
     std::function<void()> slewing_read_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> failure_stop_hook_;   // guarded by status_poll_hook_mutex_
     std::function<void()> slew_dispatch_hook_;  // guarded by status_poll_hook_mutex_
+    SlewBodyHook slew_body_hook_;               // guarded by status_poll_hook_mutex_
 };
 
 std::unique_ptr<TelescopeDriver> create_celestron_telescope(
@@ -3896,6 +3917,12 @@ void set_slewing_read_hook_for_testing(TelescopeDriver& driver, std::function<vo
 void set_failure_stop_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook) {
     if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
         celestron->set_failure_stop_hook_for_testing(std::move(hook));
+    }
+}
+
+void set_slew_body_hook_for_testing(TelescopeDriver& driver, SlewBodyHook hook) {
+    if (auto* celestron = dynamic_cast<CelestronTelescopeDriver*>(&driver)) {
+        celestron->set_slew_body_hook_for_testing(std::move(hook));
     }
 }
 
