@@ -329,7 +329,10 @@ public:
     double get_egain(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_egain");
-        return 1.0;
+        if (egain_failure_) {
+            throw alpacacore::AlpacaException("scripted EGAIN read failure", alpacacore::AlpacaError::DriverException);
+        }
+        return egain_;
     }
     int get_heater_power_percent(int camera_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -437,6 +440,16 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         cooler_power_failure_ = fail;
     }
+    // Advertise POA_EGAIN (read by connect through probe_config_caps) and the e-/ADU it answers.
+    void set_egain(double e_per_adu) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        caps_.has_egain = true;
+        egain_ = e_per_adu;
+    }
+    void set_egain_failure(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        egain_failure_ = fail;
+    }
     void set_ready_on_stop_failure(bool ready) { ready_on_stop_failure_ = ready; }
     void set_image_ready(bool ready) {
         ready_on_start_ = ready;
@@ -505,6 +518,8 @@ private:
     bool init_failure_{false};
     bool download_failure_{false};
     bool cooler_power_failure_{false};
+    bool egain_failure_{false};
+    double egain_{1.0};
     bool hold_image_data_{false};
     bool ignore_download_timeout_{false};
     bool hold_start_readback_{false};

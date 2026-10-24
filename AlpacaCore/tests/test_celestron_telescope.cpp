@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "gps_status_check.h"
 #include "sidereal_time_check.h"
 
 #ifndef _WIN32
@@ -787,6 +788,10 @@ struct SnapshotMount {
     std::atomic<bool> p_mute{false};      // the pier-side query goes unanswered
     std::atomic<int> p_count{0};          // pier-side queries received
     std::atomic<int> s_count{0};          // sync and time commands received
+    std::atomic<bool> gps_absent{false};  // no GPS module on the AUX bus: its version probe goes unanswered
+    std::atomic<bool> gps_linked{false};  // GPS_LINKED (0x37) answer
+    std::atomic<int> gps_lat_raw{0};      // GPS_GET_LAT: 24-bit signed fraction of 360 degrees
+    std::atomic<int> gps_long_raw{0};     // GPS_GET_LONG: the same encoding
     std::atomic<int> order{0};            // arrival counter shared by the goto and cancel records below
     std::atomic<int> goto_last{0};        // arrival number of the last goto, GOTO or axis goto-fast (0: none)
     std::atomic<int> cancel_first{0};     // arrival number of the first goto cancel (0: none)
@@ -869,6 +874,15 @@ std::string snapshot_reply(SnapshotMount& st, const std::string& chunk) {
         case 'P': {  // AUX passthrough: P len dev op ...
             const unsigned char op = chunk.size() > 3 ? static_cast<unsigned char>(chunk[3]) : 0;
             const unsigned char device = chunk.size() > 2 ? static_cast<unsigned char>(chunk[2]) : 0;
+            if (device == 0xB0) {  // GPS module (AUX 0xB0)
+                if (op == 0xFE) return st.gps_absent.load() ? std::string() : std::string("\x01\x00#", 3);
+                if (op == 0x37) return std::string(1, st.gps_linked.load() ? '\x01' : '\x00') + "#";
+                if (op == 0x01 || op == 0x02) {
+                    const int raw = (op == 0x01 ? st.gps_lat_raw.load() : st.gps_long_raw.load()) & 0xFFFFFF;
+                    return std::string{static_cast<char>((raw >> 16) & 0xFF), static_cast<char>((raw >> 8) & 0xFF),
+                                       static_cast<char>(raw & 0xFF), '#'};
+                }
+            }
             if (op == 0xFE && device == 0x32) return std::string("\x01\x00#", 3);  // DEC autoguider port probe
             if (op == 0xFE) return std::string("\x00\x00#", 3);                    // absent bus devices
             if (op == 0x26) return "#";                                            // MC_AUX_GUIDE
@@ -2096,3 +2110,97 @@ TEST_CASE("Celestron spec audit - PulseGuide rejects a bad direction or duration
 }
 
 #endif  // _WIN32
+
+#ifndef _WIN32
+namespace {
+
+// 24-bit signed fraction of a full rotation, as the GPS module reports a latitude or longitude.
+int gps_raw_from_degrees(double degrees) {
+    return static_cast<int>(std::lround(degrees / 360.0 * 16777216.0)) & 0xFFFFFF;
+}
+
+}  // namespace
+
+// Issue #1277: Action("gps_status") reads the GPS module over the AUX bus (GPS_LINKED 0x37, then GPS_GET_LAT 0x01
+// and GPS_GET_LONG 0x02): the module's own reading, not the hand controller's stored site.
+TEST_CASE("Celestron snapshot - gps_status reports the GPS module's link and reading",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions() == std::vector<std::string>{"gps_status"});
+    CHECK(driver->can_action("gps_status"));
+    CHECK(driver->can_action("GPS_Status"));  // action names are case-insensitive
+    CHECK(driver->action("GPS_STATUS", "") == driver->action("gps_status", ""));
+    require_alpaca_error([&] { (void)driver->action("other_action", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+
+    SECTION("linked: fix with the module's latitude and longitude") {
+        st->gps_linked = true;
+        st->gps_lat_raw = gps_raw_from_degrees(-33.856784);
+        st->gps_long_raw = gps_raw_from_degrees(151.215297);
+        const std::string reply = driver->action("gps_status", "");
+        CHECK(reply.rfind("{\"fix\":true,", 0) == 0);
+        REQUIRE(alpacacore::test::gps_status_number(reply, "latitude").has_value());
+        // One count of the 24-bit fraction is 2.1e-5 degrees.
+        CHECK(*alpacacore::test::gps_status_number(reply, "latitude") == Catch::Approx(-33.856784).margin(3e-5));
+        CHECK(*alpacacore::test::gps_status_number(reply, "longitude") == Catch::Approx(151.215297).margin(3e-5));
+        CHECK(reply.find("\"elevation\":null") != std::string::npos);
+    }
+    SECTION("not linked: no fix, and no coordinates") {
+        st->gps_linked = false;
+        st->gps_lat_raw = gps_raw_from_degrees(51.477833);
+        st->gps_long_raw = gps_raw_from_degrees(-0.0015);
+        CHECK(driver->action("gps_status", "") ==
+              "{\"fix\":false,\"latitude\":null,\"longitude\":null,\"elevation\":null}");
+    }
+    driver->set_connected(false);
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+}
+
+TEST_CASE("Celestron snapshot - gps_status is not listed once the link is lost", "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+    cel::set_status_poll_paused_for_testing(*driver, true);
+    CHECK(driver->can_action("gps_status"));
+
+    st->mute = true;
+    for (int i = 0; i < 3; ++i) (void)cel::poll_status_now_for_testing(*driver);
+    clock.advance(alpacacore::util::kLinkStalenessBound + std::chrono::seconds(1));
+    (void)cel::poll_status_now_for_testing(*driver);
+    REQUIRE_FALSE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); }, alpacacore::AlpacaError::NotConnected);
+    st->mute = false;
+    driver->set_connected(false);
+}
+
+TEST_CASE("Celestron snapshot - gps_status is not listed on a mount without a GPS module",
+          "[celestron][telescope][snapshot]") {
+    FakeTaskClock clock;
+    auto st = std::make_shared<SnapshotMount>();
+    st->gps_absent = true;
+    alpacacore::test::FakeMountServer server([st](const std::string& c) { return snapshot_reply(*st, c); });
+    REQUIRE(server.ok());
+    auto driver = snapshot_driver(server, clock);
+    REQUIRE(driver->get_connected());
+
+    CHECK(driver->get_supported_actions().empty());
+    CHECK_FALSE(driver->can_action("gps_status"));
+    require_alpaca_error([&] { (void)driver->action("gps_status", ""); },
+                         alpacacore::AlpacaError::ActionNotImplemented);
+    driver->set_connected(false);
+}
+#endif

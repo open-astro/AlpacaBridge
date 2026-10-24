@@ -68,7 +68,6 @@ struct ZWOCameraInfo {
     bool has_shutter{};
     bool has_st4_port{};
     bool has_cooler{};
-    double electrons_per_adu{};
     int bit_depth{};
     /// ASI_CAMERA_INFO.IsUSB3Camera. Defaults true so a caller that builds the struct by hand gets no
     /// USB 2.0 post-download settle wait (the wait is for known USB 2.0 cameras only).
