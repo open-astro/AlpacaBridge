@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <memory>
 #include <string>
@@ -64,6 +65,18 @@ struct FakeCelestronState {
     std::atomic<int> cancel_goto_count{0};
     std::atomic<int> t_count{0};
     std::atomic<int> transactions{0};  // every request the handset received
+    std::atomic<int> position_reads{0};  // every position query (e/E/z/Z)
+    // Initiator supersede cases: >0 holds the next GOTO exchange this long (real time) before it is answered.
+    std::atomic<int> gate_ms{0};
+    std::atomic<Clock::rep> gate_entered{0};
+    std::atomic<Clock::rep> gate_left{0};
+    void hold_goto() {
+        const int hold = gate_ms.exchange(0);
+        if (hold <= 0) return;
+        gate_entered.store(Clock::now().time_since_epoch().count());
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold));
+        gate_left.store(Clock::now().time_since_epoch().count());
+    }
     static constexpr auto kGotoDuration = std::chrono::milliseconds(1500);
     bool goto_in_progress() const {
         if (!goto_seen.load()) return false;
@@ -82,6 +95,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
             case 'E':
             case 'z':
             case 'Z':
+                st->position_reads.fetch_add(1);
                 return "12AB0500,20000500#";  // parseable 16/24-bit position pair
             case 'r':
             case 'R':
@@ -91,6 +105,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                     st->silent.store(true);
                     return "";
                 }
+                st->hold_goto();
                 st->goto_started.store(st->now().time_since_epoch().count());
                 st->goto_seen.store(true);
                 st->goto_count.fetch_add(1);
@@ -103,6 +118,10 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                 return "#";
             case 'J':  // alignment complete (the slew-safety gate requires it)
                 return "1#";
+            case 'w':  // site read: eight binary bytes (a short answer would wait out the response timeout)
+                return std::string(8, '\0') + "#";
+            case 'W':
+                return "#";
             case 'T':  // tracking mode write
                 st->t_count.fetch_add(1);
                 return "#";
@@ -129,6 +148,7 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
                         st->silent.store(true);
                         return "";
                     }
+                    st->hold_goto();
                     st->goto_started.store(st->now().time_since_epoch().count());
                     st->goto_seen.store(true);
                     st->goto_count.fetch_add(1);
@@ -145,12 +165,12 @@ alpacacore::test::FakeMountServer::Responder celestron_responder(std::shared_ptr
     };
 }
 
-alpacacore::vendor::celestron::ConnectionInfo endpoint(int port) {
+alpacacore::vendor::celestron::ConnectionInfo endpoint(int port, int response_timeout_ms = 200) {
     alpacacore::vendor::celestron::ConnectionInfo info;
     info.type = alpacacore::vendor::celestron::ConnectionType::Network;
     info.host = "127.0.0.1";
     info.tcp_port = port;
-    info.response_timeout_ms = 200;
+    info.response_timeout_ms = response_timeout_ms;
     return info;
 }
 
@@ -176,9 +196,10 @@ bool read_slewing_error(alpacacore::TelescopeDriver& driver, std::string* messag
 
 // The driver on a caller-owned task clock, so a case steps its waits with
 // advance() instead of sleeping.
-std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock) {
+std::unique_ptr<alpacacore::TelescopeDriver> make_driver(int port, alpacacore::util::TaskClock& clock,
+                                                         int response_timeout_ms = 200) {
     return alpacacore::vendor::celestron::create_celestron_telescope_with_site(
-        0, endpoint(port), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
+        0, endpoint(port, response_timeout_ms), std::nullopt, std::nullopt, std::nullopt, std::nullopt,
         alpacacore::vendor::celestron::CelestronAlignmentSetting::Auto, clock);
 }
 
@@ -601,6 +622,220 @@ TEST_CASE("Celestron sync slew - uncontended slew returns and runs the tracking 
     CHECK(st->goto_count.load() == 1);
     CHECK(st->t_count.load() > t_before);  // the completion tail restored tracking
     driver->set_connected(false);
+}
+
+// ---- Initiator supersede (decision 0006, "Claim"; upstream #1406) ----
+//
+// A new motion initiator replaces the body in flight instead of cancelling and joining it. The protocol wrapper holds
+// its lock across each exchange, so an initiator that sends a command of its own (MoveAxis, AbortSlew, Unpark, and a
+// slew or Park for their J read) waits out the one exchange in flight whatever the driver does. What it must not wait
+// for is the old body. That cannot be seen from the exchange alone, because a joined body returns right after the
+// held exchange does, so the cases below make the old body's thread outlive its body: the slot's spawn seam runs the
+// body and then sleeps kTailMs. A join waits out that tail; a claim does not. The exchange is held kHoldMs as well,
+// so the cases also cover an old body that is inside the wire when the new initiator arrives.
+namespace cel = alpacacore::vendor::celestron;
+
+namespace {
+
+constexpr int kHoldMs = 800;
+constexpr int kTailMs = 2500;
+// An initiator may wait out the held exchange and its own few commands (the margin covers a slow or sanitized
+// runner), never the old body's tail.
+constexpr long kPastHoldMarginMs = 1200;
+
+long ms_since(Clock::time_point t0) {
+    return static_cast<long>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count());
+}
+
+struct SupersedeRig {
+    alpacacore::test::FakeTaskClock clock;
+    std::shared_ptr<FakeCelestronState> st = std::make_shared<FakeCelestronState>();
+    std::unique_ptr<alpacacore::test::FakeMountServer> server;
+    std::unique_ptr<alpacacore::TelescopeDriver> driver;
+    SupersedeRig() {
+        st->clock = &clock;
+        st->tracking_on.store(true);  // a slew needs tracking on
+        server = std::make_unique<alpacacore::test::FakeMountServer>(celestron_responder(st));
+        REQUIRE(server->ok());
+        driver = make_driver(server->port(), clock, 6000);  // longer than the hold, so the exchange does not time out
+        REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+        cel::set_status_poll_paused_for_testing(*driver, true);  // the poll sends no position read of its own
+    }
+    // The first body the slew slot starts keeps its thread alive kTailMs after the body returned.
+    void keep_first_body_thread_alive(int tail_ms) {
+        auto spawns = std::make_shared<std::atomic<int>>(0);
+        cel::set_slew_spawn_for_testing(*driver, [spawns, tail_ms](std::function<void()> body) {
+            const bool first = spawns->fetch_add(1) == 0;
+            return std::thread([body = std::move(body), first, tail_ms] {
+                body();
+                if (first) std::this_thread::sleep_for(std::chrono::milliseconds(tail_ms));
+            });
+        });
+    }
+    ~SupersedeRig() { driver->set_connected(false); }
+};
+
+// Runs `first`, waits until the fake is inside the held GOTO exchange, then times `second` from another thread.
+// Returns how long `second` took past the end of the hold.
+long time_second_initiator(const char* name, const std::function<void(alpacacore::TelescopeDriver&)>& first,
+                           const std::function<void(alpacacore::TelescopeDriver&)>& second) {
+    SupersedeRig rig;
+    rig.keep_first_body_thread_alive(kTailMs);
+    rig.st->gate_ms.store(kHoldMs);
+    first(*rig.driver);
+    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
+    std::atomic<long> past_hold{-1};
+    std::atomic<bool> threw{false};
+    std::thread t([&] {
+        try {
+            second(*rig.driver);
+        } catch (...) {
+            threw = true;
+        }
+        const auto returned = Clock::now();
+        const auto left = rig.st->gate_left.load();
+        if (left != 0) {
+            past_hold = std::chrono::duration_cast<std::chrono::milliseconds>(returned -
+                                                                              Clock::time_point(Clock::duration(left)))
+                            .count();
+        } else {
+            past_hold = 0;  // returned inside the hold
+        }
+    });
+    t.join();
+    std::printf(
+        "initiator %-16s hold=%d ms, old body thread alive %d ms past its body, returned %ld ms past the hold, "
+        "threw=%d\n",
+        name, kHoldMs, kTailMs, past_hold.load(), threw.load() ? 1 : 0);
+    std::fflush(stdout);
+    CHECK_FALSE(threw.load());
+    return past_hold.load();
+}
+
+}  // namespace
+
+TEST_CASE("Celestron initiator supersede - SlewToCoordinatesAsync does not join the old slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "slew->slew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+              [](auto& d) { d.slew_to_coordinates_async(6.5, 25.0); }) < kPastHoldMarginMs);
+}
+
+TEST_CASE("Celestron initiator supersede - MoveAxis does not join the old slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "slew->MoveAxis", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+              [](auto& d) { d.move_axis(0, 0.5); }) < kPastHoldMarginMs);
+}
+
+TEST_CASE("Celestron initiator supersede - AbortSlew does not join the old slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "slew->AbortSlew", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); },
+              [](auto& d) { d.abort_slew(); }) < kPastHoldMarginMs);
+}
+
+TEST_CASE("Celestron initiator supersede - Park does not join the old slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "slew->Park", [](auto& d) { d.slew_to_coordinates_async(5.5, 20.0); }, [](auto& d) { d.park(); }) <
+          kPastHoldMarginMs);
+}
+
+TEST_CASE("Celestron initiator supersede - Unpark does not join the old Park body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "park->Unpark", [](auto& d) { d.park(); }, [](auto& d) { d.unpark(); }) < kPastHoldMarginMs);
+}
+
+TEST_CASE("Celestron initiator supersede - AbortSlew does not join the old Park body",
+          "[celestron][telescope][initiator-supersede]") {
+    CHECK(time_second_initiator(
+              "park->AbortSlew", [](auto& d) { d.park(); }, [](auto& d) { d.abort_slew(); }) < kPastHoldMarginMs);
+}
+
+// Disconnect keeps cancel-and-join (decision 0006, rules 3 and 5): the body's thread must be gone when it returns.
+TEST_CASE("Celestron initiator supersede - disconnect still joins the old slew body",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.keep_first_body_thread_alive(kTailMs);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    const auto t0 = Clock::now();
+    rig.driver->set_connected(false);
+    CHECK(ms_since(t0) >= kTailMs - 200);
+}
+
+// The new owner's flags survive the old body (decision 0006, rule 6). The old slew body is parked on its first poll
+// wait; once MoveAxis owns the axes the clock steps past the GOTO's end, which would take the old body to its tail:
+// the tracking restore ('T'), the position read and a Slewing flip. A superseded body does none of these. (Passes
+// today too, since the join stops the body before MoveAxis; it guards the claim.)
+TEST_CASE("Celestron initiator supersede - a superseded slew body sends nothing after MoveAxis",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(rig.clock.wait_for_waiters(1, std::chrono::seconds(5)));
+    rig.driver->move_axis(0, 0.5);
+    const int reads = rig.st->position_reads.load();
+    const int tracking_writes = rig.st->t_count.load();
+    const int gotos = rig.st->goto_count.load();
+    for (int i = 0; i < 12; ++i) {  // 3 s of virtual time: past the GOTO and the start grace
+        rig.clock.advance(std::chrono::milliseconds(250));
+        rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CHECK(rig.st->position_reads.load() == reads);
+    CHECK(rig.st->t_count.load() == tracking_writes);
+    CHECK(rig.st->goto_count.load() == gotos);
+}
+
+// A second slew owns the target and the Slewing flag; the first body, held inside its GOTO exchange when the second
+// slew arrived, must not write over them when its exchange returns.
+TEST_CASE("Celestron initiator supersede - a held slew body does not overwrite the next slew's flags",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.st->gate_ms.store(kHoldMs);
+    rig.driver->slew_to_coordinates_async(5.5, 20.0);
+    REQUIRE(wait_until([&] { return rig.st->gate_entered.load() != 0; }, 5000));
+    rig.driver->slew_to_coordinates_async(6.5, 25.0);
+    REQUIRE(wait_until([&] { return rig.st->gate_left.load() != 0; }, 5000));
+    for (int i = 0; i < 4; ++i) {  // the new body's first polls; the old body, if it ran on, would write here
+        rig.clock.advance(std::chrono::milliseconds(250));
+        rig.clock.wait_for_woken_settled(std::chrono::seconds(2));
+    }
+    CHECK(rig.driver->get_target_right_ascension() == Catch::Approx(6.5));
+    CHECK(rig.driver->get_target_declination() == Catch::Approx(25.0));
+    CHECK(rig.driver->get_slewing());
+    CHECK_FALSE(rig.driver->get_at_park());
+}
+
+// AbortSlew supersedes the Park body, which then leaves the park state alone, so a failed stop must end the park
+// itself: nothing is left to complete it (the #1484 review-bot defect A). The link drops once the park GOTO is out,
+// so every stop fails.
+TEST_CASE("Celestron initiator supersede - a failed AbortSlew during a Park ends the park",
+          "[celestron][telescope][initiator-supersede]") {
+    SupersedeRig rig;
+    rig.driver->park();
+    REQUIRE(wait_until([&] { return rig.st->goto_count.load() == 1; }, 5000));
+    REQUIRE(rig.server->drop_connections());
+    rig.st->silent.store(true);  // the reconnect, if the wrapper makes one, gets no answer either
+    const auto code_of = [](const std::function<void()>& call) -> int {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return ex.error_code();
+        } catch (...) {
+            return -1;
+        }
+        return 0;
+    };
+    REQUIRE(code_of([&] { rig.driver->abort_slew(); }) == alpacacore::AlpacaError::DriverException);
+    // A park that is still recorded as in flight refuses a slew with InvalidWhileParked; on the dropped link it fails
+    // on the wire instead.
+    CHECK(code_of([&] { rig.driver->slew_to_coordinates_async(5.5, 20.0); }) !=
+          alpacacore::AlpacaError::InvalidWhileParked);
+    CHECK(code_of([&] { rig.driver->move_axis(0, 0.5); }) != alpacacore::AlpacaError::InvalidWhileParked);
 }
 
 #endif  // !_WIN32
