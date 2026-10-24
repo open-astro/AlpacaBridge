@@ -315,6 +315,7 @@ int main() {
     // exists: null and absent read as absent, a wrong kind or a number that
     // is not a whole int is refused with the field named.
     {
+        // case: raw device config reads treat null as absent and refuse a wrong kind or a non-whole int
         const auto message_of = [](auto&& read) {
             try {
                 read();
