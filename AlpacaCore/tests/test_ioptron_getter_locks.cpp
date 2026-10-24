@@ -8,6 +8,7 @@
 // with an additional permission allowing combination with proprietary
 // device-vendor SDKs. See the LICENSE file in this repository for the full
 // license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // iOptron Connected never waits on a connect (decision 0016, issue #910). The
 // connect holds the driver's state lock across the handshake, so a getter that

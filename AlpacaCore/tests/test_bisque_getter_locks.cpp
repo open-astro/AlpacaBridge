@@ -8,6 +8,7 @@
 // with an additional permission allowing combination with proprietary
 // device-vendor SDKs. See the LICENSE file in this repository for the full
 // license text and the vendor-SDK linking exception, or the license online at:
+// https://www.gnu.org/licenses/agpl-3.0.html
 
 // Bisque Connected takes no lock the connect holds and reads false for as long
 // as Connecting is true (decision 0016, issue #910). Every TheSkyX reply is
