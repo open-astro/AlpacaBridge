@@ -420,8 +420,10 @@ public:
     }
 
     double get_electrons_per_adu() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.electrons_per_adu : 0.0;
+        ensure_connected();
+        // ASI_CAMERA_INFO.ElecPerADU is one static figure; ASCOM wants e-/ADU in the current mode, which follows
+        // gain. The SDK has no per-gain query, so there is no honest value (issue #1277).
+        throw AlpacaException("ElectronsPerADU is not available for ZWO cameras", AlpacaError::PropertyNotImplemented);
     }
 
     double get_exposure_max() const override {
@@ -454,14 +456,10 @@ public:
     }
 
     double get_full_well_capacity() const override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!camera_info_valid_ || camera_info_.electrons_per_adu <= 0.0 || camera_info_.bit_depth <= 0) {
-            return 0.0;
-        }
-        double max_adu = static_cast<double>((1ULL << camera_info_.bit_depth) - 1ULL);
-        // ASIGetCameraProperty's ElecPerADU is already in electrons per ADU;
-        // full well (e-) = e-/ADU * max ADU. No unit scaling.
-        return camera_info_.electrons_per_adu * max_adu;
+        ensure_connected();
+        // The SDK has no full-well field; e-/ADU x max ADU would inherit the static ElecPerADU (see
+        // get_electrons_per_adu), so there is no honest value (issue #1277).
+        throw AlpacaException("FullWellCapacity is not available for ZWO cameras", AlpacaError::PropertyNotImplemented);
     }
 
     int get_gain() const override {
@@ -835,7 +833,7 @@ public:
 
     std::string get_sensor_name() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return camera_info_valid_ ? camera_info_.name : "ZWO Sensor";
+        return camera_info_valid_ ? camera_info_.name : std::string();  // unknown: "" (ICameraV4 SensorName)
     }
 
     SensorType get_sensor_type() const override {

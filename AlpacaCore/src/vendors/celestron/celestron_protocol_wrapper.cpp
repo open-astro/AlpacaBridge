@@ -975,6 +975,43 @@ public:
         return status == 0xFF;
     }
 
+    // One GPS module pass-through read: P chr(1) chr(0xB0) chr(cmd) chr(0) chr(0) chr(0) chr(<reply bytes>).
+    std::string gps_query(int command, int reply_bytes) {
+        std::string cmd;
+        cmd.reserve(8);
+        cmd.push_back('P');
+        cmd.push_back(static_cast<char>(1));
+        cmd.push_back(static_cast<char>(CelestronProtocolWrapper::DEV_GPS));
+        cmd.push_back(static_cast<char>(command));
+        cmd.push_back(static_cast<char>(0));
+        cmd.push_back(static_cast<char>(0));
+        cmd.push_back(static_cast<char>(0));
+        cmd.push_back(static_cast<char>(reply_bytes));
+        std::string response = send_command(cmd, true, 0, reply_bytes);
+        if (response.size() < static_cast<size_t>(reply_bytes)) {
+            throw AlpacaException("Invalid GPS module response", AlpacaError::DriverException);
+        }
+        return response;
+    }
+
+    // 24-bit signed fraction of a full rotation (GPS_GET_LAT / GPS_GET_LONG) to degrees.
+    static double gps_fraction_to_degrees(const std::string& bytes) {
+        int32_t raw = (static_cast<int32_t>(static_cast<unsigned char>(bytes[0])) << 16) |
+                      (static_cast<int32_t>(static_cast<unsigned char>(bytes[1])) << 8) |
+                      static_cast<int32_t>(static_cast<unsigned char>(bytes[2]));
+        if (raw & 0x800000) raw -= 0x1000000;
+        return static_cast<double>(raw) / 16777216.0 * 360.0;
+    }
+
+    CelestronProtocolWrapper::GpsReading get_gps_reading() {
+        CelestronProtocolWrapper::GpsReading reading;
+        reading.linked = (static_cast<unsigned char>(gps_query(0x37, 1)[0]) == 1);
+        if (!reading.linked) return reading;
+        reading.latitude_degrees = gps_fraction_to_degrees(gps_query(0x01, 3));
+        reading.longitude_degrees = gps_fraction_to_degrees(gps_query(0x02, 3));
+        return reading;
+    }
+
     uint32_t get_mc_position(int axis) {
         // MC_GET_POSITION (0x01): P chr(1) chr(dev) chr(0x01) chr(0) chr(0) chr(0) chr(3)
         // Response: 3 bytes = 24-bit encoder position as fraction of full rotation.
@@ -1791,6 +1828,8 @@ int CelestronProtocolWrapper::pec_get_bin() {
 bool CelestronProtocolWrapper::is_slew_done(int axis) {
     return pimpl_->is_slew_done(axis);
 }
+
+CelestronProtocolWrapper::GpsReading CelestronProtocolWrapper::get_gps_reading() { return pimpl_->get_gps_reading(); }
 
 uint32_t CelestronProtocolWrapper::get_mc_position(int axis) {
     return pimpl_->get_mc_position(axis);
