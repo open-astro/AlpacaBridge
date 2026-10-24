@@ -258,6 +258,7 @@ function resetDeviceForm() {
     }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
+    keepVendor = '';
     updateVendorOptions();
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
@@ -267,7 +268,6 @@ function resetDeviceForm() {
     if (messageDiv) {
         messageDiv.style.display = 'none';
     }
-    keepVendor = '';
     ensureCatalog();
 }
 

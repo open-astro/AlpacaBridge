@@ -305,6 +305,15 @@ test('startEditDevice awaits the catalog before it fills the form, and fills not
     assert.ok(wait.index < body.indexOf("setFormValue('vendor'"), 'startEditDevice fills the vendor before the catalog');
 });
 
+test('startEditDevice keeps the edited vendor offered, and resetDeviceForm clears it before the options are rebuilt', () => {
+    const edit = functionBody(app, 'startEditDevice');
+    assert.match(edit, /keepVendor = vendor;/);
+    assert.ok(edit.indexOf('keepVendor = vendor;') < edit.indexOf('updateVendorOptions()'), 'keepVendor is set after the options are built');
+    const reset = functionBody(app, 'resetDeviceForm');
+    assert.match(reset, /keepVendor = '';/);
+    assert.ok(reset.indexOf("keepVendor = '';") < reset.indexOf('updateVendorOptions()'), 'keepVendor is cleared after the options are built');
+});
+
 test('the edit click handler awaits startEditDevice', () => {
     assert.match(app, /^ {4}await startEditDevice\(device\);$/m);
     assert.doesNotMatch(app, /^ *startEditDevice\(/m, 'a startEditDevice() call that is not awaited');
