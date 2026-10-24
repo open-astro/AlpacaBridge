@@ -3063,6 +3063,7 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
         refused_and_left_running([&]() { driver->slew_to_coordinates_async(13.0, 40.0); }, "SlewToCoordinatesAsync");
         refused_and_left_running([&]() { driver->slew_to_target_async(); }, "SlewToTargetAsync");
         refused_and_left_running([&]() { driver->slew_to_coordinates(13.0, 40.0); }, "SlewToCoordinates");
+        refused_and_left_running([&]() { driver->slew_to_target(); }, "SlewToTarget");
         CHECK(driver->get_slewing());
     }
 
@@ -3142,9 +3143,11 @@ TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason",
     };
     for (const Case& c : {Case{"1", alpacacore::AlpacaError::InvalidOperation, "below the horizon limit"},
                           Case{"2", alpacacore::AlpacaError::InvalidOperation, "above the overhead limit"},
+                          Case{"3", alpacacore::AlpacaError::InvalidOperation, "in standby"},
                           Case{"4", alpacacore::AlpacaError::InvalidWhileParked, "the mount is parked"},
                           Case{"5", alpacacore::AlpacaError::InvalidOperation, "the mount stopped it"},
                           Case{"6", alpacacore::AlpacaError::InvalidOperation, "outside the limits"},
+                          Case{"7", alpacacore::AlpacaError::InvalidOperation, "a hardware fault"},
                           Case{"8", alpacacore::AlpacaError::InvalidOperation, "already moving"},
                           Case{"9", alpacacore::AlpacaError::InvalidOperation, "an unspecified error"}}) {
         mount->set_ms_reply(c.reply);
