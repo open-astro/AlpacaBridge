@@ -731,16 +731,18 @@ public:
     }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure duration not set", AlpacaError::ValueNotSet);
+            throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
         }
         return last_exposure_duration_;
     }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         if (!last_exposure_valid_) {
-            throw AlpacaException("Last exposure start time not set", AlpacaError::ValueNotSet);
+            throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
         }
         return last_exposure_start_;
     }

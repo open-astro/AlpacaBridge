@@ -13,6 +13,7 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
+#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/qhy/qhy_camera_driver.h>
@@ -983,19 +984,15 @@ public:
     }
 
     double get_last_exposure_duration() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("No exposure has been taken", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_duration_;
+        return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!last_exposure_valid_) {
-            throw AlpacaException("No exposure has been taken", AlpacaError::ValueNotSet);
-        }
-        return last_exposure_start_;
+        return published_exposure_.start_time();
     }
 
     int get_max_adu() const override {
@@ -1810,6 +1807,7 @@ public:
                         alpacacore::util::validate_image_shape(expected_shape);
                         exposure_status_ = QHYExposureStatus::Success;
                         image_ready_ = true;
+                        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
                     } catch (const std::exception& e) {
                         exposure_status_ = QHYExposureStatus::Failed;
                         exposure_failure_ = e.what();
@@ -1945,6 +1943,9 @@ private:
     double last_exposure_duration_;
     std::chrono::system_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
+    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
+    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    util::LastExposure published_exposure_;
     std::thread exposure_thread_;
     // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
     // (stop_exposure). Join racing the spawn's thread-assignment is UB on
@@ -2177,6 +2178,7 @@ private:
         last_exposure_duration_ = 0.0;
         last_exposure_start_    = std::chrono::system_clock::time_point{};
         last_exposure_valid_    = false;
+        published_exposure_.clear();
         exposure_buffer_.clear();
         exposure_width_    = 0;
         exposure_height_   = 0;
