@@ -1081,8 +1081,9 @@ jobs:
   conformu-fake:
     # Hardware-free ConformU: the Sky-Watcher driver over FakeSkyWatcherMount,
     # served by the test-only fake_skywatcher_server (not installed or packaged).
-    # The report is a CI artifact (Fake-Linux-arm64.txt, "FAKE REPORT:" first line);
-    # a committed copy comes in a follow-up commit. It is never hardware validation.
+    # The report is a CI artifact (Fake-Linux-arm64.txt, "FAKE REPORT:" first line)
+    # and a copy is committed under AlpacaCore/conformu/SkyWatcher/Fake/. It is never
+    # hardware validation.
     name: ConformU against the fake Sky-Watcher mount (arm64)
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
