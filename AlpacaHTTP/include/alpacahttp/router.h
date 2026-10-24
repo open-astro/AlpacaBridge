@@ -52,6 +52,8 @@
 
 namespace alpacahttp {
 
+class DeviceCall;  // src/http/device_call.h: one Device API call, built per request
+
 struct RouteMatch {
     std::string device_type;
     std::uint32_t device_number = 0;
@@ -290,13 +292,8 @@ private:
     Response handle_device(const Request& request, const RouteMatch& match, std::uint32_t server_tx_id);
     
     // Dispatch device method calls
-    Response dispatch_device_method(
-        std::shared_ptr<alpacacore::AlpacaDriver> device,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_device_method(std::shared_ptr<alpacacore::AlpacaDriver> device, const std::string& method_name,
+                                    const DeviceCall& call);
 
     // open-astro#274: where a device config came from decides what a failed
     // validation rule means. A config arriving over
@@ -327,85 +324,36 @@ private:
     nlohmann::json build_description_payload() const;
     
     // Dispatch telescope-specific method calls
-    Response dispatch_telescope_method(
-        std::shared_ptr<alpacacore::TelescopeDriver> telescope,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_telescope_method(std::shared_ptr<alpacacore::TelescopeDriver> telescope,
+                                       const std::string& method_name, const DeviceCall& call);
 
-    Response dispatch_camera_method(
-        std::shared_ptr<alpacacore::CameraDriver> camera,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_camera_method(std::shared_ptr<alpacacore::CameraDriver> camera, const std::string& method_name,
+                                    const DeviceCall& call);
 
-    Response dispatch_switch_method(
-        std::shared_ptr<alpacacore::SwitchDriver> sw,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_switch_method(std::shared_ptr<alpacacore::SwitchDriver> sw, const std::string& method_name,
+                                    const DeviceCall& call);
 
-    Response dispatch_filterwheel_method(
-        std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_filterwheel_method(std::shared_ptr<alpacacore::FilterWheelDriver> filterwheel,
+                                         const std::string& method_name, const DeviceCall& call);
 
-    Response dispatch_focuser_method(
-        std::shared_ptr<alpacacore::FocuserDriver> focuser,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_focuser_method(std::shared_ptr<alpacacore::FocuserDriver> focuser, const std::string& method_name,
+                                     const DeviceCall& call);
 
-    Response dispatch_rotator_method(
-        std::shared_ptr<alpacacore::RotatorDriver> rotator,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_rotator_method(std::shared_ptr<alpacacore::RotatorDriver> rotator, const std::string& method_name,
+                                     const DeviceCall& call);
 
-    Response dispatch_dome_method(
-        std::shared_ptr<alpacacore::DomeDriver> dome,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_dome_method(std::shared_ptr<alpacacore::DomeDriver> dome, const std::string& method_name,
+                                  const DeviceCall& call);
 
-    Response dispatch_covercalibrator_method(
-        std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_covercalibrator_method(std::shared_ptr<alpacacore::CoverCalibratorDriver> covercalibrator,
+                                             const std::string& method_name, const DeviceCall& call);
 
     Response dispatch_observingconditions_method(
-        std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+        std::shared_ptr<alpacacore::ObservingConditionsDriver> observingconditions, const std::string& method_name,
+        const DeviceCall& call);
 
-    Response dispatch_safetymonitor_method(
-        std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
-        const std::string& method_name,
-        const Request& request,
-        std::uint32_t client_tx_id,
-        std::uint32_t server_tx_id
-    );
+    Response dispatch_safetymonitor_method(std::shared_ptr<alpacacore::SafetyMonitorDriver> safetymonitor,
+                                           const std::string& method_name, const DeviceCall& call);
 
     // Per-client Connected tracking (issue #160). Alpaca allows several
     // clients to share one device (imaging app + guider on the same mount);
