@@ -695,6 +695,24 @@ function mayAbortCalibration(state) {
     return state === 'calibrating';
 }
 
+// A fresh CalibrationStatus answer, read just before AbortCalibration is sent,
+// must still say "Calibrating"; a cached state is not enough.
+function mayAbortFromStatus(value) {
+    return mayAbortCalibration(parseCalibrationStatus(value));
+}
+
+// Whether to schedule another status read. One failed read during a run keeps
+// the poll going (Abort stays hidden meanwhile); a failure after any other
+// state ends it.
+function keepPollingCalibration(lastGoodState, nextState, failed) {
+    if (failed) return lastGoodState === 'calibrating';
+    return isCalibrationRunning(nextState);
+}
+
+function calibrationStatusClass(state) {
+    return state === 'not-calibrated' ? 'calibration-status calibration-status-warn' : 'calibration-status';
+}
+
 function mayStartCalibration(state) {
     return state === 'calibrated' || state === 'not-calibrated';
 }
@@ -740,6 +758,7 @@ if (typeof module !== 'undefined' && module.exports) {
                         thermalCameraOptions, thermalCameraSelection, thermalCameraHint,
                         deviceSettingShown,
                        showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
-                       mayAbortCalibration, mayStartCalibration, calibrationStatusText, calibrationHint,
+                       mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,
+                       mayStartCalibration, calibrationStatusText, calibrationHint,
                        calibrationConfirmText, calibrationActionBody };
 }

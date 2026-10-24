@@ -92,3 +92,37 @@ test('app.js uses the generic focuser action route and guards Abort and polling'
     assert.ok(app.includes('if (inFlight) return;'));
     assert.ok(app.includes('if (!box.isConnected) return;'));
 });
+
+const css = fs.readFileSync(path.join(__dirname, '..', '..', 'web', 'style.css'), 'utf8');
+
+test('collapsing a card hides info, settings, actions and calibration controls', () => {
+    const rule = css.match(/((?:\.device-card\.collapsed [^{,]+,\s*)+\.device-card\.collapsed [^{,]+)\{([^}]*)\}/);
+    assert.ok(rule, 'collapsed rule present');
+    for (const sel of ['.device-info', '.device-settings', '.device-actions', '.calibration-controls']) {
+        assert.ok(rule[1].includes('.device-card.collapsed ' + sel), sel);
+    }
+    assert.match(rule[2], /display:\s*none/);
+    assert.doesNotMatch(css, /(^|\n)\.device-actions\s*\{[^}]*display:\s*none/);
+});
+
+test('a failed status read keeps polling only during a run', () => {
+    assert.equal(f.keepPollingCalibration('calibrating', 'unknown', true), true);
+    assert.equal(f.keepPollingCalibration('calibrated', 'unknown', true), false);
+    assert.equal(f.keepPollingCalibration('unknown', 'unknown', true), false);
+    assert.equal(f.keepPollingCalibration('unknown', 'calibrating', false), true);
+    assert.equal(f.keepPollingCalibration('calibrating', 'calibrated', false), false);
+});
+
+test('Abort is sent only when a fresh status read says Calibrating', () => {
+    assert.equal(f.mayAbortFromStatus('Calibrating'), true);
+    for (const v of ['Calibrated', 'NotCalibrated', 'junk', undefined, null]) {
+        assert.equal(f.mayAbortFromStatus(v), false);
+    }
+    assert.ok(app.includes("mayAbortFromStatus(await calibrationAction(deviceNumber, 'CalibrationStatus'))"));
+});
+
+test('the Not calibrated status line has a warning tint', () => {
+    assert.match(f.calibrationStatusClass('not-calibrated'), /calibration-status-warn/);
+    assert.equal(f.calibrationStatusClass('calibrated'), 'calibration-status');
+    assert.match(css, /\.calibration-status-warn\s*\{[^}]*var\(--warn\)/);
+});

@@ -695,12 +695,14 @@ function initCalibrationControls(box) {
     const startBtn = box.querySelector('.btn-calibrate');
     const abortBtn = box.querySelector('.btn-abort-calibration');
     let state = 'unknown';
+    let lastGoodState = 'unknown';
     let timer = null;
     let inFlight = false;
     let busy = false;
 
     const render = (errorText) => {
         statusEl.textContent = calibrationStatusText(state, errorText);
+        statusEl.className = calibrationStatusClass(state);
         hintEl.textContent = calibrationHint(state);
         startBtn.disabled = busy || !mayStartCalibration(state);
         abortBtn.hidden = !mayAbortCalibration(state);
@@ -718,17 +720,20 @@ function initCalibrationControls(box) {
         if (!box.isConnected) return;
         inFlight = true;
         let errorText = '';
+        let failed = false;
         try {
             state = parseCalibrationStatus(await calibrationAction(deviceNumber, 'CalibrationStatus'));
+            lastGoodState = state;
         } catch (e) {
             state = 'unknown';
+            failed = true;
             errorText = e.message || String(e);
         } finally {
             inFlight = false;
         }
         if (!box.isConnected) return;
         render(errorText);
-        if (isCalibrationRunning(state)) {
+        if (keepPollingCalibration(lastGoodState, state, failed)) {
             timer = setTimeout(refresh, CALIBRATION_POLL_MS);
         }
     };
@@ -758,9 +763,27 @@ function initCalibrationControls(box) {
         if (!window.confirm(calibrationConfirmText())) return;
         act('Calibrate');
     });
-    abortBtn.addEventListener('click', () => {
+    abortBtn.addEventListener('click', async () => {
         if (!mayAbortCalibration(state)) return;
-        act('AbortCalibration');
+        // Read the status again: the cached state can be 2 s old.
+        busy = true;
+        render('');
+        stop();
+        while (inFlight) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        let stillRunning = false;
+        try {
+            stillRunning = mayAbortFromStatus(await calibrationAction(deviceNumber, 'CalibrationStatus'));
+        } catch (e) {
+            stillRunning = false;
+        }
+        if (!stillRunning) {
+            busy = false;
+            await refresh();
+            return;
+        }
+        await act('AbortCalibration');
     });
     render('');
     refresh();
