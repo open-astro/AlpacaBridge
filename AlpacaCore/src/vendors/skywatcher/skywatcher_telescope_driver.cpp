@@ -3062,7 +3062,6 @@ private:
     // running, initialized) while the driver reported Slewing false, and no
     // ":K" was sent anywhere in the relink.
     void adopt_surviving_motion_locked(StateLock& lock, const AxisStatus (&entry_status)[2]) {
-        (void)lock;  // held by the caller for the whole connect
         const auto lost_at = protocol_->consume_link_lost_at();
         const auto now = clock_.now();
         // A stop is only justified when we have POSITIVE evidence of a long,
@@ -3084,11 +3083,10 @@ private:
             lost_at.has_value() && (now - *lost_at) >= detail::relink_motion_preserve_window();
 
         // ONE budget for the whole stop-and-confirm phase, not one per axis.
-        // Both axes can take the stopping branch, and this all runs under the
-        // connect's lock -- which get_connected() also takes -- so a per-axis
-        // timeout made the worst case two full timeouts of blocking inside
-        // set_connected(true), overrunning the client's Connect() budget and
-        // stalling every Connected poll meanwhile (review of #553). Whichever
+        // Both axes can take the stopping branch, and this all runs inside
+        // the connect, so a per-axis timeout made the worst case two full
+        // timeouts of blocking inside set_connected(true), overrunning the
+        // client's Connect() budget (review of #553). Whichever
         // axis is confirmed second gets whatever remains; its ":K" is sent
         // regardless, since only the confirmation is bounded here.
         const auto stop_confirm_deadline = clock_.now() + kConnectStopConfirmBudget;
@@ -3170,7 +3168,7 @@ private:
                 message += where;
                 message += " still running and nobody in control; stopping it";
                 ALPACA_LOG_WARN("SkyWatcher", message);
-                stop_surviving_axis_locked(channel, stop_confirm_deadline);
+                stop_surviving_axis_locked(lock, channel, stop_confirm_deadline);
             }
         }
     }
@@ -3180,7 +3178,12 @@ private:
     // @p deadline is the caller's budget for the whole stop-confirm phase and
     // is SHARED with the other axis, so this must never extend it: the stop
     // itself always goes out, only the waiting for rest is bounded.
-    void stop_surviving_axis_locked(int channel, std::chrono::steady_clock::time_point deadline) {
+    //
+    // The sleeps between polls run with the state lock released (decision 0016
+    // rule 1): the connect still holds the transition and I/O locks, so no
+    // other mutator can run in the gap, and a getter reads NotConnected
+    // (session_connecting_) instead of waiting for up to the whole budget.
+    void stop_surviving_axis_locked(StateLock& lock, int channel, std::chrono::steady_clock::time_point deadline) {
         const Wire protocol = wire();
         try {
             protocol.stop_motion(channel);
@@ -3201,7 +3204,9 @@ private:
                 message += e.what();
                 ALPACA_LOG_TRACE("SkyWatcher", message);
             }
+            lock.unlock();
             clock_.sleep_for(std::chrono::milliseconds(50));
+            lock.lock();
         }
         // The stop was sent and accepted; we simply ran out of the shared
         // connect budget before seeing it come to rest. Say both halves, so

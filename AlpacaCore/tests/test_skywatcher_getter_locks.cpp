@@ -29,6 +29,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -36,8 +37,10 @@
 
 #include "catch2_compat.h"
 #include "fake_skywatcher_mount.h"
+#include "fake_task_clock.h"
 
 namespace sw = alpacacore::vendor::skywatcher;
+using alpacacore::test::FakeMountProfile;
 using alpacacore::test::FakeSkyWatcherMount;
 
 namespace {
@@ -367,6 +370,76 @@ TEST_CASE("SkyWatcher getters - an auto-detect scan on the connect holds up no s
     connecting.join();
     CHECK(driver->get_connected());
     driver->set_connected(false);
+}
+
+namespace {
+// Reports the link as lost an hour ago on the driver's task clock, so a reconnect takes the stop branch.
+class LongOutageWrapper : public sw::SkyWatcherProtocolWrapper {
+public:
+    explicit LongOutageWrapper(const alpacacore::test::FakeTaskClock& clock) : clock_(clock) {}
+    std::optional<std::chrono::steady_clock::time_point> consume_link_lost_at() override {
+        return clock_.now() - std::chrono::hours(1);
+    }
+
+private:
+    const alpacacore::test::FakeTaskClock& clock_;
+};
+}  // namespace
+
+TEST_CASE("SkyWatcher getters - the connect's stop-confirm wait holds up no state getter",
+          "[skywatcher][getter-locks]") {
+    // A reconnect after a long outage finds RA still running, stops it and sleeps 50 ms on the task clock between
+    // polls of the axis. The clock is held, so that sleep lasts 300 ms of wall time: the state lock must be free
+    // for all of it, and Slewing, Tracking and AtPark (which read it) answer NotConnected at once.
+    alpacacore::test::FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto first = sw::create_skywatcher_telescope(0, endpoint(mount), kSiteLatitude, kSiteLongitude, kSiteElevation,
+                                                 {}, {}, clock);
+    first->set_connected(true);
+    first->set_tracking(true);
+    for (int i = 0; i < 300 && !mount.axis_running(1); ++i) {
+        std::this_thread::sleep_for(milliseconds(10));
+    }
+    REQUIRE(mount.axis_running(1));
+    mount.set_stop_ramp_ms(60000);  // the axis never reports at rest within the connect's budget
+
+    auto second = sw::create_skywatcher_telescope(0, endpoint(mount), kSiteLatitude, kSiteLongitude, kSiteElevation,
+                                                  std::make_unique<LongOutageWrapper>(clock), {}, clock);
+    std::atomic<bool> done{false};
+    std::thread connecting([&] {
+        second->set_connected(true);
+        done = true;
+    });
+    // `first`'s status poller is one waiter; the connect's sleep is the second.
+    REQUIRE(clock.wait_for_waiters(2, milliseconds(5000)));
+    // Release the clock 300 ms from now, so a getter stuck behind the sleeping connect pays that much.
+    std::thread ticker([&] {
+        std::this_thread::sleep_for(milliseconds(300));
+        while (!done) {
+            clock.advance(milliseconds(50));
+            std::this_thread::sleep_for(milliseconds(2));
+        }
+    });
+    const std::vector<Getter> state_getters = {
+        {"Slewing", [](auto& d) { (void)d.get_slewing(); }},
+        {"Tracking", [](auto& d) { (void)d.get_tracking(); }},
+        {"AtPark", [](auto& d) { (void)d.get_at_park(); }},
+    };
+    for (const auto& g : state_getters) {
+        const auto start = steady_clock::now();
+        try {
+            g.read(*second);
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch): only the wait is timed
+        }
+        const auto spent = std::chrono::duration_cast<milliseconds>(steady_clock::now() - start);
+        INFO(g.name << " took " << spent.count() << " ms during the stop-confirm sleep");
+        CHECK(spent < kGetterBudget);
+    }
+    connecting.join();
+    ticker.join();
+    second->set_connected(false);
+    first->set_connected(false);
 }
 
 #endif  // !_WIN32

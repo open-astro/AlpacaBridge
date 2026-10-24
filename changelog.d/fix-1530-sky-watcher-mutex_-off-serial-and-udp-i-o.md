@@ -5,4 +5,4 @@
 - **Sky-Watcher instructions and the `get_connected()` roster** (docs, issue #1530): the lock order and the `StateLock`/`Wire` rule are written down in `skywatcher.instructions.md`, and Sky-Watcher leaves the blocking `get_connected()` list in `async_connectable.h` and `scripts/check_docs_drift.py`.
 
 ### Added (tests)
-- **Sky-Watcher getter timing** (issue #1530): `test_skywatcher_getter_locks.cpp` times eleven getters against SetPark, Park, FindHome, Sync, SetTracking a connect on the wire and an auto-detect scan of 1 s (each under 100 ms; replies held 300 ms), and races `SiteLongitude` and `UTCDate` writes against `SiderealTime` and `UTCDate` reads (`[stress-guard]`, run under TSan in CI).
+- **Sky-Watcher getter timing** (issue #1530): `test_skywatcher_getter_locks.cpp` times eleven getters against SetPark, Park, FindHome, Sync, SetTracking, a connect on the wire, an auto-detect scan of 1 s and the connect's stop-confirm sleep (each under 100 ms; replies held 300 ms), and races `SiteLongitude` and `UTCDate` writes against `SiderealTime` and `UTCDate` reads (`[stress-guard]`, run under TSan in CI).
