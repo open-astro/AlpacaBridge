@@ -1,0 +1,8 @@
+### Fixed
+- **Sky-Watcher telescope: getters no longer wait behind a Park, FindHome, goto, Sync or SetPark** (AlpacaCore, issue #1530): every exchange with the motor board now runs with the driver state lock free, under a per-command operation lock that stays in the same order as the SynScan, Celestron and Bisque slices (`transition_mutex_`, then `io_mutex_`, then `mutex_` as a leaf). `Connected`, `SiteLatitude`, `SiteLongitude`, `SiderealTime` and `UTCDate` take no driver lock at all; `SiderealTime` and `UTCDate` read the client UTCDate offset and the site longitude from one snapshot, so a concurrent write is seen whole or not at all. While a connect is on the wire, including an auto-detect port or host scan, a getter now reads `NotConnected` (`Connected` false) at once instead of waiting for it. Park, FindHome, goto and Sync behave as before.
+
+### Changed (docs)
+- **Sky-Watcher instructions and the `get_connected()` roster** (docs, issue #1530): the lock order and the `StateLock`/`Wire` rule are written down in `skywatcher.instructions.md`, and Sky-Watcher leaves the blocking `get_connected()` list in `async_connectable.h` and `scripts/check_docs_drift.py`.
+
+### Added (tests)
+- **Sky-Watcher getter timing** (issue #1530): `test_skywatcher_getter_locks.cpp` times eleven getters against SetPark, Park, FindHome, Sync, SetTracking, a connect on the wire, an auto-detect scan of 1 s and the connect's stop-confirm sleep (each under 100 ms; replies held 300 ms), and races `SiteLongitude` and `UTCDate` writes against `SiderealTime` and `UTCDate` reads (`[stress-guard]`, run under TSan in CI).

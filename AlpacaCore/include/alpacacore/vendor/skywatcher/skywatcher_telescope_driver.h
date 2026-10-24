@@ -102,7 +102,7 @@ bool host_clock_stepped(std::chrono::system_clock::duration system_elapsed,
 //
 // `offset_survives` folds in both "an offset was written" and "the host clock
 // has not been stepped since", because the caller's
-// client_offset_survives_locked() already answers exactly that and the two
+// client_offset_survives() already answers exactly that and the two
 // can never disagree at the call site.
 bool pointing_uses_client_offset(bool offset_survives, bool host_was_synchronized);
 }  // namespace detail
@@ -158,6 +158,12 @@ void set_status_poll_paused_for_testing(TelescopeDriver& driver, bool paused);
 /// window. Pass an empty function to clear it, and release anything the hook
 /// blocks on before the driver is destroyed.
 void set_status_poll_after_sample_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
+
+/// Test seam: `hook` runs on the thread that changes the RA rate, in the window
+/// where it has released the driver locks and not yet started the rate-applied
+/// check, so a case can land a disconnect and a reconnect before the check body
+/// starts. Pass an empty function to clear it.
+void set_rate_verify_before_start_hook_for_testing(TelescopeDriver& driver, std::function<void()> hook);
 
 /// Endpoint resolved at connect time by `connection_resolver` (#659); the
 /// auto-detect factory below wraps it, tests inject a fake's endpoint.

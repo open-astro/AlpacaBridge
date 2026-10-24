@@ -54,7 +54,7 @@ datagrams before each send so replies cannot get off-by-one.
   move by mechanical counts and never call it. Their gotos skip RA backlash compensation
   until the site is known (`dispatch_goto_locked()`), since the RA approach side reads
   the hemisphere. A new call site of `hemisphere_south_locked()` or
-  `site_longitude_` in a public member must call it. A config **already on disk** is
+  `local_sidereal_hours()` (which reads the longitude) in a public member must call it. A config **already on disk** is
   registered anyway, with a WARN, and left for those refusals: a device dropped at startup never enters
   the registry, so `configureddevices` cannot list it and the web UI offers no way to edit
   the entry that is at fault. That asymmetry is the rule for any new validation in
@@ -85,7 +85,7 @@ datagrams before each send so replies cannot get off-by-one.
   hemisphere-independent, which is one of #432's findings; the mechanical branch is
   `k * side` and mirrors with the hemisphere only on a board with a measured sense (#458).
   Time comes from one function ([decision 0001](../../docs/decisions/0001-skywatcher-pointing-clock.md),
-  #1472): `utc_now_locked()` feeds the `UTCDate` readback and every LST computation (pointing,
+  #1472): `utc_now()` feeds the `UTCDate` readback and every LST computation (pointing,
   `SiderealTime`, pier side, gotos), so a client can explain `SiderealTime` from its own
   `UTCDate` and `SiteLongitude` reads. On a host the kernel reports NTP-disciplined
   (`detail::host_synchronized_probe()`, one `adjtimex` read) a `UTCDate` write throws
@@ -302,6 +302,23 @@ datagrams before each send so replies cannot get off-by-one.
   that is served. A test that rendezvouses with a task on a `FakeTaskClock` counts the poll as
   one waiter that is always parked (`kPollerWaiter`), or pauses it with
   `set_status_poll_paused_for_testing()`.
+- **Locks: getters never wait on the wire** ([decision 0016](../../docs/decisions/0016-getters-never-wait-on-device-io.md),
+  #1530). Order: `transition_mutex_` (`set_connected()` against `set_connected()`; no getter takes it) -> `io_mutex_`
+  (the operation lock) -> `mutex_` (the state lock, a leaf) -> the protocol wrapper's own lock. Every member that
+  reaches the board holds `io_mutex_` for the whole command through a `StateLock` (Mode::Io, the default), which
+  also holds `mutex_`; its `unlock()` releases both, so the places that let other commands in (a sleep, a join)
+  are unchanged. Every exchange goes through `Wire` (`wire()`), which drops `mutex_` for the call and takes it back
+  after, so `mutex_` is never held across serial or UDP I/O and the multi-step sequences stay together under
+  `io_mutex_`. A getter takes `mutex_` alone (`StateLock::Mode::State`) or nothing: `Connected`, `SiteLatitude`
+  (an atomic like `SiteElevation`), `SiteLongitude`, `SiderealTime` and `UTCDate` never touch `mutex_`. The last
+  three read `client_clock_`, one leaf-locked snapshot of the client UTCDate offset (with its anchors and
+  discipline flags) and the site longitude, so a read sees the old state or the new one, never an old offset with a
+  new longitude; the setters write it under `io_mutex_` and `mutex_` too. A new member that reaches the board takes
+  a default `StateLock` and calls `wire()`, never `protocol_->` directly; a new getter takes `Mode::State` and must
+  not call `wire()`. While a connect runs (`session_connecting_`) a getter reads `NotConnected` (`Connected` false)
+  instead of waiting for it; the connect's own thread passes `check_connected()` because it holds `io_mutex_`.
+  Tests: `test_skywatcher_getter_locks.cpp`. The `FakeTaskClock` goto pump (`skywatcher_fake_clock.h`) jumps only
+  while the poll and a goto body are parked on the clock, since a getter no longer queues behind the dispatch.
 - **Slewing must be a STATE FLAG spanning the whole goto + landing refinement**
   (`goto_in_progress_`, same pattern as `parking_`/`homing_`), never a timed
   hold: the 3 s `slew_force_until_` expired during a slow refine iteration
