@@ -55,6 +55,9 @@ namespace alpacacore::test::skywatcher_clock {
 // cover any goto here (180 deg at 800x sidereal = 55 s).
 inline constexpr auto kGotoJump = std::chrono::seconds(20);
 inline constexpr auto kFrameRendezvous = std::chrono::milliseconds(50);
+// The status poll and one goto body.
+inline constexpr std::size_t kIdleWaiters = 2;
+inline constexpr auto kIdleRendezvous = std::chrono::milliseconds(20);
 
 // Pumps virtual time (goto jumps, otherwise wall time) until pred() holds;
 // false when `real_bound` of wall time passes first.
@@ -67,6 +70,12 @@ inline bool pump_until(FakeTaskClock& clock, FakeSkyWatcherBoard& mount, const s
             return false;
         }
         if (mount.axis_in_goto(1) || mount.axis_in_goto(2)) {
+            // Jump while the driver is idle on the clock (its poll and a goto body parked), not while a
+            // command's exchanges are still on the wire: getters no longer queue behind those (decision
+            // 0016), so a pump that jumped on every frame would age the status frame past
+            // util::kLinkStalenessBound before the poll could publish. Bounded, for a driver that is on the
+            // wall clock or whose goto runs on the calling thread and so never parks two waiters.
+            clock.wait_for_waiters(kIdleWaiters, kIdleRendezvous);
             clock.advance(kGotoJump);
         }
         mount.wait_for_frames(0, mount.frames_seen() + 1, kFrameRendezvous);
