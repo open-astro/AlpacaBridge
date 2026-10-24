@@ -571,7 +571,8 @@ All 9 steps required for end-to-end functionality:
    per-`(vendor, deviceType)` auto-increment and manual-edit tracking, so a second device
    of the same vendor/type doesn't silently reuse index 0. (Distinct from the Alpaca
    device number, which auto-assigns per type already.) See "Enumeration index fields" in
-   `.github/instructions/http-integration.instructions.md`.
+   `.github/instructions/http-integration.instructions.md`. Each named form field also
+   carries `data-config-key` and sits in a `data-vendor` / `data-device-type` scope `<div>`.
 7. Frontend validation logic.
 8. Build-flag propagation from AlpacaCore to AlpacaHTTP.
 9. Routing/config tests in `AlpacaHTTP/tests/`.
