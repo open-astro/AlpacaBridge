@@ -338,7 +338,7 @@ private:
     // The single fault text (decision 0009, point 5): the latched poll fault,
     // kept after the link is lost so the management listing says why.
     std::string get_link_fault() const override {
-        const auto fault = state_.fault();
+        auto fault = state_.fault();
         if (!fault.empty()) return fault;
         return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
