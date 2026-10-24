@@ -497,3 +497,37 @@ TEST_CASE("Gemini Flat Panel Driver - connected, MaxBrightness is 255 and Bright
     REQUIRE(driver->get_calibrator_state() == alpacacore::CalibratorState::Off);
     CHECK(driver->get_brightness() == 0);
 }
+
+// A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: gemini_flatpanel_protocol_wrapper.cpp:823 read_response() sending ReadOutcome::LinkDead to the timeout
+// branch (the message reads "Read timeout" and the call takes the full serial_timeout_s).
+TEST_CASE("Gemini flat panel protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[gemini][flatpanel][unit][link-dead]") {
+    FakeGeminiFlatPanel panel;
+    alpacacore::vendor::gemini::GeminiFlatPanelProtocolWrapper wrapper;
+    alpacacore::vendor::gemini::FlatPanelConnectionConfig config;
+    config.serial_port = panel.slave_path();
+    wrapper.connect(config);
+    panel.set_reply_delay(">S#",
+                          std::chrono::milliseconds(300));  // the panel sits on the >S# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        panel.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_light_on();
+        FAIL("a hung-up port must not return a value");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "Serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
+}

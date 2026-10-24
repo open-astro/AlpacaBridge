@@ -18,7 +18,9 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <chrono>
 #include <functional>
+#include <string>
 #include <thread>
 
 #include "catch2_compat.h"
@@ -264,4 +266,37 @@ TEST_CASE("iOptron iEAF Focuser Driver - a connected port refuses a second open"
     CHECK(fake.connects() == 1);
     CHECK(driver->get_position() == 1000);
     driver->set_connected(false);
+}
+
+// A device that drops off the bus between the command and its reply: the wrapper reports the hangup and the
+// errno at once, not a read timeout after serial_timeout_s.
+// Falsified by: ioptron_ieaf_protocol_wrapper.cpp:434 read_response() sending ReadOutcome::LinkDead to the timeout
+// branch (the message reads "iEAF read timeout" and the call takes the full serial_timeout_s).
+TEST_CASE("iOptron iEAF protocol wrapper - a hangup before the reply throws serial link lost with the errno",
+          "[ioptron][focuser][unit][link-dead]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    alpacacore::vendor::ioptron::IeafProtocolWrapper wrapper;
+    alpacacore::vendor::ioptron::IeafConnectionConfig config;
+    config.serial_port = fake.slave_path();
+    wrapper.connect(config);
+    fake.hold_next_reply(std::chrono::milliseconds(300));  // the fake sits on the :FI# reply while the cable is pulled
+    std::thread pull([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        fake.unplug();
+    });
+    const auto start = std::chrono::steady_clock::now();
+    std::string what;
+    try {
+        wrapper.get_status();
+        FAIL("a hung-up port must not return a value");
+    } catch (const alpacacore::AlpacaException& ex) {
+        what = ex.what();
+    }
+    pull.join();
+    CHECK(what == "iEAF serial link lost (errno 5)");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(2));
+    try {
+        wrapper.disconnect();
+    } catch (...) {
+    }
 }
