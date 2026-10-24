@@ -668,8 +668,9 @@ async function loadDevices() {
 // format.js. Abort is sent only while the last CalibrationStatus said
 // "Calibrating". Failed reads during a run keep polling (Abort stays hidden)
 // until a read succeeds; the poll stops when the run ends, a failed read
-// follows any other state, or the card leaves the page. It never has two
-// requests in flight.
+// follows any other state, or the card leaves the page. Status polls never
+// overlap each other, and refresh() clears any pending timer so only one poll
+// chain exists.
 const CALIBRATION_POLL_MS = 2000;
 let calibrationTransactionId = 0;
 
@@ -717,7 +718,7 @@ function initCalibrationControls(box) {
         }
     };
     const refresh = async () => {
-        timer = null;
+        stop();
         if (inFlight) return;
         if (!box.isConnected) return;
         inFlight = true;
