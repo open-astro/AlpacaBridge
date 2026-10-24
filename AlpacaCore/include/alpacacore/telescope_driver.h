@@ -98,10 +98,13 @@ public:
         add("Slewing", [this] { return get_slewing(); });
         add("Tracking", [this] { return get_tracking(); });
         add("UTCDate", [this] { return device_state_timestamp(get_utc_date()); });
-        state.push_back({"TimeStamp", age ? device_state_timestamp(
-                                                std::chrono::system_clock::now() -
-                                                std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
-                                          : device_state_timestamp()});
+        if (!state.empty()) {
+            state.push_back(
+                {"TimeStamp",
+                 age ? device_state_timestamp(std::chrono::system_clock::now() -
+                                              std::chrono::duration_cast<std::chrono::system_clock::duration>(*age))
+                     : device_state_timestamp()});
+        }
         return state;
     }
 

@@ -452,7 +452,7 @@ TEST_CASE("ToupTek AAF Focuser Driver - A dead link refuses reads instead of ser
         CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);
     }
     CHECK(driver->get_connected() == true);
-    CHECK(driver->get_device_state().size() == 1);  // TimeStamp only
+    CHECK(driver->get_device_state().empty());
 
     fake.throw_from.clear();
     CHECK(driver->get_position() == 0);
