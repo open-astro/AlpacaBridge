@@ -80,6 +80,8 @@ TEST_CASE("SVBONY camera - connected acquisition and lifecycle stress", "[svbony
         guard([&] { camera.start_exposure(0.001, true); });
         guard([&] { static_cast<void>(camera.get_image_ready()); });
         guard([&] { static_cast<void>(camera.get_image_array()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { camera.abort_exposure(); });
         guard([&] { static_cast<void>(camera.get_gain()); });
     });

@@ -36,7 +36,6 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/image_validation.h>
-#include <alpacacore/util/last_exposure.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/task_clock.h>
@@ -409,8 +408,6 @@ public:
         image_ready_ = false;
         retired_image = std::move(last_image_);
         exposure_failure_.clear();
-        last_exposure_duration_ = taken;
-        last_exposure_start_ = std::chrono::system_clock::now();
     }
 
     void abort_exposure() override {
@@ -479,13 +476,16 @@ public:
     double get_last_exposure_duration() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return published_exposure_.duration();
+        return last_exposure_duration_locked();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
-        return published_exposure_.start_time();
+        (void)last_exposure_duration_locked();  // InvalidOperation until an image succeeds.
+        // uvcvideo advertises SOE even for host arrival timestamps; no verified iGuider photon-start source.
+        throw AlpacaException("iGuider does not provide a verified exposure start timestamp",
+                              AlpacaError::PropertyNotImplemented);
     }
 
     // ---- Guiding (through the mount, not the camera) -----------------------
@@ -547,11 +547,8 @@ private:
     // The last result, guarded by mutex_.
     bool image_ready_ = false;
     std::shared_ptr<const ImageArray> last_image_;
-    double last_exposure_duration_ = 0.0;
-    std::chrono::system_clock::time_point last_exposure_start_{};
-    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
-    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
-    util::LastExposure published_exposure_;
+    // No LastExposure pair: the stream supplies a duration, but no verified UTC photon-start timestamp.
+    std::optional<double> last_exposure_duration_;
 
     // Last members: destroyed first, so the worker is joined before anything it touches.
     util::OperationGeneration stream_generation_;
@@ -604,6 +601,13 @@ private:
         }
     }
 
+    double last_exposure_duration_locked() const {
+        if (!last_exposure_duration_) {
+            throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
+        }
+        return *last_exposure_duration_;
+    }
+
     void latch_exposure_timeout_locked() const {
         if (exposure_pending_ && clock_.now() >= exposure_deadline_) {
             ALPACA_LOG_WARN(kLog, "Exposure got no frame before its deadline");
@@ -624,9 +628,7 @@ private:
         exposure_failure_.clear();
         image_ready_ = false;
         retired_image = std::move(last_image_);
-        last_exposure_duration_ = 0.0;
-        last_exposure_start_ = {};
-        published_exposure_.clear();
+        last_exposure_duration_.reset();
     }
 
     // ---- Connect / disconnect (under transition_mutex_, never mutex_) ------
@@ -840,10 +842,11 @@ private:
 
         auto image = std::make_shared<const ImageArray>(crop_luma(luma, roi));  // outside the lock
         std::lock_guard<std::mutex> lock(mutex_);
+        latch_exposure_timeout_locked();
         if (!exposure_pending_ || exposure_token_ != token) return;  // aborted or superseded meanwhile
         last_image_ = std::move(image);
         image_ready_ = true;
-        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
+        last_exposure_duration_ = exposure_duration_;
         exposure_pending_ = false;
         exposure_failure_.clear();
     }

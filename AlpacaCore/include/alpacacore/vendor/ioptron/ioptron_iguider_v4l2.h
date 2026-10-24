@@ -96,6 +96,11 @@ public:
      * plane (every even YUYV byte, width x height bytes) into @p luma.
      * Returns false when no complete frame arrived in time; a short or
      * error-flagged frame is dropped and counts as none.
+     * No photon-start timestamp is promised: uvcvideo sets MONOTONIC | SOE
+     * even when its timestamp is host packet arrival (Linux 6.12 uvc_queue.c /
+     * uvc_video.c). EOF is arrival of the last pixel, UNKNOWN has no known
+     * clock domain, and sequence counts frames, not control application.
+     * Exposing UTC start requires verified device timing, not dequeue minus duration.
      */
     virtual bool read_frame(int handle, std::vector<std::uint8_t>& luma, std::chrono::milliseconds timeout) = 0;
 

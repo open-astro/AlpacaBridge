@@ -49,9 +49,8 @@ namespace alpacacore::test {
 //   verify the native wrapper's SVB_ERROR_TIMEOUT translation.
 class FakeSVBSDK final : public vendor::svbony::SVBSDK {
 public:
-    // Test-only hook, null by default: runs on the calling thread at the top of get_video_data() and
-    // pulse_guide(), before the fake takes its mutex, so it may advance a FakeTaskClock. Set it before the
-    // driver exists and never change it while a call is in flight (FakeGPhotoSDK::before_call ownership).
+    // Test-only hook, null by default, before the fake mutex. Set before starting an operation and never
+    // change it while a call is in flight; capture-start callbacks also run under the driver's state lock.
     std::function<void(const std::string&)> before_call;
 
     using CameraInfo = vendor::svbony::SVBCameraInfo;
@@ -143,6 +142,7 @@ public:
     }
     void set_control_value(int camera_id, Control type, long value, bool is_auto) override {
         if (type == Control::FrameSpeedMode) {
+            if (before_call) before_call("set_control_value.FrameSpeedMode");
             // Outside the mutex like open_camera: the driver's deferred write takes about a second on hardware.
             const auto delay = std::chrono::milliseconds(frame_speed_write_delay_ms_.load());
             if (delay.count() > 0) std::this_thread::sleep_for(delay);
@@ -219,6 +219,7 @@ public:
         type_ = type;
     }
     void start_video_capture(int camera_id) override {
+        if (before_call) before_call("start_video_capture");
         std::lock_guard lock(mutex_);
         record_locked("start_video_capture");
         maybe_fail_locked("start_video_capture");
