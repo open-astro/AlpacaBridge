@@ -278,8 +278,9 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - a Position read after set_position
 // The iEFW connect sleeps 100 ms before its handshake, so a stale frame cannot outlive a reconnect here; the
 // link-health record can. Two failures before the reconnect and two after must not add up to the three that
 // latch the fault.
-// Falsified by: ioptron_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the second
-// failed read after the reconnect throws "communications compromised").
+// Falsified by: ioptron_filterwheel_driver.cpp connect and disconnect both without status_cache_.reset() (the
+// second failed read after the reconnect throws "communications compromised"). Either call alone is not
+// caught: the other one clears the count too (the connect reset covers a refill that races a disconnect).
 TEST_CASE("iOptron iEFW Filter Wheel Driver - a reconnect clears the Position link-health count",
           "[ioptron][filterwheel][unit][position-cache]") {
     ConnectedIefw wheel;
@@ -396,9 +397,9 @@ TEST_CASE("iOptron iEFW Filter Wheel Driver - get_names does not wait behind a h
     driver->set_connected(false);
 }
 
-// Two writers race: the latch (target_/moving_), :WM and the restore on a throw are one step under the per-link
-// move lock. Without it a PUT can leave target_ on a slot the wheel did not reach, and Position reads -1 until
-// the next move. Passes today (mutex_ covers the whole move); it guards the conversion.
+// Two writers race: the latch (target_/moving_), :WM and the restore on a throw are one step under
+// io_mutex_. Without it a PUT can leave target_ on a slot the wheel did not reach, and Position reads -1 until
+// the next move. Probabilistic: it guards the conversion, and a lock split is not caught reliably.
 // Falsified by: ioptron_filterwheel_driver.cpp set_position() setting target_ and calling :WM without one lock
 // held across both (after the writers finish, Position stays -1 although the wheel settled on a slot).
 TEST_CASE("iOptron iEFW Filter Wheel Driver - concurrent set_position calls leave Position on the wheel slot",

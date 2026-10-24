@@ -129,6 +129,8 @@ public:
                 }
             }
             // After the I/O lock is released: the cache lock is taken before it, never inside it.
+            // Also drops a closed frame that a refill racing the last disconnect cached after that
+            // disconnect's reset(): it counts as a good reply and would be served for up to the TTL.
             status_cache_.reset();
             connected_.store(true);
             std::int32_t slots = 0;
