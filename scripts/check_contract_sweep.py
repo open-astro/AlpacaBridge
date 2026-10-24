@@ -333,14 +333,19 @@ def adopted_sources(adr_text: str) -> set[str]:
     """Source column (backticks removed) of each `adopted` row in the ADR's `## Adoption` table."""
     out: set[str] = set()
     in_adoption = False
+    source_at, state_at = 1, 2  # a table with no header row keeps the original layout
     for line in adr_text.splitlines():
         if line.startswith("## "):
             in_adoption = line.strip() == "## Adoption"
         if not in_adoption or not line.startswith("|"):
             continue
         cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) >= 3 and cells[1].startswith("`") and cells[1].endswith("`") and cells[2] == "adopted":
-            out.add(cells[1][1:-1])
+        if "Source" in cells and "State" in cells:
+            source_at, state_at = cells.index("Source"), cells.index("State")
+            continue
+        if len(cells) > max(source_at, state_at) and cells[source_at].startswith("`") \
+                and cells[source_at].endswith("`") and cells[state_at] == "adopted":
+            out.add(cells[source_at][1:-1])
     return out
 
 
@@ -673,12 +678,12 @@ FIX_SWEEP = '''CONTRACT_SWEEP_ENTRIES(CS_T1_INVALID)
 FIX_ADR = '''
 ## Adoption
 
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1 | n |
-| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #2 | n |
-| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #3 | n |
-| Planned focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | planned | #4 | n |
+| Driver | Symbol | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Bisque telescope | `StateSnapshot` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1 | n |
+| Gemini focuser | `StateSnapshot` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #2 | n |
+| Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #3 | n |
+| Planned focuser | `StateSnapshot` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | planned | #4 | n |
 
 ## Other
 '''
