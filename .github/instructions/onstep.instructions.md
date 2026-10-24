@@ -257,10 +257,11 @@ it is never reachable through `router.cpp` or the web UI.
   is the client's poll cadence times three, each failed read costing the response timeout.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
-  `Tracking` reads false, after the parked check and coordinate validation and before any target or
-  GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
-  just written counts as off. `SlewToAltAz(Async)` skips the check: it converts to RA/Dec and calls
-  `start_slew_locked()` directly. OnStepX turns tracking on at a GOTO only on the first GOTO after a
+  `Tracking` reads false, after the coordinate validation (which comes before the connection check)
+  and the parked check, and before any target or GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
+  just written counts as off. `SlewToAltAz(Async)` skips this check and has the opposite one
+  (refused while Tracking is true, #1377, see below), then converts to RA/Dec and calls
+  `start_slew_locked()`. OnStepX turns tracking on at a GOTO only on the first GOTO after a
   home reset (`firstGoto`) or one that starts from home (`Goto.cpp`; an HM-17 run on 2026-10-18 read `Tracking`
   true after a GOTO, which fits one of these), otherwise it leaves tracking as it was, so the
   refusal is the interface contract. `:GU#` keeps the tracking flag through a whole GOTO.
@@ -393,7 +394,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
   telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
-  by an ordinary GOTO that skips the Tracking check (#1274) (the router refuses synchronous `SlewToAltAz` with
+  by an ordinary GOTO, refused while Tracking is true (#1377) rather than needing it (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
