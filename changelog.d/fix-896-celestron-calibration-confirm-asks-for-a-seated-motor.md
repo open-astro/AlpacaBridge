@@ -1,0 +1,2 @@
+### Fixed
+- **The Celestron focus motor calibration confirm no longer says to remove things the motor could hit** (Celestron, issue #896): the motor runs inside the focuser housing, so nothing is in its way. The dialog now asks the user to check that the motor is firmly seated on the focuser, because a loose fit can make it bind during the run. Pinned by `AlpacaHTTP/tests/web/celestron_calibration.test.js`.
