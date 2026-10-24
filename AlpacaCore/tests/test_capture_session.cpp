@@ -489,6 +489,27 @@ TEST_CASE("CaptureSession - discard_image drops a ready frame and keeps the last
     CHECK(h.session->last_exposure_duration() == Catch::Approx(0.5));
 }
 
+TEST_CASE("CaptureSession - fail ends the exposure with the driver's failure and cancels the body",
+          "[util][capture-session]") {
+    Harness h;
+    auto p = std::make_shared<Probe>();
+    h.session->start(10.0, polling_body(p));
+    REQUIRE(eventually([&] { return p->entered.load(); }));
+    REQUIRE(h.clock.wait_for_waiters(1, kBound));
+
+    h.session->fail("scripted stop failure");
+    REQUIRE(eventually([&] { return p->exited.load(); }));  // no advance: the body is woken
+    CHECK(p->reason == StopReason::Cancelled);
+    CHECK(p->accepted == 0);
+    CHECK(h.session->camera_state() == CameraState::Idle);
+    REQUIRE(h.session->failure().has_value());
+    CHECK(*h.session->failure() == "scripted stop failure");
+    CHECK(error_of([&] { (void)h.session->image_ready(); }) == AlpacaError::DriverException);
+
+    h.session->fail("a later failure");  // not exposing: a no-op
+    CHECK(*h.session->failure() == "scripted stop failure");
+}
+
 // Tagged [stress-guard]: the sanitizers-tsan job runs it under ThreadSanitizer.
 TEST_CASE("CaptureSession - destruction joins a body blocked in the SDK once it returns",
           "[util][capture-session][stress-guard]") {

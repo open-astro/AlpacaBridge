@@ -86,6 +86,11 @@ public:
     void disconnect_and_join() {}
     /// Drops a ready frame (a geometry change); keeps the last exposure.
     void discard_image() {}
+    /// The driver fails the exposure in flight (an SDK stop that failed):
+    /// kept like a body's throw, and the body is cancelled. A no-op when
+    /// nothing is exposing.
+    // NOLINTNEXTLINE(performance-unnecessary-value-param): stub; the implementation moves it.
+    void fail(std::string /*message*/) {}
 
     /// Applies the watchdog: an exposure past start + duration + margin fails.
     CameraState camera_state() const { return CameraState::Idle; }
