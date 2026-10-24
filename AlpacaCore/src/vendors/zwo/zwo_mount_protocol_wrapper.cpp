@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <regex>
@@ -373,6 +374,61 @@ std::string format_utc_minutes_to_protocol_timezone(int utc_offset_minutes) {
 constexpr const char* kSerialOwner = "ZWO mount";
 
 #ifndef _WIN32
+// Registry lock is a leaf: only memory operations, never DNS, socket I/O, other locks or joins.
+// Explicit pairs keep their existing sharing policy; Auto and probes require an unused endpoint.
+class NetworkEndpointClaim {
+public:
+    ~NetworkEndpointClaim() {
+        auto& reg = registry();
+        std::lock_guard lock(reg.mutex);
+        reg.holders.erase(this);
+    }
+    NetworkEndpointClaim() = default;
+    NetworkEndpointClaim(const NetworkEndpointClaim&) = delete;
+    NetworkEndpointClaim& operator=(const NetworkEndpointClaim&) = delete;
+
+    bool claim(const sockaddr_in& address, bool exclusive) {
+        auto& reg = registry();
+        std::lock_guard lock(reg.mutex);
+        for (const auto& [owner, holder] : reg.holders) {
+            if (holder.address.sin_addr.s_addr == address.sin_addr.s_addr &&
+                holder.address.sin_port == address.sin_port && (exclusive || holder.exclusive)) {
+                return false;
+            }
+        }
+        reg.holders.emplace(this, Holder{address, exclusive});
+        return true;
+    }
+
+private:
+    struct Holder {
+        sockaddr_in address;
+        bool exclusive;
+    };
+    struct Registry {
+        std::mutex mutex;
+        std::map<const NetworkEndpointClaim*, Holder> holders;
+    };
+    static Registry& registry() {
+        // Static wrappers may release their claims at process exit.
+        static auto* reg = new Registry();  // NOLINT(cppcoreguidelines-owning-memory)
+        return *reg;
+    }
+};
+
+bool resolve_network_endpoint(const std::string& host, int port, sockaddr_in& address) {
+    if (port < 1 || port > 65535) return false;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* result = nullptr;
+    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) return false;
+    address = *reinterpret_cast<sockaddr_in*>(result->ai_addr);
+    address.sin_port = htons(static_cast<uint16_t>(port));
+    freeaddrinfo(result);
+    return true;
+}
+
 // Issue #1202: whether the scan may probe @p port. A port another connected
 // device holds is never opened. One a connected ZWO mount holds is listed at
 // its scan position without being probed (model unknown), so the order of
@@ -460,34 +516,28 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     (void)timeout_ms;
     return "";
 #else
+    sockaddr_in addr{};
+    if (!resolve_network_endpoint(host, port, addr)) return "";
+    NetworkEndpointClaim claim;
+    if (!claim.claim(addr, true)) {
+        ALPACA_LOG_DEBUG("ZWO", "Auto-detect: skipping held network endpoint " + host + ":" + std::to_string(port));
+        return "";
+    }
     const int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) {
         return "";
     }
-
-    sockaddr_in addr{};
-    std::memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(static_cast<u_short>(port));
-    // getaddrinfo (thread-safe, unlike gethostbyname's static buffer).
-    addrinfo hints{};
-    std::memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* result = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
-        close(sock);
-        return "";
-    }
-    addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-    freeaddrinfo(result);
+    struct SocketCloser {
+        int fd;
+        ~SocketCloser() { ::close(fd); }
+    } closer{sock};  // closes before the endpoint claim releases, including on exceptions
 
     // Non-blocking connect so an unreachable host fails within the probe timeout.
-    const int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    if (!util::set_nonblocking(sock)) {
+        return "";
+    }
     const int rc = ::connect(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
     if (rc < 0 && errno != EINPROGRESS) {
-        close(sock);
         return "";
     }
     fd_set wfds;
@@ -497,18 +547,15 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = static_cast<suseconds_t>(timeout_ms % 1000) * 1000;
     if (select(sock + 1, nullptr, &wfds, nullptr, &tv) <= 0) {
-        close(sock);
         return "";
     }
     int so_error = 0;
     socklen_t len = sizeof(so_error);
     if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) != 0 || so_error != 0) {
-        close(sock);
         return "";
     }
     // Restore blocking mode (SO_RCVTIMEO below bounds the read loop).
-    if (fcntl(sock, F_SETFL, flags) < 0) {
-        close(sock);
+    if (!util::clear_nonblocking(sock)) {
         return "";
     }
 
@@ -522,7 +569,6 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
 
     const std::string cmd = ":GVP#";
     if (!util::send_all(sock, cmd.c_str(), cmd.size(), MSG_NOSIGNAL)) {
-        close(sock);
         return "";
     }
 
@@ -544,14 +590,30 @@ std::string probe_network_mount(const std::string& host, int port, int timeout_m
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    close(sock);
-
     response = trim_copy(std::move(response));
     return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
 }
 
 }  // namespace
+
+std::vector<ZWODeviceInfo> enumerate_zwo_mounts(const std::vector<ZWODeviceInfo>& candidates, int probe_timeout_ms) {
+    std::vector<ZWODeviceInfo> results;
+    for (auto candidate : candidates) {
+        if (candidate.type == ConnectionType::Serial) {
+#ifndef _WIN32
+            if (!zwo_mount_candidate_free(candidate.port_path, candidate.label, results)) continue;
+#endif
+            candidate.model_name = probe_serial_mount(candidate.port_path, probe_timeout_ms);
+        } else if (candidate.type == ConnectionType::Network) {
+            candidate.model_name = probe_network_mount(candidate.host, candidate.tcp_port, probe_timeout_ms);
+        } else {
+            continue;
+        }
+        if (!candidate.model_name.empty()) results.push_back(std::move(candidate));
+    }
+    return results;
+}
 
 std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
     // Probes own temporary links; the serial registry keeps them off connected siblings' ports.
@@ -623,8 +685,9 @@ std::vector<ZWODeviceInfo> enumerate_zwo_mounts(int probe_timeout_ms) {
 
 class ZWOMountProtocolWrapper::Impl {
 public:
-    explicit Impl(bool require_identity)
+    explicit Impl(bool require_identity, std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
         : require_identity_(require_identity),
+          discovery_candidates_(std::move(discovery_candidates)),
           connected_(false),
           connection_type_(ConnectionType::Serial)
 #ifdef _WIN32
@@ -667,14 +730,16 @@ public:
             // entries) block ~5 s per candidate. 1500 ms is plenty for a local
             // :GVP probe and keeps connectionType=auto responsive.
             constexpr int kProbeTimeoutMs = 1500;
-            const auto devices = enumerate_zwo_mounts(std::min(info.response_timeout_ms, kProbeTimeoutMs));
+            const int timeout = std::min(info.response_timeout_ms, kProbeTimeoutMs);
+            const auto devices = discovery_candidates_ ? enumerate_zwo_mounts(*discovery_candidates_, timeout)
+                                                       : enumerate_zwo_mounts(timeout);
             for (const auto& dev : devices) {
                 ConnectionInfo candidate = info;
                 candidate.type = dev.type;
                 candidate.port_path = dev.port_path;
                 candidate.host = dev.host;
                 candidate.tcp_port = dev.tcp_port;
-                if (connect_locked(candidate)) {
+                if (connect_locked(candidate, true)) {
                     std::string connect_msg = "Auto-connected to ";
                     connect_msg += dev.model_name;
                     connect_msg += " via ";
@@ -701,7 +766,7 @@ public:
     }
 
     // Actual connection logic; caller must hold mutex_.
-    bool connect_locked(const ConnectionInfo& info) {
+    bool connect_locked(const ConnectionInfo& info, bool automatic = false) {
         if (info.type == ConnectionType::Serial && info.port_path.empty()) {
             ALPACA_LOG_ERROR("ZWO", "Serial connection requested but port path is empty");
             return false;
@@ -724,7 +789,7 @@ public:
         if (info.type == ConnectionType::Serial) {
             ok = connect_serial(info.port_path, info.baud_rate);
         } else {
-            ok = connect_network(info.host, info.tcp_port);
+            ok = connect_network(info.host, info.tcp_port, automatic);
         }
 
         connected_ = ok;
@@ -1089,7 +1154,7 @@ private:
 #endif
     }
 
-    bool connect_network(const std::string& host, int port) {
+    bool connect_network(const std::string& host, int port, bool automatic) {
 #ifdef _WIN32
         if (port < 1 || port > static_cast<int>(std::numeric_limits<u_short>::max())) {
             return false;
@@ -1130,29 +1195,18 @@ private:
         ioctlsocket(socket_handle_, FIONBIO, &mode);
         return true;
 #else
+        sockaddr_in addr{};
+        if (!resolve_network_endpoint(host, port, addr)) return false;
+        auto claim = std::make_unique<NetworkEndpointClaim>();
+        if (!claim->claim(addr, automatic)) {
+            last_connect_error_ = "ZWO mount network endpoint is held by another ZWO entry or discovery probe";
+            ALPACA_LOG_DEBUG("ZWO", "Skipping held network endpoint " + host + ":" + std::to_string(port));
+            return false;
+        }
         socket_fd_ = socket(AF_INET, SOCK_STREAM, 0);
         if (socket_fd_ < 0) {
             return false;
         }
-
-        sockaddr_in addr {};
-        std::memset(&addr, 0, sizeof(addr));
-        addr.sin_family = AF_INET;
-        addr.sin_port = htons(port);
-
-        // Each link needs its own lookup result when sibling connects run concurrently.
-        addrinfo hints{};
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
-        addrinfo* result = nullptr;
-        if (getaddrinfo(host.c_str(), nullptr, &hints, &result) != 0 || result == nullptr) {
-            close(socket_fd_);
-            socket_fd_ = -1;
-            return false;
-        }
-
-        addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-        freeaddrinfo(result);
 
         if (::connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
             close(socket_fd_);
@@ -1161,6 +1215,7 @@ private:
         }
 
         configure_network_timeouts();
+        network_claim_ = std::move(claim);
         return true;
 #endif
     }
@@ -1176,6 +1231,7 @@ private:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        network_claim_.reset();
 #endif
     }
 
@@ -1343,6 +1399,7 @@ private:
 private:
     mutable std::mutex mutex_;
     const bool require_identity_;
+    const std::optional<std::vector<ZWODeviceInfo>> discovery_candidates_;
     bool identity_verified_ = false;
     bool connected_;
     std::atomic<bool> link_lost_{false};
@@ -1357,14 +1414,16 @@ private:
     SOCKET socket_handle_;
 #else
     util::SerialLink link_;
+    std::unique_ptr<NetworkEndpointClaim> network_claim_;
     int serial_fd_;  // link_.fd() while connected over serial, else -1
     int socket_fd_;
 #endif
     std::string last_connect_error_;
 };
 
-ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity)
-    : pimpl_(std::make_unique<Impl>(require_identity)) {}
+ZWOMountProtocolWrapper::ZWOMountProtocolWrapper(bool require_identity,
+                                                 std::optional<std::vector<ZWODeviceInfo>> discovery_candidates)
+    : pimpl_(std::make_unique<Impl>(require_identity, std::move(discovery_candidates))) {}
 
 ZWOMountProtocolWrapper::~ZWOMountProtocolWrapper() = default;
 
