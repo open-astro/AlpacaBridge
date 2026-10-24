@@ -401,10 +401,15 @@ TEST_CASE("Player One PW Filter Wheel Driver - failed Position reads are not ser
     std::this_thread::sleep_for(kPastTtl);
 
     // fail_next is one-shot: arm it before each read.
-    fake.fail_next("get_position");
-    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
-    fake.fail_next("get_position");
-    CHECK_THROWS_AS(driver->get_position(), alpacacore::AlpacaException);
+    for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch
+        fake.fail_next("get_position");
+        try {
+            driver->get_position();
+            FAIL("a failed read must throw");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+        }
+    }
     fake.fail_next("get_position");
     try {
         driver->get_position();
@@ -461,5 +466,46 @@ TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a 
     CHECK(driver->get_name() == "FakePhoenixWheel");
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
+    driver->set_connected(false);
+}
+
+// A move command that throws leaves the cached frame untrusted.
+// Falsified by: playerone_filterwheel_driver.cpp set_position() skipping status_cache_.invalidate() when
+// goto_position throws (the read after the failed move is served from the old frame: no second SDK read).
+TEST_CASE("Player One PW Filter Wheel Driver - a failed set_position invalidates the cached Position",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+    CHECK(driver->get_position() == 0);
+    const int before = fake.call_count("get_position");
+
+    fake.fail_next("goto_position");
+    CHECK_THROWS_AS(driver->set_position(3), alpacacore::AlpacaException);
+    CHECK(driver->get_position() == 0);
+    CHECK(fake.call_count("get_position") == before + 1);
+    driver->set_connected(false);
+}
+
+// Decision 0016 rules 1 and 4: the connect handshake runs off the state lock.
+// Falsified by: playerone_filterwheel_driver.cpp set_connected(true) holding mutex_ across open_wheel
+// (get_names() and get_name() wait the whole 400 ms open delay).
+TEST_CASE("Player One PW Filter Wheel Driver - get_names does not wait behind a held connect",
+          "[playerone][filterwheel][unit][fake-sdk][position-cache][timing]") {
+    alpacacore::test::FakePlayerOnePWSDK fake;
+    auto driver = create_playerone_filterwheel(0, 0, fake);
+    fake.set_open_delay(400ms);
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 500 && fake.call_count("open_wheel") == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.call_count("open_wheel") == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_NOTHROW(driver->get_names());
+    CHECK_NOTHROW(driver->get_name());
+    CHECK(std::chrono::steady_clock::now() - start < 150ms);
+    connect.get();
     driver->set_connected(false);
 }

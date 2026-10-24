@@ -338,8 +338,14 @@ TEST_CASE("ZWO EFW seam - failed Position reads are not served and latch a link 
     std::this_thread::sleep_for(kPastTtl);
 
     sdk.fail_reads = true;
-    CHECK_THROWS(driver->get_position());
-    CHECK_THROWS(driver->get_position());
+    for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch
+        try {
+            driver->get_position();
+            FAIL("a failed read must throw");
+        } catch (const AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+        }
+    }
     try {
         driver->get_position();
         FAIL("third consecutive failure must throw");
@@ -395,5 +401,49 @@ TEST_CASE("ZWO EFW seam - get_names does not wait behind a slow Position refill"
     CHECK(driver->get_name() == "EFW");
     CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(150));
     refill.get();
+    driver->set_connected(false);
+}
+
+// A move command that throws leaves the cached frame untrusted.
+// Falsified by: zwo_filterwheel_driver.cpp set_position() skipping status_cache_.invalidate() when the SDK move
+// throws (the read after the failed move is served from the old frame: no second SDK read).
+TEST_CASE("ZWO EFW seam - a failed set_position invalidates the cached Position",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache]") {
+    FakeZWOEFWSDK sdk;
+    sdk.position = 3;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 3);
+    CHECK(driver->get_position() == 3);
+    REQUIRE(sdk.position_calls == 1);
+
+    sdk.fail_set_position = true;
+    CHECK_THROWS_AS(driver->set_position(4), AlpacaException);
+    sdk.fail_set_position = false;
+    sdk.position = 2;
+    CHECK(driver->get_position() == 2);
+    CHECK(sdk.position_calls == 2);
+    driver->set_connected(false);
+}
+
+// Decision 0016 rules 1 and 4: the connect handshake runs off the state lock.
+// Falsified by: zwo_filterwheel_driver.cpp set_connected(true) holding mutex_ across open_wheel (get_names() and
+// get_name() wait the whole 400 ms open delay).
+TEST_CASE("ZWO EFW seam - get_names does not wait behind a held connect",
+          "[zwo][filterwheel][unit][fake-sdk][position-cache][timing]") {
+    FakeZWOEFWSDK sdk;
+    auto driver = zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    sdk.open_delay = std::chrono::milliseconds(400);
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 500 && sdk.open_entered.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    REQUIRE(sdk.open_entered.load() == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(driver->get_names().size() == 7);
+    CHECK(driver->get_name() == "EFW");
+    CHECK(std::chrono::steady_clock::now() - start < std::chrono::milliseconds(150));
+    connect.get();
     driver->set_connected(false);
 }

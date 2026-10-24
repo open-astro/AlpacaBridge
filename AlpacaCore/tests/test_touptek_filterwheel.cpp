@@ -247,7 +247,8 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - a Position read after set_position 
 
 // The connect homes the wheel for about 300 ms, longer than the TTL, so a stale frame cannot outlive a
 // reconnect here; the link-health record can. Two failures before the reconnect and two after must not add up to
-// the three that latch the fault.
+// the three that latch the fault. The connect's homing poll reads the SDK directly, never through
+// status_cache_: a good homing read through the cache would clear the count and hide a missing reset().
 // Falsified by: touptek_filterwheel_driver.cpp connect or disconnect without status_cache_.reset() (the fourth
 // failed read in all, the second after the reconnect, throws "communications compromised").
 // Passes before the cache exists: it guards the reset once the cache does.
@@ -282,8 +283,14 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - failed Position reads are not serve
     std::this_thread::sleep_for(kPastTtl);
 
     wheel.fake.throw_from.insert(kPositionCall);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
-    CHECK_THROWS_AS(wheel.driver->get_position(), alpacacore::AlpacaException);
+    for (int i = 0; i < 2; ++i) {  // below the threshold the raw failure comes through, not the latch
+        try {
+            wheel.driver->get_position();
+            FAIL("a failed read must throw");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(std::string(ex.what()).find("communications compromised") == std::string::npos);
+        }
+    }
     try {
         wheel.driver->get_position();
         FAIL("third consecutive failure must throw");
@@ -338,4 +345,50 @@ TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a sl
     CHECK(std::chrono::steady_clock::now() - start < 150ms);
     refill.get();
     slow->store(false);
+}
+
+// A move command that throws leaves the cached frame untrusted.
+// Falsified by: touptek_filterwheel_driver.cpp set_position() skipping status_cache_.invalidate() when the SDK
+// move throws (the read after the failed move is served from the old frame: no second SDK read).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - a failed set_position invalidates the cached Position",
+          "[touptek][filterwheel][unit][position-cache]") {
+    ConnectedAfw wheel;
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.driver->get_position() == 0);
+    REQUIRE(wheel.reads() == 1);
+
+    wheel.fake.throw_from.insert("set_filter_wheel_position");
+    CHECK_THROWS_AS(wheel.driver->set_position(3), alpacacore::AlpacaException);
+    wheel.fake.throw_from.erase("set_filter_wheel_position");
+    CHECK(wheel.driver->get_position() == 0);
+    CHECK(wheel.reads() == 2);
+}
+
+// Decision 0016 rules 1 and 4: the connect (open and handshake) runs off the state lock.
+// Falsified by: touptek_filterwheel_driver.cpp set_connected(true) holding mutex_ across open_camera_by_id
+// (get_names() and get_name() wait the whole 400 ms open).
+TEST_CASE("ToupTek AFW Filter Wheel Driver - get_names does not wait behind a held connect",
+          "[touptek][filterwheel][unit][position-cache][timing]") {
+    alpacacore::test::FakeToupTekSDK fake;
+    alpacacore::test::FakeToupTekSDK::ToupFilterWheelInfo info;
+    info.id = "fake-afw-0";
+    info.name = "FakeAFW";
+    info.model_name = "AFW-M";
+    fake.wheels.push_back(info);
+    fake.before_call = [](const std::string& fn) {
+        if (fn == "open_camera_by_id") std::this_thread::sleep_for(400ms);
+    };
+    auto driver = alpacacore::vendor::touptek::create_touptek_filterwheel_by_id(0, "fake-afw-0", fake);
+    auto connect = std::async(std::launch::async, [&] { driver->set_connected(true); });
+    for (int i = 0; i < 500 && fake.call_count("open_camera_by_id") == 0; ++i) {
+        std::this_thread::sleep_for(2ms);
+    }
+    REQUIRE(fake.call_count("open_camera_by_id") == 1);
+
+    const auto start = std::chrono::steady_clock::now();
+    CHECK_NOTHROW(driver->get_names());
+    CHECK_NOTHROW(driver->get_name());
+    CHECK(std::chrono::steady_clock::now() - start < 150ms);
+    connect.get();
+    driver->set_connected(false);
 }
