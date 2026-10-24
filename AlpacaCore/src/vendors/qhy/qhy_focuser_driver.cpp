@@ -286,15 +286,18 @@ public:
     void halt() override {
         ensure_connected();
         // Hold status_mutex_ across the wire command so the command and the
-        // target_ update are atomic against a concurrent move()/halt() (Alpaca
-        // does not serialize device methods). Lock order is status_mutex_ ->
-        // wrapper mutex, and status_mutex_ -> the snapshot's leaf lock.
+        // frame's target update are ordered against a concurrent move()/halt()
+        // (Alpaca does not serialize device methods). Lock order is
+        // status_mutex_ -> wrapper mutex, and status_mutex_ -> the module's leaf lock.
         // Halt is the safety stop: never refused for a link fault.
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.halt();
-        target_.reset();  // no target => not moving, whatever position the motor stopped at
         // Write-through: IsMoving reads false right after Halt, not after the next poll.
-        state_.write([](StateFrame& frame) { frame.moving = false; });
+        // No target => not moving, whatever position the motor stopped at.
+        state_.write([](StateFrame& frame) {
+            frame.target.reset();
+            frame.moving = false;
+        });
     }
 
     void move(int position) override {
@@ -304,23 +307,31 @@ public:
         }
         (void)served_frame();  // refused while the link is faulted or lost
         // Hold status_mutex_ across move_to() so two concurrent moves cannot
-        // reach the device in one order while target_ records the other (see
+        // reach the device in one order while the frame records the other (see
         // halt() for the lock-order note).
         std::lock_guard<std::mutex> lock(status_mutex_);
         protocol_.move_to(position);
-        target_ = position;
-        last_change_ = clock_.now();
+        const auto now = clock_.now();
         // Write-through (decision 0010, point 3): IsMoving reads true right
         // after a successful Move that has somewhere to go; Position stays the
         // measured one until the next poll.
-        state_.write([position](StateFrame& frame) { frame.moving = frame.position != position; });
+        state_.write([position, now](StateFrame& frame) {
+            frame.target = position;
+            frame.last_change = now;
+            frame.moving = frame.position != position;
+        });
     }
 
 private:
     // What one poll measured. `telemetry` is refreshed with every poll.
+    // `target` and `last_change` are motion state: they live in the frame so a
+    // frame that a move()/halt() write overtook is dropped whole, with its
+    // position and these, by PolledState.
     struct StateFrame {
         int position = 0;
         bool moving = false;
+        std::optional<int> target;
+        util::TaskClock::clock::time_point last_change{};
         QFocuserTelemetry telemetry;
     };
 
@@ -354,30 +365,30 @@ private:
         StateFrame frame;
         const std::int32_t pos = protocol_.get_position();
         frame.telemetry = protocol_.get_telemetry();
-        // status_mutex_ orders this decision against move()/halt(), which hold
-        // it across their wire command and state write. A frame such a write
-        // overtook is dropped by PolledState, so the next poll decides again
-        // from the write-through frame.
-        std::lock_guard<std::mutex> lock(status_mutex_);
+        // The motion decision reads the target and last change from the held
+        // frame and writes the arrival into the new one. A frame a move()/halt()
+        // write overtook is dropped whole by PolledState, so a target set
+        // meanwhile survives and the next poll decides again from it.
         const auto now = clock_.now();
         const auto previous = state_.read();
         const bool changed = !previous.has_value() || pos != previous->value.position;
-        const auto changed_at = changed ? now : last_change_;
         frame.position = pos;
-        frame.moving = target_.has_value() && pos != *target_ && (now - changed_at) < kMotionGrace;
-        last_change_ = changed_at;
-        if (target_.has_value() && pos == *target_) {
-            target_.reset();  // arrived
+        if (previous.has_value()) {
+            frame.target = previous->value.target;
+            frame.last_change = changed ? now : previous->value.last_change;
+        } else {
+            frame.last_change = now;
+        }
+        frame.moving = frame.target.has_value() && pos != *frame.target && (now - frame.last_change) < kMotionGrace;
+        if (frame.target.has_value() && pos == *frame.target) {
+            frame.target.reset();  // arrived
         }
         return frame;
     }
 
     // At connect and disconnect: drop the frame, the fault and the target.
     void reset_state() {
-        state_.reset();
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        target_.reset();
-        last_change_ = {};
+        state_.reset();  // the target and last change go with the frame
     }
 
     // Push the user's settings to the firmware right after the handshake.
@@ -424,11 +435,9 @@ private:
     mutable std::mutex firmware_mutex_;
     std::string firmware_;
 
-    // Orders the poll's motion decision against move()/halt(); guards target_
-    // and last_change_. Held across a wire command, so never taken by a getter.
+    // Orders move() and halt() on the wire. Held across a wire command, so
+    // never taken by a getter or the poll.
     std::mutex status_mutex_;
-    std::optional<int> target_;
-    util::TaskClock::clock::time_point last_change_{};
     util::OperationGeneration state_poll_generation_;
     // Position, motion and telemetry served to the getters (open-astro#1310).
     // Declared after clock_ and protocol_: it is destroyed first and joins its

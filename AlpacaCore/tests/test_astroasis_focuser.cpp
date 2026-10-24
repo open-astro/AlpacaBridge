@@ -112,7 +112,7 @@ TEST_CASE("Astroasis Focuser Driver - getters between poll ticks cause no device
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete the first poll_state_once() at connect.
+// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:102 start() delete the first poll_once() at connect.
 TEST_CASE("Astroasis Focuser Driver - DeviceState reads the device not at all",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -144,7 +144,7 @@ TEST_CASE("Astroasis Focuser Driver - static members never touch the device", "[
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:move() delete the snapshot_.write() after move_to.
+// Falsified by: astroasis_focuser_driver.cpp:move():324 delete the state_.write() after move_to.
 TEST_CASE("Astroasis Focuser Driver - Move and Halt write through to the frame",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -200,7 +200,7 @@ void act_during_poll(const std::shared_ptr<FakeHidState>& state, alpacacore::tes
     REQUIRE(clock.wait_for_waiters(1, kBound));
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:move() delete the snapshot_.write() in move()'s catch block.
+// Falsified by: astroasis_focuser_driver.cpp:move():319 delete the state_.write() in move()'s catch block.
 TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -221,7 +221,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed move drops the poll that overlaps
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:halt() delete the snapshot_.write() in halt()'s catch block.
+// Falsified by: astroasis_focuser_driver.cpp:halt():299 delete the state_.write() in halt()'s catch block.
 TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps it",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -243,7 +243,7 @@ TEST_CASE("Astroasis Focuser Driver - a failed halt drops the poll that overlaps
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:poll_state_once() take begin_poll() after the device read instead of
+// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:201 poll_once() take begin_poll() after the device read instead of
 // before.
 TEST_CASE("Astroasis Focuser Driver - a poll that overlaps a write drops its frame",
           "[astroasis][focuser][snapshot][unit]") {
@@ -285,7 +285,7 @@ TEST_CASE("Astroasis Focuser Driver - failed MaxStep read at connect closes the 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp kFaultThreshold raised from 3 to 100 (the link never latches).
+// Falsified by: astroasis_focuser_driver.cpp polled_state.h:72 fault_threshold raised from 3 to 100 (the link never latches).
 TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link latches",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -347,7 +347,7 @@ TEST_CASE("Astroasis Focuser Driver - failed polls are not served once the link 
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:note_poll_failure() delete the link_lost_ latch past kLinkStalenessBound.
+// Falsified by: astroasis_focuser_driver.cpp:polled_state.h:218 note_failure() delete the lost_ latch past kLinkStalenessBound.
 TEST_CASE("Astroasis Focuser Driver - a link silent past the staleness bound drops Connected",
           "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
@@ -429,7 +429,7 @@ TEST_CASE("Astroasis Focuser Driver - DeviceState TimeStamp is when the frame wa
     driver->set_connected(false);
 }
 
-// Falsified by: astroasis_focuser_driver.cpp:set_connected() delete state_poll_.cancel_all_and_join() on disconnect.
+// Falsified by: astroasis_focuser_driver.cpp:set_connected():210 delete state_.stop_and_join() on disconnect.
 TEST_CASE("Astroasis Focuser Driver - disconnect stops the poll", "[astroasis][focuser][snapshot][unit]") {
     auto state = std::make_shared<FakeHidState>();
     alpacacore::test::FakeTaskClock clock;
