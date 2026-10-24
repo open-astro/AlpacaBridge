@@ -177,13 +177,19 @@ Checks:
  22. Every decision record in docs/decisions/ has the shape README.md there
      describes: an NNNN-<slug>.md name with no gap in the numbers, a
      `Status:` line on line 3 (a superseded record names a record that
-     exists), the sections Context, Decision, Rules, Alternatives rejected,
-     Consequences and Links in that order (Adoption and How to reverse may sit
-     between them; a superseded record needs no Rules), numbered Rules lines
-     that end `Scope: `glob`. Checked by: <check>.` with every glob matching a
-     tracked file, and an index that lists every record once, in order. The
-     planned decision-record gate reads these sections, so a record it cannot
-     parse would pass every pull request.
+     exists; a retired one names its issue or PR), the sections Context,
+     Decision, Rules, Alternatives rejected, Consequences and Links in that
+     order (Adoption and How to reverse may sit between them; a superseded
+     record needs no Rules and a retired one drops Rules and Adoption; How to
+     reverse is required from record 0020 on and in any record that supersedes
+     another), numbered Rules lines that end
+     `Scope: `glob`. Checked by: <check>.` with every glob matching a tracked
+     file (`**` only in 0013), no except/unless/until/for now on a rule line
+     without the `<!-- allowed -->` marker, bare `Checked by: review` rules
+     held to the per-record ratchet DECISION_BARE_REVIEW_BASELINE, and an
+     index that lists every record once, in order, with `(retired)` on exactly
+     the retired ones. The decision-record gate reads these sections, so a
+     record it cannot parse would pass every pull request.
  23. Every `## Adoption` table agrees with the code, both ways: every file
      the `Scan:` glob matches that names the `Symbol:` (with no `Symbol:`
      line, every scanned file) has a row; a Symbol column overrides the symbol
@@ -2274,14 +2280,49 @@ def check_agents_md_size(root=ROOT):
 
 DECISION_DIR = "docs/decisions"
 DECISION_FILE_RE = re.compile(r"^(\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
-DECISION_STATUS_RE = re.compile(r"^Status: (proposed|accepted|superseded by (\d{4}))$")
+DECISION_STATUS_RE = re.compile(r"^Status: (proposed|accepted|superseded by (\d{4})|retired \(#\d+\))$")
 DECISION_SECTIONS = ("Context", "Decision", "Rules", "Alternatives rejected", "Consequences", "Links")
 # Sections a record may add between the required ones; anything else is a typo
 # or a new convention that README.md has to describe first.
 DECISION_OPTIONAL_SECTIONS = ("Adoption", "How to reverse")
 DECISION_RULE_RE = re.compile(
-    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+)\.$")
-DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)$", re.M)
+    r"^(?P<n>\d+)\. (?P<text>.+?) Scope: (?P<scope>`[^`]+`(?:, `[^`]+`)*)\. Checked by: (?P<check>.+?)\."
+    r"(?P<allowed> <!-- allowed -->)?$")
+DECISION_INDEX_LINK_RE = re.compile(r"^- \[[^\]]+\]\((\d{4}-[^)]+\.md)\)( \(retired\))?$", re.M)
+# A rule's bound is part of the rule; a carve-out for code that deviates is a
+# defect with an issue, never a clause (README.md, "Rules"). A rule whose bound
+# needs one of these words ends with ` <!-- allowed -->` (DECISION_RULE_RE's
+# `allowed` group, so check_adr_scope.py reads a marked rule as any other).
+DECISION_EXCEPTION_WORD_RE = re.compile(r"\b(except|unless|until|for now)\b", re.I)
+# `Checked by: review` names no evidence, so the bot has nothing to apply. New
+# rules write `review (<what to look for>)`; the records below keep the bare
+# form they had when the form changed, and this baseline may only fall: lower
+# a record's figure (or drop the record) in the PR that converts its rules.
+DECISION_BARE_REVIEW_BASELINE = {
+    "0001-skywatcher-pointing-clock.md": 1,
+    "0002-server-thread-ownership.md": 1,
+    "0003-docs-drift-gates.md": 1,
+    "0005-task-clock.md": 4,
+    "0006-async-operation-ownership.md": 3,
+    "0007-lan-surface-threat-model.md": 13,
+    "0009-link-loss-and-relink-policy.md": 3,
+    "0010-snapshot-served-state.md": 1,
+    "0011-cgx-logical-reference-continuity.md": 4,
+    "0012-bundled-libgphoto2.md": 1,
+    "0013-designs-to-avoid.md": 7,
+    "0014-utc-offset.md": 2,
+    "0015-sdk-seams.md": 4,
+    "0016-getters-never-wait-on-device-io.md": 5,
+    "0017-serial-port-ownership.md": 8,
+    "0019-connect-without-site.md": 1,
+}
+# The negative catalogue's rules have no natural file scope, so it alone may
+# write `Scope: `**``; anywhere else that scope marks a rule that belongs in
+# the catalogue or in a topic file.
+DECISION_ANY_SCOPE_RECORDS = ("0013-designs-to-avoid.md",)
+# Records from this number on say how to undo themselves (README.md, "How to
+# reverse"); the earlier ones add the section when next touched.
+DECISION_REVERSE_REQUIRED_FROM = 20
 ADOPTION_STATES = ("adopted", "partial", "planned")
 ISSUE_REF_RE = re.compile(r"#\d+")
 CODE_SPAN_ONLY_RE = re.compile(r"`([^`]+)`")
@@ -2307,11 +2348,17 @@ def _decision_sections(text):
     return [(title, "\n".join(body)) for title, body in sections]
 
 
-def _decision_record_findings(records, readme, tracked):
+def _decision_record_findings(records, readme, tracked, baseline=DECISION_BARE_REVIEW_BASELINE,
+                              reverse_required_from=DECISION_REVERSE_REQUIRED_FROM):
     """records: {file name: text}; readme: docs/decisions/README.md text;
-    tracked: repo-relative paths the Rules scope globs are matched against."""
+    tracked: repo-relative paths the Rules scope globs are matched against;
+    baseline: {file name: bare `Checked by: review` rules still allowed};
+    reverse_required_from: first record number that needs `## How to reverse`."""
     findings = []
     numbers = []
+    retired = set()
+    superseded_by = {}   # superseding record number -> the record it replaces
+    has_reverse = {}     # record number -> whether it has `## How to reverse`
     for name in sorted(records):
         text = records[name]
         m = DECISION_FILE_RE.match(name)
@@ -2325,17 +2372,31 @@ def _decision_record_findings(records, readme, tracked):
             findings.append("%s: the first line is not a `# ` title" % where)
         status = DECISION_STATUS_RE.match(lines[2]) if len(lines) > 2 else None
         if not status:
-            findings.append("%s: line 3 is not `Status: proposed`, `Status: accepted` or "
-                            "`Status: superseded by NNNN`" % where)
+            findings.append("%s: line 3 is not `Status: proposed`, `Status: accepted`, "
+                            "`Status: superseded by NNNN` or `Status: retired (#NNNN)`" % where)
             continue
         if status.group(2) and not any(n.startswith(status.group(2) + "-") for n in records):
             findings.append("%s: superseded by %s, which does not exist" % (where, status.group(2)))
+        if status.group(2):
+            superseded_by.setdefault(status.group(2), name)
+        is_retired = status.group(1).startswith("retired")
+        if is_retired:
+            retired.add(name)
+        no_rules = bool(status.group(2)) or is_retired
         sections = _decision_sections(text)
         titles = [t for t, _ in sections]
         unknown = [t for t in titles if t not in DECISION_SECTIONS + DECISION_OPTIONAL_SECTIONS]
         for t in unknown:
             findings.append("%s: unknown section `## %s` (README.md lists the allowed ones)" % (where, t))
-        required = [t for t in DECISION_SECTIONS if not (t == "Rules" and status.group(2))]
+        has_reverse[m.group(1)] = "How to reverse" in titles
+        if is_retired:
+            for t in ("Rules", "Adoption"):
+                if t in titles:
+                    findings.append("%s: a retired record drops its `## %s` section" % (where, t))
+        elif int(m.group(1)) >= reverse_required_from and "How to reverse" not in titles:
+            findings.append("%s: a record from %04d on needs a `## How to reverse` section"
+                            % (where, reverse_required_from))
+        required = [t for t in DECISION_SECTIONS if not (t == "Rules" and no_rules)]
         present = [t for t in titles if t in required]
         for t in required:
             if t not in titles:
@@ -2346,9 +2407,10 @@ def _decision_record_findings(records, readme, tracked):
             if titles.count(t) > 1:
                 findings.append("%s: section `## %s` appears %d times" % (where, t, titles.count(t)))
         rules = dict(sections).get("Rules")
-        if rules is None:
+        if rules is None or is_retired:
             continue
         expected = 1
+        bare_review = 0
         for line in rules.splitlines():
             if not re.match(r"^\d+\. ", line):
                 continue
@@ -2361,17 +2423,46 @@ def _decision_record_findings(records, readme, tracked):
             if int(rule.group("n")) != expected:
                 findings.append("%s: rule %s is out of sequence (expected %d)" % (where, rule.group("n"), expected))
             expected = int(rule.group("n")) + 1
+            word = DECISION_EXCEPTION_WORD_RE.search(rule.group("text"))
+            if word and not rule.group("allowed"):
+                findings.append("%s: rule %s says `%s`; a carve-out is a defect with an issue, not a rule clause "
+                                "(end the line with `<!-- allowed -->` when the bound is the rule)"
+                                % (where, rule.group("n"), word.group(1)))
+            if rule.group("check") == "review":
+                bare_review += 1
             for glob_pattern in CODE_SPAN_ONLY_RE.findall(rule.group("scope")):
-                if not any(_glob_match(p, glob_pattern) for p in tracked):
+                if glob_pattern == "**" and name not in DECISION_ANY_SCOPE_RECORDS:
+                    findings.append("%s: rule %s scope `**` is allowed only in %s; name the files or move "
+                                    "the rule" % (where, rule.group("n"), ", ".join(DECISION_ANY_SCOPE_RECORDS)))
+                elif not any(_glob_match(p, glob_pattern) for p in tracked):
                     findings.append("%s: rule %s scope `%s` matches no tracked file"
                                     % (where, rule.group("n"), glob_pattern))
         if expected == 1:
             findings.append("%s: `## Rules` has no numbered rule" % where)
+        allowed_bare = baseline.get(name, 0)
+        if bare_review > allowed_bare:
+            findings.append("%s: %d rules say a bare `Checked by: review` but the ratchet allows %d; write "
+                            "`review (<what to look for>)`" % (where, bare_review, allowed_bare))
+        elif bare_review < allowed_bare:
+            findings.append("%s: %d bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE "
+                            "allows %d; lower it so the ratchet holds" % (where, bare_review, allowed_bare))
+    # README.md: a record that supersedes another says how to reverse, whatever
+    # its number (the number cut-over above covers only new records).
+    for number, old in sorted(superseded_by.items()):
+        if has_reverse.get(number) is False and int(number) < reverse_required_from:
+            new = next(n for n in records if n.startswith(number + "-"))
+            findings.append("%s/%s: supersedes %s and needs a `## How to reverse` section"
+                            % (DECISION_DIR, new, old))
     numbers.sort()
     if numbers and numbers != list(range(1, len(numbers) + 1)):
         findings.append("%s: record numbers are not 0001..%04d with no gap or repeat: %s"
                         % (DECISION_DIR, len(numbers), ", ".join("%04d" % n for n in numbers)))
-    indexed = DECISION_INDEX_LINK_RE.findall(readme)
+    index_lines = DECISION_INDEX_LINK_RE.findall(readme)
+    indexed = [n for n, _ in index_lines]
+    for n, suffix in index_lines:
+        if bool(suffix) != (n in retired):
+            findings.append("%s/README.md: the index line for %s %s the `(retired)` suffix"
+                            % (DECISION_DIR, n, "lacks" if n in retired else "carries"))
     record_names = sorted(n for n in records if DECISION_FILE_RE.match(n))
     if indexed != record_names:
         missing = sorted(set(record_names) - set(indexed))
@@ -3555,12 +3646,65 @@ def self_test():
     good_index = "- [Example](0001-example.md)\n- [Second](0002-second.md)\n"
     tracked_fixture = ["src/a.cpp", "src/b.cpp", "docs/x.md"]
 
-    def records(first=good_record, second=good_record, index=good_index, extra=None):
+    fixture_baseline = {"0001-example.md": 1, "0002-second.md": 1}
+
+    def records(first=good_record, second=good_record, index=good_index, extra=None,
+                baseline=fixture_baseline, reverse_from=99):
         recs = {"0001-example.md": first, "0002-second.md": second}
         recs.update(extra or {})
-        return _decision_record_findings(recs, index, tracked_fixture)
+        return _decision_record_findings(recs, index, tracked_fixture, baseline, reverse_from)
 
     check("decision records: the baseline fixture is clean", records() == [])
+    retired_record = good_record.replace("Status: accepted", "Status: retired (#1234)").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", "")
+    retired_index = "- [Example](0001-example.md) (retired)\n- [Second](0002-second.md)\n"
+    check("decision records: a retired record with no Rules and a suffixed index line is clean",
+          records(first=retired_record, index=retired_index) == [])
+    f = records(first=good_record.replace("Status: accepted", "Status: retired (#1234)"), index=retired_index)
+    check("decision records: a retired record that keeps its Rules is reported",
+          any("retired record drops its `## Rules`" in x for x in f))
+    f = records(first=good_record.replace("Status: accepted", "Status: retired"))
+    check("decision records: retired without the retiring issue or PR is reported", any("line 3" in x for x in f))
+    f = records(first=retired_record)
+    check("decision records: a retired record whose index line lacks the suffix is reported",
+          any("0001-example.md lacks the `(retired)` suffix" in x for x in f))
+    f = records(index=retired_index)
+    check("decision records: an accepted record whose index line carries the suffix is reported",
+          any("0001-example.md carries the `(retired)` suffix" in x for x in f))
+    f = records(first=good_record.replace("Checked by: review.", "Checked by: review (no sleep in the getter)."),
+                baseline={"0002-second.md": 1})
+    check("decision records: `review (<evidence>)` counts as evidence, not a bare review", f == [])
+    f = records(baseline={"0002-second.md": 1})
+    check("decision records: a bare review above the ratchet is reported",
+          any("1 rules say a bare `Checked by: review` but the ratchet allows 0" in x for x in f))
+    f = records(first=good_record.replace("Checked by: review.", "Checked by: review (evidence)."))
+    check("decision records: a stale ratchet figure is reported so the baseline only falls",
+          any("0 bare `Checked by: review` rules remain but DECISION_BARE_REVIEW_BASELINE allows 1" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing.", "1. Do a thing unless asked."))
+    check("decision records: an exception word in a rule is reported", any("rule 1 says `unless`" in x for x in f))
+    f = records(first=good_record.replace("1. Do a thing. Scope: `src/a.cpp`. Checked by: review.",
+                                          "1. Do a thing until told. Scope: `src/a.cpp`. Checked by: review. <!-- allowed -->"))
+    check("decision records: the allowed marker admits a bounded rule", f == [])
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"))
+    check("decision records: scope `**` outside the catalogue is reported",
+          any("scope `**` is allowed only in" in x for x in f))
+    f = records(first=good_record.replace("Scope: `src/a.cpp`", "Scope: `**`"),
+                extra={"0013-designs-to-avoid.md": good_record.replace("Scope: `src/a.cpp`", "Scope: `**`")})
+    check("decision records: scope `**` inside the catalogue is not the finding",
+          not any("0013-designs-to-avoid.md: rule 1 scope `**`" in x for x in f))
+    f = records(reverse_from=2)
+    check("decision records: a record from the cut-over number on without How to reverse is reported",
+          any("0002-second.md: a record from 0002 on needs a `## How to reverse`" in x for x in f)
+          and not any("0001-example.md: a record from" in x for x in f))
+    f = records(second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), reverse_from=2)
+    check("decision records: How to reverse satisfies the cut-over", f == [])
+    f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
+        "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        baseline={"0002-second.md": 1})
+    check("decision records: a superseding record below the cut-over without How to reverse is reported",
+          any("0002-second.md: supersedes 0001-example.md and needs a `## How to reverse`" in x for x in f))
     f = records(first=good_record.replace("## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
                                           "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
     check("decision records: a missing Rules section is reported", any("missing section `## Rules`" in x for x in f))
@@ -3570,7 +3714,8 @@ def self_test():
     check("decision records: a supersede target that does not exist is reported", any("0009, which does not exist" in x for x in f))
     f = records(first=good_record.replace("Status: accepted", "Status: superseded by 0002").replace(
         "## Rules\n\nintro\n\n1. Do a thing. Scope: `src/a.cpp`. Checked by: review.\n"
-        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""))
+        "2. Do another. Scope: `src/*.cpp`, `docs/x.md`. Checked by: `tests/t.cpp`.\n\n", ""),
+        second=good_record.replace("## Links", "## How to reverse\n\nr\n\n## Links"), baseline={"0002-second.md": 1})
     check("decision records: a superseded record needs no Rules section", f == [])
     f = records(first=good_record.replace(" Checked by: review.", "."))
     check("decision records: a rule with no `Checked by:` is reported", any("rule line does not end" in x for x in f))

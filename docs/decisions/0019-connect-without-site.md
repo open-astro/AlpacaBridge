@@ -26,7 +26,7 @@ Decided 2026-10-21 on issue #1470 (item 5): allow Connect without a site, and re
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
 1. A Sky-Watcher Connect succeeds without a site and sends no hemisphere-dependent command. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one").
-2. Every member whose result or motion depends on `hemisphere_south_locked()` or on the longitude throws `InvalidOperation` until both site coordinates are set; the site getters throw `InvalidOperation` until set. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one", "one configured coordinate is not enough to point"), review of every `hemisphere_south_locked()` call site.
+2. Every member whose result or motion depends on `hemisphere_south_locked()` or on the longitude throws `InvalidOperation` until both site coordinates are set; the site getters throw `InvalidOperation` until set. Scope: `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_async.cpp` ("connects without a site and refuses what needs one", "one configured coordinate is not enough to point"), review of every `hemisphere_south_locked()` call site. <!-- allowed -->
 3. A new mount driver whose controller stores no site follows rules 1 and 2 instead of refusing Connect. Scope: `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: review.
 
 ## Alternatives rejected

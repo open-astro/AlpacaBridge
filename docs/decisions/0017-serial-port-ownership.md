@@ -37,7 +37,7 @@ The rules a change is checked against. Each names where it applies and what chec
 7. A connect whose remembered serial port is gone or held by another connected device reports a stale endpoint, so the connect re-scans instead of failing. Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
 8. A serial driver confirms which device it reached from its connect handshake reply before it reports `Connected`; a port name, by-id or not, never identifies the device on its own. Scope: `AlpacaCore/src/vendors/**`. Checked by: review.
 9. No raw `read`/`write` on a serial link's fd outside the shared read and write helpers and the named `poll()`-bounded loops (Sky-Watcher and the Celestron CGX, behind their test seams). Scope: `AlpacaCore/src/vendors/**`, `AlpacaCore/include/alpacacore/util/*.h`. Checked by: `scripts/check_serial_port_ownership.py` (CI `serial-port-ownership` job), review.
-10. The shared open helper takes `TIOCEXCL` on every open; a refusal logs a warning and the open continues, except on a link that opts in to a required lock (the Celestron CGX), where the open fails. Scope: `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review.
+10. The shared open helper takes `TIOCEXCL` on every open; a refusal logs a warning and the open continues, except on a link that opts in to a required lock (the Celestron CGX), where the open fails. Scope: `AlpacaCore/include/alpacacore/util/*.h`. Checked by: review. <!-- allowed -->
 
 ## Adoption
 

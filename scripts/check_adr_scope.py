@@ -85,10 +85,10 @@ def fold_checklist(text):
 
 
 def record_rules(records):
-    """{record file: [(rule number, [glob])]} for every record that is not superseded."""
+    """{record file: [(rule number, [glob])]} for every record that is not superseded or retired."""
     out = {}
     for name, text in sorted(records.items()):
-        if not DECISION_FILE_RE.match(name) or re.search(r"^Status: superseded by", text, re.M):
+        if not DECISION_FILE_RE.match(name) or re.search(r"^Status: (superseded by|retired)", text, re.M):
             continue
         rules = dict(_decision_sections(text)).get("Rules", "")
         parsed = []
@@ -253,6 +253,13 @@ def self_test():
     expect(in_scope(["AlpacaCore/src/vendors/zwo/sub/x_driver.cpp"], rules) == [],
            "a single star does not cross a directory")
     expect(in_scope(["README.md"], rules) == [], "a file outside every scope is in no record")
+    marked = record.replace("Checked by: review.\n2.", "Checked by: review. <!-- allowed -->\n2.")
+    marked_rules = record_rules({"0001-a.md": marked})
+    expect(in_scope(["AlpacaCore/src/vendors/zwo/zwo_camera_driver.cpp"], marked_rules) == [("0001-a.md", [1])],
+           "a rule line ending in the allowed marker stays in scope")
+    retired = record.replace("Status: accepted", "Status: retired (#1)")
+    expect(list(record_rules({"0001-a.md": record, "0002-b.md": retired})) == ["0001-a.md"],
+           "retired records are skipped")
 
     changed = ["docs/decisions/0005-task-clock.md", "scripts/x.py"]
     good = "## Decision records\n\n- 0005 (adds a row)\n"
