@@ -85,7 +85,10 @@ function catalogFieldProblems(formFieldList, descriptors, exempt) {
     return problems;
 }
 
-test('the drift checks report a named field with no catalog entry, and a catalog field with no form field', () => {
+// Self-test of the reader and both checks on a literal form, run first in each
+// check case so a reader or check that reports nothing cannot pass vacuously
+// (decision 0003: extractor logic has literal self-test fixtures).
+function assertChecksCatchDrift() {
     const snippet = `
         <form id="device-form">
           <select id="vendor" name="vendor"><option value="">Select vendor...</option></select>
@@ -124,13 +127,15 @@ test('the drift checks report a named field with no catalog entry, and a catalog
     assert.deepEqual(catalogFieldProblems(parsed, cat, none), [
         'acme/camera/cameraId: no form field has data-config-key="cameraId" and noFormField does not list it',
     ]);
-});
+}
 
 test('every named form field maps to a catalog field, a key the router keeps for every device, or a listed UI-only id', () => {
+    assertChecksCatchDrift();
     assert.deepEqual(namedFieldProblems(fields, catalog, exemptions, agnostic), []);
 });
 
 test('every catalog field has a form field or a listed reason', () => {
+    assertChecksCatchDrift();
     assert.deepEqual(catalogFieldProblems(fields, catalog, exemptions), []);
 });
 
@@ -163,7 +168,7 @@ test('every exemption in catalog_form_drift.json is still needed', () => {
     assert.deepEqual(stale, []);
 });
 
-test('each form field\'s control fits its catalog field type', () => {
+test('each form field control fits its catalog field type', () => {
     const problems = [];
     const seen = new Set();
     for (const f of fields) {

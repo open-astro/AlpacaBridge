@@ -93,7 +93,7 @@ test('an absent Discriminator opens on its catalog default', () => {
     assert.equal(shown('zwo', 'switch', {})('zwo-switch-type'), 'dewheater');
 });
 
-test('every Discriminator\'s catalog default is an option of its select', () => {
+test('every Discriminator catalog default is an option of its select', () => {
     const problems = [];
     for (const d of catalog) {
         for (const c of d.fields.filter((x) => x.role === 'Discriminator')) {
@@ -167,7 +167,7 @@ test('Bisque and gphoto fall back to the values the form shows for a new device'
     assert.equal(gphoto('gphoto-long-exposure-nr'), 'camera');
 });
 
-test('the fill stays inside the edited device\'s vendor and type', () => {
+test('the fill stays inside the vendor and type of the edited device', () => {
     const qhy = schema().editAssignments(descriptor('qhy', 'focuser'), { maxStep: 5000 }, fields).map((a) => a.id);
     assert.ok(qhy.includes('qhy-focuser-max-step'));
     assert.ok(!qhy.includes('zwo-focuser-max-step'), 'only a ZWO focuser fills the ZWO max step input');

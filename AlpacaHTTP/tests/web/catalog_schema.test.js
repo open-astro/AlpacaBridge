@@ -95,7 +95,7 @@ test('offeredVendors drops a descriptor the build does not include', () => {
     assert.ok(schema().offeredVendors(noZwoCamera, 'focuser').includes('zwo'));
 });
 
-test('offeredVendors keeps the edited device\'s vendor when the build lacks it', () => {
+test('offeredVendors keeps the vendor of the edited device when the build lacks it', () => {
     const noZwoCamera = withAvailable('zwo', 'camera', false);
     assert.ok(schema().offeredVendors(noZwoCamera, 'camera', 'zwo').includes('zwo'));
     assert.ok(!schema().offeredVendors(catalog, 'camera', 'weewx').includes('weewx'),
