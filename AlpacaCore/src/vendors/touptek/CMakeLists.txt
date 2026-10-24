@@ -1,11 +1,11 @@
 # ToupTek vendor support
-# Uses vendored SDK in external/ToupTek/toupcamsdk.20260128
+# Uses vendored SDK in external/ToupTek/toupcamsdk.20260519
 
 if(ALPACACORE_ENABLE_TOUPTEK)
     message(STATUS "Building ToupTek camera driver support")
 
     get_filename_component(ALPACACORE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
-    set(TOUPTEK_SDK_ROOT "${ALPACACORE_ROOT}/external/ToupTek/toupcamsdk.20260128")
+    set(TOUPTEK_SDK_ROOT "${ALPACACORE_ROOT}/external/ToupTek/toupcamsdk.20260519")
     set(TOUPTEK_SDK_INCLUDE "${TOUPTEK_SDK_ROOT}/inc")
 
     if(NOT EXISTS "${TOUPTEK_SDK_INCLUDE}/toupcam.h")

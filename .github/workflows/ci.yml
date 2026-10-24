@@ -223,7 +223,7 @@ jobs:
           libs=(
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/ToupTek/toupcamsdk.20260519/linux/arm64/glibc/libtoupcam.so"
             "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
             "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"
@@ -485,7 +485,7 @@ jobs:
           libs=(
             "$core/ZWO/ASI_Camera_SDK/lib/linux/armv8/libASICamera2.so"
             "$core/SVBONY/lib/armv8/libSVBCameraSDK.so"
-            "$core/ToupTek/toupcamsdk.20260128/linux/arm64/glibc/libtoupcam.so"
+            "$core/ToupTek/toupcamsdk.20260519/linux/arm64/glibc/libtoupcam.so"
             "$core/PlayerOne/PlayerOne_Camera_SDK_Linux_V3.10.1/lib/arm64/libPlayerOneCamera.so"
             "$core/PlayerOne/PlayerOne_FilterWheel_SDK_Linux_V1.2.3/lib/arm64/libPlayerOnePW.so"
             "$core/QHY/sdk_linux_arm64_26.07.28/usr/local/lib/libqhyccd.so"

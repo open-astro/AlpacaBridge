@@ -190,7 +190,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>ToupTek Driver Notes</strong></summary>
 
-- **SDK**: ToupTek toupcamsdk 2026-01-28 (build target)
+- **SDK**: ToupTek toupcamsdk 2026-05-19 (build target)
 - **Connection**: USB (self-contained `libtoupcam.so`; no libusb/libudev link dependency)
 - **Tested models**: GPCMOS01200KPF and GPCMOS02000KPA (guide cameras), ATR2600M (cooled APS-C mono, IMX571), ATR2600C (cooled APS-C color, IMX571, sold rebadged as the SVBONY SC571CC), ATR585M (cooled mono, IMX585, HCG/LCG/HDR readout modes), GPM662M (uncooled mono, IMX662, HCG/LCG readout modes) and G3M678C (uncooled color, IMX678) — all ConformU-validated on Linux arm64. G3M715C (also sold rebadged as SVBONY SC715C — see the SVBONY section) is validated too. Other ToupTek models sharing the same SDK are expected to work but have not been individually verified.
 - **ConformU**: 4.3.0 — ATR2600M: 0 errors, 0 issues, 0 timing issues (SDK 59.30701.20260128). 4.5.0 — GPM662M (Raspberry Pi, 2026-08-26): 0 errors, 0 issues, all members within timing targets. 4.5.1 — G3M715C (sold as the SVBONY SC715C, 2026-09-11): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC715C/`. 4.5.1 — ATR2600C (sold as the SVBONY SC571CC, 2026-09-13): 0 errors, 0 issues, 0 timing issues; report under `AlpacaCore/conformu/SVBONY/SC571CC/`. 4.5.2 — G3M678C (a user's Raspberry Pi 5, Debian 13, AlpacaBridge 5.1.0 nightly `g7f037d8`, 2026-10-18, issue #1300): 0 errors, 0 issues, 0 timing issues.
@@ -379,7 +379,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>ToupTek FilterWheel Driver Notes</strong></summary>
 
-- **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera and focuser drivers)
+- **SDK**: ToupTek toupcamsdk 2026-05-19 (shared with the ToupTek camera and focuser drivers)
 - **Connection**: USB (enumerated by the toupcam SDK via `TOUPCAM_FLAG_FILTERWHEEL`; standalone AFW-M, not a camera-integrated wheel)
 - **Tested model**: AFW-M 7-slot on Linux arm64 (wheel firmware `FILTERWHEEL01A_V202_20250903.iic`)
 - **ConformU**: 4.3.0 — 0 errors, 0 issues, 0 timing issues
@@ -525,7 +525,7 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>ToupTek Focuser Driver Notes</strong></summary>
 
-- **SDK**: ToupTek toupcamsdk 2026-01-28 (shared with the ToupTek camera driver)
+- **SDK**: ToupTek toupcamsdk 2026-05-19 (shared with the ToupTek camera driver)
 - **Connection**: USB. Devices are enumerated via `Toupcam_EnumV2` and filtered by `TOUPCAM_FLAG_AUTOFOCUSER`.
 - **Configuration**: `focuserIndex` (0-based among AAF devices) or `focuserId` (opaque SDK id; overrides index).
 - **Capabilities**: Absolute positioning, halt, max-step query, on-board temperature (tenths of °C), backlash and reverse direction supported by the firmware. `StepSize` is not exposed because the AAF firmware does not report mechanically-valid microns-per-step for arbitrary focuser setups.

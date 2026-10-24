@@ -22,12 +22,14 @@ of Altair's download is vendored. The SDK ships no static library.
   new SDK directory needs its `license.txt`, and the `debian/copyright` path
   and year must follow.
 
-- **altaircam is the ToupTek SDK renamed.** Against `toupcam.h` 59.30701 it
-  differs only in the `Altaircam_` / `ALTAIRCAM_` prefixes, comments, four GigE
-  timeout constants and eight added functions; every function the wrappers call
-  has the same signature, every struct the same layout, every constant the same
-  value. Recheck that claim when either SDK is bumped: rename the prefixes in a
-  copy of `altaircam.h` and diff it against `toupcam.h`.
+- **altaircam is the ToupTek SDK renamed.** Against `toupcam.h` 60.31488 it
+  differs only in the `Altaircam_` / `ALTAIRCAM_` prefixes, comments, the
+  `HToupCam` typedef alias that only `toupcam.h` declares, and
+  `Altaircam_Reset`, which only `altaircam.h` declares and the wrappers do not
+  call; every function the wrappers call has the same signature, every struct
+  the same layout, every constant the same value. Recheck that claim when either
+  SDK is bumped: rename the prefixes in a copy of `altaircam.h` and diff it
+  against `toupcam.h`.
 - **One wrapper implementation for both brands.** `ToupcamFamilySDK<Api>`
   (`AlpacaCore/src/vendors/touptek/toupcam_family_sdk.h`, private to the
   vendor sources: it is not installed) holds every SDK

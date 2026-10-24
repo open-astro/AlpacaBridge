@@ -12,8 +12,9 @@
 # as the vendor ships it (see AlpacaCore/external/README.md), so a finding there
 # is not ours to fix. The workflow uses build-mode: none, which extracts every
 # C/C++ file in the tree, so without this the SDKs' unbuilt sample programs
-# (ToupTek's samples/) raise alerts on every scan. Our own code that calls the
-# SDKs lives under AlpacaCore/src/vendors/ and is still scanned.
+# (QHY's usr/local/testapp/, SVBONY's demo/) raise alerts on every scan. Our
+# own code that calls the SDKs lives under AlpacaCore/src/vendors/ and is still
+# scanned.
 paths-ignore:
   - AlpacaCore/external/**
 query-filters:
