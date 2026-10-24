@@ -863,8 +863,8 @@ public:
         // the :MS# handler explicitly sets supress_frame=true) and hardware
         // (the mount visibly started slewing while this call sat waiting
         // for a '#' that was never coming).
-        // LX200 convention: "0" means the slew was accepted; any other reply is
-        // the refusal reason, which the driver reports (#1379).
+        // One digit: "0" means the slew was accepted; 1-9 is the refusal reason
+        // (OnStep Command.ino, OnStepX Goto.command.cpp), which the driver reports (#1379).
         return send_command(":MS#", false, kSetAckTimeoutMs);
     }
 

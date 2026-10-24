@@ -3194,15 +3194,11 @@ TEST_CASE("OnStep Telescope Driver - a refused GOTO reports the mount's reason",
         }
     }
 
-    SECTION("an LX200 text reply keeps its text, an unknown digit says so") {
-        mount->set_ms_reply("1Object below horizon");  // classic LX200: digit then text
-        auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
-        INFO(error.second);
-        CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
-        CHECK(error.second.find("below the horizon limit") != std::string::npos);
-        CHECK(error.second.find("reply '1Object below horizon'") != std::string::npos);
+    // OnStep and OnStepX reply with one digit (Command.ino, Goto.command.cpp); a
+    // reply outside 0-9 still refuses, and the message shows what came back.
+    SECTION("a reply that is not a known digit is an unknown reason") {
         mount->set_ms_reply("X");
-        error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
+        const auto error = alpaca_error_of([&]() { driver->slew_to_coordinates_async(12.0, 45.0); });
         INFO(error.second);
         CHECK(error.first == alpacacore::AlpacaError::InvalidOperation);
         CHECK(error.second.find("an unknown reason") != std::string::npos);
