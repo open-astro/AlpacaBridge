@@ -2017,3 +2017,36 @@ TEST_CASE("QHY Camera Driver - CoolerOn works with the cooler capability", "[qhy
     require_alpaca_error([&] { (void)driver->get_cooler_power(); }, alpacacore::AlpacaError::PropertyNotImplemented);
     driver->set_connected(false);
 }
+
+TEST_CASE("FakeQHYSDK via LockedQHYSDK - SDK version hook does not wait on an in-flight open", "[qhy][camera][unit]") {
+    // open-astro#1646: QHYSDKWrapper::get_sdk_version() took the same mutex
+    // open_camera() holds for the whole USB open, so configureddevices and
+    // DriverInfo stalled behind a connect. This pins the LockedQHYSDK layout
+    // (the wrapper itself sits on libqhyccd and has no seam). The camera
+    // driver does not override get_device_firmware(), so it is not checked.
+    auto fake = make_fake();
+    fake.before_call = [](const std::string& fn) {
+        if (fn == "open_camera") {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk);
+
+    std::thread connector([&] { driver->connect(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fake.call_count("open_camera") < 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    REQUIRE(fake.call_count("open_camera") == 1);
+
+    const auto elapsed_ms = [](auto&& fn) {
+        const auto started = std::chrono::steady_clock::now();
+        fn();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+            .count();
+    };
+    CHECK(elapsed_ms([&] { (void)driver->get_device_sdk_version(); }) < 100);
+
+    connector.join();
+}

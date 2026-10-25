@@ -162,6 +162,8 @@ author must do. Read the docstring before changing a gate.
     by review against the [concurrency checklist](driver-lifecycle.instructions.md#driver-concurrency--lifecycle-read-before-writing-a-driver).
 - **SDK decorators take their mutex on every forward** (#394): `check_docs_drift.py` compares
   `QHYSDK`, `LockedQHYSDK` and the sweep list in `test_qhy_fake_sdk.cpp`, and fails on a forward
-  that skips `locked()`, except `cancel_exposure()`, which takes its own `cancel_mutex_` so it can
-  interrupt a download blocked on the handle (#339). Do not move it back under `mutex_`. Model a
-  new decorator the same way.
+  that skips the one-argument `locked([&] {...})` (a `locked(other_mutex_, ...)` fails too), except
+  two: `cancel_exposure()`, which takes its own `cancel_mutex_` so it can interrupt a download
+  blocked on the handle (#339), and `get_sdk_version()`, which must use `locked(version_mutex_, ...)`
+  so the hook never queues behind an in-flight open (#1646). Do not move either back under
+  `mutex_`. Model a new decorator the same way.
