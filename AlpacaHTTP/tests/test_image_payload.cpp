@@ -83,6 +83,7 @@ std::string refusal_of(Fn&& fn) {
     return std::string();
 }
 
+// case: JSON ImageArray rank 2 is X-major with the envelope head
 // A 3 wide, 2 high rank-2 image reaches the wire X-major: [[col0],[col1],[col2]].
 // Falsified by: skipping the transpose; swapping the two ids in the envelope head; dropping Type or Rank.
 void case_json_rank2() {
@@ -93,6 +94,7 @@ void case_json_rank2() {
            "\"Type\":2,\"Rank\":2,\"Value\":[[0,3],[1,4],[2,5]]}");
 }
 
+// case: JSON ImageArray rank 3 nests x, y, channel
 // Rank 3 nests [x][y][channel] and keeps each pixel's channels together.
 // Falsified by: transposing channels with x/y; nesting rank 3 like rank 2.
 void case_json_rank3() {
@@ -103,6 +105,7 @@ void case_json_rank3() {
            "\"Type\":2,\"Rank\":3,\"Value\":[[[1,2,3],[7,8,9]],[[4,5,6],[10,11,12]]]}");
 }
 
+// case: JSON ImageArray blocked transpose matches a plain X-major walk
 // The blocked traversal must reach the same offsets as a plain X-major walk on an image wider than one block.
 // Falsified by: a block edge off by one in for_each_xy_blocked.
 void case_json_blocked_transpose_matches_naive() {
@@ -129,6 +132,7 @@ void case_json_blocked_transpose_matches_naive() {
     EXPECT(payload.body.compare(payload.body.size() - expected.size(), expected.size(), expected) == 0);
 }
 
+// case: Accept header picks ImageBytes or JSON
 // Accept negotiation: only a header naming application/imagebytes (any case, among others) selects ImageBytes.
 // Falsified by: comparing the Accept value case-sensitively; always choosing JSON; always choosing ImageBytes.
 void case_accept_negotiation() {
@@ -146,6 +150,7 @@ void case_accept_negotiation() {
     }
 }
 
+// case: ImageBytes header carries both transaction ids, rank and dimensions
 // The 44-byte ImageBytes header: both transaction ids, element types, rank and dimensions.
 // Falsified by: swapping client and server ids; writing the wrong rank, dimension or data-start offset.
 void case_imagebytes_header_fields() {
@@ -173,6 +178,7 @@ void case_imagebytes_header_fields() {
     EXPECT(color.body.size() == 44 + 12);
 }
 
+// case: ImageBytes picks the narrowest element type and packs X-major little-endian
 // The transmission type is the narrowest that holds the data, and pixels go out X-major little-endian.
 // Falsified by: wrong range cut-offs in choose_image_bytes_format; big-endian packing; missing clamp.
 void case_imagebytes_element_types() {
@@ -196,6 +202,7 @@ void case_imagebytes_element_types() {
     }
 }
 
+// case: Invalid images are refused, including the size overflow guard
 // An image that cannot be encoded is refused with a DriverException message, never a short body.
 // Falsified by: removing the shape check, the data-length check or the size-overflow guard.
 void case_invalid_images_refused() {

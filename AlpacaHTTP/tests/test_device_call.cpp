@@ -268,6 +268,7 @@ void case_ok_envelope() {
     EXPECT(none["ClientTransactionID"] == 9);
 }
 
+// case: success_head is the ok_void envelope without its closing brace
 // success_head() is the ok_void() envelope without its closing brace, ids in the same order.
 // Falsified by: swapping the two ids in success_head(); dropping ErrorMessage; closing the brace.
 void case_success_head() {
