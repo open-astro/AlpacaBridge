@@ -736,7 +736,10 @@ TEST_CASE("iOptron Telescope Driver - the UTCDate readback after a write moves b
     conn.tcp_port = server.port();
     conn.response_timeout_ms = 50;
     alpacacore::test::FakeTaskClock clock;
-    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn, clock);
+    // Clock sync off: its body waits on the same clock, so advance() would wake it and it would
+    // overwrite the written UTC with the host's.
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, std::nullopt, std::nullopt,
+                                                                                  std::nullopt, false, clock);
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
 
     const auto written = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 365 * 30);
