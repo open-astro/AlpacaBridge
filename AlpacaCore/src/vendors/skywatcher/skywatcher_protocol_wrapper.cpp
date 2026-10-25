@@ -391,19 +391,16 @@ std::string probe_skywatcher_port(const std::string& port_path, int baud_rate) {
         return "";
     }
 
-    std::string reply;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1500);
-    for (;;) {
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) break;
-        char ch = 0;
-        const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-        if (r != 1) break;  // 0: silent for the rest of the budget; -1: hangup or read error
-        if (ch == kFrameEnd) break;
-        reply.push_back(ch);
-        if (reply.size() > 16) break;
-    }
+    // The frame end is not part of the reply; seventeen kept bytes without one
+    // is Overflow and is judged as is. Nothing is skipped.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = std::string(1, kFrameEnd);
+    spec.skip.clear();
+    spec.max_len = 17;
+    auto frame = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(1500));
+    std::string reply = std::move(frame.bytes);
+    if (frame.outcome == util::ReadOutcome::Terminator) reply.pop_back();
     link.close();
 
     if (reply.size() < 7 || reply[0] != kReplyOk) {

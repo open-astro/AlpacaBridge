@@ -469,3 +469,26 @@ TEST_CASE(
                                                      [&] { rotator.send("A"); }));
     CHECK_FALSE(wrapper.is_connected());
 }
+
+// Falsified by: wandererastro_rotator_protocol_wrapper.cpp read_handshake_section retries a LinkDead read
+TEST_CASE("WandererAstro Rotator Protocol Wrapper - Connect fails at once when the port hangs up mid-handshake",
+          "[wandererastro][rotator][serial][unit]") {
+    // A rotator that never answers; the pty is severed 300 ms into connect().
+    // Each handshake section waits serial_timeout_s (3 s) and the handshake
+    // retries once, so a connect that returns well before 3 s saw the hangup.
+    alpacacore::test::PtyPair pty("HangupRotator");
+    std::thread severer([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        pty.sever();
+    });
+    alpacacore::vendor::wandererastro::WandererRotatorProtocolWrapper wrapper;
+    alpacacore::vendor::wandererastro::RotatorConnectionConfig config;
+    config.serial_port = pty.slave_path();
+    config.serial_timeout_s = 3;
+    const auto started = std::chrono::steady_clock::now();
+    require_alpaca_error([&]() { wrapper.connect(config); }, alpacacore::AlpacaError::NotConnected);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    severer.join();
+    CHECK(elapsed < std::chrono::milliseconds(2500));
+    CHECK_FALSE(wrapper.is_connected());
+}
