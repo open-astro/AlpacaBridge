@@ -209,7 +209,8 @@ void case_imagebytes_element_types() {
 
 // case: Invalid images are refused, including the size overflow guard
 // An image that cannot be encoded is refused with error code DriverException and a message, never a short body.
-// Falsified by: removing the shape check, the data-length check or the size-overflow guard; throwing InvalidOperation instead of DriverException.
+// Falsified by: removing the shape check, the data-length check or the size-overflow guard; throwing InvalidOperation
+// instead of DriverException.
 void case_invalid_images_refused() {
     const auto bad_rank = refusal_of([] { build_payload({{1}, 1, 1, 4}, kBytes); });
     EXPECT(bad_rank.code == alpacacore::AlpacaError::DriverException);
