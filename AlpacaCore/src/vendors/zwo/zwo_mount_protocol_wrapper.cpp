@@ -1301,17 +1301,9 @@ private:
 #endif
     }
 
-    // The deadline of a reply read: timeout_ms plus one read slice (100 ms over serial, the socket's 200 ms
-    // SO_RCVTIMEO over TCP). The byte-at-a-time loop checked the timeout only at the end of each slice and never after
-    // a '#', so a '#' that arrived in the slice in which the timeout ran out still ended its reply.
-    std::chrono::steady_clock::time_point reply_deadline(int timeout_ms) const {
-        const auto slice = std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
-        return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) + slice;
-    }
-
     std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
                               bool* saw_hash = nullptr, bool preserve_whitespace = false) {
-        const auto end = reply_deadline(timeout_ms);
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         std::string response;
 
         // The terminator ends the reply; without one the reply ends when the line goes quiet for kIdleBreakMs
@@ -1325,6 +1317,20 @@ private:
             spec.idle_gap = std::chrono::milliseconds(kIdleBreakMs);
         }
 
+        // One slice of a read that ends at `until`; a closing or lost link throws NotConnected.
+        const auto read_slice = [&](const util::ReadSpec& s, std::chrono::steady_clock::time_point until) {
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+            const auto r = read_reply(s, std::min(until, std::chrono::steady_clock::now() + kReadSlice));
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+            if (r.outcome == util::ReadOutcome::LinkDead) {
+                errno = r.err;
+                note_transport_error();
+                link_lost_.store(true);
+            }
+            if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
+            return r;
+        };
+
         // A read that ended on the '#' holds it as its last byte: the reply is what precedes it, and finding one
         // tells a blind command its own reply is gone.
         const auto finish = [&]() {
@@ -1336,17 +1342,8 @@ private:
             return response;
         };
 
-        while (true) {
-            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
-            const auto now = std::chrono::steady_clock::now();
-            const auto r = read_reply(spec, std::min(end, now + kReadSlice));
-            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
-            if (r.outcome == util::ReadOutcome::LinkDead) {
-                errno = r.err;
-                note_transport_error();
-                link_lost_.store(true);
-            }
-            if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
+        while (std::chrono::steady_clock::now() < end) {
+            const auto r = read_slice(spec, end);
             response += r.bytes;
             if (response.size() >= kMaxReplyLen) {
                 throw AlpacaException("ZWO mount response too long", AlpacaError::DriverException);
@@ -1357,17 +1354,31 @@ private:
                  !response.empty() && std::chrono::steady_clock::now() < end)) {
                 return finish();
             }
-
-            const auto after = std::chrono::steady_clock::now();
-            if (after >= end) {
-                if (reply_expected) {
-                    reply_owed_ = true;
-                    owed_until_ = after + std::chrono::milliseconds(kOwedReplyBoundMs);
-                }
-                if (!require_hash_terminator) return finish();
-                throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
-            }
         }
+
+        // The timeout ran out. The byte-at-a-time loop checked the timeout after each byte and never after a '#',
+        // so the byte in flight then (one read slice: 100 ms over serial, the socket's 200 ms SO_RCVTIMEO over
+        // TCP) settled the reply: a '#' still ended it, any other byte was kept and the reply had timed out. A
+        // strict deadline would leave a late '#' to answer the next command; a deadline one slice later would take
+        // a whole late reply.
+        util::ReadSpec late_spec;
+        late_spec.stop = util::ReadSpec::Stop::Length;
+        late_spec.length = 1;
+        late_spec.skip = spec.skip;
+        const auto late_until = end + std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+        std::string late;
+        while (late.empty() && std::chrono::steady_clock::now() < late_until) {
+            late = read_slice(late_spec, late_until).bytes;
+        }
+        response += late;
+        if (late == "#") return finish();
+
+        if (reply_expected) {
+            reply_owed_ = true;
+            owed_until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(kOwedReplyBoundMs);
+        }
+        if (!require_hash_terminator) return finish();
+        throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
     }
 
     void configure_network_timeouts() {

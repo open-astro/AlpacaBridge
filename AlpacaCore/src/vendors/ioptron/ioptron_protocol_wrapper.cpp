@@ -1479,21 +1479,33 @@ private:
 #endif
     }
 
-    // The deadline of a reply read: timeout_ms plus one read slice (100 ms over
-    // serial, the socket's 200 ms SO_RCVTIMEO over TCP). The byte-at-a-time
-    // loop checked the timeout only at the end of each slice and never after a
-    // '#', so a '#' that arrived in the slice in which the timeout ran out still
-    // ended its reply; a strict deadline would leave it to answer the next
-    // command.
-    std::chrono::steady_clock::time_point reply_deadline(int timeout_ms) const {
-        const auto slice = std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
-        return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) + slice;
-    }
-
     [[noreturn]] void throw_link_lost(int err) const {
         throw AlpacaException(std::string("iOptron mount ") +
                               (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
                               " link lost (hangup): " + util::errno_string(err));
+    }
+
+    // The read slice of the byte-at-a-time loop: 100 ms over serial, the
+    // socket's 200 ms SO_RCVTIMEO over TCP.
+    std::chrono::milliseconds read_slice() const {
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+    }
+
+    // The byte the line sends in the read slice after a reply's timeout ran
+    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
+    // timeout after each byte and never after a '#', so the byte in flight when
+    // the timeout ran out settled the reply: a '#' still ended it, any other
+    // byte was kept and the reply had timed out. A strict deadline would leave
+    // a late '#' to answer the next command; a deadline one slice later would
+    // take a whole late reply.
+    std::string late_byte(const std::string& skip) {
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        spec.skip = skip;
+        const auto r = read_reply(spec, std::chrono::steady_clock::now() + read_slice());
+        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+        return r.bytes;
     }
 
     // The reply without its '#': a read that ended on the terminator holds it
@@ -1514,15 +1526,18 @@ private:
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
-        const auto r = read_reply(spec, reply_deadline(timeout_ms));
+        const auto r = read_reply(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::LinkDead:
                 throw_link_lost(r.err);
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("iOptron mount response too long");
-            case util::ReadOutcome::Timeout:
-                if (!require_hash_terminator) return r.bytes;
+            case util::ReadOutcome::Timeout: {
+                const std::string late = late_byte(spec.skip);
+                if (late == "#") return r.bytes;
+                if (!require_hash_terminator) return r.bytes + late;
                 throw AlpacaException("Timeout waiting for mount response");
+            }
             default:
                 return without_terminator(r);
         }

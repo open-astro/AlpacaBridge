@@ -20,10 +20,11 @@
 // - a read that does not require the '#' still ends at the '#': the "mount"
 //   answers "1#" and then keeps the line busy, so a read that ran past the '#'
 //   would wait for the whole reply window.
-// And per wrapper over TCP: a '#' that arrives in the read slice in which the
-// timeout runs out still ends its own reply, as it did when the byte-at-a-time
-// loop checked the timeout only after each 200 ms recv() and never after a '#';
-// a '#' left in the line there would answer the next command.
+// And per wrapper over TCP, the byte in flight when the timeout runs out
+// settles the reply, as it did when the byte-at-a-time loop checked the timeout
+// after each 200 ms recv() and never after a '#': a late '#' still ends its own
+// reply (left in the line it would answer the next command), and a whole reply
+// that starts after the timeout is still a timeout.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -308,27 +309,29 @@ TEST_CASE("ZWO mount - a read that does not require the '#' ends at the '#'", "[
 }
 #endif
 
-// A TCP "mount" that answers "Late" with "#" kLateReply after it arrives, past the kLateTimeoutMs the case gives the
-// read but inside the 200 ms read slice that follows it, and answers "Next" with "1#" at once.
+// A TCP "mount" that answers "Late" with "#" and "Slow" with "1#", both kLateReply after the command arrives: past the
+// kLateTimeoutMs the case gives the read but inside the 200 ms read slice that follows it. It answers "Next" with "1#"
+// at once. ZWO sends ":Late#"; the other wrappers send the command as given.
 constexpr int kLateTimeoutMs = 300;
 constexpr auto kLateReply = std::chrono::milliseconds(350);
 
 std::string late_hash_reply(const std::string& chunk) {
-    if (chunk.rfind("Late", 0) == 0) {
+    const std::string cmd = chunk.rfind(':', 0) == 0 ? chunk.substr(1) : chunk;
+    if (cmd.rfind("Late", 0) == 0 || cmd.rfind("Slow", 0) == 0) {
         std::this_thread::sleep_for(kLateReply);
-        return "#";
+        return cmd.rfind("Late", 0) == 0 ? "#" : "1#";
     }
-    if (chunk.rfind("Next", 0) == 0) return "1#";
+    if (cmd.rfind("Next", 0) == 0) return "1#";
     return alpacacore::test::answer_handset_echo(chunk);
 }
 
-// Sends "Late" with the short timeout, then "Next": the error the first threw (empty when its '#' ended it) and the
+// Sends `first` with the short timeout, then "Next": the error the first threw (empty when it returned) and the
 // reply to the second.
 template <typename Send>
-std::pair<std::string, std::string> late_then_next(Send&& send) {
+std::pair<std::string, std::string> late_then_next(Send&& send, const std::string& first = "Late") {
     std::string error;
     try {
-        (void)send("Late", kLateTimeoutMs);
+        (void)send(first, kLateTimeoutMs);
     } catch (const alpacacore::AlpacaException& e) {
         error = e.what();
     }
@@ -342,8 +345,8 @@ std::pair<std::string, std::string> late_then_next(Send&& send) {
 }
 
 #ifdef ALPACACORE_ENABLE_IOPTRON
-// Falsified by: ioptron_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
-// and the late '#' answers "Next")
+// Falsified by: ioptron_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// 300 ms and the late '#' answers "Next")
 TEST_CASE("iOptron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[ioptron][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -361,11 +364,29 @@ TEST_CASE("iOptron mount - a '#' that arrives within one read slice after the ti
     CHECK(error.empty());
     CHECK(next == "1");
 }
+
+// Falsified by: ioptron_protocol_wrapper.cpp read_response() reading to the timeout plus one read slice (the late "1#"
+// is read as the reply)
+TEST_CASE("iOptron mount - a reply that starts after the timeout is still a timeout",
+          "[ioptron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto result = late_then_next(
+        [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
+    wrapper.disconnect();
+    CHECK(result.first.find("Timeout") != std::string::npos);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_CELESTRON
-// Falsified by: celestron_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
-// and the late '#' answers "Next")
+// Falsified by: celestron_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// 300 ms and the late '#' answers "Next")
 TEST_CASE("Celestron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[celestron][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -383,11 +404,29 @@ TEST_CASE("Celestron mount - a '#' that arrives within one read slice after the 
     CHECK(error.empty());
     CHECK(next == "1");
 }
+
+// Falsified by: celestron_protocol_wrapper.cpp read_response() reading to the timeout plus one read slice (the late
+// "1#" is read as the reply)
+TEST_CASE("Celestron mount - a reply that starts after the timeout is still a timeout",
+          "[celestron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::celestron::CelestronProtocolWrapper::instance();
+    alpacacore::vendor::celestron::ConnectionInfo info;
+    info.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto result = late_then_next(
+        [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
+    wrapper.disconnect();
+    CHECK(result.first.find("Timeout") != std::string::npos);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
-// Falsified by: synscan_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
-// and the late '#' answers "Next")
+// Falsified by: synscan_protocol_wrapper.cpp read_response() without late_byte() on a timeout (the read times out at
+// 300 ms and the late '#' answers "Next")
 TEST_CASE("SynScan mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[synscan][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -405,10 +444,29 @@ TEST_CASE("SynScan mount - a '#' that arrives within one read slice after the ti
     CHECK(error.empty());
     CHECK(next == "1");
 }
+
+// Falsified by: synscan_protocol_wrapper.cpp read_response() reading to the timeout plus one read slice (the late "1#"
+// is read as the reply)
+TEST_CASE("SynScan mount - a reply that starts after the timeout is still a timeout",
+          "[synscan][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::synscan::SynScanProtocolWrapper::instance();
+    alpacacore::vendor::synscan::ConnectionInfo info;
+    info.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto result = late_then_next(
+        [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
+    wrapper.disconnect();
+    CHECK(result.first.find("Timeout") != std::string::npos);
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_ZWO
-// Falsified by: zwo_mount_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms)
+// Falsified by: zwo_mount_protocol_wrapper.cpp read_response() without the late byte after the timeout (the read times
+// out at 300 ms and the late '#' answers "Next")
 TEST_CASE("ZWO mount - a '#' that arrives within one read slice after the timeout ends its own reply",
           "[zwo][network][serial_read][issue1644]") {
     alpacacore::test::FakeMountServer server(late_hash_reply);
@@ -425,6 +483,24 @@ TEST_CASE("ZWO mount - a '#' that arrives within one read slice after the timeou
     INFO("error: " << error);
     CHECK(error.empty());
     CHECK(next == "1");
+}
+
+// Falsified by: zwo_mount_protocol_wrapper.cpp read_response() reading to the timeout plus one read slice (the late
+// "1#" is read as the reply)
+TEST_CASE("ZWO mount - a reply that starts after the timeout is still a timeout",
+          "[zwo][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ZWOMountProtocolWrapper wrapper;
+    alpacacore::vendor::zwo::ConnectionInfo info;
+    info.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto result = late_then_next(
+        [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
+    wrapper.disconnect();
+    CHECK(result.first.find("Timeout") != std::string::npos);
 }
 #endif
 
