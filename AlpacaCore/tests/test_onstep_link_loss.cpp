@@ -928,11 +928,16 @@ TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a
     require_refused([&] { driver->slew_to_coordinates_async(2.0, 10.0); }, "SlewToCoordinatesAsync");
     require_refused([&] { driver->find_home(); }, "FindHome");
     require_refused([&] { driver->park(); }, "Park");
+    // The site and time writes too, so a client that only writes sees the fault (#1626).
+    require_refused([&] { driver->set_site_latitude(40.5); }, "SiteLatitude");
+    require_refused([&] { driver->set_site_longitude(-85.5); }, "SiteLongitude");
+    require_refused([&] { driver->set_utc_date(std::chrono::system_clock::now()); }, "UTCDate");
 
     SECTION("a MoveAxis stop is sent, then refused, and ends the move") {
         require_refused([&] { driver->move_axis(0, 0.0); }, "MoveAxis stop");
         CHECK(mount.received(":Qe#"));
         mount.mute(false);
+        clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off (#1626)
         CHECK_FALSE(driver->get_slewing());  // the stopped axis no longer counts as moving
         CHECK(driver->get_link_fault().empty());
     }
@@ -942,21 +947,86 @@ TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a
     }
     SECTION("a position reply clears it") {
         mount.mute(false);
+        clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off (#1626)
         CHECK(driver->get_right_ascension() == ra);
         CHECK(driver->get_link_fault().empty());
     }
     SECTION("a status reply clears it") {
         mount.mute(false);
+        clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off (#1626)
         (void)driver->get_tracking();
         CHECK(driver->get_link_fault().empty());
     }
     SECTION("an Alt/Az reply clears it") {
         mount.mute(false);
+        clock.advance(std::chrono::milliseconds(2100));  // past the faulted-read back-off (#1626)
         (void)driver->get_altitude();
         CHECK(driver->get_link_fault().empty());
     }
     SECTION("a disconnect clears it") {
         driver->set_connected(false);
+        CHECK(driver->get_link_fault().empty());
+    }
+
+    driver->set_connected(false);
+}
+
+// #1626: while the fault is latched, each getter used to wait out the reply
+// timeout under mutex_, so a DeviceState (about eight of them) took about eight
+// timeouts. After a failed read the next reads throw the fault without asking
+// the mount for kFaultedReadBackoff (2 s); then one read asks again, and a
+// reply clears the fault as before.
+TEST_CASE("OnStep link loss - a faulted DeviceState asks the mount at most once in the back-off",
+          "[onstep][serial][connected]") {
+    WrapperReset reset;
+    alpacacore::test::FakeTaskClock clock;  // the caches, the fault and the back-off run on it
+    FakeOnStepSerialMount mount;
+    PortLink link(mount.slave_path());
+    auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
+    driver->set_connected(true);
+    REQUIRE(driver->get_connected());
+    (void)driver->get_right_ascension();
+    clock.advance(std::chrono::milliseconds(2100));  // past the 2 s caches
+
+    mount.mute(true);
+    for (int i = 0; i < 3; ++i) {
+        try {
+            (void)driver->get_right_ascension();
+        } catch (const alpacacore::AlpacaException&) {  // NOLINT(bugprone-empty-catch)
+            // the third throws: the fault latched
+        }
+    }
+    REQUIRE(driver->get_link_fault().find("not answering") != std::string::npos);
+    const auto reads = [&mount] {
+        const auto all = mount.commands();
+        return std::count_if(all.begin(), all.end(), [](const std::string& c) {
+            return c.rfind(":GU", 0) == 0 || c.rfind(":GR", 0) == 0 || c.rfind(":GD", 0) == 0 ||
+                   c.rfind(":GA", 0) == 0 || c.rfind(":GZ", 0) == 0;
+        });
+    };
+
+    SECTION("inside the back-off a DeviceState and the getters send no read") {
+        const auto before = reads();
+        (void)driver->get_device_state();  // no read below, so no reply timeout waited
+        try {
+            (void)driver->get_side_of_pier();
+            FAIL("SideOfPier answered during the fault");
+        } catch (const alpacacore::AlpacaException& ex) {
+            CHECK(ex.error_code() == alpacacore::AlpacaError::DriverException);  // the fault, not a cache
+        }
+        CHECK(reads() == before);
+    }
+
+    SECTION("after the back-off one read asks again, and a reply clears the fault") {
+        clock.advance(std::chrono::milliseconds(2100));
+        const auto before = reads();
+        CHECK_THROWS((void)driver->get_tracking());  // still silent: asks once, fails
+        CHECK(reads() == before + 1);
+        CHECK_THROWS((void)driver->get_tracking());  // back inside the back-off: no read
+        CHECK(reads() == before + 1);
+        mount.mute(false);
+        clock.advance(std::chrono::milliseconds(2100));
+        REQUIRE_NOTHROW((void)driver->get_tracking());
         CHECK(driver->get_link_fault().empty());
     }
 
@@ -1009,17 +1079,34 @@ TEST_CASE("OnStep link loss - a lost link during the failed reads is not latched
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    (void)driver->get_right_ascension();
+    // Each refresh with a valid cache (#1626): the read that finds the link gone
+    // throws the loss instead of serving that cache once more.
+    std::function<void()> read;
+    std::string command;
+    SECTION("the position read") {
+        read = [&] { (void)driver->get_right_ascension(); };
+        command = ":GRa#";
+    }
+    SECTION("the status read") {
+        read = [&] { (void)driver->get_tracking(); };
+        command = ":GU#";
+    }
+    SECTION("the Alt/Az read") {
+        read = [&] { (void)driver->get_altitude(); };
+        command = ":GA#";
+    }
+    read();  // fills the cache
     clock.advance(std::chrono::milliseconds(2100));
 
     mount.mute(true);
-    (void)driver->get_right_ascension();  // two failed reads
-    (void)driver->get_right_ascension();
-    mount.sever_on(":GRa#");  // the third finds the adapter gone
+    read();  // two failed reads serve the cache
+    read();
+    mount.sever_on(command);  // the third finds the adapter gone
     try {
-        (void)driver->get_right_ascension();
+        read();
+        FAIL("a read that found the link gone served the cache");  // #1626
     } catch (const alpacacore::AlpacaException& ex) {
-        CHECK(ex.error_code() != alpacacore::AlpacaError::DriverException);  // not a latched fault
+        CHECK(ex.error_code() == alpacacore::AlpacaError::NotConnected);  // the loss, not a latched fault
     }
     CHECK_FALSE(driver->get_connected());
     CHECK(driver->get_link_fault().find("not answering") == std::string::npos);

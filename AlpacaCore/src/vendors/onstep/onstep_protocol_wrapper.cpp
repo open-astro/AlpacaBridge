@@ -975,6 +975,8 @@ public:
         if (direction < 0 || direction > 3) {
             throw AlpacaException("Invalid OnStep pulse guide direction");
         }
+        // Defence in depth: the driver rejects anything past kMaxPulseGuideMs
+        // (onstep_telescope_driver.cpp) first; keep the two limits equal.
         int clamped = std::clamp(duration_ms, 0, 9999);
         char buf[16];
         std::snprintf(buf, sizeof(buf), ":Mg%c%04d#", kCodes[direction], clamped);
@@ -1040,19 +1042,26 @@ public:
 
         std::string date_resp = send_command(":GC#", true, 0);
         // "MM/DD/YY" — not a sexagesimal value, parse directly.
-        int mm = 1;
-        int dd = 1;
-        int yy = 0;
-        if (std::sscanf(date_resp.c_str(), "%d/%d/%d", &mm, &dd, &yy) == 3) {
-            info.month = mm;
-            info.day = dd;
-            info.year = yy;
+        // A reply that does not parse throws instead of leaving the defaults
+        // (2000-01-01, offset 0) to be stored as the mount's clock (#1626).
+        int mm = 0;
+        int dd = 0;
+        int yy = -1;
+        if (std::sscanf(date_resp.c_str(), "%d/%d/%d", &mm, &dd, &yy) != 3 || yy < 0 || yy > 99 || mm < 1 || dd < 1 ||
+            !std::chrono::year_month_day{std::chrono::year{2000 + yy}, std::chrono::month{static_cast<unsigned>(mm)},
+                                         std::chrono::day{static_cast<unsigned>(dd)}}
+                 .ok()) {  // a real calendar date: 13/40 and 02/31 are refused too
+            throw AlpacaException("Invalid OnStep date response");
         }
+        info.month = mm;
+        info.day = dd;
+        info.year = yy;
 
         auto offset = parse_sexagesimal(send_command(":GG#", true, 0));
-        if (offset.has_value()) {
-            info.utc_offset_hours = offset.value();
+        if (!offset.has_value()) {
+            throw AlpacaException("Invalid OnStep UTC offset response");
         }
+        info.utc_offset_hours = offset.value();
         return info;
     }
 

@@ -121,6 +121,11 @@ std::string describe_onstepx_error(int code) {
 // when a client asks, so the time to latch is the client's poll cadence times
 // this, each failed read costing the response timeout.
 constexpr int kLinkFaultThreshold = 3;
+// #1626: while the fault is latched, a read that failed this recently makes the
+// reads after it throw the fault without asking the mount, so a faulted
+// DeviceState (eight getters) costs one reply timeout, not eight. It matches the
+// 2 s caches: a mount that answers again is seen within this long.
+constexpr auto kFaultedReadBackoff = std::chrono::seconds(2);
 // Informational only — OnStep does not expose a guide-rate query command in
 // this driver, and CanSetGuideRates is false, so this value is never sent to
 // or read from the mount; it merely satisfies the ASCOM GuideRate property.
@@ -258,8 +263,9 @@ public:
         }
     }
 
-    // Why the serial link was lost, kept until the next Connect or Disconnect
-    // (decision 0009). Wrapper state only: never waits on mutex_.
+    // Why the serial link was lost, kept until the next Connect or Disconnect,
+    // or else the latched fault of a silent mount (decision 0009). The wrapper's
+    // reason and link_fault_text_ under its own narrow mutex: never waits on mutex_.
     std::string get_link_fault() const override {
         auto& protocol = OnStepProtocolWrapper::instance();
         (void)protocol.link_alive();  // notice an unplug the listing would otherwise miss
@@ -337,6 +343,7 @@ public:
             client_disagreement_warned_ = false;
             firmware_reports_guide_move_ = false;
             link_health_.reset();
+            faulted_read_failed_at_.reset();
             set_link_fault_text("");
             target_ra_set_ = false;
             target_dec_set_ = false;
@@ -808,6 +815,7 @@ public:
         util::validate_latitude(latitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("SiteLatitude");  // as the other writes (#1626)
         // Populate longitude (and mark the pair valid) from the mount BEFORE
         // overwriting just latitude below -- otherwise, if longitude was
         // never cached yet, unconditionally setting site_info_valid_ = true
@@ -830,6 +838,7 @@ public:
         util::validate_longitude(longitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
+        refuse_while_faulted_locked("SiteLongitude");  // as the other writes (#1626)
         // See set_site_latitude(): populate latitude from the mount first so
         // marking the pair valid below never promotes a stale/default
         // latitude alongside the freshly-set longitude.
@@ -914,7 +923,9 @@ public:
             auto local_time = date + hours{info.hour} + minutes{info.minute} + seconds{info.second};
             auto offset = duration_cast<system_clock::duration>(
                 std::chrono::duration<double, std::ratio<3600>>(info.utc_offset_hours));
-            utc_offset_.set(local_time - offset, clock_.now());
+            // OnStepX :GG# is the hours to add to local time to get UTC
+            // (Site.command.cpp), so UTC = local + offset (#1626).
+            utc_offset_.set(local_time + offset, clock_.now());
             mount_clock_unreadable_.reset();
         } catch (const std::exception& ex) {
             mount_clock_unreadable_ = ex.what();
@@ -925,6 +936,10 @@ public:
 
     void set_utc_date(std::chrono::system_clock::time_point utc) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        check_connected();
+        // Here, not in set_utc_date_locked(): the connect's own time sync runs
+        // right after link_health_.reset(), where the check cannot fire (#1626).
+        refuse_while_faulted_locked("UTCDate");
         set_utc_date_locked(utc);
     }
 
@@ -1692,7 +1707,10 @@ private:
     // :GE# with no code is firmware without it, or a mount that stopped
     // answering (#1414): a :GU# read tells them apart. A silent mount counts
     // as a failed read toward the link fault, and the park or home fails
-    // instead of reading as accepted.
+    // instead of reading as accepted. Unlike refresh_status_cache_locked(), the
+    // :GU# read here leaves status_read_since_move_ alone on purpose: the #1378
+    // 'g' check then waits for the next status read, the safe side, so do not
+    // "fix" it without a test for that check.
     std::optional<int> last_command_error_locked(const char* who) {
         auto& protocol = OnStepProtocolWrapper::instance();
         if (const auto code = protocol.get_last_command_error()) {
@@ -1843,6 +1861,7 @@ private:
     void reset_session_state_locked() {
         supersede_park_or_home_locked();
         link_health_.reset();
+        faulted_read_failed_at_.reset();
         set_link_fault_text("");
         refraction_from_firmware_.reset();
         {
@@ -2152,10 +2171,12 @@ private:
     // closes the port as for a pulled adapter (#1241), so Connected reads
     // false and calls throw NotConnected. Only the client's Connect relinks.
     // While faulted no cache is served: every refresh skips its TTL and asks
-    // the mount, so a read either clears the fault or throws; on a polled
-    // link those reads are the only thing that can clear it. Time is the task
-    // clock.
+    // the mount, except within kFaultedReadBackoff of a read that failed, when
+    // it throws the fault without asking (#1626); so a read either clears the
+    // fault or throws, and on a polled link those reads are the only thing that
+    // can clear it. Time is the task clock.
     void note_read_ok_locked() const {
+        faulted_read_failed_at_.reset();
         if (link_health_.on_reply()) {
             ALPACA_LOG_INFO("OnStep", "Mount answering again; link fault cleared");
             set_link_fault_text("");
@@ -2177,9 +2198,33 @@ private:
         }
         lose_link_if_stale_locked(now);
         if (link_health_.faulted()) {
+            faulted_read_failed_at_ = now;  // the back-off window starts (#1626)
             throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
                                   AlpacaError::DriverException);
         }
+    }
+
+    // #1626: inside kFaultedReadBackoff of a faulted read that failed, throw the
+    // latched fault at once (decision 0009 rule 1) instead of waiting out another
+    // reply timeout under mutex_. The bound still turns a standing fault into a loss.
+    void throw_if_in_fault_backoff_locked() const {
+        if (!link_health_.faulted() || !faulted_read_failed_at_) {
+            return;
+        }
+        const auto now = clock_.now();
+        if (now - *faulted_read_failed_at_ >= kFaultedReadBackoff) {
+            return;  // ask the mount again
+        }
+        lose_link_if_stale_locked(now);
+        throw AlpacaException("OnStep mount communications compromised: " + link_health_.fault(),
+                              AlpacaError::DriverException);
+    }
+
+    // A read that found the link gone is reported even when a cache is valid,
+    // instead of serving that cache once more (#1626).
+    static bool is_link_lost(const std::exception& ex) {
+        const auto* alpaca = dynamic_cast<const AlpacaException*>(&ex);
+        return alpaca != nullptr && alpaca->error_code() == AlpacaError::NotConnected;
     }
 
     // A fault that has stood past util::kLinkStalenessBound is a lost link:
@@ -2223,6 +2268,7 @@ private:
         if (!force && status_cache_valid_ && !link_health_.faulted() && (now - last_status_update_) < kStatusCacheTtl) {
             return;
         }
+        throw_if_in_fault_backoff_locked();
         try {
             cached_status_ = OnStepProtocolWrapper::instance().get_status();
             status_cache_valid_ = true;
@@ -2231,7 +2277,7 @@ private:
             note_read_ok_locked();
         } catch (const std::exception& ex) {
             note_read_failure_locked(ex);
-            if (!status_cache_valid_) {
+            if (!status_cache_valid_ || is_link_lost(ex)) {
                 throw;
             }
         }
@@ -2242,6 +2288,7 @@ private:
         if (equatorial_cache_valid_ && !link_health_.faulted() && (now - last_equatorial_update_) < kPositionCacheTtl) {
             return;
         }
+        throw_if_in_fault_backoff_locked();
         try {
             Position pos = OnStepProtocolWrapper::instance().get_position();
             cached_ra_hours_ = pos.ra_hours;
@@ -2251,7 +2298,7 @@ private:
             note_read_ok_locked();
         } catch (const std::exception& ex) {
             note_read_failure_locked(ex);
-            if (!equatorial_cache_valid_) {
+            if (!equatorial_cache_valid_ || is_link_lost(ex)) {
                 throw;
             }
         }
@@ -2262,6 +2309,7 @@ private:
         if (altaz_cache_valid_ && !link_health_.faulted() && (now - last_altaz_update_) < kPositionCacheTtl) {
             return;
         }
+        throw_if_in_fault_backoff_locked();
         try {
             AltAz altaz = OnStepProtocolWrapper::instance().get_alt_az();
             cached_alt_degrees_ = altaz.altitude_degrees;
@@ -2271,7 +2319,7 @@ private:
             note_read_ok_locked();
         } catch (const std::exception& ex) {
             note_read_failure_locked(ex);
-            if (!altaz_cache_valid_) {
+            if (!altaz_cache_valid_ || is_link_lost(ex)) {
                 throw;
             }
         }
@@ -2451,6 +2499,8 @@ private:
 
     // Decision 0009 fault latch for a silent mount (#1414). Under mutex_.
     mutable util::PolledLinkHealth link_health_;
+    // When a read failed while the fault was latched (#1626); under mutex_.
+    mutable std::optional<std::chrono::steady_clock::time_point> faulted_read_failed_at_;
     // Its text for get_link_fault(), which takes no mutex_: own narrow mutex.
     mutable std::mutex link_fault_mutex_;
     mutable std::string link_fault_text_;
