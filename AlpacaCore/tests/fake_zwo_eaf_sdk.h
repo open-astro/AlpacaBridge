@@ -60,8 +60,10 @@ public:
     int set_max_step_calls{0};
     int last_set_max_step{-1};
     int open_calls{0};
+    int last_open_id{-1};
     int close_calls{0};
     bool step_range_fails{false};
+    bool removed{false};
     // The next open_focuser() throws (a connect that must fail).
     bool fail_open{false};
     // open_focuser() sleeps this long before returning (a connect held open).
@@ -75,24 +77,40 @@ public:
     std::atomic<int> busy{0};
     std::atomic<bool> closed_while_busy{false};
 
+    // Issue #1500: a USB drop. remove() makes open/move/read throw what the wrapper throws for
+    // EAF_ERROR_REMOVED (NotConnected) and the focuser vanish from enumeration; replug(id) brings it back
+    // under a new SDK id.
+    void remove() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = true;
+    }
+    void replug(int new_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = false;
+        id = new_id;
+    }
+
     std::vector<Info> enumerate_focusers() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (removed) return {};
         return {Info{id, "EAF", max_step}};
     }
     bool get_focuser_info_by_id(int focuser_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (focuser_id != id) {
+        if (removed || focuser_id != id) {
             return false;
         }
         info = Info{id, "EAF", max_step};
         return true;
     }
     bool get_focuser_info_by_index(int, Info& info) override { return get_focuser_info_by_id(id, info); }
-    void open_focuser(int) override {
+    void open_focuser(int focuser_id) override {
         const InFlight in_flight(*this, open_delay, open_entered);
         std::lock_guard<std::mutex> lock(mutex_);
+        throw_if_removed();
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
+        last_open_id = focuser_id;
     }
     void close_focuser(int) override {
         if (busy.load() > 0) closed_while_busy = true;
@@ -103,6 +121,7 @@ public:
         const InFlight in_flight(*this, read_delay, read_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         ++moving_calls;
+        throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
@@ -111,6 +130,7 @@ public:
     int get_position(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++position_calls;
+        throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
@@ -161,6 +181,10 @@ public:
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
+    void throw_if_removed() const {
+        if (removed) throw AlpacaException("EAF_ERROR_REMOVED", AlpacaError::NotConnected);
+    }
+
     // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.
     struct InFlight {
         InFlight(FakeZWOEAFSDK& fake, std::chrono::milliseconds delay, std::atomic<bool>& entered) : fake_(fake) {

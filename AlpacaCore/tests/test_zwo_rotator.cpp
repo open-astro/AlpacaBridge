@@ -694,3 +694,44 @@ TEST_CASE("ZWO CAA Rotator Driver - A disconnect during queued status reads is n
     CHECK(other.load() == 0);
     CHECK(not_connected.load() == kReaders);
 }
+
+// Issue #1500: CAA_ERROR_REMOVED reaches the driver as NotConnected. Positive evidence the transport is gone
+// (decision 0009 point 2a), so Connected reads false at once.
+// Falsified by: the status refill counting a NotConnected SDK error as one more failed poll.
+TEST_CASE("ZWO CAA Rotator Driver - A rotator removed from USB reads Connected false",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 10.0);
+
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1500: the replug gives the CAA a new SDK id; one Connect finds it again.
+// Falsified by: connect opening the id the driver was created with.
+TEST_CASE("ZWO CAA Rotator Driver - A replugged rotator is reopened by one Connect",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.degree = 10.0;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+    sdk.replug(12);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(sdk.open_calls == 2);
+    CHECK(sdk.last_open_id == 12);
+    wait_past_status_ttl();
+    CHECK(driver->get_position() == 10.0);
+}

@@ -73,6 +73,21 @@ public:
     static constexpr std::chrono::milliseconds kUsb2FailWindow{500};
     static constexpr long kUsb2FailMinExposureUs{3'000'000};
 
+    // Issue #1500: a USB drop. remove() makes every per-camera call throw what the wrapper throws for
+    // ASI_ERROR_CAMERA_REMOVED (NotConnected) and the camera vanish from enumeration; replug(id) brings it
+    // back under a new SDK id with no open handle behind it, as the real SDK does.
+    void remove() {
+        std::lock_guard lock(mutex_);
+        removed_ = true;
+    }
+
+    void replug(int new_camera_id) {
+        std::lock_guard lock(mutex_);
+        removed_ = false;
+        camera.camera_id = new_camera_id;
+        open_count_ = 0;
+    }
+
     static CameraInfo default_camera() {
         CameraInfo info;
         info.camera_id = 17;
@@ -156,12 +171,14 @@ public:
 
     std::vector<CameraInfo> enumerate_cameras(std::vector<vendor::zwo::ZwoUnreadableSlot>* = nullptr) override {
         hit("enumerate_cameras");
+        if (is_removed()) return {};
         return {camera};
     }
 
     std::vector<vendor::zwo::ZwoEnumeratedCamera> enumerate_identified_cameras(
         const std::string& only_model_name, std::vector<vendor::zwo::ZwoUnreadableSlot>*) override {
         hit("enumerate_identified_cameras");
+        if (is_removed()) return {};
         if (!only_model_name.empty() && only_model_name != camera.name) return {};
         return {{0, camera.camera_id, camera.name, "FAKE-ZWO-17"}};
     }
@@ -184,6 +201,7 @@ public:
 
     void open_camera(int camera_id) override {
         hit("open_camera");
+        throw_if_removed();
         require_id(camera_id);
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         std::lock_guard lock(mutex_);
@@ -402,7 +420,17 @@ private:
         }
     }
 
+    bool is_removed() const {
+        std::lock_guard lock(mutex_);
+        return removed_;
+    }
+
+    void throw_if_removed() const {
+        if (is_removed()) throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected);
+    }
+
     void require_open_locked(int camera_id) const {
+        if (removed_) throw AlpacaException("ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected);
         require_id(camera_id);
         if (open_count_ <= 0) {
             throw AlpacaException("fake ZWO operation requires an open camera", AlpacaError::DriverException);
@@ -424,6 +452,7 @@ private:
     std::vector<util::TaskClock::clock::time_point> start_times_;
     std::optional<util::TaskClock::clock::time_point> last_download_time_;
     int open_count_{0};
+    bool removed_{false};
     int temperature_reads_since_open_{0};
     bool download_held_{false};
     bool download_entered_{false};

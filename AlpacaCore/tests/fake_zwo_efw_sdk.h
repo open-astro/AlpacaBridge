@@ -78,14 +78,28 @@ public:
     // set_position() throws a DriverException after it is counted (a refused or failed move command).
     bool fail_set_position{false};
 
+    // Issue #1500: a USB drop. remove() makes open/read/move throw what the wrapper throws for
+    // EFW_ERROR_REMOVED (NotConnected) and the wheel vanish from enumeration; replug(id) brings it back
+    // under a new SDK id.
+    bool removed{false};
+    void remove() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = true;
+    }
+    void replug(int new_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        removed = false;
+        id = new_id;
+    }
+
     std::vector<Info> enumerate_wheels() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels) return {};
+        if (no_wheels || removed) return {};
         return {Info{id, "EFW", slot_count}};
     }
     bool get_wheel_info_by_id(int wheel_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || wheel_id != id) {
+        if (no_wheels || removed || wheel_id != id) {
             return false;
         }
         info = Info{id, "EFW", slot_count};
@@ -93,7 +107,7 @@ public:
     }
     bool get_wheel_info_by_index(int wheel_index, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (no_wheels || wheel_index != 0) {
+        if (no_wheels || removed || wheel_index != 0) {
             return false;
         }
         info = Info{id, "EFW", slot_count};
@@ -104,6 +118,7 @@ public:
         if (open_delay.count() > 0) std::this_thread::sleep_for(open_delay);
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
+        throw_if_removed();
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
     }
@@ -118,6 +133,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++position_calls;
+        throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
@@ -131,6 +147,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++set_position_calls;
+        throw_if_removed();
         if (fail_set_position) throw AlpacaException("scripted set_position failure", AlpacaError::DriverException);
         last_set_position = slot;
         if (slot < 0 || slot >= slot_count) {
@@ -174,6 +191,10 @@ public:
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
+    void throw_if_removed() const {
+        if (removed) throw AlpacaException("EFW_ERROR_REMOVED", AlpacaError::NotConnected);
+    }
+
     // A wrong id is EFW_ERROR_INVALID_ID on hardware, which the wrapper maps to InvalidValue.
     void check_id(int wheel_id) const {
         if (wheel_id != id) throw AlpacaException("EFW: EFW_ERROR_INVALID_ID", AlpacaError::InvalidValue);

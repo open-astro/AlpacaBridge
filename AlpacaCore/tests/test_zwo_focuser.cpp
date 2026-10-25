@@ -545,3 +545,40 @@ TEST_CASE("ZWO EAF Focuser Driver - A disconnect during queued status reads is n
     CHECK(other.load() == 0);
     CHECK(not_connected.load() == kReaders);
 }
+
+// Issue #1500: EAF_ERROR_REMOVED reaches the driver as NotConnected. Positive evidence the transport is gone
+// (decision 0009 point 2a), so Connected reads false at once, not "communications compromised" after three polls.
+// Falsified by: the status refill counting a NotConnected SDK error as one more failed poll.
+TEST_CASE("ZWO EAF Focuser Driver - A focuser removed from USB reads Connected false",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);
+
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1500: the replug gives the EAF a new SDK id; one Connect finds it again and the reads work.
+// Falsified by: connect opening the id the driver was created with.
+TEST_CASE("ZWO EAF Focuser Driver - A replugged focuser is reopened by one Connect",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+    sdk.replug(9);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(sdk.open_calls == 2);
+    CHECK(sdk.last_open_id == 9);
+    wait_past_status_ttl();
+    CHECK(driver->get_position() == 500);
+}

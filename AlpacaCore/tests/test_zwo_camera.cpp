@@ -320,3 +320,42 @@ TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not impl
     }
     driver->set_connected(false);
 }
+
+// Issue #1500 (rig log: every call fails with ASI_ERROR_CAMERA_REMOVED while Connected stays true). The
+// wrapper maps CAMERA_REMOVED to NotConnected; on that evidence the transport is gone (decision 0009 point 2a),
+// so Connected reads false and the client's Connect relinks.
+// Falsified by: the camera driver keeping connected_ true after an SDK call threw NotConnected.
+TEST_CASE("ZWO Camera Driver - A camera removed from USB reads Connected false", "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == 15.0);
+
+    sdk.remove();
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(camera->get_connected());
+    CHECK(camera->get_device_state().empty());
+}
+
+// Issue #1500: after the replug the SDK hands out a new id and no handle is open. One client Connect must
+// enumerate again, find the camera by its serial and open the new id (decision 0009 point 4).
+// Falsified by: set_connected(true) returning early on a stale connected_ == true, or binding the old camera id.
+TEST_CASE("ZWO Camera Driver - A replugged camera is found by serial and reopened by one Connect",
+          "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "FAKE-ZWO-17";
+    binding.identity.camera_name = sdk.camera.name;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == 15.0);
+
+    sdk.remove();
+    CHECK_THROWS(camera->get_ccd_temperature());
+    sdk.replug(21);
+
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_ccd_temperature() == 15.0);
+    CHECK(sdk.open_count() == 1);  // the new handle only: the dead one is not counted again
+}

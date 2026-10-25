@@ -18,7 +18,11 @@
 #include <variant>
 #include <vector>
 
+#include <chrono>
+#include <thread>
+
 #include "catch2_compat.h"
+#include "fake_zwo_efw_sdk.h"
 
 namespace {
 
@@ -105,4 +109,39 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Unique IDs", "[zwo][filterwheel][unit]"
     auto d1 = alpacacore::vendor::zwo::create_zwo_efw_filterwheel_by_index(1, 0);
 
     CHECK(d0->get_unique_id() != d1->get_unique_id());
+}
+
+// Issue #1500: EFW_ERROR_REMOVED reaches the driver as NotConnected. Positive evidence the transport is gone
+// (decision 0009 point 2a), so Connected reads false at once.
+// Falsified by: the Position refill counting a NotConnected SDK error as one more failed poll.
+TEST_CASE("ZWO EFW Filter Wheel Driver - A wheel removed from USB reads Connected false",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 0);
+
+    sdk.remove();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_THROWS(driver->get_position());
+    CHECK_FALSE(driver->get_connected());
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+}
+
+// Issue #1500: the replug gives the EFW a new SDK id; one Connect finds it again.
+// Falsified by: connect opening the id the driver was created with.
+TEST_CASE("ZWO EFW Filter Wheel Driver - A replugged wheel is reopened by one Connect",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_THROWS(driver->get_position());
+    sdk.replug(4);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(driver->get_position() == 0);
 }
