@@ -96,7 +96,7 @@ TEST_CASE("pointing - gmst_degrees keeps sub-second resolution", "[util][pointin
 
 // Falsified by: local_sidereal_hours() adding the longitude in hours instead of
 // degrees, subtracting it, or not wrapping into [0, 24).
-TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps into [0, 24)", "[util][pointing]") {
+TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps into the 0 to 24 hour range", "[util][pointing]") {
     const auto j2000 = at_unix(946728000);
     const double greenwich = 280.46061837 / 15.0;
     CHECK(pointing::local_sidereal_hours(j2000, 0.0) == Approx(greenwich).epsilon(0).margin(1e-9));
@@ -112,7 +112,7 @@ TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps int
 
 // Falsified by: wrap_hours() using a single fmod without the negative branch, or without the >= 24 guard,
 // or returning 24.0 for an input of 24.
-TEST_CASE("pointing - wrap_hours lands in [0, 24)", "[util][pointing]") {
+TEST_CASE("pointing - wrap_hours lands in the 0 to 24 hour range", "[util][pointing]") {
     CHECK(pointing::wrap_hours(0.0) == 0.0);
     CHECK(pointing::wrap_hours(24.0) == 0.0);
     CHECK(pointing::wrap_hours(-0.5) == Approx(23.5));
@@ -123,7 +123,7 @@ TEST_CASE("pointing - wrap_hours lands in [0, 24)", "[util][pointing]") {
 }
 
 // Falsified by: wrap_degrees() using a single fmod without the negative branch, or without the >= 360 guard.
-TEST_CASE("pointing - wrap_degrees lands in [0, 360)", "[util][pointing]") {
+TEST_CASE("pointing - wrap_degrees lands in the 0 to 360 degree range", "[util][pointing]") {
     CHECK(pointing::wrap_degrees(0.0) == 0.0);
     CHECK(pointing::wrap_degrees(360.0) == 0.0);
     CHECK(pointing::wrap_degrees(-90.0) == Approx(270.0));
@@ -134,7 +134,7 @@ TEST_CASE("pointing - wrap_degrees lands in [0, 360)", "[util][pointing]") {
 
 // Falsified by: wrap_hour_angle() closing the interval on the positive side
 // ((-12, 12], the old ZWO convention): +12 would stay +12.
-TEST_CASE("pointing - wrap_hour_angle lands in [-12, 12)", "[util][pointing]") {
+TEST_CASE("pointing - wrap_hour_angle lands in the minus 12 to 12 hour range", "[util][pointing]") {
     CHECK(pointing::wrap_hour_angle(0.0) == 0.0);
     CHECK(pointing::wrap_hour_angle(12.0) == Approx(-12.0));
     CHECK(pointing::wrap_hour_angle(-12.0) == Approx(-12.0));
@@ -156,7 +156,7 @@ TEST_CASE("pointing - shortest_ra_delta_hours takes the short way round", "[util
 
 // Falsified by: shortest_ra_delta_hours() wrapping at 12 with < instead of <=
 // (an exact half turn flips sign), or a loop-free wrap that drops +-12.
-TEST_CASE("pointing - shortest_ra_delta_hours keeps +-12 at the half turn", "[util][pointing]") {
+TEST_CASE("pointing - shortest_ra_delta_hours keeps plus or minus 12 at the half turn", "[util][pointing]") {
     CHECK(pointing::shortest_ra_delta_hours(12.0, 0.0) == Approx(12.0));
     CHECK(pointing::shortest_ra_delta_hours(0.0, 12.0) == Approx(-12.0));
     CHECK(pointing::shortest_ra_delta_hours(23.99, 0.0) == Approx(-0.01).epsilon(0).margin(1e-9));
@@ -164,7 +164,7 @@ TEST_CASE("pointing - shortest_ra_delta_hours keeps +-12 at the half turn", "[ut
 
 // Falsified by: pier_side_for_hour_angle() testing > 0 instead of >= 0 (HA 0
 // would be west), or returning the sides swapped.
-TEST_CASE("pointing - pier_side_for_hour_angle is 0 for HA >= 0 and 1 for HA < 0", "[util][pointing]") {
+TEST_CASE("pointing - pier_side_for_hour_angle is 0 for HA at or above 0 and 1 below 0", "[util][pointing]") {
     CHECK(pointing::pier_side_for_hour_angle(0.0) == 0);
     CHECK(pointing::pier_side_for_hour_angle(6.0) == 0);
     CHECK(pointing::pier_side_for_hour_angle(-0.0001) == 1);
@@ -173,7 +173,7 @@ TEST_CASE("pointing - pier_side_for_hour_angle is 0 for HA >= 0 and 1 for HA < 0
 
 // Falsified by: validate_ra() accepting 24 (<= instead of <), dropping the
 // isfinite test (NaN passes), or changing the message text.
-TEST_CASE("pointing - validate_ra accepts [0, 24) and throws InvalidValue with the label", "[util][pointing]") {
+TEST_CASE("pointing - validate_ra accepts 0 up to 24 and throws InvalidValue with the label", "[util][pointing]") {
     CHECK_NOTHROW(pointing::validate_ra(0.0, "TargetRightAscension"));
     CHECK_NOTHROW(pointing::validate_ra(23.999, "TargetRightAscension"));
     const std::string expected = "TargetRightAscension must be in range 0 to <24 hours";
@@ -187,7 +187,7 @@ TEST_CASE("pointing - validate_ra accepts [0, 24) and throws InvalidValue with t
 
 // Falsified by: validate_dec() accepting +-90.0001 (< instead of <=), dropping
 // the isfinite test, or changing the message text.
-TEST_CASE("pointing - validate_dec accepts [-90, 90] and throws InvalidValue with the label", "[util][pointing]") {
+TEST_CASE("pointing - validate_dec accepts minus 90 to 90 and throws InvalidValue with the label", "[util][pointing]") {
     CHECK_NOTHROW(pointing::validate_dec(-90.0, "TargetDeclination"));
     CHECK_NOTHROW(pointing::validate_dec(90.0, "TargetDeclination"));
     const std::string expected = "TargetDeclination must be in range -90 to 90 degrees";
