@@ -87,6 +87,31 @@ TEST_CASE("iOptron Telescope Driver - Defaults", "[ioptron][telescope][unit]") {
     REQUIRE(driver->get_can_set_tracking());
 }
 
+// Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message
+// text fails this case.
+TEST_CASE("iOptron Telescope Driver - out of range arguments report the shared message before the connection",
+          "[ioptron][telescope][unit]") {
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope(0, conn);
+    const auto message_of = [](const std::function<void()>& call) {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return std::string(ex.what());
+        }
+        return std::string("no exception");
+    };
+    CHECK(message_of([&] {
+              driver->sync_to_coordinates(24.0, 0.0);
+          }).find("SyncToCoordinates: RightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
+          std::string::npos);
+    CHECK(message_of([&] { driver->set_site_longitude(180.1); }).find("SiteLongitude must be in range") !=
+          std::string::npos);
+}
+
 TEST_CASE("iOptron Telescope Driver - Target Range Validation", "[ioptron][telescope][unit]") {
     alpacacore::vendor::ioptron::ConnectionInfo conn;
     conn.type = alpacacore::vendor::ioptron::ConnectionType::Serial;

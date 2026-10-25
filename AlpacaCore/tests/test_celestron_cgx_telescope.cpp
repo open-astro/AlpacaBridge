@@ -1115,6 +1115,12 @@ TEST_CASE("Celestron CGX USB Telescope Driver - independent targets and exact er
                          alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->set_target_right_ascension(-0.1); }, alpacacore::AlpacaError::InvalidValue);
     require_alpaca_error([&] { driver->set_target_right_ascension(24.0); }, alpacacore::AlpacaError::InvalidValue);
+    try {
+        driver->sync_to_coordinates(24.0, 0.0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("SyncToCoordinates: RightAscension must be in range") != std::string::npos);
+    }
     require_alpaca_error([&] { driver->set_target_declination(90.1); }, alpacacore::AlpacaError::InvalidValue);
 
     require_alpaca_error([&] { driver->set_target_right_ascension(7.5); }, alpacacore::AlpacaError::NotConnected);
