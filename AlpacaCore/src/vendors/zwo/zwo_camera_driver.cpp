@@ -33,6 +33,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "zwo_fields.h"
+
 namespace alpacacore::vendor::zwo {
 
 namespace {
@@ -1664,8 +1666,9 @@ private:
                                       " (setup accepts 0..100)",
                                   AlpacaError::DriverException);
         }
+        const auto default_bandwidth = static_cast<long>(catalog::kZwoCamUsbBandwidth.default_value);
         const long applied =
-            requested ? static_cast<long>(*requested) : std::clamp(40L, caps.min_value, caps.max_value);
+            requested ? static_cast<long>(*requested) : std::clamp(default_bandwidth, caps.min_value, caps.max_value);
         try {
             sdk_.set_control_value(camera_id, ZWOControlType::BandwidthOverload, applied, false);
             long actual = 0;
@@ -1678,7 +1681,8 @@ private:
                     throw AlpacaException("camera did not confirm the requested value in manual mode",
                                           AlpacaError::DriverException);
                 }
-                ALPACA_LOG_WARN("ZWO", camera_info_.name + ": USB Limit default requested 40 (clamped to " +
+                ALPACA_LOG_WARN("ZWO", camera_info_.name + ": USB Limit default requested " +
+                                           std::to_string(default_bandwidth) + " (clamped to " +
                                            std::to_string(applied) + "), read back " + std::to_string(actual) +
                                            (is_auto ? " auto" : " manual") + "; continuing connection");
                 return;
@@ -1686,11 +1690,11 @@ private:
         } catch (const std::exception& e) {
             throw AlpacaException("USB Limit: " + std::string(e.what()), AlpacaError::DriverException);
         }
-        ALPACA_LOG_INFO("ZWO", camera_info_.name + " (camera id " + std::to_string(camera_id) + "): USB Limit " +
-                                   (requested ? std::to_string(*requested) : "default 40") + " applied " +
-                                   std::to_string(applied) + " manual; range " + std::to_string(caps.min_value) + ".." +
-                                   std::to_string(caps.max_value) + ", SDK default " +
-                                   std::to_string(caps.default_value));
+        ALPACA_LOG_INFO(
+            "ZWO", camera_info_.name + " (camera id " + std::to_string(camera_id) + "): USB Limit " +
+                       (requested ? std::to_string(*requested) : "default " + std::to_string(default_bandwidth)) +
+                       " applied " + std::to_string(applied) + " manual; range " + std::to_string(caps.min_value) +
+                       ".." + std::to_string(caps.max_value) + ", SDK default " + std::to_string(caps.default_value));
     }
 
     void select_default_image_type_locked() {

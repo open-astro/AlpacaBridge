@@ -15,7 +15,8 @@
 // ZWO catalog field declarations for the telescope (AM mounts), camera, EFW
 // filter wheel, EAF focuser, CAA rotator and the three switch backends (dew
 // heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568), shared by zwo_schema.cpp
-// (no vendor header) and zwo_catalog.cpp (the factory, vendor header allowed).
+// (no vendor header), zwo_catalog.cpp (the factory, vendor header allowed), and
+// the camera driver (the USB bandwidth default).
 // No vendor header here either: the schema file includes this one and compiles
 // in every build (including vendors-OFF).
 

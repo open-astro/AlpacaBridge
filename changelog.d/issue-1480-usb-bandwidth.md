@@ -4,3 +4,4 @@
 ### Fixed
 - **Apply the missing per-camera USB bandwidth limit** (AlpacaCore, AlpacaHTTP, issue #1480): persist `usbBandwidth`, expose USB Limit in ZWO camera setup, map the SDK control in both directions, and fail cleanly when an explicit setting cannot be applied. Intended as a mitigation for marginal-link download failures, not a proven fix for the reported resets; USB reset/reopen recovery (#1500) is not included. For saved entries, see Breaking changes.
 - **ZWO camera setup browser cache** (AlpacaHTTP, issue #1480): bump both `format.js` and `app.js` asset versions so cached scripts cannot omit the USB Limit helper or submission code after upgrade.
+- **ZWO camera USB Limit default consistency** (AlpacaCore, AlpacaHTTP, issue #1480): read the driver's default from the catalog field and check the UI placeholder/help against the catalog fixture, which routing tests compare with the live catalog.

@@ -89,6 +89,10 @@ test('editAssignments fills saved values, leaves absent ones to the markup, and 
 });
 
 test('ZWO USB Limit edits explicit values and leaves default blank without affecting switches', () => {
+    const bandwidth = descriptor('zwo', 'camera').fields.find((field) => field.key === 'usbBandwidth');
+    const input = html.match(/<input[^>]*id="zwo-usb-bandwidth"[^>]*>/)[0];
+    assert.ok(input.includes(`placeholder="Default: ${bandwidth.default}"`));
+    assert.ok(html.includes(`Blank uses ${bandwidth.default}, clamped to the camera's range, in manual mode.`));
     for (const value of [0, 40, 65, 100]) {
         assert.equal(shown('zwo', 'camera', { usbBandwidth: value })('zwo-usb-bandwidth'), String(value));
     }
