@@ -354,7 +354,7 @@ Rules, applied to every cache-backed serial driver (Gemini PDH, WandererBox/Cove
   lock-free `link_lost_` latch the getter reads; since #1310 that transaction is the state poll
   (250 ms), because the getters are served from a snapshot and make none. OnStep follows the Sky-Watcher shape since #1241
   (`OnStepProtocolWrapper::link_alive()`; pty tests in `test_onstep_link_loss.cpp`). The ZWO EAF follows it since #1500 for its
-  SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, `INVALID_ID`) drops `Connected`
+  SDK: `NotConnected` from a per-device call (`EAF_ERROR_REMOVED`, `CLOSED`, BLE disconnect, `INVALID_ID`) drops `Connected`
   at once, and the next Connect rebinds by serial ([ZWO](zwo.instructions.md)). The #237 drivers still treat a
   removed node as a fault; that has not been changed. Tests: `sever_link()` on
   `fake_skywatcher_serial_board.h`, `[skywatcher][serial][connected]`.
