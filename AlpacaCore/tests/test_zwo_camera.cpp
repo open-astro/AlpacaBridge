@@ -430,10 +430,11 @@ TEST_CASE("ZWO Camera Driver - A generic SDK failure is not a lost link", "[zwo]
     CHECK(camera->get_ccd_temperature() == 15.0);
 }
 
-// Issue #1500 invariant 2 (link epoch): an ImageArray download that took the old id before the removal fails
-// with CAMERA_CLOSED only after the client relinked the replugged camera. That stale failure must not drop the
-// new link.
-// Falsified by: applying a loss without checking that the link epoch captured with the id is still current.
+// Issue #1500 invariants 2 and 7: an ImageArray download that took the old id before the removal is still held
+// when the client relinks the replugged camera. The relink waits for that transfer, which fails with
+// CAMERA_CLOSED, and then reopens the camera: the camera ends up connected on its new id. The relink's wait
+// orders the stale failure before the new link, so the epoch comparison itself is pinned by test_link_epoch.cpp.
+// Falsified by: set_connected(true) returning early on a stale connected_ true, so no relink follows the transfer.
 TEST_CASE("ZWO Camera Driver - A download that fails after the relink does not drop the new link",
           "[zwo][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeZWOSDK sdk;
