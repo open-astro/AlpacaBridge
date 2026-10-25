@@ -66,7 +66,7 @@ public:
         shutdown_connection();
         if (link_.is_open()) {
             try {
-                set_connected(false);
+                set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("ZWO", "Error during EAF destruction: " + std::string(e.what()));
             }
