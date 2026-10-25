@@ -107,7 +107,7 @@ A camera's "no image yet" answer (`ImageArray` before any exposure, or while one
 - `DoesRefraction` throws `PropertyNotImplemented` on read and write in a driver that neither knows nor computes refraction (ITelescopeV4). Never store the flag and read it back: it would claim a correction the driver does not apply. OnStep reads it from the firmware.
 - `SiteElevation` throws `InvalidOperation` until the device config or a client sets it, never 0 m ([decision 0019](../../docs/decisions/0019-connect-without-site.md)).
 - `DestinationSideOfPier` throws `InvalidValue` for RA outside [0, 24) or Dec outside [-90, 90], before the connection check.
-- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron follows this; the other adopters are not converted yet.
+- A `UTCDate` read the mount clock cannot answer throws `InvalidOperation`; the host clock does not stand in for the mount's (ITelescopeV4 `UTCDate`, the ASCOM time FAQ). Celestron and OnStep follow this; the other adopters are not converted yet.
 
 ### A failed async operation body keeps its error (all drivers)
 
