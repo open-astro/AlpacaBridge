@@ -342,9 +342,10 @@ const loadCatalog = catalogLoader(() => fetch('/management/v1/devicecatalog').th
 }));
 
 // The device form's catalog-mapped inputs, as catalog_schema.js reads them:
-// { id, vendor, deviceType, configKey, control, path } from the data-vendor,
-// data-device-type and data-config-key attributes in index.html. path lists the
-// ids of the enclosing <div>s, outermost first.
+// { id, vendor, deviceType, configKey, control, manual, readOnly, path } from
+// the data-vendor, data-device-type, data-config-key and data-config-fill
+// attributes and the readonly attribute in index.html. path lists the ids of
+// the enclosing <div>s, outermost first.
 function readFormFields() {
     return Array.from(document.querySelectorAll('#device-form [data-config-key]')).map(element => {
         const path = [];

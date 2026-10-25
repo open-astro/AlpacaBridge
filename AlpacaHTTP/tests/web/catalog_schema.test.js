@@ -26,7 +26,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { WEB, readWeb, readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+const { WEB, readWeb, readCatalogFixture, deviceFormHtml, formFields } = require('./catalog_form_fields.js');
 
 const SCHEMA_PATH = path.join(WEB, 'catalog_schema.js');
 // Required inside each case, so a missing module fails each case on its own.
@@ -416,4 +416,67 @@ test('the disabled cue is scoped to the vendor select', () => {
     const css = readWeb('style.css');
     assert.match(css, /\.form-group #vendor:disabled \{/);
     assert.doesNotMatch(css, /\.form-group select:disabled/);
+});
+
+// The device form as a tree of element stubs, for running app.js DOM readers:
+// each <div>, <input>, <select> and <textarea> knows its tag, attributes,
+// dataset and parent, and answers getAttribute, hasAttribute and
+// closest('[attr]'). The root stands for the <form id="device-form">.
+function deviceFormStub(source) {
+    const element = (tagName, attrs, parentElement) => {
+        const dataset = {};
+        for (const [name, value] of Object.entries(attrs)) {
+            if (name.startsWith('data-')) {
+                dataset[name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
+            }
+        }
+        const node = {
+            tagName, id: attrs.id || '', dataset, parentElement,
+            getAttribute: (name) => (name in attrs ? attrs[name] : null),
+            hasAttribute: (name) => name in attrs,
+            closest(selector) {
+                const name = selector.match(/^\[([a-z-]+)\]$/)[1];
+                for (let n = node; n; n = n.parentElement) {
+                    if (n.hasAttribute(name)) return n;
+                }
+                return null;
+            },
+        };
+        return node;
+    };
+    const parseAttrs = (text) =>
+        Object.fromEntries([...text.matchAll(/([^\s=/]+)(?:="([^"]*)")?/g)].map((m) => [m[1], m[2] ?? '']));
+    const form = element('FORM', { id: 'device-form' }, null);
+    const controls = [];
+    let parent = form;
+    for (const [, close, tag, attrs] of deviceFormHtml(source).matchAll(/<(\/?)(div|input|select|textarea)\b([^>]*)>/g)) {
+        if (tag === 'div') {
+            parent = close ? parent.parentElement : element('DIV', parseAttrs(attrs), parent);
+        } else if (!close) {
+            controls.push(element(tag.toUpperCase(), parseAttrs(attrs), parent));
+        }
+    }
+    return controls;
+}
+
+// The browser half of the fill reads the form with readFormFields; every test
+// reads it with the formFields() helper. Running the real readFormFields over
+// index.html ties the two: each key the helper reports for a mapped control
+// (manual, readOnly, configKey, ...) must come out of app.js the same.
+test('readFormFields in app.js reports what the formFields helper reports for every mapped control', () => {
+    const helperOnly = ['name', 'tag', 'markupDefault'];
+    const controls = deviceFormStub(html);
+    const document = {
+        querySelectorAll(selector) {
+            assert.equal(selector, '#device-form [data-config-key]');
+            return controls.filter((c) => c.hasAttribute('data-config-key'));
+        },
+    };
+    const source = `${wholeFunction('readFormFields')}\n}\nreturn readFormFields();`;
+    const fromApp = new Function('document', source)(document);
+    const expected = formFields(html).filter((f) => f.configKey !== null).map((f) =>
+        Object.fromEntries(Object.entries(f).filter(([key]) => !helperOnly.includes(key))));
+    assert.ok(expected.length > 100, `only ${expected.length} mapped controls`);
+    assert.ok(expected.some((f) => f.manual) && expected.some((f) => f.readOnly));
+    assert.deepEqual(JSON.parse(JSON.stringify(fromApp)), expected);
 });

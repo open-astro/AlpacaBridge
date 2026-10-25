@@ -83,8 +83,9 @@ function markupDefault(tag, control, attrs, rest) {
 
 // Every <input>, <select> and <textarea> inside <form id="device-form">, in
 // document order: { id, name, tag, control, vendor, deviceType, configKey,
-// manual, path, markupDefault }. path lists the ids of the enclosing <div>s,
-// outermost first.
+// manual, readOnly, path, markupDefault }. path lists the ids of the enclosing
+// <div>s, outermost first. For a mapped control, every key but name, tag and
+// markupDefault is also what readFormFields in app.js builds.
 function formFields(html) {
     const form = deviceFormHtml(html);
     const re = /<(\/?)(div|input|select|textarea)\b([^>]*)>/g;
@@ -145,6 +146,7 @@ module.exports = {
     readWeb,
     readCatalogFixture,
     routerAgnosticKeys,
+    deviceFormHtml,
     formFields,
     vendorOptions,
 };
