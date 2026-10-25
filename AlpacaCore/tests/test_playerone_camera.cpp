@@ -1439,6 +1439,31 @@ TEST_CASE("Player One Camera Driver - a refused disconnect keeps the Ready frame
     CHECK_FALSE(driver->get_connected());
 }
 
+TEST_CASE("Player One Camera Driver - a refused disconnect after a stopped exposure leaves the camera idle",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    sdk.set_has_st4_port(true);
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+
+    sdk.set_pulse_off_failure(true);
+    driver->pulse_guide(0, 1);
+    REQUIRE(eventually([&] { return sdk.pulse_off_count() == 1; }));
+    sdk.set_image_ready(false);
+    driver->start_exposure(10.0, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+    require_alpaca_error([&] { driver->set_connected(false); }, alpacacore::AlpacaError::DriverException);
+    REQUIRE(driver->get_connected());
+
+    // The SDK stop discarded the frame: the body must not keep polling for it.
+    CHECK(driver->get_camera_state() != alpacacore::CameraState::Exposing);
+    CHECK_NOTHROW(driver->start_exposure(1.0, true));
+
+    sdk.set_pulse_off_failure(false);
+    driver->abort_exposure();
+    driver->set_connected(false);
+}
+
 // --- SDK seam: LockedPlayerOneSDK (issue #1256) -------------------------------
 
 TEST_CASE("FakePlayerOneSDK-style recording SDK behind LockedPlayerOneSDK - forwards every entry point",

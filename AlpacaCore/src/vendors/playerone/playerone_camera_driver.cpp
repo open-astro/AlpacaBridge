@@ -262,6 +262,11 @@ public:
             exposure_stop_error = stop_sdk_exposure();
             if (!exposure_stop_error.empty()) {
                 session_.fail(exposure_stop_error);
+            } else {
+                // The SDK stop discarded the frame, so a live body would poll to its deadline. Cancel and join
+                // it now (a no-op when nothing runs: a Ready frame and a kept failure stay) so a pulse stop
+                // that throws below leaves the camera idle, not Exposing.
+                session_.abort();
             }
             // The pulse stop comes before the join: it can throw and leave the camera connected, and the
             // join clears the Ready frame, the kept failure and LastExposure*.
