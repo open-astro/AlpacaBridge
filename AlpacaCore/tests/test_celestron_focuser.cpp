@@ -26,10 +26,10 @@
 #include <ctime>
 #include <functional>
 #include <string>
-#include <variant>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "catch2_compat.h"
@@ -768,9 +768,12 @@ TEST_CASE("Celestron Focuser Driver - a fault that stands past the link-loss bou
     driver->set_connected(false);
 }
 
-// Falsified by: celestron_focuser_driver.cpp: get_link_fault() delete the override (the management listing never says why the link is down).
-TEST_CASE("Celestron Focuser Driver - the link fault text is reported while faulted and after the loss, and cleared by Disconnect",
-          "[celestron][focuser][snapshot][unit][fake]") {
+// Falsified by: celestron_focuser_driver.cpp: get_link_fault() delete the override (the management listing never says
+// why the link is down).
+TEST_CASE(
+    "Celestron Focuser Driver - the link fault text is reported while faulted and after the loss, and cleared by "
+    "Disconnect",
+    "[celestron][focuser][snapshot][unit][fake]") {
     FakeCelestronFocuser fake;
     REQUIRE(fake.ok());
     FakeTaskClock clock;
@@ -792,7 +795,8 @@ TEST_CASE("Celestron Focuser Driver - the link fault text is reported while faul
     CHECK(driver->get_link_fault().empty());
 }
 
-// Falsified by: celestron_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time, not the frame's).
+// Falsified by: celestron_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request
+// time, not the frame's).
 TEST_CASE("Celestron Focuser Driver - DeviceState TimeStamp is when the frame was measured",
           "[celestron][focuser][snapshot][unit][fake]") {
     FakeCelestronFocuser fake;

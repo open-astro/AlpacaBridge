@@ -25,8 +25,8 @@
 #include <ctime>
 #include <functional>
 #include <string>
-#include <variant>
 #include <thread>
+#include <variant>
 
 #include "catch2_compat.h"
 #include "fake_gemini_focuser.h"
@@ -306,9 +306,12 @@ TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss boun
     driver->set_connected(false);
 }
 
-// Falsified by: gemini_focuser_driver.cpp: get_link_fault() delete the override (the management listing never says why the link is down).
-TEST_CASE("Gemini Focuser Snapshot - the link fault text is reported while faulted and after the loss, and cleared by Disconnect",
-          "[gemini][focuser][snapshot][unit][fake]") {
+// Falsified by: gemini_focuser_driver.cpp: get_link_fault() delete the override (the management listing never says why
+// the link is down).
+TEST_CASE(
+    "Gemini Focuser Snapshot - the link fault text is reported while faulted and after the loss, and cleared by "
+    "Disconnect",
+    "[gemini][focuser][snapshot][unit][fake]") {
     FakeGeminiFocuser fake;
     FakeTaskClock clock;
     auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
@@ -329,7 +332,8 @@ TEST_CASE("Gemini Focuser Snapshot - the link fault text is reported while fault
     CHECK(driver->get_link_fault().empty());
 }
 
-// Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time, not the frame's).
+// Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time,
+// not the frame's).
 TEST_CASE("Gemini Focuser Snapshot - DeviceState TimeStamp is when the frame was measured",
           "[gemini][focuser][snapshot][unit][fake]") {
     FakeGeminiFocuser fake;
