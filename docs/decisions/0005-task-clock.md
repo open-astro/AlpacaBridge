@@ -71,7 +71,7 @@ Symbol: `TaskClock`
 | WandererAstro filter wheel | `AlpacaCore/src/vendors/wandererastro/wandererastro_filterwheel_driver.cpp` | adopted | #730 | link-health timing |
 | OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | moved with its first slot (the MoveAxis re-send) |
 | ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | telemetry, GOTO, pulse and control deadlines; UTC/LST and protocol timeouts stay off the clock |
-| iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | planned | — | |
+| iOptron iEAF focuser | `AlpacaCore/src/vendors/ioptron/ioptron_ieaf_focuser_driver.cpp` | adopted | #1590 | status cache age |
 
 ## Links
 
