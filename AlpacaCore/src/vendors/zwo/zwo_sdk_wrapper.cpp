@@ -117,6 +117,8 @@ std::optional<ZWOControlType> to_control_type(ASI_CONTROL_TYPE type) {
         return ZWOControlType::HighSpeedMode;
     case ASI_ANTI_DEW_HEATER:
         return ZWOControlType::AntiDewHeater;
+    case ASI_BANDWIDTHOVERLOAD:
+        return ZWOControlType::BandwidthOverload;
     default:
         return std::nullopt;
     }
@@ -142,6 +144,8 @@ ASI_CONTROL_TYPE to_asi_control_type(ZWOControlType type) {
         return ASI_HIGH_SPEED_MODE;
     case ZWOControlType::AntiDewHeater:
         return ASI_ANTI_DEW_HEATER;
+    case ZWOControlType::BandwidthOverload:
+        return ASI_BANDWIDTHOVERLOAD;
     }
     return ASI_GAIN;
 }

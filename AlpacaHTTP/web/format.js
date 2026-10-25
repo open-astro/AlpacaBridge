@@ -747,6 +747,15 @@ function calibrationActionBody(actionName, clientTransactionId) {
     }).toString();
 }
 
+function zwoUsbBandwidth(value) {
+    if (value === null || value === undefined || String(value).trim() === '') return undefined;
+    const bandwidth = Number(value);
+    if (!Number.isInteger(bandwidth) || bandwidth < 0 || bandwidth > 100) {
+        throw new Error('USB Limit must be a whole number from 0 to 100, or blank for the default.');
+    }
+    return bandwidth;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
@@ -761,5 +770,5 @@ if (typeof module !== 'undefined' && module.exports) {
                        showsCalibrationControls, parseCalibrationStatus, isCalibrationRunning,
                        mayAbortCalibration, mayAbortFromStatus, keepPollingCalibration, calibrationStatusClass,
                        mayStartCalibration, calibrationStatusText, calibrationHint,
-                       calibrationConfirmText, calibrationActionBody };
+                        calibrationConfirmText, calibrationActionBody, zwoUsbBandwidth };
 }

@@ -17,7 +17,9 @@
 #include <alpacacore/vendor/zwo/zwo_camera_identity.h>
 #include <alpacacore/vendor/zwo/zwo_sdk_wrapper.h>
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -60,6 +62,8 @@ struct ZwoCameraBinding {
     ZwoConfiguredIdentity identity;
     std::string unique_id;
     std::set<std::string> claimed_serials;
+    // Setup policy, not identity: absent uses 40 clamped to the camera's capabilities.
+    std::optional<std::int64_t> usb_bandwidth;
 };
 
 /// Every connected camera with its serial (opens each one briefly).

@@ -156,6 +156,7 @@ BindResult bind_camera(vendor::zwo::ZWOSDK& sdk, const DeviceConfig& config, int
     const std::string configured_name = config.get(kZwoCamName);
 
     vendor::zwo::ZwoCameraBinding binding;
+    binding.usb_bandwidth = config.find(kZwoCamUsbBandwidth);
     if (camera_id >= 0) binding.identity.camera_id = camera_id;
     if (camera_index >= 0) binding.identity.camera_index = camera_index;
     binding.identity.serial = configured_serial;
