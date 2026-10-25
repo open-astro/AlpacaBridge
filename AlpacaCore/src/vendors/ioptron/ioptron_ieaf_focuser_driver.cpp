@@ -15,6 +15,7 @@
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_focuser_driver.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 #include <alpacacore/version.h>
@@ -39,8 +40,10 @@ public:
     ALPACA_EXPOSE_CONNECT_ERROR()
 
     IeafFocuserDriver(int device_number, IeafConnectionConfig config,
-                      util::ConnectionResolver<IeafConnectionConfig> connection_resolver = {})
+                      util::ConnectionResolver<IeafConnectionConfig> connection_resolver = {},
+                      util::TaskClock& clock = util::default_task_clock())
         : AsyncConnectable("iOptron"),
+          clock_(clock),
           device_number_(device_number),
           config_(std::move(config)),
           connection_resolver_(std::move(connection_resolver)),
@@ -269,7 +272,7 @@ private:
 
     IeafStatus cached_status() const {
         std::lock_guard<std::mutex> lock(status_mutex_);
-        const auto now = std::chrono::steady_clock::now();
+        const auto now = clock_.now();
         if (!status_cache_ || now - status_cache_time_ > STATUS_CACHE_TTL) {
             status_cache_ = const_cast<IeafFocuserDriver*>(this)->protocol_.get_status();
             status_cache_time_ = now;
@@ -288,6 +291,7 @@ private:
         }
     }
 
+    util::TaskClock& clock_;
     int device_number_;
     IeafConnectionConfig config_;
     // Set by the by-index factory; empty for an explicit port. connection_resolved_
@@ -313,26 +317,27 @@ private:
     std::string model_name_;  // "iEAF" / "iAFS2/3" from config; fixed after construction
     mutable std::mutex status_mutex_;
     mutable std::optional<IeafStatus> status_cache_;
-    mutable std::chrono::steady_clock::time_point status_cache_time_{};
+    mutable util::TaskClock::clock::time_point status_cache_time_{};
 };
 
 std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port,
-                                                   const std::string& model) {
+                                                   const std::string& model, util::TaskClock& clock) {
     IeafConnectionConfig config;
     config.serial_port = serial_port;
     config.model = model;
-    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config));
+    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config),
+                                               util::ConnectionResolver<IeafConnectionConfig>{}, clock);
 }
 
 std::unique_ptr<FocuserDriver> create_ieaf_focuser_deferred(int device_number,
                                                             util::ConnectionResolver<IeafConnectionConfig> resolver,
-                                                            const std::string& model) {
+                                                            const std::string& model, util::TaskClock& clock) {
     if (!resolver) {
         throw AlpacaException("iOptron iEAF focuser: a connection resolver is required", AlpacaError::InvalidValue);
     }
     IeafConnectionConfig config;
     config.model = model;
-    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config), std::move(resolver));
+    return std::make_unique<IeafFocuserDriver>(device_number, std::move(config), std::move(resolver), clock);
 }
 
 IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std::string& model) {
@@ -358,10 +363,11 @@ IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std:
 }
 
 std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index,
-                                                            const std::string& model) {
+                                                            const std::string& model, util::TaskClock& clock) {
     // The serial scan runs at connect time (#659), not here.
     return create_ieaf_focuser_deferred(
-        device_number, [focuser_index, model] { return resolve_ieaf_focuser_by_index(focuser_index, model); }, model);
+        device_number, [focuser_index, model] { return resolve_ieaf_focuser_by_index(focuser_index, model); }, model,
+        clock);
 }
 
 }  // namespace alpacacore::vendor::ioptron

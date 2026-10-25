@@ -26,6 +26,7 @@
 #include "catch2_compat.h"
 #include "concurrency_stress.h"
 #include "fake_ioptron_ieaf.h"
+#include "fake_task_clock.h"
 
 namespace {
 
@@ -191,6 +192,25 @@ TEST_CASE("iOptron iEAF Focuser Driver - connects and moves over the fake", "[io
     CHECK(fake.count(":FM") == 1);
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
+}
+
+// #1590: the 100 ms status cache ages by the driver's TaskClock.
+TEST_CASE("iOptron iEAF Focuser Driver - the status cache ages by the TaskClock",
+          "[ioptron][focuser][unit][taskclock]") {
+    alpacacore::test::FakeIoptronIeaf fake;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = alpacacore::vendor::ioptron::create_ieaf_focuser(0, fake.slave_path(), "ieaf", clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(10)));
+    clock.advance(std::chrono::seconds(1));  // outdate whatever the connect cached
+    (void)driver->get_position();
+    const int polls = fake.count(":FI#");
+    (void)driver->get_position();
+    (void)driver->get_is_moving();
+    CHECK(fake.count(":FI#") == polls);  // within 100 ms: served from the cache
+    clock.advance(std::chrono::milliseconds(150));
+    (void)driver->get_position();
+    CHECK(fake.count(":FI#") == polls + 1);  // past STATUS_CACHE_TTL: polled again
+    driver->set_connected(false);
 }
 
 // Parameter validation precedes the connection check (ASCOM precedence).
