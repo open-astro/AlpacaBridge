@@ -15,9 +15,9 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 1. **Catalog descriptor** — declare the vendor/device type in `AlpacaCore/src/vendors/<vendor>/<vendor>_fields.h` (fields), `<vendor>_schema.cpp` (schema, compiled in every build, no vendor header) and `<vendor>_catalog.cpp` (factory, compiled only under `ALPACACORE_ENABLE_<VENDOR>`), and register them in `AlpacaCore/src/catalog/builtin_catalog.cpp`. `Router::register_device_from_config` has no vendor arm any more (the last one, iOptron, moved in #1228): it consults the catalog and answers "not yet supported" for anything else. **Fields are read through `DeviceConfig::get()` / `find()`, never raw JSON** (#388): `contains()` is true for an explicit JSON `null` and `value()` THROWS `type_error` rather than returning the default when the stored value is not convertible, so `{"siteLatitude": null}` — trivial to produce from a client that serialises an unset value instead of omitting the key — came back as an nlohmann type complaint instead of the specific message the field has. The catalog reader treats null as absence and reports a genuinely wrong type as an `AlpacaException` naming the field; a nested `ports[]` list is a `RecordList` read the same way.
 2. **No vendor include in `router.cpp`** — the router includes no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` baseline 0); the factory file is the only place the driver header is included.
 3. **Config sanitization fields** — a declared, non-secret field is preserved by the catalog's sanitize; an undeclared key is dropped, so declare every persisted field.
-4. **Web UI vendor dropdown** — add the vendor to the device-type dropdown in the web frontend (`AlpacaHTTP/web/app.js`) so users can select it.
+4. **Web UI vendor dropdown** — add the vendor's `<option>` to `#vendor` in `AlpacaHTTP/web/index.html`. Which device types offer it comes from the descriptor's `available` flag in the device catalog (`catalog_schema.js`); `app.js` keeps no per-vendor availability list.
 5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form. Put each field inside a `data-vendor` / `data-device-type` scope `<div>` and give it `data-config-key="<catalog field key>"`; `AlpacaHTTP/tests/web/catalog_form_drift.test.js` fails on a form field the catalog does not declare, on a catalog field no form field names, and on a control that does not fit the field's type or role.
-6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and register it in the `INDEX_FIELDS` array so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; a missing registry entry reuses index 0 on the next device).
+6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and make it a `type="number"` input whose `data-config-key` names an `EnumerationIndex` catalog field, so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; an index input the catalog does not mark reuses index 0 on the next device).
 7. **Frontend validation** — add any related validation logic in frontend JS.
 8. **Build-flag propagation** — ensure `ALPACACORE_ENABLE_<VENDOR>` compile definitions propagate from AlpacaCore to AlpacaHTTP.
 9. **Routing/config tests** — add or update tests in `AlpacaHTTP/tests/`.
@@ -79,10 +79,13 @@ vendor that ignores either ships a silently broken form:
   ANY input whose name matches a field ZWO already uses, prefix it and read the prefixed name in
   the submit handler.
 - **Give the input `data-config-key`** naming its catalog field, inside a `data-vendor` / `data-device-type` scope `<div>`, so the form drift check finds it.
-- **Register the field in the `INDEX_FIELDS` array** in `AlpacaHTTP/web/app.js`
-  (`fieldId`, `vendor`, `deviceType`, `configKey`, optional `idFieldId`). That one entry
+- **Make it a catalog index field.** A `type="number"` input whose `data-config-key` names an
+  `EnumerationIndex` field of the descriptor is an index field; `app.js` derives the list with
+  `deriveIndexFields()` (`catalog_schema.js`), so there is no table to edit. That derivation
   drives auto-increment (so a second device of the same vendor/type doesn't reuse index 0)
-  **and** the manual-edit tracking. The index is scoped per `(vendor, deviceType)` — each
+  **and** the manual-edit tracking. It pairs the input with the descriptor's `DeviceId` field,
+  else its `PortPath` field, that has the same `appliesWhen`: a value typed there pins a
+  specific unit, so no index is imposed. The index is scoped per `(vendor, deviceType)` — each
   SDK enumerates from 0 independently, so a ZWO camera and a Player One camera are both
   index 0. This is distinct from the Alpaca **device number** (auto-assigned per device
   type, vendor-agnostic, and what clients address). Serial/network devices (port path or
