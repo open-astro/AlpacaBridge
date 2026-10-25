@@ -60,6 +60,12 @@ public:
     bool fail_exposure_start{false};
     // false models a camera without a cooler: get_control_caps omits CoolerOn and CoolerPower.
     bool report_cooler_controls{true};
+    std::optional<ControlCaps> bandwidth_caps =
+        ControlCaps{ControlType::BandwidthOverload, "BandWidth", "USB traffic", 40, 100, 80, true, true};
+    bool fail_bandwidth_write{false};
+    bool fail_bandwidth_read{false};
+    std::optional<long> bandwidth_readback;
+    bool bandwidth_auto_readback{false};
     // Issue #722: the real SDK answers 0 (success) on the first temperature reads after open.
     int zero_temperature_reads_after_open{0};
     // Issue #1349: the ASI120MM (USB 2.0) fails an exposure longer than 3 s at its end when it starts
@@ -229,6 +235,7 @@ public:
                 return c.type == ControlType::CoolerOn || c.type == ControlType::CoolerPower;
             });
         }
+        if (bandwidth_caps) caps.push_back(*bandwidth_caps);
         return caps;
     }
 
@@ -241,16 +248,29 @@ public:
             value = 0;
         }
         is_auto = false;
+        if (type == ControlType::BandwidthOverload) {
+            if (fail_bandwidth_read) return false;
+            value = bandwidth_readback.value_or(value);
+            is_auto = bandwidth_auto_readback || bandwidth_auto_;
+        }
         return true;
     }
 
-    void set_control_value(int camera_id, ControlType type, long value, bool) override {
+    void set_control_value(int camera_id, ControlType type, long value, bool is_auto) override {
         hit("set_control_value");
         std::lock_guard lock(mutex_);
         require_open_locked(camera_id);
         if (type == ControlType::Exposure && fail_exposure_register_write) {
             fail_exposure_register_write = false;
             throw AlpacaException("scripted exposure-register failure", AlpacaError::DriverException);
+        }
+        if (type == ControlType::BandwidthOverload) {
+            if (fail_bandwidth_write || !bandwidth_caps || !bandwidth_caps->is_writable ||
+                value < bandwidth_caps->min_value || value > bandwidth_caps->max_value) {
+                throw AlpacaException("scripted USB bandwidth write failure", AlpacaError::DriverException);
+            }
+            ++calls_["set_bandwidth"];
+            bandwidth_auto_ = is_auto;
         }
         controls_[type] = value;
     }
@@ -416,6 +436,7 @@ private:
     mutable std::condition_variable calls_cv_;
     // Non-zero so a default connect+read takes the plain path; 0 is the #722 placeholder.
     std::map<ControlType, long> controls_{{ControlType::Temperature, 150}};
+    bool bandwidth_auto_{false};
     ROIDescription roi_{};
     StartPosition start_pos_{};
     ExposureStatus status_{ExposureStatus::Idle};

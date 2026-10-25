@@ -3133,7 +3133,7 @@ TEST_CASE("Builtin catalog - register_builtin_schemas describes the ZWO devices 
     }
     // The camera's selectors are its own: unlike the dew heater switch's, they carry no applies_when.
     CHECK(keys_of(find_view(views, kZwoCameraKey)) ==
-          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName"});
+          std::vector<std::string>{"cameraIndex", "cameraId", "serialNumber", "cameraName", "usbBandwidth"});
     CHECK_FALSE(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->applies_when.has_value());
     CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraIndex")->role == Role::EnumerationIndex);
     CHECK(find_field(find_view(views, kZwoCameraKey)->fields, "cameraId")->role == Role::DeviceId);

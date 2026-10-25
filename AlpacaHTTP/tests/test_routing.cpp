@@ -2707,14 +2707,48 @@ int main() {
 #ifdef ALPACACORE_ENABLE_ZWO
     {
         // zwo / camera
-        const auto cfg = roundtrip_config(
-            router,
-            {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9601}, {"cameraIndex", 1}, {"cameraId", 7}},
-            "Camera", 9601);
+        const auto cfg = roundtrip_config(router,
+                                          {{"vendor", "zwo"},
+                                           {"deviceType", "camera"},
+                                           {"deviceNumber", 9601},
+                                           {"cameraIndex", 1},
+                                           {"cameraId", 7},
+                                           {"usbBandwidth", 65}},
+                                          "Camera", 9601);
         EXPECT(cfg.is_object() && !cfg.empty());
         EXPECT(cfg.value("cameraIndex", -1) == 1);
         EXPECT(cfg.value("cameraId", -1) == 7);
+        EXPECT(cfg.value("usbBandwidth", -1) == 65);
         remove_device(router, "zwo", "camera", 9601);
+        const auto restarted = persisted_attempt(cfg, "Camera");
+        EXPECT(restarted.listed);
+        EXPECT(restarted.config.value("usbBandwidth", -1) == 65);
+    }
+    {
+        // case: zwo USB Limit rejects invalid API values and keeps blank unset
+        nlohmann::json body = {{"vendor", "zwo"}, {"deviceType", "camera"}, {"deviceNumber", 9601}, {"cameraIndex", 0}};
+        for (const auto& value : nlohmann::json::array({-1, 101, 40.5, true, "40", nlohmann::json::object()})) {
+            body["usbBandwidth"] = value;
+            const auto result = nlohmann::json::parse(
+                route_request(router, "POST", "/management/v1/configuredevice", body.dump()).body());
+            EXPECT(result.value("ErrorNumber", 0) == 0x401);
+            EXPECT(result.value("ErrorMessage", std::string()).find("usbBandwidth") != std::string::npos);
+            const auto loaded = persisted_attempt(body, "Camera");
+            if (value.is_number_integer()) {
+                EXPECT(loaded.listed);
+                EXPECT(!loaded.warnings.empty());
+            } else {
+                EXPECT(loaded.failed_listed);
+                EXPECT(loaded.failed_entry.value("LoadError", false));
+            }
+        }
+        body["usbBandwidth"] = nullptr;
+        const auto cfg = roundtrip_config(router, body, "Camera", 9601);
+        EXPECT(!cfg.contains("usbBandwidth") || cfg["usbBandwidth"].is_null());
+        remove_device(router, "zwo", "camera", 9601);
+        const auto restarted = persisted_attempt(cfg, "Camera");
+        EXPECT(restarted.listed);
+        EXPECT(!restarted.config.contains("usbBandwidth") || restarted.config["usbBandwidth"].is_null());
     }
     {
         // case: zwo device selectors are range-checked before narrowing
