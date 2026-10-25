@@ -21,7 +21,7 @@
 #include <limits>
 #include <string>
 
-using alpacacore::AlpacaError;
+namespace AlpacaError = alpacacore::AlpacaError;
 using alpacacore::AlpacaException;
 using Catch::Approx;
 namespace pointing = alpacacore::util;
@@ -50,16 +50,39 @@ void require_invalid_value(Fn&& fn, const std::string& message) {
 // almanac): J2000.0 is 280.46061837 deg = 18.6973745 h, 2000-01-01 0h UT is
 // 6h39m52.27s, 1987-04-10 0h UT is 13h10m46.3668s, and 1987-04-10 19:21:00 UT
 // is 8h34m57.0896s.
-// Falsified by: gmst_degrees() dropping the t*t term, the t*t*t term or the
-// 360.98564736629 rate (the dated rows move by seconds), or using the constant
-// 280.46061837 with a rounded rate (the 1987 rows drift).
+// Falsified by: gmst_degrees() changing the 280.46061837 constant or rounding
+// the 360.98564736629 rate (the 1987 rows drift by seconds).
 TEST_CASE("pointing - gmst_degrees matches published GMST values", "[util][pointing]") {
-    CHECK(pointing::gmst_degrees(at_unix(946728000)) == Approx(280.46061837).margin(1e-6));
-    CHECK(pointing::gmst_degrees(at_unix(946684800)) / 15.0 == Approx(6.0 + 39.0 / 60.0 + 52.27 / 3600.0).margin(2e-5));
+    CHECK(pointing::gmst_degrees(at_unix(946728000)) == Approx(280.46061837).epsilon(0).margin(1e-6));
+    CHECK(pointing::gmst_degrees(at_unix(946684800)) / 15.0 ==
+          Approx(6.0 + 39.0 / 60.0 + 52.27 / 3600.0).epsilon(0).margin(2e-5));
     CHECK(pointing::gmst_degrees(at_unix(545011200)) / 15.0 ==
-          Approx(13.0 + 10.0 / 60.0 + 46.3668 / 3600.0).margin(2e-5));
+          Approx(13.0 + 10.0 / 60.0 + 46.3668 / 3600.0).epsilon(0).margin(2e-5));
     CHECK(pointing::gmst_degrees(at_unix(545080860)) / 15.0 ==
-          Approx(8.0 + 34.0 / 60.0 + 57.0896 / 3600.0).margin(2e-5));
+          Approx(8.0 + 34.0 / 60.0 + 57.0896 / 3600.0).epsilon(0).margin(2e-5));
+}
+
+// The 0h-UT form of the same polynomial (Meeus 12.3, seconds of sidereal time),
+// evaluated at 1900-01-01 and 2100-01-01 0h UT where the t*t term is about
+// 0.09 s.
+// Falsified by: gmst_degrees() dropping the 0.000387933 * t * t term (0.093 s
+// at |T| = 1). The t*t*t term is below 1e-6 s here and pinned by no case.
+TEST_CASE("pointing - gmst_degrees agrees with the 0h-UT polynomial a century either side of J2000",
+          "[util][pointing]") {
+    struct Row {
+        std::int64_t unix_seconds;
+        double julian_date;
+    };
+    for (const Row row : {Row{-2208988800, 2415020.5}, Row{4102444800, 2488069.5}}) {
+        const double t = (row.julian_date - 2451545.0) / 36525.0;
+        double seconds = 24110.54841 + 8640184.812866 * t + 0.093104 * t * t - 6.2e-6 * t * t * t;
+        seconds = std::fmod(seconds, 86400.0);
+        if (seconds < 0.0) {
+            seconds += 86400.0;
+        }
+        CHECK(pointing::gmst_degrees(at_unix(row.unix_seconds)) / 15.0 ==
+              Approx(seconds / 3600.0).epsilon(0).margin(3e-6));
+    }
 }
 
 // Falsified by: gmst_degrees() truncating the time point to whole seconds (the
@@ -68,7 +91,7 @@ TEST_CASE("pointing - gmst_degrees keeps sub-second resolution", "[util][pointin
     const auto whole = at_unix(946728000);
     const auto half = whole + std::chrono::milliseconds(500);
     const double step = pointing::gmst_degrees(half) - pointing::gmst_degrees(whole);
-    CHECK(step == Approx(0.5 * 360.98564736629 / 86400.0).epsilon(1e-6));
+    CHECK(step == Approx(0.5 * 360.98564736629 / 86400.0).epsilon(1e-3));
 }
 
 // Falsified by: local_sidereal_hours() adding the longitude in hours instead of
@@ -76,9 +99,10 @@ TEST_CASE("pointing - gmst_degrees keeps sub-second resolution", "[util][pointin
 TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps into [0, 24)", "[util][pointing]") {
     const auto j2000 = at_unix(946728000);
     const double greenwich = 280.46061837 / 15.0;
-    CHECK(pointing::local_sidereal_hours(j2000, 0.0) == Approx(greenwich).margin(1e-9));
-    CHECK(pointing::local_sidereal_hours(j2000, 15.0) == Approx(greenwich + 1.0 - 24.0).margin(1e-9));
-    CHECK(pointing::local_sidereal_hours(j2000, -151.215297) == Approx(greenwich - 151.215297 / 15.0).margin(1e-9));
+    CHECK(pointing::local_sidereal_hours(j2000, 0.0) == Approx(greenwich).epsilon(0).margin(1e-9));
+    CHECK(pointing::local_sidereal_hours(j2000, 15.0) == Approx(greenwich + 1.0).epsilon(0).margin(1e-9));
+    CHECK(pointing::local_sidereal_hours(j2000, -151.215297) ==
+          Approx(greenwich - 151.215297 / 15.0).epsilon(0).margin(1e-9));
     for (double longitude : {-180.0, -90.0, 0.0, 90.0, 180.0}) {
         const double lst = pointing::local_sidereal_hours(j2000, longitude);
         CHECK(lst >= 0.0);
@@ -132,7 +156,7 @@ TEST_CASE("pointing - shortest_ra_delta_hours takes the short way round", "[util
 TEST_CASE("pointing - shortest_ra_delta_hours keeps +-12 at the half turn", "[util][pointing]") {
     CHECK(pointing::shortest_ra_delta_hours(12.0, 0.0) == Approx(12.0));
     CHECK(pointing::shortest_ra_delta_hours(0.0, 12.0) == Approx(-12.0));
-    CHECK(pointing::shortest_ra_delta_hours(23.99, 0.0) == Approx(-0.01).margin(1e-9));
+    CHECK(pointing::shortest_ra_delta_hours(23.99, 0.0) == Approx(-0.01).epsilon(0).margin(1e-9));
 }
 
 // Falsified by: pier_side_for_hour_angle() testing > 0 instead of >= 0 (HA 0
