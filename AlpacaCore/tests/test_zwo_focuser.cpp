@@ -717,3 +717,66 @@ TEST_CASE("ZWO EAF Focuser Driver - A held focuser with no serial is not shared 
     CHECK(refusal.find("EAF-SN-2") != std::string::npos);
     CHECK(refusal.find("re-save") != std::string::npos);
 }
+
+// Issue #1500, decision 7: the bridge passes only enumerated ids, so EAF_ERROR_INVALID_ID on an open id means the id is
+// gone (the wrapper maps it to NotConnected on a per-device call, the fake models that). One such read is a lost link.
+// Falsified by: the status refill counting a NotConnected SDK error as one more failed poll.
+TEST_CASE("ZWO EAF Focuser Driver - A read on an id the SDK no longer holds is a lost link",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);
+
+    sdk.replug(9);  // between two polls the unit came back on id 9; id 3 answers EAF_ERROR_INVALID_ID
+    wait_past_status_ttl();
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #1500: a temperature read that reports the unit removed is positive evidence even though Position answered
+// in the same refill; a step range read that does so fails the Connect and closes what it opened.
+// Falsified by: the refill keeping a NotConnected temperature failure as an optional reading, or the connect
+// accepting a NotConnected step range read as "range unavailable".
+TEST_CASE("ZWO EAF Focuser Driver - A removed unit seen by an optional read is a lost link",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);
+
+    sdk.temperature_removed = true;
+    wait_past_status_ttl();
+    require_alpaca_error([&] { (void)driver->get_position(); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+
+    sdk.temperature_removed = false;
+    sdk.step_range_removed = true;
+    require_alpaca_error([&] { driver->set_connected(true); }, alpacacore::AlpacaError::NotConnected);
+    CHECK_FALSE(driver->get_connected());
+    CHECK(sdk.open_calls == sdk.close_calls);
+}
+
+// Issue #1500, decision 4: the loss is logged once, with the serial and the last-known values. The serial is device
+// text, so a control character in it never reaches the log raw (CWE-117).
+// Falsified by: a WARN per failed read instead of one at the loss, or the serial logged unescaped.
+TEST_CASE("ZWO EAF Focuser Driver - A lost link is logged once with its serial escaped",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    sdk.serial = "EAF\nSN-1";
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    CHECK(driver->get_position() == 500);
+
+    WarnCapture capture;
+    sdk.remove();
+    wait_past_status_ttl();
+    for (int i = 0; i < 3; ++i) {
+        CHECK_THROWS(driver->get_position());
+    }
+    REQUIRE(capture.messages.size() == 1);
+    CHECK(capture.messages[0].find("EAF?SN-1") != std::string::npos);
+    CHECK(capture.messages[0].find('\n') == std::string::npos);
+    CHECK(capture.messages[0].find("500") != std::string::npos);    // last position
+    CHECK(capture.messages[0].find("60000") != std::string::npos);  // max step
+}

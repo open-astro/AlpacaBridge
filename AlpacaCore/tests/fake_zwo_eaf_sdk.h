@@ -57,6 +57,9 @@ public:
     double temperature{12.5};
     bool fail_reads{false};
     bool fail_temperature{false};
+    // Issue #1500: the temperature or step range read reports the unit removed (EAF_ERROR_REMOVED).
+    bool temperature_removed{false};
+    bool step_range_removed{false};
     bool temperature_not_supported{false};
     int moving_calls{0};
     int position_calls{0};
@@ -131,11 +134,11 @@ public:
         // The wrapper erases its bookkeeping, then EAFClose fails on the removed unit.
         throw_if_removed();
     }
-    bool is_moving(int) override {
+    bool is_moving(int focuser_id) override {
         const InFlight in_flight(*this, read_delay, read_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         ++moving_calls;
-        throw_if_removed();
+        check_unit(focuser_id);
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
@@ -145,7 +148,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         ++position_calls;
         last_read_id = focuser_id;
-        throw_if_removed();
+        check_unit(focuser_id);
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
@@ -176,6 +179,7 @@ public:
     int get_step_range(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++step_range_calls;
+        if (step_range_removed) throw AlpacaException("EAFStepRange: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
         if (step_range_fails) {
             throw std::runtime_error("step range unavailable");
         }
@@ -184,6 +188,7 @@ public:
     double get_temperature(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++temperature_calls;
+        if (temperature_removed) throw AlpacaException("EAFGetTemp: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
         if (temperature_not_supported) {
             throw AlpacaException("EAF temperature not supported", AlpacaError::NotImplemented);
         }
@@ -209,6 +214,14 @@ public:
 private:
     void throw_if_removed() const {
         if (removed) throw AlpacaException("EAF_ERROR_REMOVED", AlpacaError::NotConnected);
+    }
+    // A per-device call on an id the library does not hold: EAF_ERROR_INVALID_ID, which the wrapper maps to
+    // NotConnected on a per-device call (issue #1500 decision 7: the bridge passes only enumerated ids).
+    void check_unit(int focuser_id) const {
+        throw_if_removed();
+        if (focuser_id != id && focuser_id != second_id) {
+            throw AlpacaException("EAF_ERROR_INVALID_ID", AlpacaError::NotConnected);
+        }
     }
 
     // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.
