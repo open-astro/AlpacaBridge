@@ -356,8 +356,10 @@ it is never reachable through `router.cpp` or the web UI.
   `InvalidOperation` ("<member> is not allowed while a GOTO is running") before it cancels or sends
   anything while `:GU#` shows a GOTO, the driver's own within the 2 s slew grace included
   (`refuse_while_goto_running_locked()`). That covers a park or home already moving and a handset GOTO
-  too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace, so a slew right
-  after it goes out. A `:MS#` the mount refuses reports its reply digit and reason (the digits are
+  too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace and the status cache,
+  so the next slew asks the mount; it goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
+  GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
+  is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
   listed under "Commands this driver sends"; 4 parked is `InvalidWhileParked`), not "below horizon
   or limit" for every refusal.
 - **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
