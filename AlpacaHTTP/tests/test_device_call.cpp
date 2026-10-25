@@ -268,6 +268,17 @@ void case_ok_envelope() {
     EXPECT(none["ClientTransactionID"] == 9);
 }
 
+// case: success_head is the ok_void envelope without its closing brace
+// success_head() is the ok_void() envelope without its closing brace, ids in the same order.
+// Falsified by: swapping the two ids in success_head(); dropping ErrorMessage; closing the brace.
+void case_success_head() {
+    auto request = make("GET", "/x?ClientTransactionID=9");
+    DeviceCall call(*request, kServerTx);
+    EXPECT(call.success_head() ==
+           "{\"ClientTransactionID\":9,\"ServerTransactionID\":77,\"ErrorNumber\":0,\"ErrorMessage\":\"\"");
+    EXPECT(nlohmann::json::parse(call.success_head() + "}") == envelope(call.ok_void()));
+}
+
 // Falsified by: parsing the body per read (body_parse_count grows with each get_*) or re-parsing on a failed parse.
 void case_body_parsed_once() {
     auto good = put_json("{\"A\":1,\"B\":2.5,\"C\":true,\"D\":\"x\"}");
@@ -330,6 +341,7 @@ int main() {
     case_run_std_exception_is_driver_error();
     case_exception_to_error_code_ignores_text();
     case_ok_envelope();
+    case_success_head();
     case_body_parsed_once();
     case_client_transaction_id();
     std::cout << "test_device_call: all checks passed\n";
