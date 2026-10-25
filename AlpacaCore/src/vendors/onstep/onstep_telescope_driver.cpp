@@ -1920,8 +1920,8 @@ private:
         validate_alt_az(altitude, azimuth);  // arguments first, even while disconnected (#1478)
         check_connected();
         check_not_parked_locked(who);
+        refuse_while_faulted_locked(who);  // named, before the site and Tracking reads (#1414)
         compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out);
-        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
         refresh_status_cache_locked(false);
         if (cached_status_.is_tracking) {
             throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",

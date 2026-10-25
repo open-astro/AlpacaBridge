@@ -36,7 +36,7 @@ means the driver sends it and drains whatever arrives within 50 ms without readi
 | `:GS#` | sidereal time | `HH:MM:SS#` | `#`-terminated |
 | `:Gt#` / `:Gg#` | latitude / longitude (west-positive on the wire) | `sDD*MM#` / `sDDD*MM#` | `#`-terminated |
 | `:GL#` / `:GC#` / `:GG#` | local time / date / UTC offset (`UTCDate` read) | `HH:MM:SS#` / `MM/DD/YY#` / `sHH:MM#` | `#`-terminated |
-| `:GE#` | last command error (after `:hP#`/`:hC#`, #1430) | 2-digit code `#` | `#`-terminated; codes below |
+| `:GE#` | last command error (after a refused `:hP#`/`:hC#`, #1430, or `:ST`/`:hQ#`/`:hR#`, #1379) | 2-digit code `#` | `#`-terminated; codes below |
 | `:SrHH:MM:SS#` / `:SdsDD*MM:SS#` | GOTO target | `0`/`1` | bare digit, `1` accepted |
 | `:StsDD*MM#` / `:SgsDDD*MM#` | site latitude / longitude | `0`/`1` | bare digit |
 | `:SLHH:MM:SS#` / `:SCMM/DD/YY#` / `:SGsHH[:MM]#` | time sync (UTC as local, offset 0) | `0`/`1` | bare digit |

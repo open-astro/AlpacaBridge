@@ -3146,11 +3146,10 @@ TEST_CASE("OnStep Telescope Driver - a slew while a GOTO runs is refused and the
         CHECK(mount->count(":MS#") == 1);
     }
 
-    SECTION("after an AbortSlew the next slew goes out") {
+    SECTION("after an AbortSlew the next slew goes out, inside what was the slew grace") {
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(12.0, 45.0));
-        mount->set_status("NpEW180#");  // stopped
-        REQUIRE_NOTHROW(driver->abort_slew());
-        clock.advance(std::chrono::milliseconds(2100));
+        mount->set_status("NpEW180#");          // stopped
+        REQUIRE_NOTHROW(driver->abort_slew());  // ends the 2 s grace; no clock advance
         mount->clear_log();
         REQUIRE_NOTHROW(driver->slew_to_coordinates_async(13.0, 40.0));
         CHECK(mount->count(":MS#") == 1);
