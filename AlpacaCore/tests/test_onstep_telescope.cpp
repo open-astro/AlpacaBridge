@@ -466,6 +466,13 @@ TEST_CASE("OnStep Telescope Driver - DestinationSideOfPier and PulseGuide check 
         require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(ra, dec); },
                              alpacacore::AlpacaError::InvalidValue);
     }
+    try {
+        (void)driver->get_destination_side_of_pier(24.0, 0.0);
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& ex) {
+        CHECK(std::string(ex.what()).find("DestinationSideOfPier: RightAscension must be in range") !=
+              std::string::npos);
+    }
     require_alpaca_error([&] { (void)driver->get_destination_side_of_pier(0.0, 90.0); },
                          alpacacore::AlpacaError::NotConnected);
 

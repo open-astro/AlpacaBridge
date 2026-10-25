@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -47,6 +48,9 @@
 namespace alpacacore::vendor::synscan {
 
 namespace {
+
+// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
+constexpr std::size_t kMaxReplyLen = 65536;
 
 // Operator-facing owner of this wrapper's ports, for both the auto-detect
 // probe and the connected link (issue #1202): a probe skips a port another
@@ -92,41 +96,24 @@ std::string probe_synscan_port(const std::string& port_path) {
         return "";
     }
 
-    char ver_resp[8] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 7) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        // 100 ms per read: the loop checks its deadline only BETWEEN reads, so
-        // the per-read wait is the granularity at which it is honoured (the
-        // echo helper bounds its own reads). The previous 2 s per read let a
-        // silent port overrun a 3 s budget by up to another 2 s (review
-        // finding on PR #3); the deadlines bound the loops, not this.
-        ssize_t r = util::tty_read(fd, &ch, 1, 100);
-        if (r == 1) {
-            ver_resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
+    // Binary-safe (nothing skipped); a '#' or seven kept bytes ends the read.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "#";
+    spec.skip.clear();
+    spec.max_len = 7;
+    const auto ver = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const std::string& ver_resp = ver.bytes;
 
     // Distinguish SynScan from NexStar by response length.
     // SynScan V: 6 hex-ASCII chars + '#' (7 bytes total).
     // NexStar V: 2 binary bytes + '#' (3 bytes total).
-    bool is_synscan = (total == 7 && ver_resp[6] == '#');
+    bool is_synscan = (ver_resp.size() == 7 && ver_resp[6] == '#');
     link.close();
 
     if (is_synscan) {
         // Parse "XXYYZZ" as version XX.YY.ZZ (each pair is hex)
-        std::string hex_str(ver_resp, 6);
+        std::string hex_str = ver_resp.substr(0, 6);
         bool all_hex = true;
         for (char c : hex_str) {
             if (!std::isxdigit(static_cast<unsigned char>(c))) {
@@ -144,9 +131,9 @@ std::string probe_synscan_port(const std::string& port_path) {
             iss >> std::hex >> val;
             return val;
         };
-        int major = parse_pair(ver_resp);
-        int minor = parse_pair(ver_resp + 2);
-        int patch = parse_pair(ver_resp + 4);
+        int major = parse_pair(ver_resp.data());
+        int minor = parse_pair(ver_resp.data() + 2);
+        int patch = parse_pair(ver_resp.data() + 4);
 
         std::ostringstream oss;
         oss << std::setw(2) << std::setfill('0') << major << "."
@@ -155,7 +142,7 @@ std::string probe_synscan_port(const std::string& port_path) {
         return oss.str();
     }
 
-    if (total >= 2) {
+    if (ver_resp.size() >= 2) {
         return "unknown";
     }
 
@@ -1169,115 +1156,126 @@ private:
 #endif
     }
 
+    // One reply read for both transports: util::read_until on the tty or
+    // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
+    // old 10 ms pacing sleep is gone.
+    util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+#ifndef _WIN32
+        if (connection_type_ == ConnectionType::Serial) {
+            return util::read_until(serial_fd_, spec, deadline);
+        }
+        return util::read_until_socket(socket_fd_, spec, deadline);
+#else
+        (void)spec;
+        (void)deadline;
+        throw AlpacaException("SynScan mount reads are Linux-only");
+#endif
+    }
+
+    [[noreturn]] void throw_link_lost(int err) const {
+        throw AlpacaException(std::string("SynScan ") +
+                              (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                              " link lost (hangup): " + util::errno_string(err));
+    }
+
+    // The read slice of the byte-at-a-time loop: 100 ms over serial, the
+    // socket's 200 ms SO_RCVTIMEO over TCP.
+    std::chrono::milliseconds read_slice() const {
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+    }
+
+    // The byte the line sends in the read slice after a reply's timeout ran
+    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
+    // timeout after each byte and never after a '#', so the byte in flight when
+    // the timeout ran out settled a text reply: a '#' still ended it, any
+    // other byte was kept and the reply had timed out. A strict deadline would leave
+    // a late '#' to answer the next command; a deadline one slice later would
+    // take a whole late reply.
+    std::string late_byte(const std::string& skip) {
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        spec.skip = skip;
+        const auto r = read_reply(spec, std::chrono::steady_clock::now() + read_slice());
+        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+        return r.bytes;
+    }
+
+    // The reply without its '#': a read that ended on the terminator holds it
+    // as its last byte; an idle or timed-out read holds no '#'.
+    static std::string without_terminator(const util::ReadResult& r) {
+        std::string bytes = r.bytes;
+        if (r.outcome == util::ReadOutcome::Terminator) bytes.pop_back();
+        return bytes;
+    }
+
     std::string read_response(bool require_hash_terminator, int timeout_ms, int binary_bytes = 0) {
-        std::string response;
-        auto start = std::chrono::steady_clock::now();
-        auto last_char_time = start;
-        const int idle_break_ms = 100;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        util::ReadSpec spec;
+        spec.max_len = kMaxReplyLen;
         // When binary_bytes > 0, read exactly that many raw bytes first
         // (no CR/LF filtering, no '#' detection) then drain the '#' terminator.
         // This prevents binary values like 0x23 ('#') or 0x0A/0x0D from being
-        // misinterpreted as protocol framing characters (same fix as Celestron).
-        int remaining_binary = binary_bytes;
-
-        while (true) {
-            char ch;
-            bool got_char = false;
-            if (connection_type_ == ConnectionType::Serial) {
-                got_char = read_serial_char(ch);
-            } else {
-                got_char = read_network_char(ch);
+        // misinterpreted as protocol framing characters.
+        if (binary_bytes > 0) {
+            spec.stop = util::ReadSpec::Stop::Length;
+            spec.length = static_cast<std::size_t>(binary_bytes);
+            spec.skip.clear();
+            auto r = read_reply(spec, deadline);
+            if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+            if (r.outcome != util::ReadOutcome::Length) {
+                // The byte-at-a-time loop read on after each payload byte
+                // without checking the timeout, so a payload byte that comes
+                // within one read slice of the last (or of the timeout) is
+                // still payload.
+                while (r.bytes.size() < spec.length) {
+                    const std::string late = late_byte(spec.skip);
+                    if (late.empty()) break;
+                    r.bytes += late;
+                }
+                if (r.bytes.size() < spec.length) {
+                    if (!require_hash_terminator) return r.bytes;
+                    throw AlpacaException("Timeout waiting for SynScan response");
+                }
             }
-            if (got_char) {
-                last_char_time = std::chrono::steady_clock::now();
-                if (remaining_binary > 0) {
-                    // Binary phase: accept every byte as data
-                    response.push_back(ch);
-                    --remaining_binary;
-                    if (remaining_binary == 0 && require_hash_terminator) {
-                        // All binary bytes received; now drain the '#' terminator
-                        drain_hash_terminator(timeout_ms, start);
-                    }
-                    if (remaining_binary == 0) {
-                        break;
-                    }
-                    continue;
-                }
-                if (ch == '#') {
-                    break;
-                }
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-                response.push_back(ch);
-            }
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
-                if (!require_hash_terminator) {
-                    return response;
-                }
+            // The drain waits at least one read slice for the '#', as the
+            // byte-at-a-time drain did.
+            if (require_hash_terminator)
+                drain_hash_terminator(std::max(deadline, std::chrono::steady_clock::now() + read_slice()));
+            return r.bytes;
+        }
+        // The terminator ends the reply; without one the reply ends when the
+        // line goes quiet for 100 ms after its first byte. CR/LF are dropped.
+        if (!require_hash_terminator) {
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
+            spec.idle_gap = std::chrono::milliseconds(100);
+        }
+        const auto r = read_reply(spec, deadline);
+        switch (r.outcome) {
+            case util::ReadOutcome::LinkDead:
+                throw_link_lost(r.err);
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("SynScan response too long");
+            case util::ReadOutcome::Timeout: {
+                const std::string late = late_byte(spec.skip);
+                if (late == "#") return r.bytes;
+                if (!require_hash_terminator) return r.bytes + late;
                 throw AlpacaException("Timeout waiting for SynScan response");
             }
-            if (!require_hash_terminator && !got_char && !response.empty()) {
-                auto idle_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
-                if (idle_elapsed.count() > idle_break_ms) {
-                    break;
-                }
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-        return response;
-    }
-
-    void drain_hash_terminator(int timeout_ms, std::chrono::steady_clock::time_point start) {
-        // Read and discard the '#' terminator after a binary payload.
-        while (true) {
-            char ch;
-            bool got_char = false;
-            if (connection_type_ == ConnectionType::Serial) {
-                got_char = read_serial_char(ch);
-            } else {
-                got_char = read_network_char(ch);
-            }
-            if (got_char) {
-                // Accept '#' or anything else — just drain one byte.
-                return;
-            }
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
-                // Terminator didn't arrive; the payload is still valid.
-                return;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            default:
+                return without_terminator(r);
         }
     }
 
-    bool read_serial_char(char& ch) {
-#ifdef _WIN32
-        DWORD bytes_read = 0;
-        if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-            return true;
-        }
-        return false;
-#else
-        // Bounded read (100 ms poll) held under the wrapper mutex by design —
-        // the mutex provides transaction atomicity for command/response pairs.
-        return util::tty_read(serial_fd_, &ch, 1, 100) == 1;
-#endif
-    }
-
-    bool read_network_char(char& ch) {
-#ifdef _WIN32
-        int bytes_received = recv(socket_handle_, &ch, 1, 0);
-        return bytes_received == 1;
-#else
-        // Bounded recv (SO_RCVTIMEO) held under the wrapper mutex by design —
-        // the mutex provides transaction atomicity for command/response pairs.
-        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);  // NOLINT(clang-analyzer-unix.BlockInCriticalSection)
-        return bytes_received == 1;
-#endif
+    void drain_hash_terminator(std::chrono::steady_clock::time_point deadline) {
+        // Read and discard the byte after a binary payload (the '#', or anything
+        // else); a terminator that never arrives leaves the payload valid.
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        spec.skip.clear();
+        const auto r = read_reply(spec, deadline);
+        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
     }
 
     void configure_network_timeouts() {

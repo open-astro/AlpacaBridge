@@ -49,11 +49,11 @@ The Sky-Watcher direct driver is the first on the snapshot (open-astro#1011). Th
 
 The rules a change is checked against. Each names where it applies and what checks it; the reasoning is in the Decision above.
 
-1. In a driver whose Adoption row is adopted, getters for polled telemetry read the `util::StateSnapshot` and never touch the device. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review; the roster by `scripts/check_docs_drift.py` check 23.
+1. In a driver whose Adoption row is adopted, getters for polled telemetry read the `util::StateSnapshot` and never touch the device. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (trace polled getters to snapshot reads with no device exchanges); the roster by `scripts/check_docs_drift.py` check 23.
 2. A client write goes through `write()` and leaves `measured_at` at the last publish. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`, `AlpacaCore/include/alpacacore/util/state_snapshot.h`. Checked by: `AlpacaCore/tests/test_state_snapshot.cpp`.
 3. A poll takes `begin_poll()` before it samples, and a write or `reset()` after that drops its publish. Scope: `AlpacaCore/include/alpacacore/util/state_snapshot.h`, `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: `AlpacaCore/tests/test_state_snapshot.cpp`.
-4. The snapshot mutex is never held across device I/O, and a `write()` callback does no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review.
-5. A telescope that serves `DeviceState` from the snapshot stamps `TimeStamp` with `measured_at` through `device_state_age()`. Scope: `AlpacaCore/include/alpacacore/telescope_driver.h`, `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_snapshot.cpp`, review.
+4. The snapshot mutex is never held across device I/O, and a `write()` callback does no I/O. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (snapshot callbacks and critical sections contain no device exchanges or blocking work).
+5. A telescope that serves `DeviceState` from the snapshot supplies its measurement age through `device_state_age()`: `measured_at`, or the mandatory-sample timestamp named in its Adoption row for staged publication. Partial publication and client writes never renew an existing mandatory sample's age. Scope: `AlpacaCore/include/alpacacore/telescope_driver.h`, `AlpacaCore/src/vendors/*/*_telescope_driver.cpp`. Checked by: `AlpacaCore/tests/test_skywatcher_snapshot.cpp`, the `[timestamp]` cases in `AlpacaCore/tests/test_zwo_telemetry_concurrency_stress.cpp`, review (the hook returns task-clock age, not a wall-clock time point).
 6. Each adopter states per getter what a stale frame means, in its instruction file; stale alone never refuses. Scope: `.github/instructions/*.instructions.md`. Checked by: `AlpacaCore/tests/test_contract_sweep.cpp` (the "Contract sweep snapshot" cases: a stale frame is served, never refused, for every adopted driver), `scripts/check_contract_sweep.py` (rule 6: the sweep roster matches the Adoption table), review (the per-getter statement in the instruction file).
 7. A poll-fed driver whose Adoption row names `PolledState` serves its frame through `util::PolledState` (`util/polled_state.h`) and holds no `PolledLinkHealth`, poll slot or loss latch of its own for that frame. Scope: `AlpacaCore/src/vendors/*/*_driver.cpp`. Checked by: review (no `PolledLinkHealth`, `begin_poll` or `link_lost_` in the driver), `AlpacaCore/tests/test_polled_state.cpp`.
 
@@ -88,13 +88,13 @@ Symbol: `StateSnapshot`
 | Celestron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
 | Bisque telescope | `StateSnapshot` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
 | SynScan telescope | `StateSnapshot` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
-| Gemini focuser | `StateSnapshot` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
+| Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229, #1643 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
-| Celestron focus motor | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+| Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
 | OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
 | iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
-| ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433 | 250 ms after each poll; 5 s freshness threshold; mandatory GU+RA/Dec sample age is independent of partial publication; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
+| ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |
 
 ## Links
 

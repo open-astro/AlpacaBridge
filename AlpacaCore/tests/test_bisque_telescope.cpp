@@ -472,7 +472,7 @@ TEST_CASE("Bisque Telescope Driver - non-finite slew coordinates and MoveAxis ra
             validate_ra_dec(nan, nan);
             FAIL("Expected AlpacaException");
         } catch (const alpacacore::AlpacaException& ex) {
-            CHECK(std::string(ex.what()).find("RA out of range") != std::string::npos);
+            CHECK(std::string(ex.what()).find("RightAscension must be in range") != std::string::npos);
         }
     }
     SECTION("MoveAxis rate") {

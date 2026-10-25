@@ -10,6 +10,7 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 
 #include <cmath>
@@ -19,18 +20,6 @@
 namespace alpacacore::vendor::celestron {
 
 namespace {
-
-double wrap_hours(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) wrapped += 24.0;
-    return wrapped;
-}
-
-double signed_hour_delta(double hours) {
-    double wrapped = std::fmod(hours + 12.0, 24.0);
-    if (wrapped < 0.0) wrapped += 24.0;
-    return wrapped - 12.0;
-}
 
 std::uint32_t wrap_encoder_count(std::int64_t count) {
     constexpr auto revolution = static_cast<std::int64_t>(kCgxEncoderStepsPerRevolution);
@@ -96,15 +85,9 @@ double cgx_local_sidereal_time_hours(std::chrono::system_clock::time_point utc, 
         throw std::invalid_argument("Celestron CGX longitude must be finite and in [-180, 180]");
     }
     const double seconds = std::chrono::duration<double>(utc.time_since_epoch()).count();
-    const double jd = 2440587.5 + seconds / 86400.0;
-    const double centuries = (jd - 2451545.0) / 36525.0;
-    const double gmst_degrees = 280.46061837 + 360.98564736629 * (jd - 2451545.0) +
-                                0.000387933 * centuries * centuries - (centuries * centuries * centuries) / 38710000.0;
-    const double gast_degrees = gmst_degrees + equation_of_equinoxes_arcseconds(centuries) / 3600.0;
-    double lst_degrees = std::fmod(gast_degrees + longitude_degrees, 360.0);
-    if (lst_degrees < 0.0) {
-        lst_degrees += 360.0;
-    }
+    const double centuries = (2440587.5 + seconds / 86400.0 - 2451545.0) / 36525.0;
+    const double gast_degrees = util::gmst_degrees(utc) + equation_of_equinoxes_arcseconds(centuries) / 3600.0;
+    const double lst_degrees = util::wrap_degrees(gast_degrees + longitude_degrees);
     return lst_degrees / 15.0;
 }
 
@@ -127,7 +110,7 @@ CgxSkyPosition cgx_encoder_position_to_sky(std::uint32_t ra_encoder, std::uint32
     const CgxPointingSide side = dec_axis_counts < 0 ? CgxPointingSide::BeyondPole : CgxPointingSide::Normal;
     const double hour_angle = 6.0 + ra_axis_hours + (side == CgxPointingSide::BeyondPole ? 12.0 : 0.0);
     const double declination = h * (90.0 - std::abs(dec_axis_degrees));
-    return {wrap_hours(local_sidereal_time_hours - hour_angle), declination, side};
+    return {util::wrap_hours(local_sidereal_time_hours - hour_angle), declination, side};
 }
 
 std::pair<std::uint32_t, std::uint32_t> cgx_sky_position_to_encoders(
@@ -140,9 +123,9 @@ std::pair<std::uint32_t, std::uint32_t> cgx_sky_position_to_encoders(
         throw std::invalid_argument("Celestron CGX sky coordinate or local sidereal time is invalid");
     }
     const double h = hemisphere_sign(hemisphere);
-    const double sky_hour_angle = signed_hour_delta(local_sidereal_time_hours - right_ascension_hours);
+    const double sky_hour_angle = util::wrap_hour_angle(local_sidereal_time_hours - right_ascension_hours);
     const double mechanical_hour_angle = sky_hour_angle - (pointing_side == CgxPointingSide::BeyondPole ? 12.0 : 0.0);
-    const double ra_delta_hours = signed_hour_delta(mechanical_hour_angle - 6.0);
+    const double ra_delta_hours = util::wrap_hour_angle(mechanical_hour_angle - 6.0);
     const auto ra_delta_counts = static_cast<std::int64_t>(
         std::llround(h * ra_delta_hours * static_cast<double>(kCgxEncoderStepsPerRevolution) / 24.0));
 

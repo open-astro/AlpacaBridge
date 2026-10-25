@@ -41,6 +41,7 @@ set(TEST_SOURCES
     test_state_snapshot.cpp
     test_task_clock.cpp
     test_utc_offset.cpp
+    test_pointing_math.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_capture_session.cpp
@@ -48,6 +49,7 @@ set(TEST_SOURCES
     test_serial_by_id_scan.cpp
     test_serial_link.cpp
     test_serial_read.cpp
+    test_mount_read_until_hangup.cpp
     test_stress_call_guard.cpp
     test_synscan_handset_probe.cpp
     test_telescope_driver_watchdog.cpp
@@ -293,6 +295,11 @@ if(TARGET alpacacore_playerone)
     list(APPEND TEST_SOURCES test_playerone_filterwheel.cpp)
     list(APPEND TEST_SOURCES test_playerone_switch.cpp)
     list(APPEND TEST_SOURCES test_playerone_concurrency_stress.cpp)
+endif()
+
+# One move-model case set run over the ZWO EFW and the QHY CFW3 drivers (testing instructions).
+if(TARGET alpacacore_zwo AND TARGET alpacacore_qhy)
+    list(APPEND TEST_SOURCES test_filterwheel_move_model.cpp)
 endif()
 
 # Create test executable

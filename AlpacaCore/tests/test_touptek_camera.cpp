@@ -196,7 +196,7 @@ TEST_CASE("ToupTek Camera Driver - AbortExposure during the stream restart is no
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    driver->abort_exposure();  // marks the format dirty: the next exposure restarts the stream
+    driver->set_bin_x(2);  // a real format change makes the next exposure restart the stream
 
     armed = true;
     driver->start_exposure(3.0, true);
@@ -232,7 +232,7 @@ TEST_CASE("ToupTek Camera Driver - Disconnect during the stream restart is not u
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
-    driver->abort_exposure();  // marks the format dirty: the next exposure restarts the stream
+    driver->set_bin_x(2);  // a real format change makes the next exposure restart the stream
 
     armed = true;
     driver->start_exposure(3.0, true);

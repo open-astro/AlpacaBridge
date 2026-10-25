@@ -17,6 +17,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/zwo/zwo_mount_identity.h>
@@ -54,30 +55,6 @@ constexpr double kMaxSiteElevationMeters = 10000.0;
 constexpr auto kDefaultSlewTimeout = std::chrono::minutes(15);
 constexpr auto kParkMotionSettle = std::chrono::seconds(2);
 constexpr auto kPulseGuideHold = std::chrono::milliseconds(500);
-
-void validate_ra(double ra, const char* field_name) {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-        throw AlpacaException(std::string(field_name) + " must be in [0,24) hours", AlpacaError::InvalidValue);
-    }
-}
-
-void validate_dec(double dec, const char* field_name) {
-    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-        throw AlpacaException(std::string(field_name) + " must be in [-90,+90] degrees", AlpacaError::InvalidValue);
-    }
-}
-
-void validate_latitude(double latitude) {
-    if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-        throw AlpacaException("SiteLatitude must be in [-90,+90] degrees", AlpacaError::InvalidValue);
-    }
-}
-
-void validate_longitude(double longitude) {
-    if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-        throw AlpacaException("SiteLongitude must be in [-180,+180] degrees", AlpacaError::InvalidValue);
-    }
-}
 
 std::int64_t floor_div(std::int64_t value, std::int64_t divisor) {
     std::int64_t quotient = value / divisor;
@@ -153,38 +130,6 @@ std::string sanitize_identifier(std::string value) {
         }
     }
     return value;
-}
-
-double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
-                                         double longitude_degrees) {
-    using namespace std::chrono;
-    const double unix_epoch_jd = 2440587.5;
-    const double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
-    const double jd = unix_epoch_jd + days_since_epoch;
-    const double t = (jd - 2451545.0) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
-                  + 0.000387933 * t * t - (t * t * t) / 38710000.0;
-    gmst = std::fmod(gmst, 360.0);
-    if (gmst < 0.0) {
-        gmst += 360.0;
-    }
-
-    double lst = gmst + longitude_degrees;
-    lst = std::fmod(lst, 360.0);
-    if (lst < 0.0) {
-        lst += 360.0;
-    }
-    return lst / kHoursToDegrees;
-}
-
-double normalize_hour_angle_hours(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped <= -12.0) {
-        wrapped += 24.0;
-    } else if (wrapped > 12.0) {
-        wrapped -= 24.0;
-    }
-    return wrapped;
 }
 
 } // namespace
@@ -1050,12 +995,11 @@ public:
 
         if (has_longitude) {
             const double current_ra = get_right_ascension();
-            const double lst_hours = compute_local_sidereal_time_hours(
-                std::chrono::system_clock::now(), longitude);
-            const double ha = normalize_hour_angle_hours(lst_hours - current_ra);
+            const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+            const double ha = util::wrap_hour_angle(lst_hours - current_ra);
             // HA >= 0 → target west of meridian → pierEast (0)
             // HA <  0 → target east of meridian → pierWest (1)
-            const int side = ha >= 0.0 ? 0 : 1;
+            const int side = util::pier_side_for_hour_angle(ha);
             return side;
         }
 
@@ -1063,8 +1007,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        validate_ra(ra, "RightAscension");
-        validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         double longitude = 0.0;
         bool has_longitude = false;
         {
@@ -1079,11 +1022,11 @@ public:
             return get_side_of_pier();
         }
 
-        const double lst_hours = compute_local_sidereal_time_hours(std::chrono::system_clock::now(), longitude);
-        const double hour_angle = normalize_hour_angle_hours(lst_hours - ra);
+        const double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
+        const double hour_angle = util::wrap_hour_angle(lst_hours - ra);
 
         // German equatorial: target west of meridian (hour angle >= 0) -> pier side East.
-        return hour_angle >= 0.0 ? 0 : 1;
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -1130,7 +1073,7 @@ public:
         if (!has_longitude) {
             throw AlpacaException("SiteLongitude is not available for SiderealTime", AlpacaError::DriverException);
         }
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), longitude);
+        return util::local_sidereal_hours(std::chrono::system_clock::now(), longitude);
     }
 
     double get_site_elevation() const override {
@@ -1159,7 +1102,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        validate_latitude(latitude);
+        util::validate_latitude(latitude);
         check_writable_state();
 
         // One site write at a time, so two concurrent setters, or a setter and the connect's site apply/re-send, reach
@@ -1204,7 +1147,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        validate_longitude(longitude);
+        util::validate_longitude(longitude);
         check_writable_state();
 
         std::lock_guard<std::mutex> site_write(site_write_mutex_);  // see set_site_latitude
@@ -1437,7 +1380,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        validate_dec(dec, "TargetDeclination");
+        util::validate_dec(dec, "TargetDeclination");
         check_writable_state();
 
         {
@@ -1461,7 +1404,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        validate_ra(ra, "TargetRightAscension");
+        util::validate_ra(ra, "TargetRightAscension");
         check_writable_state();
 
         {
@@ -1726,8 +1669,7 @@ public:
         // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
         // reset_position_offsets; avoid redundant mount queries here. The Tracking
         // gate runs first, though: the target setters below write to the mount.
-        validate_ra(ra, "RightAscension");
-        validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_equatorial_slew_allowed("SlewToCoordinates");
         set_target_right_ascension(ra);
         set_target_declination(dec);
@@ -1739,8 +1681,7 @@ public:
         // checks. The parked and Tracking gate runs here too, before the target
         // is replaced: both read cached state, and Tracking reads the mount (":GAT")
         // only when its 2 s cache has aged out.
-        validate_ra(ra, "RightAscension");
-        validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         check_equatorial_slew_allowed("SlewToCoordinatesAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1792,8 +1733,7 @@ public:
                 target_ra = target_ra_hours_;
                 target_dec = target_dec_degrees_;
             }
-            validate_ra(target_ra, "RightAscension");
-            validate_dec(target_dec, "Declination");
+            util::validate_ra_dec(target_ra, target_dec, "SlewToTargetAsync");
             // ITelescopeV4: an equatorial slew with Tracking false is
             // InvalidOperation (open-astro#1274; see require_tracking_for_slew),
             // checked before reset_position_offsets() cancels a pulse in
@@ -1986,8 +1926,7 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         // sync_to_target() handles ensure_not_parked and reset_position_offsets.
-        validate_ra(ra, "RightAscension");
-        validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         check_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2015,8 +1954,7 @@ public:
             target_dec = target_dec_degrees_;
         }
 
-        validate_ra(target_ra, "RightAscension");
-        validate_dec(target_dec, "Declination");
+        util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
 
         auto& protocol = protocol_;
 
@@ -2079,7 +2017,7 @@ public:
             }
         }
         if (has_raw) {
-            const double ra_delta = normalize_hour_angle_hours(target_ra - raw.ra_hours);
+            const double ra_delta = util::wrap_hour_angle(target_ra - raw.ra_hours);
             const double dec_delta = target_dec - raw.dec_degrees;
             std::lock_guard<std::mutex> lock(mutex_);
             ra_offset_hours_ = std::fmod(ra_offset_hours_ + ra_delta, 24.0);
@@ -2800,7 +2738,7 @@ private:
                     const double target_dec = std::clamp(
                         cached_equatorial_->dec_degrees + dec_offset_deg_, -90.0, 90.0);
                     // Rebase: set offset so actual_pos + new_offset = expected_final.
-                    ra_offset_hours_ = normalize_hour_angle_hours(target_ra - eq.ra_hours);
+                    ra_offset_hours_ = util::wrap_hour_angle(target_ra - eq.ra_hours);
                     dec_offset_deg_ = target_dec - eq.dec_degrees;
                 }
                 cached_equatorial_ = eq;

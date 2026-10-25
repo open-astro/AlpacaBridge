@@ -14,6 +14,7 @@
 
 #include <alpacacore/focuser_driver.h>
 #include <alpacacore/util/connection_resolver.h>
+#include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/ioptron/ioptron_ieaf_protocol_wrapper.h>
 
 #include <memory>
@@ -31,17 +32,20 @@ namespace alpacacore::vendor::ioptron {
  * @param serial_port Serial port path (e.g., "/dev/ttyUSB0")
  * @param model "ieaf" (default) or "iafs2": sets the reported device name; the
  *              protocol is identical for both
+ * @param clock TaskClock the status-cache age runs on (decision 0005): real by default, a FakeTaskClock in tests
  * @return Unique pointer to focuser driver
  */
 std::unique_ptr<FocuserDriver> create_ieaf_focuser(int device_number, const std::string& serial_port,
-                                                   const std::string& model = "ieaf");
+                                                   const std::string& model = "ieaf",
+                                                   util::TaskClock& clock = util::default_task_clock());
 
 /// Port resolved at connect time by `resolver` (#659); the by-index factory
 /// below wraps it, tests inject a fake's pty path. `model` names the unit as
 /// create_ieaf_focuser() does; the resolver's config carries the port.
 std::unique_ptr<FocuserDriver> create_ieaf_focuser_deferred(int device_number,
                                                             util::ConnectionResolver<IeafConnectionConfig> resolver,
-                                                            const std::string& model = "ieaf");
+                                                            const std::string& model = "ieaf",
+                                                            util::TaskClock& clock = util::default_task_clock());
 
 /// The serial scan behind create_ieaf_focuser_by_index(); throws when nothing answers.
 IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std::string& model);
@@ -62,6 +66,7 @@ IeafConnectionConfig resolve_ieaf_focuser_by_index(int focuser_index, const std:
  * construction succeeds while the focuser is absent (#659).
  */
 std::unique_ptr<FocuserDriver> create_ieaf_focuser_by_index(int device_number, int focuser_index = 0,
-                                                            const std::string& model = "ieaf");
+                                                            const std::string& model = "ieaf",
+                                                            util::TaskClock& clock = util::default_task_clock());
 
 }  // namespace alpacacore::vendor::ioptron

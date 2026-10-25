@@ -43,10 +43,13 @@ Checks:
      true when they were written.
   6. The QHYSDK seam's three parallel lists agree: every pure virtual on the
      interface has a LockedQHYSDK override, every override actually takes the
-     shared mutex through locked() -- except cancel_exposure(), which must
-     take its own cancel_mutex_ and must NOT go through locked() (issue #339:
-     production's cancel skips the per-handle mutex so it can interrupt a
-     download blocked on the same handle) -- and the forward sweep in
+     shared mutex through the one-argument locked() -- except two: cancel_exposure(),
+     which must take its own cancel_mutex_ and must NOT go through locked() (issue
+     #339: production's cancel skips the per-handle mutex so it can interrupt a
+     download blocked on the same handle), and get_sdk_version(), which must use
+     locked(version_mutex_, ...) and not the shared mutex (issue #1646: the hook
+     must not queue behind an in-flight open). A forward written as
+     locked(other_mutex_, ...) fails -- and the forward sweep in
      test_qhy_fake_sdk.cpp drives all of them.
   7. Every relative path referenced in AGENTS.md, CONTEXT.md, README.md (issue
      #693: the most-read file in the repo was in no scan), scoped instructions,
@@ -782,6 +785,59 @@ def _class_body(text, class_name):
     return text[match.end():_matching_brace(text, match.end() - 1) - 1]
 
 
+QHY_CANCEL_EXEMPT = "cancel_exposure"
+QHY_VERSION_EXEMPT = "get_sdk_version"
+
+
+def _qhy_forward_lock_findings(locked_methods, interface_methods):
+    """The lock each LockedQHYSDK forward takes. Pure, so --self-test can drive it.
+
+    Two methods own a mutex of their own: cancel_exposure (cancel_mutex_,
+    open-astro#339) and get_sdk_version (version_mutex_, open-astro#1646: the
+    hook must not queue behind an in-flight open_camera). Every other forward
+    must take the shared mutex through the one-argument `locked([&] {...})`;
+    `locked(other_mutex_, ...)` skips the shared mutex and is rejected."""
+    failures = []
+    for name in sorted(set(locked_methods) & interface_methods):
+        body = locked_methods[name]
+        shared_named = re.search(r"(?<![\w])mutex_\b", body)
+        if name == QHY_CANCEL_EXEMPT:
+            # Mechanical, not a substring: the body must take the lock_guard on
+            # cancel_mutex_ AND must not go through locked(). A body that does
+            # both (shared mutex plus a mention of cancel_mutex_) is the
+            # inverted shape #339 fixed, and a substring test passed it.
+            # `lock_guard<std::mutex>` or CTAD `lock_guard` both count; any
+            # mention of the shared `mutex_` (locked() or a hand-rolled guard)
+            # is the inverted shape, so it is rejected by name, not by idiom.
+            takes_own = re.search(r"lock_guard\s*(?:<\s*std::mutex\s*>)?\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
+            touches_shared = "locked(" in body or shared_named
+            if not takes_own or touches_shared:
+                failures.append(
+                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
+                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
+                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
+                    "racy forward in the decorator.")
+            continue
+        if name == QHY_VERSION_EXEMPT:
+            takes_own = re.search(r"\blocked\s*\(\s*version_mutex_\s*,", body)
+            if not takes_own or shared_named or re.search(r"\blocked\s*\(\s*\[", body):
+                failures.append(
+                    "LockedQHYSDK::get_sdk_version() must take version_mutex_ (locked(version_mutex_, ...)) "
+                    "and not the shared mutex_, per open-astro#1646: through the shared mutex the hook "
+                    "queues behind an in-flight open_camera(), which the real wrapper's leaf "
+                    "sdk_version_mutex does not.")
+            continue
+        # Every other forward: the one-argument locked([&] {...}), which takes mutex_.
+        if not re.search(r"\blocked\s*\(\s*\[", body) or re.search(r"\blocked\s*\(\s*[A-Za-z_]", body):
+            failures.append(
+                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through the one-argument locked([&] {...}). "
+                "The decorator exists only to take the shared mutex -- an unlocked forward (or one that "
+                "passes locked() another mutex) makes the fake racy under a [stress] storm and produces a "
+                "ThreadSanitizer report naming the FAKE, which is the confusion the decorator was built "
+                "to prevent." % name)
+    return failures
+
+
 def check_qhy_seam_lists():
     failures = []
     interface_body = _class_body(_strip_comments(read(QHY_INTERFACE_HEADER)), "QHYSDK")
@@ -830,39 +886,12 @@ def check_qhy_seam_lists():
             "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
             "method." % name)
 
-    # cancel_exposure is the one documented exception (open-astro#339): the real
-    # QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle call
-    # mutex so it can interrupt a GetQHYCCDSingleFrame already blocked on the
-    # same handle, and routing it through the shared mutex here inverted that
-    # invariant. It still takes A mutex -- its own -- so it is not an unlocked
-    # forward and the fake stays non-racy; it just does not queue behind the
-    # call it exists to interrupt.
-    CANCEL_EXEMPT = "cancel_exposure"
-    for name in sorted(set(locked_methods) & interface_methods):
-        body = locked_methods[name]
-        if name == CANCEL_EXEMPT:
-            # Mechanical, not a substring: the body must take the lock_guard on
-            # cancel_mutex_ AND must not go through locked(). A body that does
-            # both (shared mutex plus a mention of cancel_mutex_) is the
-            # inverted shape #339 fixed, and a substring test passed it.
-            # `lock_guard<std::mutex>` or CTAD `lock_guard` both count; any
-            # mention of the shared `mutex_` (locked() or a hand-rolled guard)
-            # is the inverted shape, so it is rejected by name, not by idiom.
-            takes_own = re.search(r"lock_guard\s*(?:<\s*std::mutex\s*>)?\s*\w+\s*\(\s*cancel_mutex_\s*\)", body)
-            touches_shared = "locked(" in body or re.search(r"(?<![\w])mutex_\b", body)
-            if not takes_own or touches_shared:
-                failures.append(
-                    "LockedQHYSDK::cancel_exposure() must take cancel_mutex_ -- its own lock, separate "
-                    "from the shared one, per open-astro#339. Through the shared mutex it queues behind "
-                    "the in-flight call it exists to interrupt; with no mutex at all it becomes the one "
-                    "racy forward in the decorator.")
-            continue
-        if "locked(" not in body:
-            failures.append(
-                "UNLOCKED FORWARD: LockedQHYSDK::%s() does not go through locked(). The decorator exists "
-                "only to take the mutex -- an unlocked forward makes the fake racy under a [stress] storm "
-                "and produces a ThreadSanitizer report naming the FAKE, which is the confusion the "
-                "decorator was built to prevent." % name)
+    # Two documented exemptions from the shared mutex, each taking its own
+    # mutex so the fake stays non-racy (rationale in the helper's docstring):
+    # cancel_exposure (open-astro#339) must not queue behind the call it
+    # interrupts, and get_sdk_version (open-astro#1646) must not queue behind
+    # an in-flight open_camera.
+    failures.extend(_qhy_forward_lock_findings(locked_methods, interface_methods))
 
     # The hand-written sweep list in the test.
     sweep = read(QHY_SWEEP_TEST)
@@ -2312,7 +2341,6 @@ DECISION_BARE_REVIEW_BASELINE = {
     "0006-async-operation-ownership.md": 3,
     "0007-lan-surface-threat-model.md": 13,
     "0009-link-loss-and-relink-policy.md": 3,
-    "0010-snapshot-served-state.md": 1,
     "0011-cgx-logical-reference-continuity.md": 4,
     "0012-bundled-libgphoto2.md": 1,
     "0013-designs-to-avoid.md": 7,
@@ -2871,6 +2899,42 @@ def self_test():
     def sub(text, old, new, count=1):
         assert text.count(old) == count, (old, text.count(old))
         return text.replace(old, new)
+
+    # check 6: the lock each LockedQHYSDK forward takes (open-astro#339, #1646).
+    qhy_ok = {
+        "open_camera": "{ locked([&] { inner_.open_camera(); }); }",
+        "cancel_exposure": "{ std::lock_guard<std::mutex> lk(cancel_mutex_); inner_.cancel_exposure(); }",
+        "get_sdk_version": "{ return locked(version_mutex_, [&] { return inner_.get_sdk_version(); }); }",
+    }
+    qhy_names = set(qhy_ok)
+
+    def qhy_with(name, body):
+        return _qhy_forward_lock_findings(dict(qhy_ok, **{name: body}), qhy_names)
+
+    check("QHY lock check: baseline forwards produce no finding",
+          _qhy_forward_lock_findings(qhy_ok, qhy_names) == [])
+    check("QHY lock check: get_sdk_version through the shared mutex fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version", "{ return locked([&] { return inner_.get_sdk_version(); }); }")))
+    check("QHY lock check: get_sdk_version with no lock fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version", "{ return inner_.get_sdk_version(); }")))
+    check("QHY lock check: get_sdk_version naming both mutexes fails",
+          any("get_sdk_version() must take version_mutex_" in x
+              for x in qhy_with("get_sdk_version",
+                                "{ locked([&] {}); return locked(version_mutex_, [&] { return 1; }); }")))
+    check("QHY lock check: another forward on locked(other_mutex_, ...) fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ locked(other_mutex_, [&] { inner_.open_camera(); }); }")))
+    check("QHY lock check: another forward on locked(version_mutex_, ...) fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ locked(version_mutex_, [&] { inner_.open_camera(); }); }")))
+    check("QHY lock check: an unlocked forward fails",
+          any("UNLOCKED FORWARD: LockedQHYSDK::open_camera()" in x
+              for x in qhy_with("open_camera", "{ inner_.open_camera(); }")))
+    check("QHY lock check: cancel_exposure through locked() fails",
+          any("cancel_exposure() must take cancel_mutex_" in x
+              for x in qhy_with("cancel_exposure", "{ locked([&] { inner_.cancel_exposure(); }); }")))
 
     ci, pf = _SELF_TEST_CI, _SELF_TEST_PREFLIGHT
     baseline = _tsan_findings(ci, pf)

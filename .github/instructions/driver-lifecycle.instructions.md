@@ -70,7 +70,8 @@ vendor-agnostic; do them in the driver from the start.
 - **Threads that are not in a slot keep these rules.** Hand-rolled threads remain in the
   ZWO telescope (`goto_thread_`, `pulse_thread_`, `disconnect_thread_`),
   the QHYCFW3 move thread,
-  the camera exposure workers, the QHY cooler-off and temperature workers and the GPIO
+  the exposure workers of cameras not yet on `util::CaptureSession` (Player One is; decision 0020),
+  the QHY cooler-off and temperature workers and the GPIO
   soft-PWM workers; the list is a sample, not a roster.
   - **Never `.detach()` a thread that touches `this`.** A `sleep_for` timer that later
     writes a member is the classic trap: if the object dies mid-sleep the wakeup writes
@@ -108,9 +109,10 @@ vendor-agnostic; do them in the driver from the start.
   a converted driver: `transition_mutex_` → I/O lock → state `mutex_` (leaf of the driver's own locks) →
   SDK-wrapper mutex. Cameras and drivers not yet converted keep `mutex_` →
   operation lock (`readout_mutex_`, …) → SDK-wrapper mutex; the `AsyncOperation`
-  slot mutex, the `StateSnapshot` mutex and the `util::PolledState` mutexes (a driver
-  that composes `PolledState` for its poll-fed frame) are leaves that nest under `mutex_`
-  (decisions 0006, 0010, 0016). Never acquire in reverse, and
+  slot mutex, the `StateSnapshot` mutex, the `util::PolledState` mutexes (a driver
+  that composes `PolledState` for its poll-fed frame) and the `util::CaptureSession` mutex (a
+  camera that composes the session; it never nests with the slot mutex) are leaves that nest
+  under `mutex_` (decisions 0006, 0010, 0016, 0020). Never acquire in reverse, and
   convert a whole driver class in one PR so the old and new order never mix in one
   class.
 - An SDK call on a closable handle is safe only if the handle can't be closed
@@ -129,7 +131,8 @@ vendor-agnostic; do them in the driver from the start.
   **Camera exception:** the ToupTek camera driver (`with_handle`) and the ZWO,
   Player One and SVBONY cameras (`with_camera`, issue #116) hold `mutex_` across
   short SDK calls, and that stays allowed until a measurement shows a getter
-  stall; a camera converts to the rule above only then. The exposure worker keeps
+  stall; a camera converts to the rule above only then. The exposure body (a
+  `CaptureSession` body, or a worker not yet converted) keeps
   a bare snapshot — it must not hold any lock across a blocking image wait
   (`WaitImageV4`, `SVBGetVideoData`, `POAGetImageData`), and its close is
   stop-and-joined first. Same exemption for a call that blocks for its whole
