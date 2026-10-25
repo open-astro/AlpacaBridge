@@ -384,6 +384,17 @@ if(ALPACAHTTP_BUILD_TESTS)
     target_compile_definitions(test_routing PRIVATE
         ALPACAHTTP_ROUTER_SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+    # Test-only server for the hardware-free ConformU job: a test catalog
+    # descriptor over FakeSkyWatcherMount. Not installed and not linked into
+    # alpacabridge or alpacahttp_server. The fake header lives under
+    # AlpacaCore/tests, so that directory is on this target's include path only.
+    if(TARGET alpacacore_skywatcher)
+        add_executable(fake_skywatcher_server tests/fake_skywatcher_server.cpp)
+        target_link_libraries(fake_skywatcher_server alpacahttp alpacacore_skywatcher)
+        target_include_directories(fake_skywatcher_server PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../AlpacaCore/tests)
+    endif()
+
     # #646: route-table snapshot, dispatch reach and rejection fixture. Own
     # working directory for the same reason as test_routing (relative
     # config/registered_devices.json), and its own process because the
