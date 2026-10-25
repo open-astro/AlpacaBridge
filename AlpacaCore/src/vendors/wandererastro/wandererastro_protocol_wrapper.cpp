@@ -152,8 +152,14 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
                 found = true;
                 break;
             }
-        } else if (line.outcome != util::ReadOutcome::Overflow) {
-            break;  // silent until the deadline, or the line is gone: not this device
+        } else if (line.outcome == util::ReadOutcome::LinkDead ||
+                   (line.outcome == util::ReadOutcome::Timeout && line.err != 0)) {
+            // Persistent read error (e.g. the device was unplugged mid-probe):
+            // back off to avoid spinning a CPU core for the rest of the probe window.
+            if (std::chrono::steady_clock::now() >= deadline) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else if (line.outcome == util::ReadOutcome::Timeout) {
+            break;  // silent until the deadline: not this device
         }
     }
 

@@ -220,8 +220,14 @@ bool probe_port(const std::string& port_path, FilterWheelPortInfo& info) {
                 break;
             }
         }
-        if (token.outcome != util::ReadOutcome::Terminator && token.outcome != util::ReadOutcome::Overflow) {
-            break;  // silent until the deadline, or the line is gone: not this device
+        if (token.outcome == util::ReadOutcome::LinkDead ||
+            (token.outcome == util::ReadOutcome::Timeout && token.err != 0)) {
+            // Persistent read error (device unplugged mid-probe): back off
+            // explicitly so the loop does not spin until the deadline.
+            if (std::chrono::steady_clock::now() >= deadline) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else if (token.outcome == util::ReadOutcome::Timeout) {
+            break;  // silent until the deadline: not this device
         }
     }
 
