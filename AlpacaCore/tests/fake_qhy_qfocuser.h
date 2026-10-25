@@ -130,7 +130,8 @@ public:
 
     /// Answer the connect handshake, the settings telemetry (cmd_id 4) and every
     /// other command except the position poll (cmd_id 5, asked first by
-    /// poll_state_once): the shape of a connect whose first state frame is lost.
+    /// QhyFocuserDriver::probe(), run by util::PolledState::poll_once()): the
+    /// shape of a connect whose first state frame is lost.
     void set_state_muted(bool on) { state_muted_.store(on); }
 
 private:
