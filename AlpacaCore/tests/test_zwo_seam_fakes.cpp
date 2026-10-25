@@ -178,7 +178,7 @@ TEST_CASE("FakeZWOEFWSDK, FakeZWOEAFSDK and FakeZWOCAASDK behind their Locked de
     const auto eaf_shared = locked_eaf.open_focuser_candidate(eaf.id);
     REQUIRE(eaf_shared.has_value());
     CHECK(eaf_shared->link == eaf_open.link);
-    // Per-device calls run under the link (issue #1500); with_link forwards without the decorator mutex.
+    // Per-device calls run under the link (issue #1500), re-entering the decorator mutex with_link holds.
     locked_eaf.with_link(eaf.id, eaf_open.link, [&] {
         CHECK_FALSE(locked_eaf.is_moving(eaf.id));
         eaf.moving = true;
@@ -253,6 +253,22 @@ TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the dri
     fake.fail_open = false;
     driver->set_connected(true);  // would deadlock if the failed call kept the decorator mutex
     CHECK(driver->get_connected());
+}
+
+// Falsified by: locked_zwo_eaf_sdk.h with_link() forwarding without its mutex (decision 0015 rule 2):
+// another thread's call then runs while the link body is still inside the decorator.
+TEST_CASE("LockedZWOEAFSDK - with_link holds the decorator mutex across its body", "[zwo][unit][fake-sdk]") {
+    FakeZWOEAFSDK eaf;
+    LockedZWOEAFSDK locked_eaf(eaf);
+    const auto opened = locked_eaf.open_focuser_link(eaf.id);
+    std::future<std::string> other;
+    locked_eaf.with_link(eaf.id, opened.link, [&] {
+        CHECK(locked_eaf.get_position(eaf.id) == eaf.position);  // the body re-enters on its own thread
+        other = std::async(std::launch::async, [&] { return locked_eaf.get_sdk_version(); });
+        CHECK(other.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+    });
+    CHECK(other.get() == "1, 7, 0, 0");
+    locked_eaf.close_focuser_link(eaf.id, opened.link);
 }
 
 // Falsified by: fake_zwo_efw_sdk.h set_position() dropping its range check (the out-of-range slot is
