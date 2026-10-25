@@ -93,6 +93,9 @@ std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& lin
     // program cannot park this read (#1202). A hangup reads as LinkDead, never
     // as a quiet timeout. The reply is raw bytes, so nothing is skipped; the
     // overall deadline is the first-byte window plus one idle window per byte.
+    link_dead = false;
+    // max_len 0 asks for no bytes; read_until would still return one as Overflow.
+    if (max_len == 0) return {};
     util::ReadSpec spec;
     spec.stop = util::ReadSpec::Stop::IdleGap;
     spec.idle_gap = std::chrono::milliseconds(kReplyIdleMs);
