@@ -55,23 +55,23 @@ The roster of drivers whose background bodies run in slots. `scripts/check_docs_
 Scan: `AlpacaCore/src/vendors/*/*_driver.cpp`
 Symbol: `AsyncOperation`
 
-| Driver | Source | State | Issue | Notes |
-| --- | --- | --- | --- | --- |
-| Sky-Watcher telescope | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #931 | slices K2, K3, K3b |
-| Celestron telescope | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1406 | claim protocol; send gate |
-| SynScan telescope | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1407 | claim protocol; bodies release `mutex_` per exchange |
-| iOptron telescope | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1246 | |
-| Bisque telescope | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | |
-| Celestron CGX telescope | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | | refuses a second motion command while one runs |
-| Gemini flat panel | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
-| Gemini focuser | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
-| QHY Q-Focuser | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | poll body |
-| QHY CFW3 filter wheel | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted | #1510 | goto arrival-wait body |
-| Astroasis focuser | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
-| Celestron focus motor | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
-| OnStep telescope | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | MoveAxis re-send body |
-| iOptron iGuider camera | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
-| ZWO telescope | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | partial | #1432, #1433 | telemetry poll slot; existing GOTO, pulse and disconnect workers remain joined raw threads |
+| Driver | Symbol | Source | State | Issue | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Sky-Watcher telescope | | `AlpacaCore/src/vendors/skywatcher/skywatcher_telescope_driver.cpp` | adopted | #931 | slices K2, K3, K3b |
+| Celestron telescope | | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1406 | claim protocol; send gate |
+| SynScan telescope | | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1407 | claim protocol; bodies release `mutex_` per exchange |
+| iOptron telescope | | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | adopted | #1246 | |
+| Bisque telescope | | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | |
+| Celestron CGX telescope | | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | | refuses a second motion command while one runs |
+| Gemini flat panel | | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
+| Gemini focuser | | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
+| QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | poll body |
+| QHY CFW3 filter wheel | | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted | #1510 | goto arrival-wait body |
+| Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
+| Celestron focus motor | | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
+| OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | MoveAxis re-send body |
+| iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
+| ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | partial | #1432, #1433 | telemetry poll slot; existing GOTO, pulse and disconnect workers remain joined raw threads |
 
 ## Links
 
