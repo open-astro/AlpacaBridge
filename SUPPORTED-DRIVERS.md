@@ -2,7 +2,7 @@
 
 <img src="docs/image/ab.png" alt="AlpacaBridge logo" width="420">
 
-## Updated 2026-10-23
+## Updated 2026-10-25
 This document lists all hardware vendors and device types that are verified to work with AlpacaBridge.
 
 ## Contents
@@ -792,9 +792,9 @@ This document lists all hardware vendors and device types that are verified to w
 <details>
 <summary><strong>OnStep Driver Notes</strong></summary>
 
-- **Protocol**: LX200-derived serial protocol, per INDI's `lx200_OnStep` reference driver (no vendor SDK or protocol PDF — OnStep is open-source firmware for DIY/retrofit mounts, commonly run on Arduino Mega/Due, Teensy, or ESP32 boards).
+- **Protocol**: LX200-derived serial protocol, per the firmware's own OnStepX command reference (a copy is in `AlpacaCore/external/OnStep/`) and the firmware source; no vendor SDK. OnStep is open-source firmware for DIY/retrofit mounts, commonly run on Arduino Mega/Due, Teensy, or ESP32 boards.
 - **Connection**: USB/Serial only in this project (no Wi-Fi/network config exposed). Default 9600 baud, 8N1. Auto-detection scans `/dev/serial/by-id/` (common USB-serial chip vendor IDs plus `Arduino`/`Teensy` substrings) falling back to `/dev/ttyUSB0`–`9` **and** `/dev/ttyACM0`–`9` (OnStep boards commonly enumerate as ttyACM), probing each with the `:GVP#` identity command.
-- **Tested model (TeSeek HM-17)**: OnStepX 10.23a (TeSeek build), CH340 USB-serial adapter at 9600 baud, ConformU 4.5.2-rc.1 (build 56111) run on the ASIAIR Plus (RK3568) against localhost with chrony; nothing else connected to the mount when the run starts.
+- **Tested model (TeSeek HM-17)**: OnStepX 10.23a (TeSeek build), CH340 USB-serial adapter at 9600 baud, ConformU 4.5.3 (build 56334) run on the ASIAIR Plus (RK3568) against localhost with chrony, bare mount, 2026-10-25: 0 errors, 0 warnings, 0 issues, all members within timing targets; nothing else connected to the mount when the run starts.
 - **Pulse guiding**: Native hardware pulse guide with mount-side timing (`:Mgn####`/`:Mgs####`/`:Mge####`/`:Mgw####`, milliseconds) — no software-timed stop thread required.
 - **SideOfPier**: Always computed from hour angle (same convention as iOptron/SynScan/Celestron) — `:GU#`'s `E`/`W` flag reports the mount's *physical* pier orientation, not ASCOM's hour-angle-defined pointing state, and using it directly failed ConformU's SideofPier check on real hardware (see `.github/instructions/onstep.instructions.md`).
 - **Tested model**: Generic OnStep DIY harmonic-drive mount, firmware "On-Step" v10.23a. Its saved report is a ConformU 4.5.0 run on x86-64 (Linux Mint 22.3), from before validation became arm64-only, despite its `Linux-arm64.txt` file name; the arm64 validation of this driver is the TeSeek HM-17 report above.

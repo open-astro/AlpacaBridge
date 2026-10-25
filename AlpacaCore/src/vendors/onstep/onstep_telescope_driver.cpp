@@ -42,6 +42,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace alpacacore::vendor::onstep {
 
@@ -76,6 +77,7 @@ constexpr int kCeNone = 0;
 constexpr int kMaxPulseGuideMs = 9999;
 constexpr int kCeSlewInMotion = 22;
 constexpr int kCeTrue = 25;
+constexpr int kCeNotParked = 11;
 
 std::string describe_onstepx_error(int code) {
     switch (code) {
@@ -421,7 +423,7 @@ public:
                 }
             }
             // The mount clock is read here, once, so UTCDate (and so DeviceState)
-            // never waits on a serial exchange (#1478); a written UTCDate needs none.
+            // performs no serial exchange of its own (#1478); a written UTCDate needs none.
             if (!utc_offset_.valid()) {
                 seed_utc_from_mount_locked();
             }
@@ -625,11 +627,15 @@ public:
         if (tracking) {
             check_not_parked_locked("Tracking");
         }
-        auto& protocol = OnStepProtocolWrapper::instance();
-        if (tracking) {
-            protocol.start_tracking();
-        } else {
-            protocol.stop_tracking();
+        // The reply is read, not drained: OnStep 4.x refuses :ST while slewing
+        // (#1379); the internal tracking restores stay blind.
+        if (!OnStepProtocolWrapper::instance().set_tracking_checked(tracking)) {
+            // With no :GE# code, refusal_code_locked() has just re-read :GU#: a
+            // mount that now tracks as asked took it (#1379 review).
+            if (const auto code = refusal_code_locked("Tracking");
+                code && !(*code < 0 && cached_status_.is_tracking == tracking)) {
+                throw mount_refused("Tracking", *code);
+            }
         }
         cached_status_.is_tracking = tracking;
         status_cache_valid_ = true;
@@ -989,7 +995,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("SetPark");
-        OnStepProtocolWrapper::instance().set_park();
+        // OnStepX refuses :hQ# while parked, during a GOTO or a guide move, or on a
+        // motor fault (Park.cpp set()); a refusal used to read as success (#1379).
+        if (!OnStepProtocolWrapper::instance().set_park()) {
+            // Unlike Unpark and Tracking, no :GU# letter shows the park position,
+            // so a 0 with no :GE# code cannot be confirmed and stays a refusal.
+            if (const auto code = refusal_code_locked("SetPark")) {
+                throw mount_refused("SetPark", *code);
+            }
+        }
     }
 
     void slew_to_coordinates(double ra, double dec) override {
@@ -1005,47 +1019,59 @@ public:
         start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
     }
 
+    // Under the target slew's own name, so a refusal names the member called (#1379).
     void slew_to_target() override {
-        double ra, dec;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-            }
-            ra = target_ra_hours_;
-            dec = target_dec_degrees_;
-        }
-        slew_to_coordinates(ra, dec);
+        std::unique_lock<std::mutex> lock(mutex_);
+        const auto [ra, dec] = target_or_throw_locked();
+        check_equatorial_slew_locked(ra, dec, "SlewToTarget");
+        start_slew_locked(ra, dec, "SlewToTarget");
+        wait_for_slew_complete_locked(lock);
     }
 
     void slew_to_target_async() override {
-        double ra, dec;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-            }
-            ra = target_ra_hours_;
-            dec = target_dec_degrees_;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto [ra, dec] = target_or_throw_locked();
+        check_equatorial_slew_locked(ra, dec, "SlewToTargetAsync");
+        start_slew_locked(ra, dec, "SlewToTargetAsync");
+    }
+
+    std::pair<double, double> target_or_throw_locked() const {
+        if (!target_ra_set_ || !target_dec_set_) {
+            throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
         }
-        slew_to_coordinates_async(ra, dec);
+        return {target_ra_hours_, target_dec_degrees_};
     }
 
     void sync_to_coordinates(double ra, double dec) override {
-        // Arguments before the connected, fault and parked checks, as the
-        // slews do (#1478).
-        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
+        sync_locked(ra, dec, "SyncToCoordinates");
+    }
+
+    void sync_to_target() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto [ra, dec] = target_or_throw_locked();
+        sync_locked(ra, dec, "SyncToTarget");
+    }
+
+    // Under the member's own name (#1379). A sync during a GOTO is refused by the
+    // mount (Goto.cpp validate(): CE_SLEW_IN_SLEW) and used to read as success, as
+    // did every :CM# refusal; the driver refuses first and reads the reply.
+    void sync_locked(double ra, double dec, const char* who) {
+        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
         check_connected();
-        refuse_while_faulted_locked("SyncToCoordinates");
-        check_not_parked_locked("SyncToCoordinates");
+        refuse_while_faulted_locked(who);
+        check_not_parked_locked(who);
+        refuse_while_goto_running_locked(who);
         auto& protocol = OnStepProtocolWrapper::instance();
         // Use the mount's own sync command — do NOT maintain a driver-level
         // offset, which would cause coordinate divergence during subsequent
         // slews (project-wide rule; see the iOptron and Celestron files under .github/instructions/).
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
-        protocol.sync_to_target();
+        const std::string reply = protocol.sync_to_target();
+        if (reply.size() >= 2 && reply[0] == 'E' && std::isdigit(static_cast<unsigned char>(reply[1]))) {
+            throw digit_refused(who, "sync", ":CM#", reply[1], reply);
+        }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
         target_ra_set_ = true;
@@ -1056,25 +1082,22 @@ public:
         last_equatorial_update_ = clock_.now();
     }
 
-    void sync_to_target() override {
-        double ra, dec;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (!target_ra_set_ || !target_dec_set_) {
-                throw AlpacaException("Target coordinates have not been set", AlpacaError::ValueNotSet);
-            }
-            ra = target_ra_hours_;
-            dec = target_dec_degrees_;
-        }
-        sync_to_coordinates(ra, dec);
-    }
-
     void unpark() override {
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("Unpark");
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
-        OnStepProtocolWrapper::instance().unpark();
+        // A refusal used to read as success (#1379): OnStepX refuses :hR# before the
+        // date and time are set or on a motor fault (Park.cpp restore()). "Not
+        // parked" (11) is ASCOM's no-op, not a refusal.
+        if (!OnStepProtocolWrapper::instance().unpark()) {
+            // 11 (not parked) is ASCOM's no-op; with no :GE# code, the :GU# that
+            // refusal_code_locked() has just re-read decides (#1379 review).
+            if (const auto code = refusal_code_locked("Unpark");
+                code && *code != kCeNotParked && !(*code < 0 && !cached_status_.is_parked)) {
+                throw mount_refused("Unpark", *code);
+            }
+        }
         cached_status_.is_parked = false;
         status_cache_valid_ = true;
         last_status_update_ = clock_.now();
@@ -1296,16 +1319,15 @@ public:
         refuse_while_faulted_locked("AbortSlew");
     }
 
-    // An Alt/Az slew is not equatorial, so it skips the Tracking check
-    // (open-astro#1274) and goes straight to the GOTO.
+    // An Alt/Az slew is the opposite of an equatorial one (open-astro#1274): ITelescopeV4
+    // refuses it while Tracking is true (#1377), since a tracking mount drifts off the
+    // requested Alt/Az. It converts to RA/Dec and runs the same GOTO.
     void slew_to_alt_az(double altitude, double azimuth) override {
         double ra = 0.0;
         double dec = 0.0;
         std::unique_lock<std::mutex> lock(mutex_);
-        check_connected();
-        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        check_not_parked_locked("SlewToCoordinates");
-        start_slew_locked(ra, dec, "SlewToCoordinates");
+        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAz");
+        start_slew_locked(ra, dec, "SlewToAltAz");
         wait_for_slew_complete_locked(lock);
     }
 
@@ -1313,10 +1335,8 @@ public:
         double ra = 0.0;
         double dec = 0.0;
         std::lock_guard<std::mutex> lock(mutex_);
-        check_connected();
-        compute_alt_az_target_locked(altitude, azimuth, ra, dec);
-        check_not_parked_locked("SlewToCoordinatesAsync");
-        start_slew_locked(ra, dec, "SlewToCoordinatesAsync");
+        check_alt_az_slew_locked(altitude, azimuth, ra, dec, "SlewToAltAzAsync");
+        start_slew_locked(ra, dec, "SlewToAltAzAsync");
     }
 
     void sync_to_alt_az(double altitude, double azimuth) override {
@@ -1664,7 +1684,7 @@ private:
             return true;  // for a park: the reply was lost or garbled, but the mount took it
         }
         if (code != kCeSlewInMotion && !(code < 0 && !home)) {
-            throw park_or_home_refused(who, code);
+            throw mount_refused(who, code);
         }
         return false;
     }
@@ -1695,7 +1715,18 @@ private:
         return std::nullopt;
     }
 
-    static AlpacaException park_or_home_refused(const char* who, int code) {
+    // A numeric command the mount answered '0' (or garbled): the reason is the :GE#
+    // code. As for :hP# (#1430), a :GE# that then says 0 or 25 means it was taken.
+    // Returns the refusal code (-1 when :GE# gave none), or nullopt when accepted.
+    std::optional<int> refusal_code_locked(const char* who) {
+        const int code = last_command_error_locked(who).value_or(-1);
+        if (code == kCeNone || code == kCeTrue) {
+            return std::nullopt;
+        }
+        return code;
+    }
+
+    static AlpacaException mount_refused(const char* who, int code) {
         return AlpacaException(std::string(who) + " refused by the mount (" +
                                    (code < 0 ? std::string("no reason given") : describe_onstepx_error(code)) + ")",
                                AlpacaError::InvalidOperation);
@@ -1771,7 +1802,7 @@ private:
             for (;;) {
                 if (!try_now) {
                     if (clock_.now() >= deadline) {
-                        throw park_or_home_refused(who, code);
+                        throw mount_refused(who, code);
                     }
                     if (!wait(kInMotionRetryPoll)) {
                         return;
@@ -1880,13 +1911,92 @@ private:
     // does (a :GU# query when the cache is stale), so a Tracking=false just
     // written counts as off.
     void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
+        util::validate_ra_dec(ra, dec, who);  // arguments first, even while disconnected (#1478)
         check_connected();
         check_not_parked_locked(who);
-        util::validate_ra_dec(ra, dec, who);
+        refuse_while_faulted_locked(who);  // named, before the Tracking read (#1414)
         refresh_status_cache_locked(false);
         if (!cached_status_.is_tracking) {
             throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
         }
+    }
+
+    // (#1377). Same order as the equatorial check: arguments, connected, parked,
+    // fault, then Tracking read as the getter reads it, before anything is sent.
+    void check_alt_az_slew_locked(double altitude, double azimuth, double& ra_out, double& dec_out,
+                                  const char* who) const {
+        validate_alt_az(altitude, azimuth);  // arguments first, even while disconnected (#1478)
+        check_connected();
+        check_not_parked_locked(who);
+        refuse_while_faulted_locked(who);  // named, before the site and Tracking reads (#1414)
+        compute_alt_az_target_locked(altitude, azimuth, ra_out, dec_out);
+        refresh_status_cache_locked(false);
+        if (cached_status_.is_tracking) {
+            throw AlpacaException(std::string(who) + " is not allowed while Tracking is true",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // A GOTO sent while one runs makes OnStepX stop the running one and refuse the
+    // new one (Goto.cpp request(): CE_SLEW_IN_SLEW -> abort(), :MS# reply 5), so the
+    // driver refuses first and leaves it running (#1379): its own GOTO (also in the
+    // grace before :GU# shows it), a park or home already moving, or a handset GOTO.
+    void refuse_while_goto_running_locked(const char* who) const {
+        bool running = clock_.now() < slew_force_until_;
+        if (!running) {
+            refresh_status_cache_locked(false);
+            running = cached_status_.is_slewing;
+        }
+        if (running) {
+            throw AlpacaException(std::string(who) + " is not allowed while a GOTO is running",
+                                  AlpacaError::InvalidOperation);
+        }
+    }
+
+    // The :MS# refusal digit (OnStepX Goto.command.cpp) as the error the client sees (#1379).
+    static AlpacaException slew_refused(const char* who, const std::string& reply) {
+        return digit_refused(who, "GOTO", ":MS#", reply.empty() ? '?' : reply[0], reply);
+    }
+
+    // The :MS# digits, also behind the E of a :CM# refusal (OnStep Command.ino).
+    static AlpacaException digit_refused(const char* who, const char* what, const char* command, char code,
+                                         const std::string& reply) {
+        const bool is_goto = std::string(what) == "GOTO";
+        const char* why = "an unknown reason";
+        switch (code) {
+            case '1':
+                why = "the target is below the horizon limit";
+                break;
+            case '2':
+                why = "the target is above the overhead limit";
+                break;
+            case '3':
+                why = "the controller is in standby";
+                break;
+            case '4':
+                why = "the mount is parked";
+                break;
+            case '5':
+                why = is_goto ? "a GOTO was already running, and the mount stopped it" : "a GOTO is running";
+                break;
+            case '6':
+                why = "the target is outside the limits";
+                break;
+            case '7':
+                why = "a hardware fault";
+                break;
+            case '8':
+                why = "the mount is already moving";
+                break;
+            case '9':
+                why = "an unspecified error";
+                break;
+            default:
+                break;
+        }
+        return AlpacaException(std::string(who) + ": the mount refused the " + what + ": " + why + " (" + command +
+                                   " reply '" + reply + "')",
+                               code == '4' ? AlpacaError::InvalidWhileParked : AlpacaError::InvalidOperation);
     }
 
     void check_not_parked_locked(const char* operation) const {
@@ -1896,13 +2006,17 @@ private:
         }
     }
 
-    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
+    static void validate_alt_az(double altitude, double azimuth) {
         if (!std::isfinite(altitude) || altitude < -90.0 || altitude > 90.0) {
             throw AlpacaException("Altitude out of range", AlpacaError::InvalidValue);
         }
         if (!std::isfinite(azimuth) || azimuth < 0.0 || azimuth > 360.0) {
             throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
         }
+    }
+
+    void compute_alt_az_target_locked(double altitude, double azimuth, double& ra_out, double& dec_out) const {
+        validate_alt_az(altitude, azimuth);
         ensure_site_info_cached_locked();
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
@@ -1911,12 +2025,14 @@ private:
     void start_slew_locked(double ra, double dec, const char* context) {
         util::validate_ra_dec(ra, dec, context);
         refuse_while_faulted_locked(context);
-        supersede_park_or_home_locked();  // a newer motion command wins (#1430)
+        refuse_while_goto_running_locked(context);  // before anything is cancelled or sent (#1379)
+        supersede_park_or_home_locked();            // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
         protocol.set_target_ra(ra);
         protocol.set_target_dec(dec);
-        if (!protocol.slew_to_target()) {
-            throw AlpacaException("Mount rejected slew target (below horizon or limit)", AlpacaError::InvalidOperation);
+        const std::string reply = protocol.slew_to_target();
+        if (reply.empty() || reply[0] != '0') {
+            throw slew_refused(context, reply);
         }
         target_ra_hours_ = ra;
         target_dec_degrees_ = dec;
@@ -2297,8 +2413,9 @@ private:
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     std::atomic<double> site_elevation_m_;  // NaN until set or configured
 
-    // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
-    // time since. Cleared on connect and disconnect. Under mutex_.
+    // Decision 0014: the UTCDate a client wrote, or the mount clock the connect
+    // read (seed_utc_from_mount_locked()), and the task-clock time since.
+    // Cleared on connect and disconnect. Under mutex_.
     mutable util::UtcOffset utc_offset_;
     // Why the connect could not read the mount clock (#1478); under mutex_,
     // cleared on connect, disconnect and a UTCDate write.
