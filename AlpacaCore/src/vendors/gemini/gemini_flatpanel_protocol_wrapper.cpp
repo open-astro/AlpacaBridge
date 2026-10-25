@@ -224,34 +224,18 @@ static bool probe_port(const std::string& port_path) {
         // as "*HGeminiFlatPanelLite#" (22 chars). A too-small buffer here
         // silently truncates before the '#' terminator, so the well-formed
         // check below never passes and the port is wrongly rejected.
-        char resp[kMaxResponseLen] = {};
-        int total = 0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kProbeReadTimeoutMs);
-        while (total < static_cast<int>(sizeof(resp)) - 1) {
-            const auto remaining =
-                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
-                    .count();
-            if (remaining <= 0) {
-                break;
-            }
-            char ch = 0;
-            const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-            if (r == 1) {
-                if (ch == '\r' || ch == '\n') continue;
-                resp[total++] = ch;
-                if (ch == '#') break;
-            } else if (r == 0) {
-                continue;  // timed out; the deadline check above ends the loop
-            } else {
-                break;
-            }
-        }
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Terminator;
+        spec.terminators = "#";
+        spec.max_len = kMaxResponseLen - 1;
+        const auto reply = util::read_until(
+            fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(kProbeReadTimeoutMs));
 
         // See is_flatpanel_handshake_reply()'s doc comment: requiring the
         // "*H" prefix (rather than any well-formed '#'-terminated reply) is
         // what lets auto-detect discriminate the flat panel from the Gemini
         // focuser when both share the same USB-serial by-id patterns.
-        if (is_flatpanel_handshake_reply(std::string(resp, static_cast<std::size_t>(total)))) {
+        if (is_flatpanel_handshake_reply(reply.bytes)) {
             // HUPCL was already cleared by configure_flatpanel_line(); DTR
             // stays high when `link` closes the port.
             return true;

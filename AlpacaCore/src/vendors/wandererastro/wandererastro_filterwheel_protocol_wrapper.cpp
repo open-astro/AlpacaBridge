@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_filterwheel_protocol_wrapper.h>
 
 #include <atomic>
@@ -201,20 +202,32 @@ bool probe_port(const std::string& port_path, FilterWheelPortInfo& info) {
     TokenStreamParser parser;
     FilterWheelStatus status;
     bool found = false;
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           3000) {
-        char ch = 0;
-        ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
-        if (r == 1) {
+    // One read_until per token (A, CR or LF ends it); the parser sees every
+    // byte, so its delimiter and runaway-token rules stay its own. A token of
+    // MAX_TOKEN_LEN + 1 bytes without a delimiter is Overflow, and feeding it
+    // makes the parser drop it as before.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "A\r\n";
+    spec.skip.clear();
+    spec.max_len = MAX_TOKEN_LEN + 1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(3000);
+    for (; !found;) {
+        const util::ReadResult token = util::read_until(fd, spec, deadline);
+        for (const char ch : token.bytes) {
             if (parser.feed(ch, status) && status.valid) {
                 found = true;
                 break;
             }
-        } else if (r < 0) {
-            // Persistent read error (device unplugged mid-probe): the read
-            // window bounds only the no-data path, so back off explicitly.
+        }
+        if (token.outcome == util::ReadOutcome::LinkDead ||
+            (token.outcome == util::ReadOutcome::Timeout && token.err != 0)) {
+            // Persistent read error (device unplugged mid-probe): back off
+            // explicitly so the loop does not spin until the deadline.
+            if (std::chrono::steady_clock::now() >= deadline) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else if (token.outcome == util::ReadOutcome::Timeout) {
+            break;  // silent until the deadline: not this device
         }
     }
 

@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/zwo/zwo_mount_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -475,35 +476,26 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
         return "";
     }
 
-    std::string response;
-    bool terminated = false;
-    const auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           timeout_ms) {
-        char ch = '\0';
-        // This read is reached via enumerate_zwo_mounts() called from
-        // Impl::connect(Auto), which deliberately holds mutex_ across the
-        // whole auto-detect probe sequence (see that function's doc comment)
-        // so a concurrent connect can't race it. Each read waits at most
-        // 100 ms; the loop's deadline bounds the probe.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        const ssize_t n = util::tty_read(fd, &ch, 1, 100);
-        if (n == 1) {
-            if (ch == '#') {
-                terminated = true;
-                break;
-            }
-            response.push_back(ch);
-        } else if (n < 0) {
-            break;
-        }
-        if (!response.empty() && n == 0) {
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
+    // This read is reached via enumerate_zwo_mounts() called from
+    // Impl::connect(Auto), which deliberately holds mutex_ across the
+    // whole auto-detect probe sequence (see that function's doc comment)
+    // so a concurrent connect can't race it. The read's deadline bounds the
+    // probe. IdleGap keeps the old rule: 100 ms of silence after the first
+    // byte ends the read, and only a '#' seen before that counts as a reply.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::IdleGap;
+    spec.idle_gap = std::chrono::milliseconds(100);
+    spec.skip.clear();
+    // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
+    spec.max_len = 4096;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
+    const auto reply = util::read_until(fd, spec, deadline);
     link.close();
 
+    const std::size_t hash = reply.bytes.find('#');
+    const bool terminated = hash != std::string::npos;
+    std::string response = reply.bytes.substr(0, hash);
     response = trim_copy(std::move(response));
     return terminated && is_zwo_mount_model(response) ? response : "";
 #endif
