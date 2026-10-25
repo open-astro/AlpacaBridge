@@ -685,3 +685,35 @@ TEST_CASE("ZWO EAF Focuser Driver - An idle focuser does not drive the unit that
     CHECK_NOTHROW(y->set_connected(false));
     CHECK(x->get_connected());
 }
+
+// Issue #1500 (B7b): a focuser that reports no serial cannot be proven after a replug. Y holds such a unit on
+// id 3 and a replug swaps it with X's unit. X's Connect must not share Y's open of id 3, which nothing proves,
+// nor bind the unit on id 4, which is not X's serial: it refuses with NotConnected and names the recovery.
+// Falsified by: a candidate scan sharing a held open whose unit reported no serial, or Connect opening the id
+// the driver was created with.
+TEST_CASE("ZWO EAF Focuser Driver - A held focuser with no serial is not shared after a swap",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    sdk.serial.clear();  // Y's unit reports no serial
+    sdk.second_id = 4;
+    auto y = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, 3, sdk);
+    auto x = alpacacore::vendor::zwo::create_zwo_eaf_focuser(1, 4, sdk);  // EAF-SN-2
+    y->set_connected(true);
+    x->set_connected(true);
+
+    sdk.remove();
+    sdk.second_id = 3;  // X's unit (EAF-SN-2) comes back on id 3, Y's unit on id 4
+    sdk.replug(4);
+    x->set_connected(false);
+
+    std::string refusal;
+    try {
+        x->set_connected(true);
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        refusal = e.what();
+    }
+    CHECK_FALSE(x->get_connected());
+    CHECK(refusal.find("EAF-SN-2") != std::string::npos);
+    CHECK(refusal.find("re-save") != std::string::npos);
+}

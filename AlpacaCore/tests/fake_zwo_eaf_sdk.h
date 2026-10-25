@@ -28,6 +28,7 @@ namespace alpacacore::test {
 // Scripted ZWO EAF SDK: one focuser (id 3), shared by the focuser unit tests, the
 // connected stress case and the contract sweep. second_id >= 0 adds a second focuser
 // (serial second_serial) to enumeration, open and the serial read.
+// An empty serial makes the serial read fail as a unit with no serial does.
 // Every override runs under one internal mutex, so the fake is race-free under a
 // concurrent storm (the ZWO driver tests run it through lifecycle stress and TSan);
 // the public knobs and counters are plain fields for single-threaded tests, set before
@@ -194,7 +195,13 @@ public:
     std::string get_serial_number(int focuser_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         throw_if_removed();
-        return focuser_id == second_id ? second_serial : serial;
+        const std::string& unit_serial = focuser_id == second_id ? second_serial : serial;
+        // An empty serial is a unit that reports none (TODO(#1500): confirm on the rig which code an EAF
+        // without a serial returns; the wrapper maps EAF_ERROR_NOT_SUPPORTED to NotImplemented).
+        if (unit_serial.empty()) {
+            throw AlpacaException("EAFGetSerialNumber: EAF_ERROR_NOT_SUPPORTED", AlpacaError::NotImplemented);
+        }
+        return unit_serial;
     }
     std::string get_firmware_version(int) override { return "1.0"; }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
