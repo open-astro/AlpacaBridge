@@ -2257,6 +2257,12 @@ public:
                     // reads drifting after the pulse ended (ConformU 4.5 pulse
                     // displacement tests read phantom motion).
                     StateLock lock(*this);
+                    // Fold the motion since the last anchor into the model first: with the rate
+                    // zeroed the getters serve the cached angle until the next status poll, and
+                    // an anchor up to the cache TTL old made ConformU's read at the end of the
+                    // pulse short by that much motion ("Declination change +30.3, expected
+                    // +37.6"). A hardware read here would lengthen the pulse.
+                    advance_model_anchor_locked();
                     cmd_axis_rate_deg_s_[axis - 1] = 0.0;
                     invalidate_position_cache_locked(false);
                     // A Dec pulse pre-empted any DeclinationRate offset

@@ -23,6 +23,7 @@ This document lists all hardware vendors and device types that are verified to w
 
 - **ConformU Verification**: All drivers listed below have been tested and verified using the ConformU tool to ensure full compliance with the ASCOM Alpaca API specification.
 - **Driver Status**: Only drivers that have been verified with ConformU are listed. Additional drivers may be in development but are not included until they pass ConformU verification.
+- **Fake-only report**: The `conformu-fake` CI job (artifact `conformu-fake-skywatcher`) runs ConformU against a simulated Sky-Watcher mount (`FakeSkyWatcherMount`); the report is committed under `AlpacaCore/conformu/SkyWatcher/Fake/`. It checks the driver and the HTTP layer with no hardware and is not hardware validation; no row below depends on it.
 - **Adding New Drivers**: New driver support can be added by implementing the appropriate driver interface. See the [Development Guide](docs/development.md) for details. All drivers must pass ConformU verification before being added to this list.
 
 - **Connection Types**:

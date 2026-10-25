@@ -507,6 +507,30 @@ TEST_CASE("SkyWatcher async - pulse guide north physically moves Dec and ends cl
     driver->set_connected(false);
 }
 
+// ConformU "PulseGuide North" reads Declination the moment IsPulseGuiding clears. The
+// pulse stop zeroed the Dec dead-reckoning rate without folding the motion since the
+// last poll into the anchor, so that read froze short of the real position (up to the
+// 2 s position cache TTL of motion) until the next status poll, 100 ms later, re-anchored it.
+TEST_CASE("SkyWatcher async - Declination read right after a Dec pulse already holds the pulse's full motion",
+          "[skywatcher][async][pulseguide]") {
+    FakeTaskClock clock;
+    FakeSkyWatcherMount mount(FakeMountProfile::wave_100i(), clock);
+    REQUIRE(mount.ok());
+    auto driver = connected_driver(mount, clock, -33.856784, 151.215297, 42.0);
+    driver->set_tracking(true);
+    mount.jump_axis_degrees(2, 45.0);
+    elapse(clock, std::chrono::milliseconds(1200));  // virtual time for a poll to anchor the model
+
+    driver->pulse_guide(0, 3000);  // North at the 0.5x default rate, about 22 arcsec
+    // The stale window lasts only until the next status poll (100 ms of virtual time).
+    REQUIRE(run_clock_until(clock, [&] { return !driver->get_is_pulse_guiding(); }, std::chrono::seconds(10)));
+    const double just_after = driver->get_declination();
+    elapse(clock, std::chrono::milliseconds(500));  // a poll re-anchors on the board
+    const double settled = driver->get_declination();
+    CHECK(std::abs(settled - just_after) * 3600.0 < 1.0);
+    driver->set_connected(false);
+}
+
 // open-astro#559: IsPulseGuiding followed a deadline stamped at dispatch
 // (duration + 1000 ms) rather than the pulse task's actual stop, so it stayed
 // true about a second after the axis had stopped, and on a stalled stop it
