@@ -292,8 +292,8 @@ TEST_CASE("QHY Q-Focuser Snapshot - a Move against a frame older than the stalen
     clock.advance(31s);
 
     expect_code([&] { driver->move(1200); }, static_cast<int>(alpacacore::AlpacaError::NotConnected));
-    CHECK(fake.count("\"cmd_id\":6") == 0);  // no move command was sent
-    CHECK(driver->get_connected() == false);   // the refused Move latched the loss
+    CHECK(fake.count("\"cmd_id\":6") == 0);   // no move command was sent
+    CHECK(driver->get_connected() == false);  // the refused Move latched the loss
 
     driver->set_connected(false);
 }
