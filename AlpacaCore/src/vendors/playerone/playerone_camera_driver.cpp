@@ -173,7 +173,7 @@ public:
         session_.disconnect_and_join();
         if (connected_.load()) {
             try {
-                set_connected(false);
+                apply_connected(false);
             } catch (const std::exception& e) {
                 ALPACA_LOG_WARN("PlayerOne", "Error during destruction: " + std::string(e.what()));
                 force_release_camera();
@@ -229,7 +229,10 @@ public:
     void disconnect() override { start_connection_task(false); }
     bool get_connecting() const override { return connection_task_active(); }
 
-    void set_connected(bool connected) override {
+    void set_connected(bool connected) override { apply_connected(connected); }
+
+    // The body of set_connected(), non-virtual so the destructor can run it without a virtual call.
+    void apply_connected(bool connected) {
         std::lock_guard<std::mutex> transition_lock(transition_mutex_);
         std::unique_lock<std::mutex> pulse_lifecycle_lock(pulse_guide_lifecycle_mutex_, std::defer_lock);
         // A disconnect that leaves the camera connected (a gate below, a pulse stop that throws) must not
@@ -239,7 +242,11 @@ public:
             bool closed = false;
             ~ReopenIfConnected() {
                 if (closed && driver.connected_.load()) {
-                    driver.session_.open();
+                    try {
+                        driver.session_.open();
+                    } catch (const std::exception& e) {
+                        ALPACA_LOG_WARN("PlayerOne", "Could not reopen the exposure session: " + std::string(e.what()));
+                    }
                 }
             }
         } reopen{*this};
@@ -1351,7 +1358,7 @@ private:
         try {
             frame_ready = session_.image_ready();
         } catch (const AlpacaException&) {
-            // A kept failure: not ready.
+            frame_ready = false;  // a kept failure: not ready
         }
         if (exposure_starting_ || sdk_exposure_started_ || state == CameraState::Exposing ||
             state == CameraState::Download || (session_.busy() && !frame_ready)) {
