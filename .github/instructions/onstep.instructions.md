@@ -7,10 +7,94 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 Devices: Telescope.
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
-ESP32, STM32) for DIY/retrofit mounts. No manufacturer protocol PDF exists; the reference for
-this driver is INDI's `lx200_OnStep` driver (`indilib/indi`, `drivers/telescope/lx200_OnStep.cpp`
-+ the shared `lx200telescope.cpp`/`lx200driver.cpp` base it inherits from) — there was no INDI
-driver naming collision to resolve, "OnStep"/"On-Step" appears verbatim in both.
+ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
+command reference, kept unmodified in [`AlpacaCore/external/OnStep/`](../../AlpacaCore/external/OnStep/README.md)
+(GPL-3.0, with its license; upstream
+[at the same commit](https://github.com/hjd1964/OnStepX/blob/097cc5797b4708e3787dd0b8bbbf81df66fdb5ff/docs/COMMAND_REFERENCE.md),
+the one read for the table below), then the firmware source itself
+([OnStepX](https://github.com/hjd1964/OnStepX), and [OnStep](https://github.com/hjd1964/OnStep)
+`Command.ino` for the older firmware). Check a reply format there before a driver change or a
+test fake relies on it. The driver was first written from INDI's `lx200_OnStep` driver
+(`indilib/indi`, `drivers/telescope/lx200_OnStep.cpp` + the shared `lx200telescope.cpp`/`lx200driver.cpp`
+base it inherits from); several of INDI's readings turned out wrong (see the `:GU#` polarity and
+the tracking commands below), so INDI is history, not the reference.
+
+#### Commands this driver sends
+
+Replies are from the command reference unless noted. "Bare digit" means one character and no
+`#` (the driver reads it with `require_hash_terminator=false` and `kSetAckTimeoutMs`); "blind"
+means the driver sends it and drains whatever arrives within 50 ms without reading it.
+
+| Command | Used for | Reply | How the driver reads it |
+| --- | --- | --- | --- |
+| `:GVP#` / `:GVN#` | identity probe, firmware version | `name#` / `M.mm...#` | `#`-terminated; product must be `OnStep` or `On-Step` |
+| `:GXEE#` | coordinate mode (`DoesRefraction`, #1216) | `0#`, `1#`, ... | read without waiting for `#` |
+| `:GU#` | status (tracking, slewing, park, home, guide, pier side) | packed status `#` | `#`-terminated; see the status table below |
+| `:GRa#` / `:GDe#` | RA / Dec | `HH:MM:SS.SSSS#` / `sDD*MM:SS.SSS#` | `#`-terminated. Not in the reference: aliases of `:GRH#`/`:GDH#` (OnStepX `Mount.command.cpp`, the `'a'`/`'e'` parameter) |
+| `:GA#` / `:GZ#` | altitude / azimuth | `sDD*MM#` or `sDD*MM'SS#` / `DDD*MM#` or `DDD*MM'SS#` | `#`-terminated |
+| `:Gh#` / `:Go#` | horizon / overhead limit (MoveAxis gate, #1378) | `sDD*#` / `DD*#` | `#`-terminated |
+| `:GS#` | sidereal time | `HH:MM:SS#` | `#`-terminated |
+| `:Gt#` / `:Gg#` | latitude / longitude (west-positive on the wire) | `sDD*MM#` / `sDDD*MM#` | `#`-terminated |
+| `:GL#` / `:GC#` / `:GG#` | local time / date / UTC offset (`UTCDate` read) | `HH:MM:SS#` / `MM/DD/YY#` / `sHH:MM#` | `#`-terminated |
+| `:GE#` | last command error (after a refused `:hP#`/`:hC#`, #1430, or `:ST`/`:hQ#`/`:hR#`, #1379) | 2-digit code `#` | `#`-terminated; codes below |
+| `:SrHH:MM:SS#` / `:SdsDD*MM:SS#` | GOTO target | `0`/`1` | bare digit, `1` accepted |
+| `:StsDD*MM#` / `:SgsDDD*MM#` | site latitude / longitude | `0`/`1` | bare digit |
+| `:SLHH:MM:SS#` / `:SCMM/DD/YY#` / `:SGsHH[:MM]#` | time sync (UTC as local, offset 0) | `0`/`1` | bare digit |
+| `:MS#` | GOTO | one digit `0`..`9` | bare digit; `0` accepted, the rest below |
+| `:CM#` | sync | `N/A#`, or `E1#`..`E9#` on failure (the `:MS#` digits) | `#`-terminated; `E<n>` throws with the digit's reason (#1379) |
+| `:Q#` | stop all slews, abort GOTO | none | blind |
+| `:Qn#` / `:Qs#` / `:Qe#` / `:Qw#` | stop one axis direction | none | blind |
+| `:Mn#` / `:Ms#` / `:Me#` / `:Mw#` | MoveAxis at the custom guide rate | none | blind; re-sent every 7 s (#1378) |
+| `:RAn.n#` / `:REn.n#` | MoveAxis rate, deg/s per axis | none | blind |
+| `:RS#` | slew-rate preset before a move | none | blind |
+| `:Mgdnnnn#` | pulse guide, `d` = `n`/`s`/`e`/`w`, 4-digit ms | none | blind |
+| `:ST60.164275#` / `:ST0#` | tracking on / off | `0`/`1` | bare digit for the client's `Tracking` write (`0` throws with the `:GE#` reason, #1379); blind for the driver's own tracking restores |
+| `:hP#` | park | `0`/`1` | bare digit; then `:GE#` for the reason |
+| `:hC#` | find home | none | blind; then `:GE#` for the reason |
+| `:hR#` | unpark | `0`/`1` | bare digit; `0` throws with the `:GE#` reason, except `11` (not parked), ASCOM's no-op |
+| `:hQ#` | set park position | `0`/`1` | bare digit; `0` throws with the `:GE#` reason |
+
+`:MS#` refusal digits (OnStepX `Goto.command.cpp`, OnStep `Command.ino`; the same digits follow
+`E` in a `:CM#` failure): `1` below the horizon limit, `2` above the overhead limit, `3` controller
+in standby, `4` parked, `5` GOTO in progress (OnStepX also stops the running GOTO), `6` outside
+limits, `7` hardware fault, `8` already in motion, `9` unspecified.
+
+`:GE#` codes the driver acts on (the full list is in the command reference): `00` none and `25`
+true are success; `22` in motion makes Park/FindHome wait for the mount to be still and retry for
+3 s; any other code is a refusal the driver keeps and reports with its number (#1430). The `:MS#`
+digits are these codes 15 to 23 less 14.
+
+#### OnStep 4.x and OnStepX
+
+OnStep (the older firmware, 4.x, last release branch `release-4.24`) and OnStepX (10.x, a
+rewrite) speak the same LX200 dialect for every command in the table, with the differences below
+(read from OnStep `Command.ino`/`Goto.ino` at `3b73bffcfb` and the OnStepX sources). Only OnStepX
+is tested: the TeSeek HM-17 runs OnStepX 10.23a, and no OnStep 4.x mount has been run, so the 4.x
+column is from the source, not from hardware.
+
+- **Telling them apart**: OnStepX numbers its releases from 10 (`:GVN#` `10.23a`), OnStep 4.x and
+  older below that (`is_onstepx_version()`, version 10 or later). The driver uses this only to
+  decide whether to ask `:GXEE#`.
+- **`:GXEE#`** (coordinate mode, `DoesRefraction`, #1216): OnStepX only. OnStep 4.x answers any
+  unknown command with `0`, so the driver does not ask it there and keeps the settable local flag.
+- **`:GE#`**: both, with the same codes up to 23; OnStep 4.x has no `25` (`CE_1`) and keeps the
+  code per serial channel (see the Park and FindHome bullet).
+- **`:GU#`**: the letters the driver reads are the same, except that OnStep 4.x has no `h`
+  (homing), so a `FindHome` there is never taken as one already running. OnStep 4.x adds letters
+  the driver does not read (`R`, `S`, `r`, `s`, `t`, `w`, `u`, `z`, `a` and a PEC character).
+  Both send `g` while a `:Mn#`-style move runs and `G` while a pulse guide runs.
+- **`:GG#`** (UTC offset): OnStep 4.x answers whole hours (`sHH#`), OnStepX `sHH:MM#`; the
+  sexagesimal parser reads both.
+- **`:GRa#` / `:GDe#`**: both take `a`/`e` as the high-precision form, like `H`.
+- **`:ST`** (tracking rate): both reply `0`/`1`; OnStep 4.x refuses it while slewing
+  (`CE_MOUNT_IN_MOTION`); OnStepX does not start tracking while parked (no error, `Mount.command.cpp`).
+  The client's `Tracking` write reads the reply, so a 4.x refusal during a GOTO throws (#1379).
+- **A GOTO during a GOTO** (#1379): both stop the running one and refuse the new one (OnStepX
+  `Goto.cpp` `CE_SLEW_IN_SLEW`; OnStep 4.x `Goto.ino` `CE_GOTO_ERR_GOTO`, unless built with
+  `CE_GOTO_ERR_GOTO_OFF`), with `:MS#` reply `5`.
+- **The guide time limit that ends a `MoveAxis`** (`GUIDE_TIME_LIMIT`, #1378) is a build setting
+  in both: 1-120 s or `0` for none (OnStep 4.x `Config.h` ships `0`; OnStepX defaults to 10 s, which
+  the HM-17 runs). The re-send keeps a move going under a limit and changes nothing without one.
 
 Connection types: **Serial (USB) only** in this project — no Wi-Fi/network config is exposed to
 users, unlike iOptron/Celestron. Default 9600 baud, 8N1, standard LX200 `#`-terminated ASCII
@@ -23,9 +107,9 @@ it is never reachable through `router.cpp` or the web UI.
   CH341 substrings, plus `Arduino`/`Teensy`) falling back to `/dev/ttyUSB0-9` **and**
   `/dev/ttyACM0-9` — OnStep boards commonly enumerate as ttyACM (native USB-CDC) rather than
   ttyUSB, unlike the RS-232-based mounts (iOptron/Celestron) this project supported first.
-- **Identity probe**: `:GVP#` (get product name) must return `"OnStep"` or `"On-Step"`;
-  cross-checked with `:GVN#`'s leading version digit to distinguish legacy OnStep from OnStepX
-  per the INDI driver's own detection logic.
+- **Identity probe**: `:GVP#` (get product name) must return `"OnStep"` or `"On-Step"` (both
+  firmwares); `:GVN#` is read for the firmware string only. Which firmware it is matters in one
+  place, see "OnStep 4.x and OnStepX" below.
 - **DTR/HUPCL Arduino-reset quirk**: like the Gemini focuser wrapper, CH340/CH341/native-USB-CDC
   adapters reset the MCU on a DTR edge at port open. The probe path (`probe_onstep_port()`)
   clears `HUPCL` before *and* after probing, and the production `connect_serial()` path also
@@ -211,10 +295,12 @@ it is never reachable through `router.cpp` or the web UI.
   CH340 can come back as `ttyUSB0`), and `get_link_fault()` naming the reason. A `Connected=true`
   then reconnects. OnStepX keeps running a GOTO while the cable is out, and a `MoveAxis` for up to
   about 10 s, after which this firmware ends it by itself (HM-17: 5 degrees at 0.5 deg/s in #1098,
-  2.5 degrees at 0.25 deg/s in #1241; from the home position it did not move at all, though the
-  call succeeded), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
+  2.5 degrees at 0.25 deg/s in #1241; it moves from the home position too, HM-17 2026-10-19), so the reconnect after an outage of `util::kRelinkMotionPreserveWindow` (5 s) or more
   sends AbortSlew's stops (`:Q#`, `:Qn/s/e/w#`); a shorter outage, or a connect with no recorded
   loss, stops nothing (#521). The stops also end a park that was running, as AbortSlew's do.
+  They leave tracking as it was: `:Q#` stops a GOTO through `goTo.abort()` and the guide stop and
+  never calls `mount.tracking(false)` (HM-17 2026-10-24: `:GU#` `pEW160` before, `NpEW160` after a
+  `:Q#` sent mid-GOTO), so nothing has to restore tracking after them.
   The outage runs from the last moment the link was seen alive (connect, a live `link_alive()`,
   the check before each exchange) to the end of the reconnect, so the reconnect's own time counts,
   an auto-detect re-scan included. It is not timed from when the loss was noticed: the driver has
@@ -255,14 +341,41 @@ it is never reachable through `router.cpp` or the web UI.
   is the client's poll cadence times three, each failed read costing the response timeout.
 - **An equatorial slew needs Tracking** (#1274, the [ascom-contract rule](ascom-contract.instructions.md#equatorial-slews-require-tracking-all-telescope-drivers)): `SlewToCoordinates(Async)` and
   `SlewToTarget(Async)` throw `InvalidOperation` ("<member> requires Tracking to be true") while
-  `Tracking` reads false, after the parked check and coordinate validation and before any target or
-  GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
-  just written counts as off. `SlewToAltAz(Async)` skips the check: it converts to RA/Dec and calls
-  `start_slew_locked()` directly. The firmware itself turns tracking on at the end of a GOTO (HM-17,
-  2026-10-18: tracking off, GOTO, `Tracking` read true after it), so the refusal is the interface
-  contract, not a fix for an untracked landing. No exception is needed for a retarget of a GOTO in
-  flight: `:GU#` kept the tracking flag through a whole GOTO, and OnStepX answers `:MS#` with an error
-  while a GOTO runs, so a second slew is refused by the mount either way.
+  `Tracking` reads false, after the coordinate validation (which comes before the connection check)
+  and the parked check, and before any target or GOTO command is sent (`check_equatorial_slew_locked()`). Tracking is read as the getter reads it, so a `Tracking=false`
+  just written counts as off. `SlewToAltAz(Async)` skips this check and has the opposite one
+  (refused while Tracking is true, #1377, see below), then converts to RA/Dec and calls
+  `start_slew_locked()`. OnStepX turns tracking on at a GOTO only on the first GOTO after a
+  home reset (`firstGoto`) or one that starts from home (`Goto.cpp`; an HM-17 run on 2026-10-18 read `Tracking`
+  true after a GOTO, which fits one of these), otherwise it leaves tracking as it was, so the
+  refusal is the interface contract. `:GU#` keeps the tracking flag through a whole GOTO.
+- **A slew while a GOTO runs is refused** (#1379): OnStepX answers a second `:MS#` by stopping the
+  running GOTO and refusing the new one (`Goto.cpp` `request()`: `CE_SLEW_IN_SLEW` calls `abort()`,
+  reply `5`; seen on the HM-17 2026-10-18, the first GOTO stopped about 1 degree short). So every slew
+  (`SlewToCoordinates(Async)`, `SlewToTarget(Async)`, `SlewToAltAz(Async)`) throws
+  `InvalidOperation` ("<member> is not allowed while a GOTO is running") before it cancels or sends
+  anything while `:GU#` shows a GOTO, the driver's own within the 2 s slew grace included
+  (`refuse_while_goto_running_locked()`). That covers a park or home already moving and a handset GOTO
+  too, which the second `:MS#` would also have stopped. `AbortSlew` ends the grace and the status cache,
+  so the next slew asks the mount; it goes out once `:GU#` shows the GOTO ended. OnStepX keeps the
+  GOTO state while it brakes after `:Q#` (HM-17 2026-10-24: about 1.6 s), and a slew in that time
+  is refused, as the firmware would refuse it (reply `5`). A `:MS#` the mount refuses reports its reply digit and reason (the digits are
+  listed under "Commands this driver sends"; 4 parked is `InvalidWhileParked`), not "below horizon
+  or limit" for every refusal.
+- **Refusals are read, not drained** (#1379): `Tracking` writes, `SetPark`, `Unpark` and the syncs
+  used to send their command blind or ignore the reply, so a mount that refused them read as
+  success. They now read it: a bare `0` from `:ST`/`:hQ#`/`:hR#` throws `InvalidOperation`
+  ("<member> refused by the mount (<reason>)") with the `:GE#` reason, unless `:GE#` then says `00`
+  or `25`, which is taken as accepted, as for `:hP#`. With no `:GE#` code (firmware without `:GE#`), the `:GU#` the driver has just re-read decides: an `Unpark` whose mount reads not parked, or a `Tracking` write the mount now shows, is taken; `SetPark` stays a refusal ("no reason given"), since no `:GU#` letter shows the park position; `Unpark` on a mount that is not parked (`11`)
+  stays ASCOM's no-op. A `:CM#` `E<n>` throws with the `:MS#` digit's reason, and a sync while a
+  GOTO runs is refused before anything is sent, as the slews are (OnStepX refuses it with reply
+  `5`). `SyncToTarget` reports under its own name. The driver's own tracking restores after a
+  slew stay blind, so AbortSlew's timing is unchanged.
+- **An Alt/Az slew is refused while Tracking is true** (#1377, ITelescopeV4 `SlewToAltAz`): both
+  forms throw `InvalidOperation` ("<member> is not allowed while Tracking is true") after the
+  Alt/Az validation and the parked check, before anything is sent, under their own names
+  (`check_alt_az_slew_locked()`). With Tracking off the driver converts to RA/Dec and runs the same
+  GOTO as an equatorial slew; it does not use OnStepX's `:MA#`.
 - **`Connected` is read lock-free** (#910): `set_connected(true)` holds `mutex_` for the whole connect
   (port open, handshake, site and time sync, cache warm-up, an auto-detect scan with no explicit port),
   so `get_connected()` reads the atomic `published_connected_` instead, plus `link_alive()`, which takes
@@ -301,7 +414,10 @@ it is never reachable through `router.cpp` or the web UI.
     met it. A refusal the task meets is kept and raised by `Slewing`, and by `AtPark` (a park's) or
     `AtHome` (a home's), until the next motion command (`MoveAxis`, `AbortSlew`, a GOTO, `Unpark`,
     `Park`, `FindHome`) or a reconnect clears it; those also end a task still running, without
-    sending anything (the shared rule "A failed async operation body keeps its error"). A
+    sending anything (the shared rule "A failed async operation body keeps its error"). A GOTO
+    does so only when it is sent: a slew is refused while `:GU#` shows a GOTO (#1379), which covers
+    the braking after the stops of a GOTO the park interrupted and the park itself once it moves,
+    so such a slew leaves the task and its kept refusal as they were. A
     `PulseGuide` does not. The call claims the task under `mutex_` before it releases it
     (`park_home_claim_`, decision 0006 rule 3), so a newer command that lands before the task starts
     still ends it, and `Slewing` reads true from the call until the task ends. The task runs the
@@ -375,7 +491,7 @@ it is never reachable through `router.cpp` or the web UI.
 - **v1 scope is equatorial mounts only** (`AlignmentMode::GermanPolar`), matching every other
   telescope driver in this project (iOptron, SynScan, Celestron). `SlewToAltAzAsync`
   is supported via a local Alt/Az→RA/Dec coordinate transform followed
-  by an ordinary GOTO that skips the Tracking check (#1274) (the router refuses synchronous `SlewToAltAz` with
+  by an ordinary GOTO, refused while Tracking is true (#1377) rather than needing it (#1274) (the router refuses synchronous `SlewToAltAz` with
   `MethodNotImplemented`, #775) — this works regardless of the physical mount's mechanical
   alignment, so it does not require native AltAz mount support. `SyncToAltAz` is not implemented
   (`CanSyncAltAz=false`) since OnStep has no native Alt/Az sync command.
@@ -389,7 +505,8 @@ it is never reachable through `router.cpp` or the web UI.
 - **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): the connect
   reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
   `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,
-  never waits on a serial exchange. If that read fails, `UTCDate` throws `InvalidOperation` with
+  performs no serial exchange of its own (it still takes `mutex_`, so it can queue behind another
+  member's exchange until #1449). If that read fails, `UTCDate` throws `InvalidOperation` with
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
   computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation

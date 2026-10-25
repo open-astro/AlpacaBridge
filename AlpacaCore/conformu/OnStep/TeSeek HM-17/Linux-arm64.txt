@@ -1,418 +1,418 @@
-17:10:22.540 ASCOM Universal Device Conformance Checker Version 4.5.2.56111, Build time: Fri 16 October 2026 15:39:10          
-17:10:22.541                                              
-17:10:22.541 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
-17:10:22.542                                              
-17:10:22.542 Alpaca device:  (localhost:6800 Telescope/1)          
-17:10:22.542                                              
-17:10:22.544 CreateDevice                        INFO     Creating Alpaca device: Access service: Http, IP address: localhost, IP Port: 6800, Alpaca device number: 1 (Not accepting user generated SSL certificates)
-17:10:22.604 CreateDevice                        INFO     Alpaca device created OK
-17:10:22.604 CreateDevice                        INFO     Successfully created driver
-17:10:23.921 CreateDevice                        OK       Found a valid interface version: 4
-17:10:23.921 CreateDevice                        OK       Driver instance created successfully
-17:10:23.921                                              
-17:10:23.921 Connect to device                            
-17:10:25.421 Connected                           OK       Connected to device successfully using Connected = True
-17:10:25.979 Connected                           OK       Disconnected from device successfully using Connected = False
-17:10:27.497 Connect                             OK       Connected to device successfully using Connect()
-17:10:27.497                                              
-17:10:27.500 Common Driver Methods                        
-17:10:27.501 InterfaceVersion                    OK       4
-17:10:27.505 Connected                           OK       True
-17:10:27.521 Description                         OK       OnStep LX200-Protocol Telescope Driver
-17:10:27.524 DriverInfo                          OK       AlpacaCore OnStep Driver v0.1
-17:10:27.527 DriverVersion                       OK       5.0.0~beta3
-17:10:27.530 Name                                OK       OnStep Telescope
-17:10:27.531                                              
-17:10:27.544 SupportedActions                    OK       Driver returned an empty action list
-17:10:27.544 Action                              INFO     Conform cannot test the Action method
-17:10:27.544                                              
-17:10:27.570 DeviceState                         OK       Received 12 operational state properties.
-17:10:27.571 DeviceState                         OK         Altitude = 40
-17:10:27.571 DeviceState                         OK         AtHome = True
-17:10:27.571 DeviceState                         OK         AtPark = False
-17:10:27.571 DeviceState                         OK         Azimuth = 0
-17:10:27.572 DeviceState                         OK         Declination = 89.99999722222222
-17:10:27.572 DeviceState                         OK         IsPulseGuiding = False
-17:10:27.572 DeviceState                         OK         RightAscension = 19.15723294444444
-17:10:27.572 DeviceState                         OK         SideOfPier = ThroughThePole
-17:10:27.572 DeviceState                         OK         SiderealTime = 13.157452532245467
-17:10:27.572 DeviceState                         OK         Slewing = False
-17:10:27.572 DeviceState                         OK         Tracking = False
-17:10:27.572 DeviceState                         OK         TimeStamp = 10/16/2026 17:10:27
-17:10:27.591 DeviceState                         INFO     Operational property UTCDate was not included in the DeviceState response.
-17:10:27.591                                              
-17:10:27.591 Can Properties                               
-17:10:27.595 CanFindHome                         OK       True
-17:10:27.598 CanPark                             OK       True
-17:10:27.601 CanPulseGuide                       OK       True
-17:10:27.604 CanSetDeclinationRate               OK       False
-17:10:27.607 CanSetGuideRates                    OK       False
-17:10:27.610 CanSetPark                          OK       True
-17:10:27.613 CanSetPierSide                      OK       False
-17:10:27.618 CanSetRightAscensionRate            OK       False
-17:10:27.650 CanSetTracking                      OK       True
-17:10:27.654 CanSlew                             OK       False
-17:10:27.657 CanSlewltAz                         OK       False
-17:10:27.663 CanSlewAltAzAsync                   OK       True
-17:10:27.666 CanSlewAsync                        OK       True
-17:10:27.669 CanSync                             OK       True
-17:10:27.673 CanSyncAltAz                        OK       False
-17:10:27.677 CanUnPark                           OK       True
-17:10:27.677                                              
-17:10:27.677 Pre-run Checks                               
-17:10:27.680 Mount Safety                        INFO     Scope is not parked, continuing testing
-17:10:27.806 Mount Safety                        INFO     Scope tracking has been enabled
-17:10:27.806 TimeCheck                           INFO     PC Time Zone:  (UTC) Coordinated Universal Time offset: 0 hours.
-17:10:27.807 TimeCheck                           INFO     PC UTCDate:    16-Oct-2026 17:10:27.806
-17:10:27.843 TimeCheck                           INFO     Mount UTCDate: 16-Oct-2026 17:10:27.808
-17:10:27.843                                              
-17:10:27.843 Properties                                   
-17:10:27.911 AlignmentMode                       OK       GermanPolar
-17:10:27.922 Altitude                            OK       +40:00:00.0
-17:10:27.926 ApertureArea                        INFO     ApertureArea is 0.0
-17:10:27.931 ApertureDiameter                    INFO     ApertureDiameter is 0.0
-17:10:27.935 AtHome                              OK       True
-17:10:27.940 AtPark                              OK       False
-17:10:27.944 Azimuth                             OK       +00:00:00.0
-17:10:27.948 Declination                         OK       +90:00:00.0
-17:10:27.952 DeclinationRate Read                OK       0.00
-17:10:27.961 DeclinationRate Write               OK       CanSetDeclinationRate is False and a NotImplementedException error was generated as expected
-17:10:27.972 DoesRefraction Read                 OK       False
-17:10:27.977 DoesRefraction Write                OK       Can set DoesRefraction to True
-17:10:27.981 DoesRefraction Write                OK       Restored original DoesRefraction state: False
-17:10:27.986 EquatorialSystem                    OK       Topocentric
-17:10:27.991 FocalLength                         INFO     FocalLength is 0.0
-17:10:27.997 GuideRateDeclination Read           OK       0.00
-17:10:28.002 GuideRateDeclination Write          OK       CanSetGuideRates is False and a NotImplementedException error was generated as expected
-17:10:28.007 GuideRateRightAscension Read        OK       0.00
-17:10:28.012 GuideRateRightAscension Write       OK       CanSetGuideRates is False and a NotImplementedException error was generated as expected
-17:10:28.023 IsPulseGuiding                      OK       False
-17:10:28.028 RightAscension                      OK       +19:09:26.04
-17:10:28.033 RightAscensionRate Read             OK       0.00
-17:10:28.038 RightAscensionRate Write            OK       CanSetRightAscensionRate is False and a NotImplementedException error was generated as expected
-17:10:28.043 SiteElevation Read                  OK       0
-17:10:28.048 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation < -300m
-17:10:28.052 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation > 10,000m
-17:10:28.055 SiteElevation Write                 OK       Current value 0m written successfully
-17:10:28.063 SiteElevation Write                 OK       Test value 2385 set and read correctly
-17:10:28.068 SiteElevation Write                 OK       Successfully restored original site elevation: 0.
-17:10:28.071 SiteLatitude Read                   OK       +40:00:00.0
-17:10:28.076 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude < -90 degrees
-17:10:28.081 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude > 90 degrees
-17:10:28.214 SiteLatitude Write                  OK       Current value: +40:00:00.0 degrees written successfully
-17:10:28.348 SiteLatitude Write                  OK       Test value +50:00:00.0 set and read correctly
-17:10:28.481 SiteLatitude Write                  OK       Successfully restored original site latitude: +40:00:00.0
-17:10:28.485 SiteLongitude Read                  OK       -85:00:00.0
-17:10:28.489 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude < -180 degrees
-17:10:28.494 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude > 180 degrees
-17:10:28.627 SiteLongitude Write                 OK       Current value -85:00:00.0 degrees written successfully
-17:10:28.766 SiteLongitude Write                 OK       Test value -95:00:00.0 set and read correctly
-17:10:28.900 SiteLongitude Write                 OK       Successfully restored original site longitude: -85:00:00.0
-17:10:28.903 Slewing                             OK       False
-17:10:28.911 SlewSettleTime Read                 OK       0
-17:10:28.915 SlewSettleTime Write                OK       Invalid Value exception generated as expected on set slew settle time < 0
-17:10:28.918 SlewSettleTime Write                OK       Legal value 0 seconds written successfully
-17:10:28.921 SideOfPier Read                     OK       ThroughThePole
-17:10:28.923 SiderealTime                        OK       +13:09:27.83
-17:10:28.924 SiderealTime                        OK       Scope and ASCOM sidereal times agree to better than 1 second, Scope: +13:09:27.83, ASCOM: +13:09:28.75
-17:10:28.924 TargetDeclination Read              OK       Not Set exception generated on read before write
-17:10:28.924 TargetDeclination Write             INFO     Tests moved after the SlewToCoordinates tests so that Conform can confirm that target coordinates are set as expected.
-17:10:28.924 TargetRightAscension Read           OK       Not Set exception generated on read before write
-17:10:28.924 TargetRightAscension Write          INFO     Tests moved after the SlewToCoordinates tests so that Conform can confirm that target coordinates are set as expected.
-17:10:28.927 Tracking Read                       OK       True
-17:10:30.049 Tracking Write                      OK       False
-17:10:31.241 TrackingRates                                Found drive rate: Sidereal
-17:10:31.241 TrackingRates                       OK       Drive rates read OK
-17:10:31.243 TrackingRates                       OK       Disposed tracking rates OK
-17:10:31.246 TrackingRates                       OK       Successfully obtained a TrackingRates object after the previous TrackingRates object was disposed
-17:10:31.446 TrackingRate Read                   OK       Sidereal
-17:10:31.471 TrackingRate Write                  OK       Successfully set drive rate: Sidereal
-17:10:31.475 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-17:10:31.480 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-17:10:31.484 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-17:10:31.488 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-17:10:31.492 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
-17:10:31.587 UTCDate Read                        OK       16-Oct-2026 17:10:31.582
-17:10:31.980 UTCDate Write                       OK       New UTCDate written successfully: 10/16/2026 18:10:31
-17:10:32.370 UTCDate Write                       OK       Original UTCDate restored successfully: 10/16/2026 17:10:31
-17:10:32.370                                              
-17:10:32.370 Methods                                      
-17:10:32.378 CanMoveAxis:Primary                 OK       CanMoveAxis:Primary True
-17:10:32.381 CanMoveAxis:Secondary               OK       CanMoveAxis:Secondary True
-17:10:32.384 CanMoveAxis:Tertiary                OK       CanMoveAxis:Tertiary False
-17:11:01.670 Park                                         Parking scope...
-17:11:30.622 Park                                OK       Parked successfully (AtPark is true).
-17:11:30.755 Park                                OK       Calling Park twice is harmless and leaves the mount in the parked state.
-17:11:30.767 Parked:AbortSlew                    OK       AbortSlew threw a ParkedException when Parked, as required. (ParkedException - AbortSlew is not allowed while parked)
-17:11:30.776 Parked:FindHome                     OK       FindHome threw a ParkedException when Parked, as required. (ParkedException - FindHome is not allowed while parked)
-17:11:30.784 Parked:MoveAxis Primary             OK       MoveAxis Primary threw a ParkedException when Parked, as required. (ParkedException - MoveAxis is not allowed while parked)
-17:11:30.793 Parked:MoveAxis Secondary           OK       MoveAxis Secondary threw a ParkedException when Parked, as required. (ParkedException - MoveAxis is not allowed while parked)
-17:11:30.800 Parked:PulseGuide                   OK       PulseGuide threw a ParkedException when Parked, as required. (ParkedException - PulseGuide is not allowed while parked)
-17:11:30.810 Parked:SlewToCoordinatesAsync       OK       SlewToCoordinatesAsync threw a ParkedException when Parked, as required. (ParkedException - SlewToCoordinatesAsync is not allowed while parked)
-17:11:30.825 Parked:SlewToTargetAsync            OK       SlewToTargetAsync threw a ParkedException when Parked, as required. (ParkedException - SlewToCoordinatesAsync is not allowed while parked)
-17:11:30.834 Parked:SyncToCoordinates            OK       SyncToCoordinates threw a ParkedException when Parked, as required. (ParkedException - SyncToCoordinates is not allowed while parked)
-17:11:30.848 Parked:SyncToTarget                 OK       SyncToTarget threw a ParkedException when Parked, as required. (ParkedException - SyncToCoordinates is not allowed while parked)
-17:11:30.856 Parked:Tracking = true              OK       Tracking = true threw a ParkedException when Parked, as required. (ParkedException - Tracking is not allowed while parked)
-17:11:30.973 Parked:Tracking = false             OK       Tracking = false was successful when parked.
-17:11:31.103 Unpark                              OK       Unparked successfully.
-17:11:31.354 Unpark                              OK       Calling Unpark twice is harmless and leaves the mount in the un-parked state.
-17:11:32.397 AbortSlew                           OK       AbortSlew OK when not slewing
-17:11:37.266 AbortSlew                           OK       AbortSlew stopped the mount from slewing in 2.7 seconds.
-17:11:37.333 AxisRate:Primary                    OK       Axis rate minimum: 0 Axis rate maximum: 4
-17:11:37.334 AxisRate:Primary                    OK       Axis rate minimum: 0 Axis rate maximum: 4
-17:11:37.334 AxisRate:Primary                    OK       No overlapping axis rates found
-17:11:37.334 AxisRate:Primary                    OK       No duplicate axis rates found
-17:11:37.336 AxisRate:Primary                    OK       Successfully disposed of rate 0 - 4
-17:11:37.337 AxisRate:Primary                    OK       Disposed axis rates OK
-17:11:37.339 AxisRate:Secondary                  OK       Axis rate minimum: 0 Axis rate maximum: 4
-17:11:37.339 AxisRate:Secondary                  OK       Axis rate minimum: 0 Axis rate maximum: 4
-17:11:37.339 AxisRate:Secondary                  OK       No overlapping axis rates found
-17:11:37.339 AxisRate:Secondary                  OK       No duplicate axis rates found
-17:11:37.341 AxisRate:Secondary                  OK       Successfully disposed of rate 0 - 4
-17:11:37.341 AxisRate:Secondary                  OK       Disposed axis rates OK
-17:11:37.344 AxisRate:Tertiary                   OK       Empty axis rate returned
-17:11:37.346 AxisRate:Tertiary                   OK       Disposed axis rates OK
-17:11:42.534 FindHome                            OK       Found home OK, AtHome reports TRUE as expected.
-17:11:42.889 MoveAxis Primary                    OK       Can successfully set a movement rate of zero
-17:11:42.894 MoveAxis Primary                    OK       Exception correctly generated when move axis is set below lowest rate (-5)
-17:11:42.898 MoveAxis Primary                    OK       Exception correctly generated when move axis is set above highest rate (5)
-17:11:43.108 MoveAxis Primary                    OK       Can successfully set a movement rate of 0
-17:11:45.427 MoveAxis Primary                    OK       Successfully stopped movement.
-17:11:45.642 MoveAxis Primary                    OK       Can successfully set a movement rate of 0
-17:11:47.953 MoveAxis Primary                    OK       Successfully stopped movement.
-17:11:48.169 MoveAxis Primary                    OK       Can successfully set a movement rate of 4
-17:11:50.491 MoveAxis Primary                    OK       Successfully stopped movement.
-17:11:50.708 MoveAxis Primary                    OK       Can successfully set a movement rate of -4
-17:11:53.029 MoveAxis Primary                    OK       Successfully stopped movement.
-17:11:58.242 MoveAxis Primary                    OK       Tracking state correctly retained for both tracking states
-17:11:58.243 MoveAxis Primary                    OK       AxisRates object successfully disposed
-17:11:58.470 MoveAxis Secondary                  OK       Can successfully set a movement rate of zero
-17:11:58.481 MoveAxis Secondary                  OK       Exception correctly generated when move axis is set below lowest rate (-5)
-17:11:58.492 MoveAxis Secondary                  OK       Exception correctly generated when move axis is set above highest rate (5)
-17:11:58.710 MoveAxis Secondary                  OK       Can successfully set a movement rate of 0
-17:12:01.036 MoveAxis Secondary                  OK       Successfully stopped movement.
-17:12:01.251 MoveAxis Secondary                  OK       Can successfully set a movement rate of 0
-17:12:03.610 MoveAxis Secondary                  OK       Successfully stopped movement.
-17:12:03.821 MoveAxis Secondary                  OK       Can successfully set a movement rate of 4
-17:12:06.157 MoveAxis Secondary                  OK       Successfully stopped movement.
-17:12:06.375 MoveAxis Secondary                  OK       Can successfully set a movement rate of -4
-17:12:08.708 MoveAxis Secondary                  OK       Successfully stopped movement.
-17:12:13.932 MoveAxis Secondary                  OK       Tracking state correctly retained for both tracking states
-17:12:13.932 MoveAxis Secondary                  OK       AxisRates object successfully disposed
-17:12:13.935 MoveAxis Tertiary                   OK       Received an invalid value exception
-17:12:16.188 PulseGuide                          OK       Asynchronous single axis pulse guide East found OK
-17:12:18.310 PulseGuide                          OK       Asynchronous single axis pulse guide North found OK
-17:12:20.540 PulseGuide                          OK       Asynchronous dual axis pulse guide East and North found OK
-17:12:54.742 PulseGuide -9.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.7,  Expected: +00:00:37.6,  Difference: +00:00:00.1,  Test tolerance: +00:00:01.0
-17:13:00.210 PulseGuide -9.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.6,  Expected: -00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
-17:13:05.666 PulseGuide -9.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.50, Expected: +00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
-17:13:11.116 PulseGuide -9.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.52, Expected: -00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
-17:14:08.286 PulseGuide +9.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.6,  Expected: +00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
-17:14:13.753 PulseGuide +9.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.2,  Expected: -00:00:37.6,  Difference: +00:00:00.4,  Test tolerance: +00:00:01.0
-17:14:19.215 PulseGuide +9.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.52, Expected: +00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
-17:14:24.672 PulseGuide +9.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.51, Expected: -00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
-17:15:07.842 PulseGuide -3.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.6,  Expected: +00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
-17:15:13.302 PulseGuide -3.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.6,  Expected: -00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
-17:15:18.761 PulseGuide -3.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.50, Expected: +00:00:02.51, Difference: +00:00:00.02, Test tolerance: +00:00:00.07
-17:15:24.223 PulseGuide -3.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.51, Expected: -00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
-17:16:22.386 PulseGuide +3.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.1,  Expected: +00:00:37.6,  Difference: +00:00:00.5,  Test tolerance: +00:00:01.0
-17:16:27.868 PulseGuide +3.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.1,  Expected: -00:00:37.6,  Difference: +00:00:00.5,  Test tolerance: +00:00:01.0
-17:16:33.316 PulseGuide +3.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.52, Expected: +00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
-17:16:38.771 PulseGuide +3.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.52, Expected: -00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
-17:16:38.921 SlewToCoordinates                   OK       CanSlew is False and a NotImplementedException error was generated as expected
-17:17:12.491 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +11:15:39.01, Target RA: +11:15:38.84
-17:17:12.491 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +02:00:00.0, Target DEC: +02:00:00.0
-17:17:12.494 SlewToCoordinatesAsync              OK       The TargetRightAscension property: +11:15:38.84 matches the expected RA +11:15:38.84 within tolerance ±10 arc seconds.
-17:17:12.498 SlewToCoordinatesAsync              OK       The TargetDeclination property +02:00:00.0 matches the expected Declination +02:00:00.0 within tolerance ±10 arc seconds.
-17:17:12.506 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad RA coordinate: -01:00:00.00
-17:17:12.513 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad Dec coordinate: -100:00:00.0
-17:17:12.520 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad RA coordinate: +25:00:00.00
-17:17:12.525 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad Dec coordinate: +100:00:00.0
-17:17:29.592 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:16:12.01, Target RA: +10:16:11.94
-17:17:29.592 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.1, Target DEC: +20:14:00.0
-17:17:29.919 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: +10:12:11.94, Target RA: +10:12:11.94
-17:17:29.919 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: +19:14:00.0, Target DEC: +19:14:00.0
-17:17:29.922 SyncToCoordinates                   OK       The TargetRightAscension property +10:12:11.94 matches the expected RA OK. 
-17:17:29.924 SyncToCoordinates                   OK       The TargetDeclination property +19:14:00.0 matches the expected Declination OK. 
-17:17:36.979 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:16:12.00, Target RA: +10:16:11.94
-17:17:36.980 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.1, Target DEC: +20:14:00.0
-17:17:37.307 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: +10:20:11.94, Target RA: +10:20:11.94
-17:17:37.307 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: +21:14:00.0, Target DEC: +21:14:00.0
-17:17:45.371 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:16:12.00, Target RA: +10:16:11.94
-17:17:45.372 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.1, Target DEC: +20:14:00.0
-17:17:45.387 SyncToCoordinates (Bad L)           OK       Correctly rejected bad RA coordinate: -01:00:00.00
-17:17:45.405 SyncToCoordinates (Bad L)           OK       Correctly rejected bad Dec coordinate: -100:00:00.0
-17:17:45.412 SyncToCoordinates (Bad H)           OK       Correctly rejected bad RA coordinate: +25:00:00.00
-17:17:45.417 SyncToCoordinates (Bad H)           OK       Correctly rejected bad Dec coordinate: +100:00:00.0
-17:17:45.420 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension < 0 hours
-17:17:45.424 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension > 24 hours
-17:17:45.433 TargetRightAscension Write          OK       Legal value +09:16:45.03 HH:MM:SS written successfully
-17:17:45.437 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
-17:17:45.441 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
-17:17:45.446 TargetDeclination Write             OK       Legal value +01:00:00.0 DD:MM:SS written successfully
-17:17:45.589 SlewToTarget                        OK       CanSlew is False and a NotImplementedException error was generated as expected
-17:18:02.163 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: +09:16:44.99, Target RA: +09:16:45.03
-17:18:02.164 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +04:00:00.0, Target DEC: +04:00:00.0
-17:18:02.173 SlewToTargetAsync                   OK       The TargetRightAscension property: +09:16:45.03 matches the expected RA +09:16:45.03 within tolerance ±10 arc seconds.
-17:18:02.177 SlewToTargetAsync                   OK       The TargetDeclination property +04:00:00.0 matches the expected Declination +04:00:00.0 within tolerance ±10 arc seconds.
-17:18:02.183 SlewToTargetAsync (Bad L)           OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00.00
-17:18:02.188 SlewToTargetAsync (Bad L)           OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00.0
-17:18:02.193 SlewToTargetAsync (Bad H)           OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00.00
-17:18:02.198 SlewToTargetAsync (Bad H)           OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: +100:00:00.0
-17:18:34.920 DestinationSideOfPier               OK       DestinationSideOfPier is different on either side of the meridian - East: ThroughThePole, West: Normal
-17:18:35.183 SlewToAltAz                         OK       CanSlewAltAz is False and a NotImplementedException error was generated as expected
-17:19:10.296 SlewToAltAzAsync                    OK       Slewed to target Azimuth OK within tolerance: 10 arc seconds. Actual Azimuth: +155:00:38.0, Target Azimuth: +155:00:00.0
-17:19:10.296 SlewToAltAzAsync                    OK       Slewed to target Altitude OK within tolerance: 10 arc seconds. Actual Altitude: +55:00:08.0, Target Altitude: +55:00:00.0
-17:19:10.303 SlewToAltAzAsync (Bad L)            OK       Correctly rejected bad Altitude coordinate: -100:00:00.0
-17:19:10.308 SlewToAltAzAsync (Bad L)            OK       Correctly rejected bad Azimuth coordinate: -10:00:00.0
-17:19:10.313 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Altitude coordinate: +100:00:00.0
-17:19:10.316 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Azimuth coordinate: +370:00:00.0
-17:19:47.212 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:18:10.02, Target RA: +10:18:10.26
-17:19:47.213 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.1, Target DEC: +20:14:00.0
-17:19:47.552 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: +10:14:10.26, Target RA: +10:14:10.26
-17:19:47.553 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: +19:14:00.0, Target DEC: +19:14:00.0
-17:19:55.108 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:18:10.02, Target RA: +10:18:10.26
-17:19:55.108 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.1, Target DEC: +20:14:00.0
-17:19:55.442 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: +10:22:10.26, Target RA: +10:22:10.26
-17:19:55.442 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: +21:14:00.0, Target DEC: +21:14:00.0
-17:20:03.011 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: +10:18:09.99, Target RA: +10:18:10.26
-17:20:03.012 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: +20:14:00.0, Target DEC: +20:14:00.0
-17:20:03.025 SyncToTarget (Bad L)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00.00
-17:20:03.038 SyncToTarget (Bad L)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00.0
-17:20:03.043 SyncToTarget (Bad H)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00.00
-17:20:03.049 SyncToTarget (Bad H)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: +100:00:00.0
-17:20:03.416 SyncToAltAz                         OK       CanSyncAltAz is False and a NotImplementedException error was generated as expected
-17:20:03.419                                              
-17:20:03.419 SideOfPier Model Tests                       
-17:20:03.434 SideOfPier Write                    OK       CanSideOfPier Write is False and a NotImplementedException error was generated as expected
-17:26:02.160 SideofPier                          OK       Reports the pointing state of the mount as expected
-17:26:02.161 SideofPier                          INFO     Reported SideofPier at HA -9, +9: WE
-17:26:02.161 SideofPier                          INFO     Reported SideofPier at HA -3, +3: WE
-17:26:02.161 SideofPier                          OK       pierWest is returned when the mount is observing at an hour angle between -6.0 and 0.0
-17:26:02.162 SideofPier                          OK       pierEast is returned when the mount is observing at an hour angle between 0.0 and +6.0
-17:26:02.162 DestinationSideofPier               OK       Reports the pointing state of the mount as expected
-17:26:02.162 DestinationSideofPier               OK       pierWest is returned when the mount will observe at an hour angle between -6.0 and 0.0
-17:26:02.163 DestinationSideofPier               OK       pierEast is returned when the mount will observe at an hour angle between 0.0 and +6.0
-17:26:02.163 DestinationSideofPier               INFO     Reported DesintationSideofPier at HA -9, +9: WE
-17:26:02.163 DestinationSideofPier               INFO     Reported DesintationSideofPier at HA -3, +3: WE
-17:26:02.281                                              
-17:26:02.281 Post-run Checks                              
-17:26:02.407 Mount Safety                        OK       Tracking stopped to protect your mount.
-17:26:02.408                                              
-17:26:02.408 Disconnect from device                       
-17:26:02.936 Disconnect                          OK       Disconnected from device successfully using Disconnect()
-17:26:02.937                                              
-17:26:02.939 Conformance test has finished                
-17:26:02.940                                              
-17:26:02.940 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
-17:26:02.941                                     
-17:26:02.941 Timing Summary                               See Help for further information.
-17:26:02.941 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
-17:26:02.942 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
-17:26:02.942 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
-17:26:02.942 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
-17:26:02.942                                              
-17:26:02.942 Connect                                      At 17:10:25.983 Connect                                    0.003 seconds. ✓ (STANDARD)
-17:26:02.942 InterfaceVersion                             At 17:10:27.501 InterfaceVersion                           0.000 seconds. ✓ (FAST)
-17:26:02.942 Connected                                    At 17:10:27.504 Connected                                  0.003 seconds. ✓ (FAST)
-17:26:02.942 Description                                  At 17:10:27.521 Description                                0.014 seconds. ✓ (FAST)
-17:26:02.942 DriverInfo                                   At 17:10:27.524 DriverInfo                                 0.003 seconds. ✓ (FAST)
-17:26:02.943 DriverVersion                                At 17:10:27.527 DriverVersion                              0.003 seconds. ✓ (FAST)
-17:26:02.943 Name                                         At 17:10:27.530 Name                                       0.003 seconds. ✓ (FAST)
-17:26:02.943 SupportedActions                             At 17:10:27.544 SupportedActions                           0.013 seconds. ✓ (FAST)
-17:26:02.943 DeviceState                                  At 17:10:27.569 DeviceState                                0.025 seconds. ✓ (FAST)
-17:26:02.943 CanFindHome                                  At 17:10:27.595 CanFindHome                                0.003 seconds. ✓ (FAST)
-17:26:02.943 CanPark                                      At 17:10:27.598 CanPark                                    0.003 seconds. ✓ (FAST)
-17:26:02.943 CanPulseGuide                                At 17:10:27.601 CanPulseGuide                              0.003 seconds. ✓ (FAST)
-17:26:02.943 CanSetDeclinationRate                        At 17:10:27.604 CanSetDeclinationRate                      0.003 seconds. ✓ (FAST)
-17:26:02.943 CanSetGuideRates                             At 17:10:27.607 CanSetGuideRates                           0.003 seconds. ✓ (FAST)
-17:26:02.943 CanSetPark                                   At 17:10:27.610 CanSetPark                                 0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSetPierSide                               At 17:10:27.613 CanSetPierSide                             0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSetRightAscensionRate                     At 17:10:27.618 CanSetRightAscensionRate                   0.005 seconds. ✓ (FAST)
-17:26:02.944 CanSetTracking                               At 17:10:27.650 CanSetTracking                             0.019 seconds. ✓ (FAST)
-17:26:02.944 CanSlew                                      At 17:10:27.654 CanSlew                                    0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSlewltAz                                  At 17:10:27.657 CanSlewltAz                                0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSlewAltAzAsync                            At 17:10:27.663 CanSlewAltAzAsync                          0.005 seconds. ✓ (FAST)
-17:26:02.944 CanSlewAsync                                 At 17:10:27.666 CanSlewAsync                               0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSync                                      At 17:10:27.670 CanSync                                    0.003 seconds. ✓ (FAST)
-17:26:02.944 CanSyncAltAz                                 At 17:10:27.673 CanSyncAltAz                               0.003 seconds. ✓ (FAST)
-17:26:02.944 CanUnPark                                    At 17:10:27.677 CanUnPark                                  0.003 seconds. ✓ (FAST)
-17:26:02.944 AlignmentMode                                At 17:10:27.910 AlignmentMode                              0.009 seconds. ✓ (FAST)
-17:26:02.944 Altitude                                     At 17:10:27.920 Altitude                                   0.010 seconds. ✓ (FAST)
-17:26:02.945 ApertureArea                                 At 17:10:27.926 ApertureArea                               0.004 seconds. ✓ (FAST)
-17:26:02.945 ApertureDiameter                             At 17:10:27.930 ApertureDiameter                           0.004 seconds. ✓ (FAST)
-17:26:02.945 AtHome                                       At 17:10:27.935 AtHome                                     0.004 seconds. ✓ (FAST)
-17:26:02.945 AtPark                                       At 17:10:27.940 AtPark                                     0.004 seconds. ✓ (FAST)
-17:26:02.945 Azimuth                                      At 17:10:27.944 Azimuth                                    0.004 seconds. ✓ (FAST)
-17:26:02.945 Declination                                  At 17:10:27.948 Declination                                0.004 seconds. ✓ (FAST)
-17:26:02.945 DeclinationRate Read                         At 17:10:27.952 DeclinationRate Read                       0.003 seconds. ✓ (FAST)
-17:26:02.945 DoesRefraction Read                          At 17:10:27.972 DoesRefraction Read                        0.004 seconds. ✓ (FAST)
-17:26:02.945 DoesRefraction Write                         At 17:10:27.976 DoesRefraction Write                       0.004 seconds. ✓ (STANDARD)
-17:26:02.946 EquatorialSystem                             At 17:10:27.986 EquatorialSystem                           0.004 seconds. ✓ (FAST)
-17:26:02.946 FocalLength                                  At 17:10:27.991 FocalLength                                0.004 seconds. ✓ (FAST)
-17:26:02.946 IsPulseGuiding                               At 17:10:28.023 IsPulseGuiding                             0.010 seconds. ✓ (FAST)
-17:26:02.946 RightAscension                               At 17:10:28.027 RightAscension                             0.003 seconds. ✓ (FAST)
-17:26:02.946 RightAscensionRate Read                      At 17:10:28.032 RightAscensionRate Read                    0.004 seconds. ✓ (FAST)
-17:26:02.950 SiteElevation Read                           At 17:10:28.043 SiteElevation Read                         0.004 seconds. ✓ (FAST)
-17:26:02.950 SiteElevation Write                          At 17:10:28.055 SiteElevation Write                        0.003 seconds. ✓ (STANDARD)
-17:26:02.951 SiteLatitude Read                            At 17:10:28.071 SiteLatitude Read                          0.003 seconds. ✓ (FAST)
-17:26:02.951 SiteLatitude Write                           At 17:10:28.214 SiteLatitude Write                         0.132 seconds. ✓ (STANDARD)
-17:26:02.951 SiteLongitude Read                           At 17:10:28.485 SiteLongitude Read                         0.003 seconds. ✓ (FAST)
-17:26:02.951 SiteLatitude Write                           At 17:10:28.627 SiteLatitude Write                         0.133 seconds. ✓ (STANDARD)
-17:26:02.951 Slewing                                      At 17:10:28.903 Slewing                                    0.003 seconds. ✓ (FAST)
-17:26:02.951 SlewSettleTime Read                          At 17:10:28.911 SlewSettleTime Read                        0.007 seconds. ✓ (FAST)
-17:26:02.951 SlewSettleTime Write                         At 17:10:28.917 SlewSettleTime Write                       0.002 seconds. ✓ (STANDARD)
-17:26:02.951 SideOfPier Read                              At 17:10:28.920 SideOfPier Read                            0.003 seconds. ✓ (FAST)
-17:26:02.951 SiderealTime                                 At 17:10:28.923 SiderealTime                               0.002 seconds. ✓ (FAST)
-17:26:02.951 Tracking Read                                At 17:10:28.927 Tracking Read                              0.002 seconds. ✓ (FAST)
-17:26:02.951 Tracking Write                               At 17:10:29.044 Tracking Write                             0.117 seconds. ✓ (STANDARD)
-17:26:02.952 Tracking Write                               At 17:10:31.237 Tracking Write                             0.063 seconds. ✓ (FAST)
-17:26:02.952 UTCDate Read                                 At 17:10:31.587 UTCDate Read                               0.006 seconds. ✓ (FAST)
-17:26:02.952 UTCDate Write                                At 17:10:31.980 UTCDate Write                              0.393 seconds. ✓ (STANDARD)
-17:26:02.952 CanMoveAxis:Primary                          At 17:10:32.378 CanMoveAxis:Primary                        0.008 seconds. ✓ (FAST)
-17:26:02.952 CanMoveAxis:Secondary                        At 17:10:32.381 CanMoveAxis:Secondary                      0.003 seconds. ✓ (FAST)
-17:26:02.952 CanMoveAxis:Tertiary                         At 17:10:32.384 CanMoveAxis:Tertiary                       0.003 seconds. ✓ (FAST)
-17:26:02.952 Park                                         At 17:11:01.874 Park                                       0.203 seconds. ✓ (STANDARD)
-17:26:02.952 Unpark                                       At 17:11:31.096 Unpark                                     0.123 seconds. ✓ (STANDARD)
-17:26:02.952 AbortSlew                                    At 17:11:35.047 AbortSlew                                  0.521 seconds. ✓ (STANDARD)
-17:26:02.952 FindHome                                     At 17:11:37.669 FindHome                                   0.205 seconds. ✓ (STANDARD)
-17:26:02.952 MoveAxis Primary Primary 0                   At 17:11:42.883 MoveAxis Primary Primary 0                 0.212 seconds. ✓ (STANDARD)
-17:26:02.953 MoveAxis Primary Primary 0                   At 17:11:43.106 MoveAxis Primary Primary 0                 0.208 seconds. ✓ (STANDARD)
-17:26:02.953 MoveAxis Primary Primary 4                   At 17:11:48.164 MoveAxis Primary Primary 4                 0.210 seconds. ✓ (STANDARD)
-17:26:02.953 MoveAxis Secondary Secondary 0               At 17:11:58.460 MoveAxis Secondary Secondary 0             0.212 seconds. ✓ (STANDARD)
-17:26:02.953 MoveAxis Secondary Secondary 0               At 17:11:58.704 MoveAxis Secondary Secondary 0             0.211 seconds. ✓ (STANDARD)
-17:26:02.953 MoveAxis Secondary Secondary 4               At 17:12:03.819 MoveAxis Secondary Secondary 4             0.209 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide East 2s                           At 17:12:14.167 PulseGuide East 2s                         0.104 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide North 2s                          At 17:12:16.293 PulseGuide North 2s                        0.105 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide North 5s                          At 17:12:49.404 PulseGuide North 5s                        0.105 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide South 5s                          At 17:12:54.866 PulseGuide South 5s                        0.111 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide East 5s                           At 17:13:00.324 PulseGuide East 5s                         0.106 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide West 5s                           At 17:13:05.776 PulseGuide West 5s                         0.104 seconds. ✓ (STANDARD)
-17:26:02.953 PulseGuide North 5s                          At 17:14:02.941 PulseGuide North 5s                        0.106 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide South 5s                          At 17:14:08.400 PulseGuide South 5s                        0.106 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide East 5s                           At 17:14:13.881 PulseGuide East 5s                         0.107 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide West 5s                           At 17:14:19.334 PulseGuide West 5s                         0.109 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide North 5s                          At 17:15:02.497 PulseGuide North 5s                        0.106 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide South 5s                          At 17:15:07.960 PulseGuide South 5s                        0.107 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide East 5s                           At 17:15:13.420 PulseGuide East 5s                         0.106 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide West 5s                           At 17:15:18.880 PulseGuide West 5s                         0.110 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide North 5s                          At 17:16:17.046 PulseGuide North 5s                        0.105 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide South 5s                          At 17:16:22.504 PulseGuide South 5s                        0.107 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide East 5s                           At 17:16:27.978 PulseGuide East 5s                         0.105 seconds. ✓ (STANDARD)
-17:26:02.954 PulseGuide West 5s                           At 17:16:33.434 PulseGuide West 5s                         0.108 seconds. ✓ (STANDARD)
-17:26:02.955 SlewToCoordinatesAsync                       At 17:16:39.445 SlewToCoordinatesAsync                     0.388 seconds. ✓ (STANDARD)
-17:26:02.955 SyncToCoordinates                            At 17:17:29.912 SyncToCoordinates                          0.313 seconds. ✓ (STANDARD)
-17:26:02.955 SyncToCoordinates                            At 17:17:37.297 SyncToCoordinates                          0.313 seconds. ✓ (STANDARD)
-17:26:02.955 SlewToTargetAsync                            At 17:17:46.108 SlewToTargetAsync                          0.389 seconds. ✓ (STANDARD)
-17:26:02.955 DestinationSideOfPier                        At 17:18:34.912 DestinationSideOfPier                      0.003 seconds. ✓ (FAST)
-17:26:02.955 DestinationSideOfPier                        At 17:18:34.919 DestinationSideOfPier                      0.003 seconds. ✓ (FAST)
-17:26:02.955 SlewToAltAzAsync                             At 17:18:35.831 SlewToAltAzAsync                           0.388 seconds. ✓ (STANDARD)
-17:26:02.955 SyncToTarget                                 At 17:19:47.542 SyncToTarget                               0.313 seconds. ✓ (STANDARD)
-17:26:02.955 SyncToTarget                                 At 17:19:55.437 SyncToTarget                               0.314 seconds. ✓ (STANDARD)
-17:26:02.955 DestinatitonSideOfPier                       At 17:21:04.700 DestinatitonSideOfPier                     0.004 seconds. ✓ (FAST)
-17:26:02.956 DestinatitonSideOfPier                       At 17:21:48.331 DestinatitonSideOfPier                     0.004 seconds. ✓ (FAST)
-17:26:02.956 DestinatitonSideOfPier                       At 17:23:32.474 DestinatitonSideOfPier                     0.004 seconds. ✓ (FAST)
-17:26:02.956 DestinatitonSideOfPier                       At 17:25:26.591 DestinatitonSideOfPier                     0.006 seconds. ✓ (FAST)
-17:26:02.956 Disconnect                                   At 17:26:02.421 Disconnect                                 0.006 seconds. ✓ (STANDARD)
-17:26:02.956                                              
-17:26:02.956 Congratulations, all members returned within their target response times!!          
+13:58:11.532 ASCOM Universal Device Conformance Checker Version 4.5.3.56334, Build time: Fri 23 October 2026 14:49:09          
+13:58:11.532                                              
+13:58:11.533 Operating system is Debian GNU/Linux 13 (trixie), Processor is ARM 64bit, Application is 64bit.          
+13:58:11.533                                              
+13:58:11.534 Alpaca device:  (localhost:6801 Telescope/0)          
+13:58:11.534                                              
+13:58:11.536 CreateDevice                        INFO     Creating Alpaca device: Access service: Http, IP address: localhost, IP Port: 6801, Alpaca device number: 0 (Not accepting user generated SSL certificates)
+13:58:11.613 CreateDevice                        INFO     Alpaca device created OK
+13:58:11.613 CreateDevice                        INFO     Successfully created driver
+13:58:12.962 CreateDevice                        OK       Found a valid interface version: 4
+13:58:12.963 CreateDevice                        OK       Driver instance created successfully
+13:58:12.963                                              
+13:58:12.963 Connect to device                            
+13:58:13.170 Connected                           OK       Connected to device successfully using Connected = True
+13:58:13.733 Connected                           OK       Disconnected from device successfully using Connected = False
+13:58:14.250 Connect                             OK       Connected to device successfully using Connect()
+13:58:14.250                                              
+13:58:14.253 Common Driver Methods                        
+13:58:14.253 InterfaceVersion                    OK       4
+13:58:14.257 Connected                           OK       True
+13:58:14.273 Description                         OK       OnStep LX200-Protocol Telescope Driver
+13:58:14.276 DriverInfo                          OK       AlpacaCore OnStep Driver v0.1
+13:58:14.279 DriverVersion                       OK       5.0.0
+13:58:14.282 Name                                OK       OnStep Telescope
+13:58:14.283                                              
+13:58:14.295 SupportedActions                    OK       Driver returned an empty action list
+13:58:14.295 Action                              INFO     Conform cannot test the Action method
+13:58:14.296                                              
+13:58:14.321 DeviceState                         OK       Received 13 operational state properties.
+13:58:14.323 DeviceState                         OK         Altitude = <redacted: site>
+13:58:14.323 DeviceState                         OK         AtHome = False
+13:58:14.323 DeviceState                         OK         AtPark = False
+13:58:14.323 DeviceState                         OK         Azimuth = <redacted: site>
+13:58:14.324 DeviceState                         OK         Declination = 89.99999722222222
+13:58:14.324 DeviceState                         OK         RightAscension = <redacted: site>
+13:58:14.324 DeviceState                         OK         SideOfPier = ThroughThePole
+13:58:14.324 DeviceState                         OK         IsPulseGuiding = False
+13:58:14.324 DeviceState                         OK         SiderealTime = <redacted: site>
+13:58:14.324 DeviceState                         OK         Slewing = False
+13:58:14.324 DeviceState                         OK         Tracking = True
+13:58:14.324 DeviceState                         OK         UTCDate = <redacted: local time>
+13:58:14.325 DeviceState                         OK         TimeStamp = <redacted: local time>
+13:58:14.336 DeviceState                         OK       Found all expected operational properties
+13:58:14.336                                              
+13:58:14.336 Can Properties                               
+13:58:14.340 CanFindHome                         OK       True
+13:58:14.343 CanPark                             OK       True
+13:58:14.346 CanPulseGuide                       OK       True
+13:58:14.349 CanSetDeclinationRate               OK       False
+13:58:14.352 CanSetGuideRates                    OK       False
+13:58:14.355 CanSetPark                          OK       True
+13:58:14.358 CanSetPierSide                      OK       False
+13:58:14.361 CanSetRightAscensionRate            OK       False
+13:58:14.364 CanSetTracking                      OK       True
+13:58:14.367 CanSlew                             OK       False
+13:58:14.370 CanSlewltAz                         OK       False
+13:58:14.373 CanSlewAltAzAsync                   OK       True
+13:58:14.401 CanSlewAsync                        OK       True
+13:58:14.406 CanSync                             OK       True
+13:58:14.409 CanSyncAltAz                        OK       False
+13:58:14.412 CanUnPark                           OK       True
+13:58:14.413                                              
+13:58:14.413 Pre-run Checks                               
+13:58:14.416 Mount Safety                        INFO     Scope is not parked, continuing testing
+13:58:14.554 Mount Safety                        INFO     Scope tracking has been enabled
+13:58:14.554 TimeCheck                           INFO     PC Time Zone:  <redacted: local time>
+13:58:14.555 TimeCheck                           INFO     PC UTCDate:    <redacted: local time>
+13:58:14.586 TimeCheck                           INFO     Mount UTCDate: <redacted: local time>
+13:58:14.586                                              
+13:58:14.587 Properties                                   
+13:58:14.642 AlignmentMode                       OK       GermanPolar
+13:58:14.651 Altitude                            OK       <redacted: site>
+13:58:14.654 ApertureArea                        INFO     ApertureArea is 0.0
+13:58:14.657 ApertureDiameter                    INFO     ApertureDiameter is 0.0
+13:58:14.660 AtHome                              OK       False
+13:58:14.663 AtPark                              OK       False
+13:58:14.666 Azimuth                             OK       <redacted: site>
+13:58:14.670 Declination                         OK       +90:00:00.0
+13:58:14.673 DeclinationRate Read                OK       0.00
+13:58:14.680 DeclinationRate Write               OK       CanSetDeclinationRate is False and a NotImplementedException error was generated as expected
+13:58:14.688 DoesRefraction Read                 OK       True
+13:58:14.692 DoesRefraction Write                OK       Optional member returned a NotImplementedException error.
+13:58:14.696 DoesRefraction Write                OK       Restored original DoesRefraction state: True
+13:58:14.700 EquatorialSystem                    OK       Topocentric
+13:58:14.703 FocalLength                         INFO     FocalLength is 0.0
+13:58:14.706 GuideRateDeclination Read           OK       0.00
+13:58:14.710 GuideRateDeclination Write          OK       CanSetGuideRates is False and a NotImplementedException error was generated as expected
+13:58:14.713 GuideRateRightAscension Read        OK       0.00
+13:58:14.717 GuideRateRightAscension Write       OK       CanSetGuideRates is False and a NotImplementedException error was generated as expected
+13:58:14.721 IsPulseGuiding                      OK       False
+13:58:14.724 RightAscension                      OK       <redacted: site>
+13:58:14.727 RightAscensionRate Read             OK       0.00
+13:58:14.731 RightAscensionRate Write            OK       CanSetRightAscensionRate is False and a NotImplementedException error was generated as expected
+13:58:14.734 SiteElevation Read                  OK       <redacted: site>
+13:58:14.739 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation < -300m
+13:58:14.743 SiteElevation Write                 OK       Invalid Value exception generated as expected on set site elevation > 10,000m
+13:58:14.746 SiteElevation Write                 OK       Current value <redacted: site> written successfully
+13:58:14.753 SiteElevation Write                 OK       Test value <redacted: site> set and read correctly
+13:58:14.758 SiteElevation Write                 OK       Successfully restored original site elevation: <redacted: site>
+13:58:14.761 SiteLatitude Read                   OK       <redacted: site>
+13:58:14.765 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude < -90 degrees
+13:58:14.769 SiteLatitude Write                  OK       Invalid Value exception generated as expected on set site latitude > 90 degrees
+13:58:14.899 SiteLatitude Write                  OK       Current value: <redacted: site> degrees written successfully
+13:58:15.033 SiteLatitude Write                  OK       Test value <redacted: site> set and read correctly
+13:58:15.163 SiteLatitude Write                  OK       Successfully restored original site latitude: <redacted: site>
+13:58:15.166 SiteLongitude Read                  OK       <redacted: site>
+13:58:15.170 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude < -180 degrees
+13:58:15.174 SiteLongitude Write                 OK       Invalid Value exception generated as expected on set site longitude > 180 degrees
+13:58:15.305 SiteLongitude Write                 OK       Current value <redacted: site> degrees written successfully
+13:58:15.438 SiteLongitude Write                 OK       Test value <redacted: site> set and read correctly
+13:58:15.570 SiteLongitude Write                 OK       Successfully restored original site longitude: <redacted: site>
+13:58:15.573 Slewing                             OK       False
+13:58:15.581 SlewSettleTime Read                 OK       0
+13:58:15.584 SlewSettleTime Write                OK       Invalid Value exception generated as expected on set slew settle time < 0
+13:58:15.588 SlewSettleTime Write                OK       Legal value 0 seconds written successfully
+13:58:15.591 SideOfPier Read                     OK       ThroughThePole
+13:58:15.594 SiderealTime                        OK       <redacted: site>
+13:58:15.594 SiderealTime                        OK       Scope and ASCOM sidereal times agree to better than 1 second, Scope: <redacted: site>, ASCOM: <redacted: site>
+13:58:15.595 TargetDeclination Read              OK       Not Set exception generated on read before write
+13:58:15.595 TargetDeclination Write             INFO     Tests moved after the SlewToCoordinates tests so that Conform can confirm that target coordinates are set as expected.
+13:58:15.595 TargetRightAscension Read           OK       Not Set exception generated on read before write
+13:58:15.595 TargetRightAscension Write          INFO     Tests moved after the SlewToCoordinates tests so that Conform can confirm that target coordinates are set as expected.
+13:58:15.598 Tracking Read                       OK       True
+13:58:16.725 Tracking Write                      OK       False
+13:58:17.939 TrackingRates                                Found drive rate: Sidereal
+13:58:17.940 TrackingRates                       OK       Drive rates read OK
+13:58:17.942 TrackingRates                       OK       Disposed tracking rates OK
+13:58:17.945 TrackingRates                       OK       Successfully obtained a TrackingRates object after the previous TrackingRates object was disposed
+13:58:18.151 TrackingRate Read                   OK       Sidereal
+13:58:18.178 TrackingRate Write                  OK       Successfully set drive rate: Sidereal
+13:58:18.183 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
+13:58:18.188 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
+13:58:18.192 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
+13:58:18.197 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
+13:58:18.202 TrackingRate Write                  OK       Optional member returned a NotImplementedException error.
+13:58:18.298 UTCDate Read                        OK       <redacted: local time>
+13:58:18.681 UTCDate Write                       OK       New UTCDate written successfully: <redacted: local time>
+13:58:19.064 UTCDate Write                       OK       Original UTCDate restored successfully: <redacted: local time>
+13:58:19.064                                              
+13:58:19.064 Methods                                      
+13:58:19.072 CanMoveAxis:Primary                 OK       CanMoveAxis:Primary True
+13:58:19.075 CanMoveAxis:Secondary               OK       CanMoveAxis:Secondary True
+13:58:19.078 CanMoveAxis:Tertiary                OK       CanMoveAxis:Tertiary False
+13:58:39.854 Park                                         Parking scope...
+13:58:58.537 Park                                OK       Parked successfully (AtPark is true).
+13:58:58.583 Park                                OK       Calling Park twice is harmless and leaves the mount in the parked state.
+13:58:58.595 Parked:AbortSlew                    OK       AbortSlew threw a ParkedException when Parked, as required. (ParkedException - AbortSlew is not allowed while parked)
+13:58:58.611 Parked:FindHome                     OK       FindHome threw a ParkedException when Parked, as required. (ParkedException - FindHome is not allowed while parked)
+13:58:58.627 Parked:MoveAxis Primary             OK       MoveAxis Primary threw a ParkedException when Parked, as required. (ParkedException - MoveAxis is not allowed while parked)
+13:58:58.644 Parked:MoveAxis Secondary           OK       MoveAxis Secondary threw a ParkedException when Parked, as required. (ParkedException - MoveAxis is not allowed while parked)
+13:58:58.659 Parked:PulseGuide                   OK       PulseGuide threw a ParkedException when Parked, as required. (ParkedException - PulseGuide is not allowed while parked)
+13:58:58.680 Parked:SlewToCoordinatesAsync       OK       SlewToCoordinatesAsync threw a ParkedException when Parked, as required. (ParkedException - SlewToCoordinatesAsync is not allowed while parked)
+13:58:58.711 Parked:SlewToTargetAsync            OK       SlewToTargetAsync threw a ParkedException when Parked, as required. (ParkedException - SlewToTargetAsync is not allowed while parked)
+13:58:58.731 Parked:SyncToCoordinates            OK       SyncToCoordinates threw a ParkedException when Parked, as required. (ParkedException - SyncToCoordinates is not allowed while parked)
+13:58:58.761 Parked:SyncToTarget                 OK       SyncToTarget threw a ParkedException when Parked, as required. (ParkedException - SyncToTarget is not allowed while parked)
+13:58:58.782 Parked:Tracking = true              OK       Tracking = true threw a ParkedException when Parked, as required. (ParkedException - Tracking is not allowed while parked)
+13:58:58.912 Parked:Tracking = false             OK       Tracking = false was successful when parked.
+13:58:59.054 Unpark                              OK       Unparked successfully.
+13:58:59.325 Unpark                              OK       Calling Unpark twice is harmless and leaves the mount in the un-parked state.
+13:59:00.335 AbortSlew                           OK       AbortSlew OK when not slewing
+13:59:04.995 AbortSlew                           OK       AbortSlew stopped the mount from slewing in 2.5 seconds.
+13:59:05.071 AxisRate:Primary                    OK       Axis rate minimum: 0 Axis rate maximum: 4
+13:59:05.071 AxisRate:Primary                    OK       Axis rate minimum: 0 Axis rate maximum: 4
+13:59:05.071 AxisRate:Primary                    OK       No overlapping axis rates found
+13:59:05.071 AxisRate:Primary                    OK       No duplicate axis rates found
+13:59:05.074 AxisRate:Primary                    OK       Successfully disposed of rate 0 - 4
+13:59:05.074 AxisRate:Primary                    OK       Disposed axis rates OK
+13:59:05.077 AxisRate:Secondary                  OK       Axis rate minimum: 0 Axis rate maximum: 4
+13:59:05.077 AxisRate:Secondary                  OK       Axis rate minimum: 0 Axis rate maximum: 4
+13:59:05.077 AxisRate:Secondary                  OK       No overlapping axis rates found
+13:59:05.077 AxisRate:Secondary                  OK       No duplicate axis rates found
+13:59:05.080 AxisRate:Secondary                  OK       Successfully disposed of rate 0 - 4
+13:59:05.080 AxisRate:Secondary                  OK       Disposed axis rates OK
+13:59:05.082 AxisRate:Tertiary                   OK       Empty axis rate returned
+13:59:05.085 AxisRate:Tertiary                   OK       Disposed axis rates OK
+13:59:09.885 FindHome                            OK       Found home OK, AtHome reports TRUE as expected.
+13:59:10.245 MoveAxis Primary                    OK       Can successfully set a movement rate of zero
+13:59:10.250 MoveAxis Primary                    OK       Exception correctly generated when move axis is set below lowest rate (-5)
+13:59:10.254 MoveAxis Primary                    OK       Exception correctly generated when move axis is set above highest rate (5)
+13:59:10.459 MoveAxis Primary                    OK       Can successfully set a movement rate of 0
+13:59:12.693 MoveAxis Primary                    OK       Successfully stopped movement.
+13:59:12.901 MoveAxis Primary                    OK       Can successfully set a movement rate of 0
+13:59:15.142 MoveAxis Primary                    OK       Successfully stopped movement.
+13:59:15.353 MoveAxis Primary                    OK       Can successfully set a movement rate of 4
+13:59:17.585 MoveAxis Primary                    OK       Successfully stopped movement.
+13:59:17.793 MoveAxis Primary                    OK       Can successfully set a movement rate of -4
+13:59:20.025 MoveAxis Primary                    OK       Successfully stopped movement.
+13:59:25.035 MoveAxis Primary                    OK       Tracking state correctly retained for both tracking states
+13:59:25.036 MoveAxis Primary                    OK       AxisRates object successfully disposed
+13:59:25.254 MoveAxis Secondary                  OK       Can successfully set a movement rate of zero
+13:59:25.265 MoveAxis Secondary                  OK       Exception correctly generated when move axis is set below lowest rate (-5)
+13:59:25.270 MoveAxis Secondary                  OK       Exception correctly generated when move axis is set above highest rate (5)
+13:59:25.481 MoveAxis Secondary                  OK       Can successfully set a movement rate of 0
+13:59:27.712 MoveAxis Secondary                  OK       Successfully stopped movement.
+13:59:27.917 MoveAxis Secondary                  OK       Can successfully set a movement rate of 0
+13:59:30.155 MoveAxis Secondary                  OK       Successfully stopped movement.
+13:59:30.366 MoveAxis Secondary                  OK       Can successfully set a movement rate of 4
+13:59:32.603 MoveAxis Secondary                  OK       Successfully stopped movement.
+13:59:32.808 MoveAxis Secondary                  OK       Can successfully set a movement rate of -4
+13:59:35.041 MoveAxis Secondary                  OK       Successfully stopped movement.
+13:59:40.058 MoveAxis Secondary                  OK       Tracking state correctly retained for both tracking states
+13:59:40.058 MoveAxis Secondary                  OK       AxisRates object successfully disposed
+13:59:40.062 MoveAxis Tertiary                   OK       Received an invalid value exception
+13:59:42.324 PulseGuide                          OK       Asynchronous single axis pulse guide East found OK
+13:59:44.450 PulseGuide                          OK       Asynchronous single axis pulse guide North found OK
+13:59:46.686 PulseGuide                          OK       Asynchronous dual axis pulse guide East and North found OK
+14:00:13.104 PulseGuide -9.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.2,  Expected: +00:00:37.6,  Difference: +00:00:00.4,  Test tolerance: +00:00:01.0
+14:00:18.291 PulseGuide -9.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.6,  Expected: -00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
+14:00:23.475 PulseGuide -9.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.51, Expected: +00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
+14:00:28.659 PulseGuide -9.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.52, Expected: -00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
+14:01:10.096 PulseGuide +9.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.1,  Expected: +00:00:37.6,  Difference: +00:00:00.5,  Test tolerance: +00:00:01.0
+14:01:15.291 PulseGuide +9.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.7,  Expected: -00:00:37.6,  Difference: +00:00:00.1,  Test tolerance: +00:00:01.0
+14:01:20.484 PulseGuide +9.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.51, Expected: +00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
+14:01:25.679 PulseGuide +9.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.51, Expected: -00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
+14:01:56.638 PulseGuide -3.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.1,  Expected: +00:00:37.6,  Difference: +00:00:00.5,  Test tolerance: +00:00:01.0
+14:02:01.829 PulseGuide -3.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.6,  Expected: -00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
+14:02:07.018 PulseGuide -3.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.50, Expected: +00:00:02.51, Difference: +00:00:00.02, Test tolerance: +00:00:00.07
+14:02:12.188 PulseGuide -3.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.50, Expected: -00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
+14:02:53.080 PulseGuide +3.0 North               OK       Moved north with no east-west movement  - Declination change (DMS): +00:00:37.6,  Expected: +00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
+14:02:58.245 PulseGuide +3.0 South               OK       Moved south with no east-west movement  - Declination change (DMS): -00:00:37.6,  Expected: -00:00:37.6,  Difference: +00:00:00.0,  Test tolerance: +00:00:01.0
+14:03:03.410 PulseGuide +3.0 East                OK       Moved east with no north-south movement - RA change (HMS):          +00:00:02.50, Expected: +00:00:02.51, Difference: +00:00:00.01, Test tolerance: +00:00:00.07
+14:03:08.575 PulseGuide +3.0 West                OK       Moved west with no north-south movement - RA change (HMS):          -00:00:02.51, Expected: -00:00:02.51, Difference: +00:00:00.00, Test tolerance: +00:00:00.07
+14:03:08.714 SlewToCoordinates                   OK       CanSlew is False and a NotImplementedException error was generated as expected
+14:03:32.306 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:32.306 SlewToCoordinatesAsync              OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +02:00:00.1, Target DEC: +02:00:00.0
+14:03:32.309 SlewToCoordinatesAsync              OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
+14:03:32.311 SlewToCoordinatesAsync              OK       The TargetDeclination property +02:00:00.0 matches the expected Declination +02:00:00.0 within tolerance ±10 arc seconds.
+14:03:32.317 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad RA coordinate: -01:00:00.00
+14:03:32.322 SlewToCoordinatesAsync (Bad L)      OK       Correctly rejected bad Dec coordinate: -100:00:00.0
+14:03:32.327 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad RA coordinate: +25:00:00.00
+14:03:32.333 SlewToCoordinatesAsync (Bad H)      OK       Correctly rejected bad Dec coordinate: +100:00:00.0
+14:03:43.923 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:43.923 SyncToCoordinates                   OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:03:44.204 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:44.204 SyncToCoordinates                   OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:03:44.206 SyncToCoordinates                   OK       The TargetRightAscension property <redacted: site> matches the expected RA <redacted: site> 
+14:03:44.209 SyncToCoordinates                   OK       The TargetDeclination property <redacted: site> matches the expected Declination <redacted: site> 
+14:03:49.776 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:49.776 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:03:50.053 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:50.053 SyncToCoordinates                   OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:03:55.622 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:03:55.622 SyncToCoordinates                   OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:03:55.628 SyncToCoordinates (Bad L)           OK       Correctly rejected bad RA coordinate: -01:00:00.00
+14:03:55.636 SyncToCoordinates (Bad L)           OK       Correctly rejected bad Dec coordinate: -100:00:00.0
+14:03:55.642 SyncToCoordinates (Bad H)           OK       Correctly rejected bad RA coordinate: +25:00:00.00
+14:03:55.649 SyncToCoordinates (Bad H)           OK       Correctly rejected bad Dec coordinate: +100:00:00.0
+14:03:55.653 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension < 0 hours
+14:03:55.658 TargetRightAscension Write          OK       Invalid Value exception generated as expected on set TargetRightAscension > 24 hours
+14:03:55.667 TargetRightAscension Write          OK       Legal value <redacted: site> HH:MM:SS written successfully
+14:03:55.671 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
+14:03:55.677 TargetDeclination Write             OK       Invalid Value exception generated as expected on set TargetDeclination < -90 degrees
+14:03:55.683 TargetDeclination Write             OK       Legal value +01:00:00.0 DD:MM:SS written successfully
+14:03:55.829 SlewToTarget                        OK       CanSlew is False and a NotImplementedException error was generated as expected
+14:04:07.437 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:04:07.437 SlewToTargetAsync                   OK       Slewed OK within tolerance: ±10 arc seconds. Actual DEC: +04:00:00.1, Target DEC: +04:00:00.0
+14:04:07.440 SlewToTargetAsync                   OK       The TargetRightAscension property: <redacted: site> matches the expected RA <redacted: site> within tolerance ±10 arc seconds.
+14:04:07.442 SlewToTargetAsync                   OK       The TargetDeclination property +04:00:00.0 matches the expected Declination +04:00:00.0 within tolerance ±10 arc seconds.
+14:04:07.450 SlewToTargetAsync (Bad L)           OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00.00
+14:04:07.456 SlewToTargetAsync (Bad L)           OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00.0
+14:04:07.461 SlewToTargetAsync (Bad H)           OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00.00
+14:04:07.467 SlewToTargetAsync (Bad H)           OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: +100:00:00.0
+14:04:31.178 DestinationSideOfPier               OK       DestinationSideOfPier is different on either side of the meridian - East: ThroughThePole, West: Normal
+14:04:31.439 SlewToAltAz                         OK       CanSlewAltAz is False and a NotImplementedException error was generated as expected
+14:04:55.665 SlewToAltAzAsync                    OK       Slewed to target Azimuth OK within tolerance: 10 arc seconds. Actual Azimuth: +155:00:29.0, Target Azimuth: +155:00:00.0
+14:04:55.665 SlewToAltAzAsync                    OK       Slewed to target Altitude OK within tolerance: 10 arc seconds. Actual Altitude: +55:00:06.0, Target Altitude: +55:00:00.0
+14:04:55.671 SlewToAltAzAsync (Bad L)            OK       Correctly rejected bad Altitude coordinate: -100:00:00.0
+14:04:55.674 SlewToAltAzAsync (Bad L)            OK       Correctly rejected bad Azimuth coordinate: -10:00:00.0
+14:04:55.680 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Altitude coordinate: +100:00:00.0
+14:04:55.684 SlewToAltAzAsync (Bad H)            OK       Correctly rejected bad Azimuth coordinate: +370:00:00.0
+14:05:22.324 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:05:22.325 SyncToTarget                        OK       Slewed to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:05:22.610 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:05:22.610 SyncToTarget                        OK       Synced to sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:05:28.179 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:05:28.179 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:05:28.465 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:05:28.465 SyncToTarget                        OK       Synced to reversed sync position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:05:34.036 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual RA: <redacted: site>, Target RA: <redacted: site>
+14:05:34.036 SyncToTarget                        OK       Slewed back to start position OK within tolerance: ±10 arc seconds. Actual DEC: <redacted: site>, Target DEC: <redacted: site>
+14:05:34.041 SyncToTarget (Bad L)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: -01:00:00.00
+14:05:34.048 SyncToTarget (Bad L)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: -100:00:00.0
+14:05:34.053 SyncToTarget (Bad H)                OK       Telescope.TargetRA correctly rejected bad RA coordinate: +25:00:00.00
+14:05:34.058 SyncToTarget (Bad H)                OK       Telescope.TargetDeclination correctly rejected bad Dec coordinate: +100:00:00.0
+14:05:34.235 SyncToAltAz                         OK       CanSyncAltAz is False and a NotImplementedException error was generated as expected
+14:05:34.236                                              
+14:05:34.236 SideOfPier Model Tests                       
+14:05:34.242 SideOfPier Write                    OK       CanSideOfPier Write is False and a NotImplementedException error was generated as expected
+14:09:39.645 SideofPier                          OK       Reports the pointing state of the mount as expected
+14:09:39.645 SideofPier                          INFO     Reported SideofPier at HA -9, +9: WE
+14:09:39.645 SideofPier                          INFO     Reported SideofPier at HA -3, +3: WE
+14:09:39.645 SideofPier                          OK       pierWest is returned when the mount is observing at an hour angle between -6.0 and 0.0
+14:09:39.645 SideofPier                          OK       pierEast is returned when the mount is observing at an hour angle between 0.0 and +6.0
+14:09:39.645 DestinationSideofPier               OK       Reports the pointing state of the mount as expected
+14:09:39.645 DestinationSideofPier               OK       pierWest is returned when the mount will observe at an hour angle between -6.0 and 0.0
+14:09:39.645 DestinationSideofPier               OK       pierEast is returned when the mount will observe at an hour angle between 0.0 and +6.0
+14:09:39.645 DestinationSideofPier               INFO     Reported DesintationSideofPier at HA -9, +9: WE
+14:09:39.645 DestinationSideofPier               INFO     Reported DesintationSideofPier at HA -3, +3: WE
+14:09:39.767                                              
+14:09:39.768 Post-run Checks                              
+14:09:39.892 Mount Safety                        OK       Tracking stopped to protect your mount.
+14:09:39.892                                              
+14:09:39.892 Disconnect from device                       
+14:09:40.404 Disconnect                          OK       Disconnected from device successfully using Disconnect()
+14:09:40.404                                              
+14:09:40.405 Conformance test has finished                
+14:09:40.405                                              
+14:09:40.405 Congratulations, no errors, warnings or issues found: your driver passes ASCOM validation!!          
+14:09:40.405                                     
+14:09:40.405 Timing Summary                               See Help for further information.
+14:09:40.405 Timing Summary                               FAST target response time: 0.1 seconds, (configuration and state reporting members).
+14:09:40.405 Timing Summary                               STANDARD target response time: 1.0 second, (property write and asynchronous initiators).
+14:09:40.405 Timing Summary                               EXTENDED target response time: 600.0 seconds, (synchronous methods, ImageArray and ImageArrayVariant).
+14:09:40.405 Timing Summary                               Conform is configured to report both good and bad timing outcomes.
+14:09:40.405                                              
+14:09:40.405 Connect                                      At 13:58:13.739 Connect                                    0.005 seconds. ✓ (STANDARD)
+14:09:40.405 InterfaceVersion                             At 13:58:14.253 InterfaceVersion                           0.000 seconds. ✓ (FAST)
+14:09:40.406 Connected                                    At 13:58:14.257 Connected                                  0.003 seconds. ✓ (FAST)
+14:09:40.406 Description                                  At 13:58:14.272 Description                                0.013 seconds. ✓ (FAST)
+14:09:40.406 DriverInfo                                   At 13:58:14.276 DriverInfo                                 0.003 seconds. ✓ (FAST)
+14:09:40.406 DriverVersion                                At 13:58:14.279 DriverVersion                              0.003 seconds. ✓ (FAST)
+14:09:40.406 Name                                         At 13:58:14.282 Name                                       0.003 seconds. ✓ (FAST)
+14:09:40.406 SupportedActions                             At 13:58:14.295 SupportedActions                           0.012 seconds. ✓ (FAST)
+14:09:40.406 DeviceState                                  At 13:58:14.321 DeviceState                                0.025 seconds. ✓ (FAST)
+14:09:40.406 CanFindHome                                  At 13:58:14.340 CanFindHome                                0.003 seconds. ✓ (FAST)
+14:09:40.406 CanPark                                      At 13:58:14.343 CanPark                                    0.003 seconds. ✓ (FAST)
+14:09:40.406 CanPulseGuide                                At 13:58:14.346 CanPulseGuide                              0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetDeclinationRate                        At 13:58:14.349 CanSetDeclinationRate                      0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetGuideRates                             At 13:58:14.352 CanSetGuideRates                           0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetPark                                   At 13:58:14.355 CanSetPark                                 0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetPierSide                               At 13:58:14.358 CanSetPierSide                             0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetRightAscensionRate                     At 13:58:14.361 CanSetRightAscensionRate                   0.003 seconds. ✓ (FAST)
+14:09:40.406 CanSetTracking                               At 13:58:14.364 CanSetTracking                             0.003 seconds. ✓ (FAST)
+14:09:40.407 CanSlew                                      At 13:58:14.367 CanSlew                                    0.003 seconds. ✓ (FAST)
+14:09:40.407 CanSlewltAz                                  At 13:58:14.370 CanSlewltAz                                0.003 seconds. ✓ (FAST)
+14:09:40.407 CanSlewAltAzAsync                            At 13:58:14.373 CanSlewAltAzAsync                          0.003 seconds. ✓ (FAST)
+14:09:40.407 CanSlewAsync                                 At 13:58:14.401 CanSlewAsync                               0.028 seconds. ✓ (FAST)
+14:09:40.407 CanSync                                      At 13:58:14.406 CanSync                                    0.005 seconds. ✓ (FAST)
+14:09:40.407 CanSyncAltAz                                 At 13:58:14.409 CanSyncAltAz                               0.003 seconds. ✓ (FAST)
+14:09:40.407 CanUnPark                                    At 13:58:14.412 CanUnPark                                  0.003 seconds. ✓ (FAST)
+14:09:40.407 AlignmentMode                                At 13:58:14.642 AlignmentMode                              0.007 seconds. ✓ (FAST)
+14:09:40.407 Altitude                                     At 13:58:14.650 Altitude                                   0.008 seconds. ✓ (FAST)
+14:09:40.407 ApertureArea                                 At 13:58:14.654 ApertureArea                               0.003 seconds. ✓ (FAST)
+14:09:40.407 ApertureDiameter                             At 13:58:14.657 ApertureDiameter                           0.003 seconds. ✓ (FAST)
+14:09:40.407 AtHome                                       At 13:58:14.660 AtHome                                     0.003 seconds. ✓ (FAST)
+14:09:40.407 AtPark                                       At 13:58:14.663 AtPark                                     0.003 seconds. ✓ (FAST)
+14:09:40.407 Azimuth                                      At 13:58:14.666 Azimuth                                    0.003 seconds. ✓ (FAST)
+14:09:40.407 Declination                                  At 13:58:14.669 Declination                                0.003 seconds. ✓ (FAST)
+14:09:40.407 DeclinationRate Read                         At 13:58:14.672 DeclinationRate Read                       0.003 seconds. ✓ (FAST)
+14:09:40.407 DoesRefraction Read                          At 13:58:14.688 DoesRefraction Read                        0.003 seconds. ✓ (FAST)
+14:09:40.408 EquatorialSystem                             At 13:58:14.699 EquatorialSystem                           0.003 seconds. ✓ (FAST)
+14:09:40.408 FocalLength                                  At 13:58:14.702 FocalLength                                0.003 seconds. ✓ (FAST)
+14:09:40.408 IsPulseGuiding                               At 13:58:14.721 IsPulseGuiding                             0.003 seconds. ✓ (FAST)
+14:09:40.408 RightAscension                               At 13:58:14.724 RightAscension                             0.003 seconds. ✓ (FAST)
+14:09:40.408 RightAscensionRate Read                      At 13:58:14.727 RightAscensionRate Read                    0.003 seconds. ✓ (FAST)
+14:09:40.408 SiteElevation Read                           At 13:58:14.734 SiteElevation Read                         0.003 seconds. ✓ (FAST)
+14:09:40.408 SiteElevation Write                          At 13:58:14.746 SiteElevation Write                        0.003 seconds. ✓ (STANDARD)
+14:09:40.408 SiteLatitude Read                            At 13:58:14.761 SiteLatitude Read                          0.003 seconds. ✓ (FAST)
+14:09:40.408 SiteLatitude Write                           At 13:58:14.899 SiteLatitude Write                         0.130 seconds. ✓ (STANDARD)
+14:09:40.408 SiteLongitude Read                           At 13:58:15.166 SiteLongitude Read                         0.003 seconds. ✓ (FAST)
+14:09:40.408 SiteLatitude Write                           At 13:58:15.304 SiteLatitude Write                         0.130 seconds. ✓ (STANDARD)
+14:09:40.408 Slewing                                      At 13:58:15.573 Slewing                                    0.003 seconds. ✓ (FAST)
+14:09:40.408 SlewSettleTime Read                          At 13:58:15.580 SlewSettleTime Read                        0.007 seconds. ✓ (FAST)
+14:09:40.408 SlewSettleTime Write                         At 13:58:15.587 SlewSettleTime Write                       0.003 seconds. ✓ (STANDARD)
+14:09:40.408 SideOfPier Read                              At 13:58:15.591 SideOfPier Read                            0.003 seconds. ✓ (FAST)
+14:09:40.409 SiderealTime                                 At 13:58:15.594 SiderealTime                               0.002 seconds. ✓ (FAST)
+14:09:40.409 Tracking Read                                At 13:58:15.598 Tracking Read                              0.002 seconds. ✓ (FAST)
+14:09:40.409 Tracking Write                               At 13:58:15.720 Tracking Write                             0.122 seconds. ✓ (STANDARD)
+14:09:40.409 Tracking Write                               At 13:58:17.936 Tracking Write                             0.078 seconds. ✓ (FAST)
+14:09:40.409 UTCDate Read                                 At 13:58:18.298 UTCDate Read                               0.007 seconds. ✓ (FAST)
+14:09:40.409 UTCDate Write                                At 13:58:18.681 UTCDate Write                              0.382 seconds. ✓ (STANDARD)
+14:09:40.409 CanMoveAxis:Primary                          At 13:58:19.072 CanMoveAxis:Primary                        0.007 seconds. ✓ (FAST)
+14:09:40.409 CanMoveAxis:Secondary                        At 13:58:19.075 CanMoveAxis:Secondary                      0.003 seconds. ✓ (FAST)
+14:09:40.409 CanMoveAxis:Tertiary                         At 13:58:19.078 CanMoveAxis:Tertiary                       0.003 seconds. ✓ (FAST)
+14:09:40.409 Park                                         At 13:58:39.998 Park                                       0.144 seconds. ✓ (STANDARD)
+14:09:40.409 Unpark                                       At 13:58:59.045 Unpark                                     0.133 seconds. ✓ (STANDARD)
+14:09:40.409 AbortSlew                                    At 13:59:02.966 AbortSlew                                  0.520 seconds. ✓ (STANDARD)
+14:09:40.409 FindHome                                     At 13:59:05.342 FindHome                                   0.132 seconds. ✓ (STANDARD)
+14:09:40.409 MoveAxis Primary Primary 0                   At 13:59:10.237 MoveAxis Primary Primary 0                 0.203 seconds. ✓ (STANDARD)
+14:09:40.409 MoveAxis Primary Primary 0                   At 13:59:10.457 MoveAxis Primary Primary 0                 0.202 seconds. ✓ (STANDARD)
+14:09:40.409 MoveAxis Primary Primary 4                   At 13:59:15.350 MoveAxis Primary Primary 4                 0.208 seconds. ✓ (STANDARD)
+14:09:40.410 MoveAxis Secondary Secondary 0               At 13:59:25.242 MoveAxis Secondary Secondary 0             0.203 seconds. ✓ (STANDARD)
+14:09:40.410 MoveAxis Secondary Secondary 0               At 13:59:25.475 MoveAxis Secondary Secondary 0             0.205 seconds. ✓ (STANDARD)
+14:09:40.410 MoveAxis Secondary Secondary 4               At 13:59:30.362 MoveAxis Secondary Secondary 4             0.207 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide East 2s                           At 13:59:40.300 PulseGuide East 2s                         0.104 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide North 2s                          At 13:59:42.432 PulseGuide North 2s                        0.107 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide North 5s                          At 14:00:08.028 PulseGuide North 5s                        0.104 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide South 5s                          At 14:00:13.223 PulseGuide South 5s                        0.106 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide East 5s                           At 14:00:18.400 PulseGuide East 5s                         0.104 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide West 5s                           At 14:00:23.584 PulseGuide West 5s                         0.103 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide North 5s                          At 14:01:05.036 PulseGuide North 5s                        0.105 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide South 5s                          At 14:01:10.214 PulseGuide South 5s                        0.106 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide East 5s                           At 14:01:15.409 PulseGuide East 5s                         0.107 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide West 5s                           At 14:01:20.606 PulseGuide West 5s                         0.107 seconds. ✓ (STANDARD)
+14:09:40.410 PulseGuide North 5s                          At 14:01:51.564 PulseGuide North 5s                        0.109 seconds. ✓ (STANDARD)
+14:09:40.414 PulseGuide South 5s                          At 14:01:56.754 PulseGuide South 5s                        0.103 seconds. ✓ (STANDARD)
+14:09:40.414 PulseGuide East 5s                           At 14:02:01.946 PulseGuide East 5s                         0.105 seconds. ✓ (STANDARD)
+14:09:40.415 PulseGuide West 5s                           At 14:02:07.129 PulseGuide West 5s                         0.105 seconds. ✓ (STANDARD)
+14:09:40.415 PulseGuide North 5s                          At 14:02:48.021 PulseGuide North 5s                        0.102 seconds. ✓ (STANDARD)
+14:09:40.415 PulseGuide South 5s                          At 14:02:53.187 PulseGuide South 5s                        0.102 seconds. ✓ (STANDARD)
+14:09:40.415 PulseGuide East 5s                           At 14:02:58.351 PulseGuide East 5s                         0.102 seconds. ✓ (STANDARD)
+14:09:40.415 PulseGuide West 5s                           At 14:03:03.517 PulseGuide West 5s                         0.102 seconds. ✓ (STANDARD)
+14:09:40.415 SlewToCoordinatesAsync                       At 14:03:09.228 SlewToCoordinatesAsync                     0.379 seconds. ✓ (STANDARD)
+14:09:40.415 SyncToCoordinates                            At 14:03:44.199 SyncToCoordinates                          0.272 seconds. ✓ (STANDARD)
+14:09:40.415 SyncToCoordinates                            At 14:03:50.049 SyncToCoordinates                          0.270 seconds. ✓ (STANDARD)
+14:09:40.415 SlewToTargetAsync                            At 14:03:56.350 SlewToTargetAsync                          0.378 seconds. ✓ (STANDARD)
+14:09:40.415 DestinationSideOfPier                        At 14:04:31.173 DestinationSideOfPier                      0.002 seconds. ✓ (FAST)
+14:09:40.415 DestinationSideOfPier                        At 14:04:31.177 DestinationSideOfPier                      0.002 seconds. ✓ (FAST)
+14:09:40.415 SlewToAltAzAsync                             At 14:04:32.073 SlewToAltAzAsync                           0.377 seconds. ✓ (STANDARD)
+14:09:40.415 SyncToTarget                                 At 14:05:22.606 SyncToTarget                               0.274 seconds. ✓ (STANDARD)
+14:09:40.415 SyncToTarget                                 At 14:05:28.461 SyncToTarget                               0.274 seconds. ✓ (STANDARD)
+14:09:40.416 DestinatitonSideOfPier                       At 14:06:14.522 DestinatitonSideOfPier                     0.002 seconds. ✓ (FAST)
+14:09:40.416 DestinatitonSideOfPier                       At 14:06:43.703 DestinatitonSideOfPier                     0.002 seconds. ✓ (FAST)
+14:09:40.416 DestinatitonSideOfPier                       At 14:07:56.384 DestinatitonSideOfPier                     0.002 seconds. ✓ (FAST)
+14:09:40.416 DestinatitonSideOfPier                       At 14:09:14.564 DestinatitonSideOfPier                     0.002 seconds. ✓ (FAST)
+14:09:40.416 Disconnect                                   At 14:09:39.897 Disconnect                                 0.003 seconds. ✓ (STANDARD)
+14:09:40.416                                              
+14:09:40.416 Congratulations, all members returned within their target response times!!          

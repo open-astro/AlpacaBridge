@@ -924,8 +924,8 @@ TEST_CASE("OnStep link loss - a mount that stops answering latches a fault and a
     require_refused([&] { driver->unpark(); }, "Unpark");
     require_refused([&] { driver->move_axis(1, 1.0); }, "MoveAxis");
     require_refused([&] { driver->sync_to_coordinates(2.0, 10.0); }, "SyncToCoordinates");
-    // The Alt/Az slew reports under the coordinate slew's name (it becomes one).
-    require_refused([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, "SlewToCoordinatesAsync");
+    require_refused([&] { driver->slew_to_alt_az_async(45.0, 180.0); }, "SlewToAltAzAsync");
+    require_refused([&] { driver->slew_to_coordinates_async(2.0, 10.0); }, "SlewToCoordinatesAsync");
     require_refused([&] { driver->find_home(); }, "FindHome");
     require_refused([&] { driver->park(); }, "Park");
 
@@ -1130,12 +1130,13 @@ TEST_CASE("OnStep link loss - a faulted AbortSlew does not restore tracking late
     WrapperReset reset;
     alpacacore::test::FakeTaskClock clock;
     FakeOnStepSerialMount mount;
-    mount.set_reply(":GU#", "pEo190#");  // tracking, GOTO running
+    mount.set_reply(":GU#", "NpEo190#");  // tracking, idle: a slew is refused while a GOTO runs (#1379)
     PortLink link(mount.slave_path());
     auto driver = alpacacore::vendor::onstep::create_onstep_telescope(0, quick_serial_info(link), clock);
     driver->set_connected(true);
     REQUIRE(driver->get_connected());
     REQUIRE_NOTHROW(driver->slew_to_coordinates_async(2.0, 20.0));
+    mount.set_reply(":GU#", "pEo190#");  // tracking, GOTO running
 
     mount.mute(true);
     clock.advance(std::chrono::milliseconds(2100));

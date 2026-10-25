@@ -264,17 +264,19 @@ public:
     /**
      * @brief Slew to the previously set target RA/Dec.
      *
-     * Sends :MS#. Returns true if the mount accepted the slew (response "0"),
-     * false if it reported the target as unreachable.
+     * Sends :MS# and returns the mount's reply: "0" when it accepted the slew,
+     * otherwise the OnStepX refusal digit (1 below the horizon limit ... 9
+     * unspecified, see the OnStepX :MS# reference).
      */
-    bool slew_to_target();
+    std::string slew_to_target();
 
     /**
      * @brief Sync to the previously set target RA/Dec.
      *
-     * Sends :CM#.
+     * Sends :CM# and returns the reply: "N/A" when the mount synced, "E1".."E9"
+     * when it refused (the :MS# digits, OnStep Command.ino, OnStepX Goto.command.cpp).
      */
-    void sync_to_target();
+    std::string sync_to_target();
 
     /**
      * @brief Abort any slew in progress on all axes.
@@ -305,6 +307,16 @@ public:
     void stop_tracking();
 
     /**
+     * @brief Start or stop tracking and read the mount's answer.
+     *
+     * Sends what start_tracking()/stop_tracking() send, but reads the bare
+     * '0'/'1' reply instead of draining it. Returns true when the mount
+     * accepted it; on false, get_last_command_error() says why (OnStep 4.x
+     * refuses it while slewing).
+     */
+    bool set_tracking_checked(bool on);
+
+    /**
      * @brief Park the mount at its configured park position.
      *
      * Sends :hP#. Returns true when the mount accepted the park (bare '1');
@@ -315,16 +327,18 @@ public:
     /**
      * @brief Set the current position as the park position.
      *
-     * Sends :hQ#.
+     * Sends :hQ#. Returns true when the mount accepted it (bare '1'); on false,
+     * get_last_command_error() says why.
      */
-    void set_park();
+    bool set_park();
 
     /**
      * @brief Unpark the mount.
      *
-     * Sends :hR#.
+     * Sends :hR#. Returns true when the mount accepted it (bare '1'); on false,
+     * get_last_command_error() says why (11: it was not parked).
      */
-    void unpark();
+    bool unpark();
 
     /**
      * @brief Seek the mount's home position using its home sensors.
