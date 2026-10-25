@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/celestron/celestron_protocol_wrapper.h>
 #include <arpa/inet.h>
 #include <errno.h>
@@ -79,30 +80,16 @@ std::string probe_nexstar_port(const std::string& port_path) {
         return "";
     }
 
-    // Read response: expect chr(0x42) + '#'. Each read waits up to 2 s for a
-    // character; the 3 s deadline bounds the loop.
-    char resp[4] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 2) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = util::tty_read(fd, &ch, 1, 2000);
-        if (r == 1) {
-            resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
+    // Read response: expect chr(0x42) + '#' within 3 s. The reply is binary, so
+    // nothing is skipped; a '#' or two kept bytes ends the read.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "#";
+    spec.skip.clear();
+    spec.max_len = 2;
+    const auto echo = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
-    if (total < 2 || resp[0] != 0x42 || resp[1] != '#') {
+    if (echo.bytes.size() < 2 || echo.bytes[0] != 0x42 || echo.bytes[1] != '#') {
         return "";
     }
 
@@ -112,32 +99,14 @@ std::string probe_nexstar_port(const std::string& port_path) {
         return "";
     }
 
-    char ver_resp[4] = {};
-    total = 0;
-    start = std::chrono::steady_clock::now();
-    while (total < 3) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = util::tty_read(fd, &ch, 1, 2000);
-        if (r == 1) {
-            ver_resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
+    spec.max_len = 3;
+    const auto ver = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     link.close();
 
-    if (total >= 3 && ver_resp[2] == '#') {
-        int major = static_cast<unsigned char>(ver_resp[0]);
-        int minor = static_cast<unsigned char>(ver_resp[1]);
+    if (ver.bytes.size() >= 3 && ver.bytes[2] == '#') {
+        int major = static_cast<unsigned char>(ver.bytes[0]);
+        int minor = static_cast<unsigned char>(ver.bytes[1]);
         return std::to_string(major) + "." + std::to_string(minor);
     }
 

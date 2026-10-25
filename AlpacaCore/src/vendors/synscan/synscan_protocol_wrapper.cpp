@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/util/synscan_handset_probe.h>
 #include <alpacacore/vendor/synscan/synscan_protocol_wrapper.h>
 #include <arpa/inet.h>
@@ -92,41 +93,24 @@ std::string probe_synscan_port(const std::string& port_path) {
         return "";
     }
 
-    char ver_resp[8] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 7) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        // 100 ms per read: the loop checks its deadline only BETWEEN reads, so
-        // the per-read wait is the granularity at which it is honoured (the
-        // echo helper bounds its own reads). The previous 2 s per read let a
-        // silent port overrun a 3 s budget by up to another 2 s (review
-        // finding on PR #3); the deadlines bound the loops, not this.
-        ssize_t r = util::tty_read(fd, &ch, 1, 100);
-        if (r == 1) {
-            ver_resp[total++] = ch;
-            if (ch == '#') break;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
+    // Binary-safe (nothing skipped); a '#' or seven kept bytes ends the read.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "#";
+    spec.skip.clear();
+    spec.max_len = 7;
+    const auto ver = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
+    const std::string& ver_resp = ver.bytes;
 
     // Distinguish SynScan from NexStar by response length.
     // SynScan V: 6 hex-ASCII chars + '#' (7 bytes total).
     // NexStar V: 2 binary bytes + '#' (3 bytes total).
-    bool is_synscan = (total == 7 && ver_resp[6] == '#');
+    bool is_synscan = (ver_resp.size() == 7 && ver_resp[6] == '#');
     link.close();
 
     if (is_synscan) {
         // Parse "XXYYZZ" as version XX.YY.ZZ (each pair is hex)
-        std::string hex_str(ver_resp, 6);
+        std::string hex_str = ver_resp.substr(0, 6);
         bool all_hex = true;
         for (char c : hex_str) {
             if (!std::isxdigit(static_cast<unsigned char>(c))) {
@@ -144,9 +128,9 @@ std::string probe_synscan_port(const std::string& port_path) {
             iss >> std::hex >> val;
             return val;
         };
-        int major = parse_pair(ver_resp);
-        int minor = parse_pair(ver_resp + 2);
-        int patch = parse_pair(ver_resp + 4);
+        int major = parse_pair(ver_resp.data());
+        int minor = parse_pair(ver_resp.data() + 2);
+        int patch = parse_pair(ver_resp.data() + 4);
 
         std::ostringstream oss;
         oss << std::setw(2) << std::setfill('0') << major << "."
@@ -155,7 +139,7 @@ std::string probe_synscan_port(const std::string& port_path) {
         return oss.str();
     }
 
-    if (total >= 2) {
+    if (ver_resp.size() >= 2) {
         return "unknown";
     }
 

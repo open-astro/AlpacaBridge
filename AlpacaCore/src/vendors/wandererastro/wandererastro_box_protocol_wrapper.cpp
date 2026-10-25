@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_box_protocol_wrapper.h>
 
 #include <atomic>
@@ -186,18 +187,26 @@ std::optional<BoxState> parse_frame_fields(const std::vector<std::string>& f) {
 // the identity token, then collect the following 22 fields. The controller
 // streams continuously, so a bounded listen suffices.
 std::optional<BoxState> await_frame(int fd, int timeout_ms) {
-    std::string carry;
     std::vector<std::string> fields;
     bool in_frame = false;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto remaining =
-            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
-        auto token = read_token(fd, static_cast<int>(std::max<long long>(remaining.count(), 1)), carry);
-        if (!token.has_value()) {
+    // One read_until per 'A'-terminated token, CR/LF skipped. A token of
+    // MAX_TOKEN_LEN + 1 bytes without its 'A' is Overflow: garbage, dropped
+    // so the next token resynchronises.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "A";
+    spec.max_len = MAX_TOKEN_LEN + 1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        const util::ReadResult reply = util::read_until(fd, spec, deadline);
+        if (reply.outcome == util::ReadOutcome::Overflow) {
             continue;
         }
-        if (*token == kBoxProV3ModelToken) {
+        if (reply.outcome != util::ReadOutcome::Terminator) {
+            break;  // silent until the deadline, or the line is gone
+        }
+        const std::string token = reply.bytes.substr(0, reply.bytes.size() - 1);
+        if (token == kBoxProV3ModelToken) {
             in_frame = true;
             fields.clear();
             continue;
@@ -205,7 +214,7 @@ std::optional<BoxState> await_frame(int fd, int timeout_ms) {
         if (!in_frame) {
             continue;  // mid-frame join — wait for the next identity token
         }
-        fields.push_back(*token);
+        fields.push_back(token);
         if (fields.size() == static_cast<std::size_t>(kBoxFrameFieldCount)) {
             auto state = parse_frame_fields(fields);
             if (state.has_value()) {

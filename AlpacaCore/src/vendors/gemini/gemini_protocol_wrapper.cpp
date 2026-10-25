@@ -97,32 +97,18 @@ static int probe_port(const std::string& port_path) {
             continue;
         }
 
-        // Read response — INDI reads exactly 5 bytes with a 5s timeout
-        char resp[6] = {};
-        int total = 0;
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(PROBE_READ_TIMEOUT_MS);
-        while (total < 5) {
-            const auto remaining =
-                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now())
-                    .count();
-            if (remaining <= 0) {
-                break;
-            }
-            char ch = 0;
-            const ssize_t r = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-            if (r == 1) {
-                if (ch == '\r' || ch == '\n') continue;
-                resp[total++] = ch;
-                if (ch == '#') break;
-            } else if (r == 0) {
-                continue;  // timed out; the deadline check above ends the loop
-            } else {
-                break;
-            }
-        }
+        // Read response — INDI reads exactly 5 bytes with a 5s timeout. A '#'
+        // ends the reply early; five kept bytes without one is Overflow, and
+        // every outcome keeps the bytes that arrived for the sscanf below.
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Terminator;
+        spec.terminators = "#";
+        spec.max_len = 5;
+        const auto reply = util::read_until(
+            fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(PROBE_READ_TIMEOUT_MS));
 
         int firmware = 0;
-        if (std::sscanf(resp, "F%d#", &firmware) > 0 && firmware > 0) {
+        if (std::sscanf(reply.bytes.c_str(), "F%d#", &firmware) > 0 && firmware > 0) {
             // HUPCL was cleared by configure_focuser_line(), so DTR stays
             // asserted when `link` closes the port.
             return firmware;
