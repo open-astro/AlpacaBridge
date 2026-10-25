@@ -332,6 +332,11 @@ Response DeviceCall::ok_void() const {
     return response;
 }
 
+std::string DeviceCall::success_head() const {
+    return "{\"ClientTransactionID\":" + std::to_string(client_tx_id_) +
+           ",\"ServerTransactionID\":" + std::to_string(server_tx_id_) + ",\"ErrorNumber\":0,\"ErrorMessage\":\"\"";
+}
+
 Response DeviceCall::error(std::int32_t error_number, const std::string& message) const {
     Response response;
     response.set_body(make_error_response(client_tx_id_, server_tx_id_, error_number, message));
