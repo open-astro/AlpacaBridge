@@ -37,11 +37,14 @@ TEST_CASE("iOptron iGuider camera - connected acquisition and lifecycle stress",
     // live worker, not over fail-fast connection checks only.
     REQUIRE(fake.wait_for_frames(2, std::chrono::seconds(2)));
 
-    alpacacore::test::StressCallGuard guard({AlpacaError::NotConnected, AlpacaError::InvalidOperation});
+    alpacacore::test::StressCallGuard guard(
+        {AlpacaError::NotConnected, AlpacaError::InvalidOperation, AlpacaError::PropertyNotImplemented});
     alpacacore::test::run_lifecycle_stress(*driver, [&guard](AlpacaDriver& d) {
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { camera.start_exposure(0.01, true); });
         guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(camera.get_image_array()); });
         guard([&] { static_cast<void>(camera.get_camera_state()); });
         guard([&] { static_cast<void>(camera.get_percent_completed()); });

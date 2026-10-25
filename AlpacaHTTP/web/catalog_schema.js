@@ -80,7 +80,7 @@ function vendorSelectState(catalog, deviceType, vendor, keepVendor = '') {
 // EnumerationIndex catalog field, paired with the input that pins a specific
 // unit (the descriptor's first DeviceId field, else its first PortPath field,
 // with the same appliesWhen; the one sharing the longest id path wins).
-// formFields entries: { id, vendor, deviceType, configKey, control, path }.
+// formFields entries: { id, vendor, deviceType, configKey, control, manual, readOnly, path }.
 function deriveIndexFields(catalog, formFields) {
     const sameWhen = (a, b) => (a ? JSON.stringify(a) : '') === (b ? JSON.stringify(b) : '');
     const sharedPath = (a, b) => {
@@ -121,8 +121,101 @@ function deriveIndexFields(catalog, formFields) {
     return entries;
 }
 
+// The form elements mapped to the descriptor's catalog fields, in the
+// descriptor's field order (document order within one field).
+function elementsByField(descriptor, formFields) {
+    const entries = [];
+    for (const field of descriptor.fields) {
+        for (const element of formFields) {
+            if (element.id && element.vendor === descriptor.vendor && element.deviceType === descriptor.deviceType
+                && element.configKey === field.key) {
+                entries.push({ field, element });
+            }
+        }
+    }
+    return entries;
+}
+
+// What the edit form fills from a saved config: one { id, key, value,
+// discriminator } per mapped element, in descriptor field order, so the
+// Discriminators come out in the order their togglers must run. A saved value
+// is assigned as saved (false and 0 included; a stringList joins with "\n").
+// An absent or null value is null, meaning "show the markup default", except
+// for a Discriminator, which gets its catalog default (the value the server
+// reads for an absent key). Record lists, secrets, read-only elements (their
+// value is fixed by the server) and elements marked data-config-fill="manual"
+// are not assigned. [] without a descriptor.
+function editAssignments(descriptor, config, formFields) {
+    if (!descriptor) {
+        return [];
+    }
+    const saved = config || {};
+    const assignments = [];
+    for (const { field, element } of elementsByField(descriptor, formFields)) {
+        if (element.manual || element.readOnly || field.type === 'recordList' || field.role === 'Secret') {
+            continue;
+        }
+        const discriminator = field.role === 'Discriminator';
+        let value = saved[field.key];
+        if (value === undefined || value === null) {
+            value = discriminator && field.default !== undefined ? field.default : null;
+        } else if (field.type === 'stringList') {
+            value = Array.isArray(value) ? value.join('\n') : null;
+        } else if (element.control === 'checkbox') {
+            value = value === true;
+        }
+        assignments.push({ id: element.id, key: field.key, value, discriminator });
+    }
+    return assignments;
+}
+
+// Whether each mapped element's field applies, given the values the form holds
+// (valuesById: element id to value). A field applies when it has no
+// appliesWhen, or when the discriminator element nearest to it (longest shared
+// id path) holds appliesWhen.value and itself applies. A discriminator with no
+// value in valuesById counts as holding its catalog default; one with no
+// element on the form cannot be judged, so its dependants apply.
+// { elementId: boolean }; {} without a descriptor.
+function applicability(descriptor, formFields, valuesById) {
+    if (!descriptor) {
+        return {};
+    }
+    const entries = elementsByField(descriptor, formFields);
+    const sharedPath = (a, b) => {
+        let n = 0;
+        while (n < a.length && n < b.length && a[n] === b[n]) {
+            n += 1;
+        }
+        return n;
+    };
+    const result = {};
+    const applies = (entry, seen) => {
+        if (entry.element.id in result) {
+            return result[entry.element.id];
+        }
+        const when = entry.field.appliesWhen;
+        let answer = true;
+        if (when && !seen.has(entry.element.id)) {
+            const nearest = entries.filter((e) => e.field.key === when.key)
+                .sort((a, b) => sharedPath(entry.element.path, b.element.path)
+                    - sharedPath(entry.element.path, a.element.path))[0];
+            if (nearest) {
+                const held = nearest.element.id in valuesById ? valuesById[nearest.element.id] : nearest.field.default;
+                answer = String(held) === String(when.value) && applies(nearest, new Set(seen).add(entry.element.id));
+            }
+        }
+        result[entry.element.id] = answer;
+        return answer;
+    };
+    for (const entry of entries) {
+        applies(entry, new Set());
+    }
+    return result;
+}
+
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { catalogFromResponse, catalogLoader, offeredVendors, vendorSelectState, deriveIndexFields };
+    module.exports = { catalogFromResponse, catalogLoader, offeredVendors, vendorSelectState, deriveIndexFields,
+        editAssignments, applicability };
 }

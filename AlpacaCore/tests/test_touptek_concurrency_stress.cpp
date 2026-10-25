@@ -83,6 +83,9 @@ FakeToupTekSDK make_fake_with_focuser() {
 
 TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[touptek][camera][stress]") {
     auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.cameras[0].max_width = 2;
+    fake.cameras[0].max_height = 2;
     LockedToupTekSDK sdk(fake);
     auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, sdk);
 
@@ -107,6 +110,8 @@ TEST_CASE("ToupTek camera - concurrent connect/disconnect/operate stress", "[tou
         guard([&] { cam.set_gain(100); });
         guard([&] { static_cast<void>(cam.get_readout_mode()); });
         guard([&] { cam.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { cam.abort_exposure(); });
     });
 

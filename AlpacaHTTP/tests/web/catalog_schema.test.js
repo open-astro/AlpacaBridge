@@ -26,7 +26,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const { WEB, readWeb, readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+const { WEB, readWeb, readCatalogFixture, deviceFormHtml, formFields } = require('./catalog_form_fields.js');
 
 const SCHEMA_PATH = path.join(WEB, 'catalog_schema.js');
 // Required inside each case, so a missing module fails each case on its own.
@@ -329,4 +329,154 @@ test('index.html loads catalog_schema.js before app.js', () => {
     const appTag = html.indexOf('<script src="/web/app.js');
     assert.ok(schemaTag >= 0, 'no <script src="/web/catalog_schema.js"> tag');
     assert.ok(schemaTag < appTag, 'catalog_schema.js must load before app.js');
+});
+
+// A failed catalog load writes its message to #form-message, which sits on the
+// Configure tab: the edit click must already be there, not on the Devices tab.
+test('startEditDevice opens the Configure tab before it waits for the catalog', () => {
+    const body = functionBody(app, 'startEditDevice');
+    const open = body.indexOf("showTab('configure', { preserveForm: true });");
+    assert.ok(open >= 0, "startEditDevice does not call showTab('configure', { preserveForm: true })");
+    assert.ok(open < body.indexOf('await ensureCatalog()'), 'the tab opens after the catalog wait, so the message lands on a hidden tab');
+    assert.equal(body.split("showTab('configure'").length - 1, 1, 'the tab is opened once');
+});
+
+// The delegated listener replaced 29 per-field ones: typing in an index field
+// must mark it user-modified so auto-numbering leaves it alone.
+test('the delegated input listener marks only index fields as user-modified', () => {
+    const start = app.indexOf("document.getElementById('device-form').addEventListener('input', event => {");
+    assert.ok(start >= 0, 'app.js has no delegated input listener on #device-form');
+    const body = app.slice(start, app.indexOf('\n});', start));
+    assert.match(body, /indexFields\.some\(field => field\.fieldId === event\.target\.id\)/);
+    assert.match(body, /event\.target\.dataset\.userModified = 'true'/);
+    assert.ok(body.indexOf('indexFields.some(') < body.indexOf('userModified'), 'the mark is not guarded by the index-field check');
+});
+
+// A read-only mapped control holds a value the server fixes (the ASIAIR GPIO
+// chip and PWM device path): a saved config naming another value must not be
+// loaded, or the edit sends it back and the server refuses it.
+test('editAssignments skips the read-only server-fixed controls, which keep their markup value', () => {
+    const fields = formFields(html);
+    const readOnly = fields.filter((f) => f.configKey && f.readOnly);
+    assert.deepEqual(readOnly.map((f) => f.id).sort(), ['asiair-gpio-chip', 'asiair-plus-device-path']);
+    const zwoSwitch = catalog.find((d) => d.vendor === 'zwo' && d.deviceType === 'switch');
+    const asiair = schema().editAssignments(zwoSwitch, { switchType: 'asiair', gpioChip: '/dev/gpiochip4' }, fields);
+    assert.equal(asiair.find((a) => a.id === 'asiair-gpio-chip'), undefined);
+    assert.ok(asiair.find((a) => a.id === 'zwo-switch-type'), 'the rest of the switch still fills');
+    const plus = schema().editAssignments(zwoSwitch, { switchType: 'asiair-plus-rk3568', devicePath: '/dev/other' }, fields);
+    assert.equal(plus.find((a) => a.id === 'asiair-plus-device-path'), undefined);
+    assert.equal(fields.find((f) => f.id === 'asiair-gpio-chip').markupDefault, '/dev/gpiochip0');
+    assert.equal(fields.find((f) => f.id === 'asiair-plus-device-path').markupDefault, '/dev/pwm-gpio-misc');
+});
+
+test('a checkbox is checked only by a saved true', () => {
+    const d = { vendor: 'acme', deviceType: 'focuser', available: true,
+        fields: [{ key: 'enabled', type: 'bool', role: 'Plain', default: false }] };
+    const ff = [{ id: 'acme-enabled', vendor: 'acme', deviceType: 'focuser', configKey: 'enabled',
+        control: 'checkbox', manual: false, path: [] }];
+    for (const saved of ['true', 1, 'yes']) {
+        assert.equal(schema().editAssignments(d, { enabled: saved }, ff)[0].value, false, JSON.stringify(saved));
+    }
+    assert.equal(schema().editAssignments(d, { enabled: true }, ff)[0].value, true);
+});
+
+function wholeFunction(name) {
+    const start = app.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `app.js has no function ${name}`);
+    return app.slice(start, app.indexOf('\n}\n', start));
+}
+
+// The togglers show the saved branch only if every Discriminator gets its
+// change event, after the fill and before the hiding pass.
+test('startEditDevice collects the Discriminators, puts the CGX connection type first and dispatches change on each before hiding', () => {
+    const body = wholeFunction('startEditDevice');
+    assert.match(body, /if \(assignment\.discriminator\) \{\s*discriminators\.push\(element\);/);
+    assert.match(body, /celestronConnection\.value = [^\n]*\n\s*discriminators\.unshift\(celestronConnection\);/);
+    const dispatch = body.indexOf("discriminators.forEach(element => element.dispatchEvent(new Event('change')));");
+    assert.ok(dispatch >= 0, 'no change dispatch on the Discriminators');
+    assert.ok(body.indexOf('editAssignments(') < body.indexOf('discriminators.push('));
+    assert.ok(body.indexOf('discriminators.unshift(') < dispatch);
+    assert.ok(dispatch < body.indexOf('updateFieldApplicability();'), 'the hiding pass runs before the dispatch');
+});
+
+test('startEditDevice restores the markup default for a null assignment and rebuilds the filter slot lists', () => {
+    const body = wholeFunction('startEditDevice');
+    assert.match(body, /if \(assignment\.value === null\) \{\s*restoreMarkupDefault\(element\);/);
+    assert.match(body, /if \(vendor === slotVendor && deviceType === slotType\) \{\s*slotUI\.syncSlotsFromTextarea\(\);/);
+    assert.ok(body.indexOf('syncSlotsFromTextarea()') > body.indexOf("discriminators.forEach("));
+});
+
+test('updateFieldApplicability hides a form group shared by several fields only when none of them applies', () => {
+    const body = wholeFunction('updateFieldApplicability');
+    assert.match(body, /groupApplies\.set\(group, groupApplies\.get\(group\) === true \|\| applies\[id\]\);/);
+    assert.match(body, /group\.hidden = !shown;/);
+});
+
+test('the disabled cue is scoped to the vendor select', () => {
+    const css = readWeb('style.css');
+    assert.match(css, /\.form-group #vendor:disabled \{/);
+    assert.doesNotMatch(css, /\.form-group select:disabled/);
+});
+
+// The device form as a tree of element stubs, for running app.js DOM readers:
+// each <div>, <input>, <select> and <textarea> knows its tag, attributes,
+// dataset and parent, and answers getAttribute, hasAttribute and
+// closest('[attr]'). The root stands for the <form id="device-form">.
+function deviceFormStub(source) {
+    const element = (tagName, attrs, parentElement) => {
+        const dataset = {};
+        for (const [name, value] of Object.entries(attrs)) {
+            if (name.startsWith('data-')) {
+                dataset[name.slice(5).replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
+            }
+        }
+        const node = {
+            tagName, id: attrs.id || '', dataset, parentElement,
+            getAttribute: (name) => (name in attrs ? attrs[name] : null),
+            hasAttribute: (name) => name in attrs,
+            closest(selector) {
+                const name = selector.match(/^\[([a-z-]+)\]$/)[1];
+                for (let n = node; n; n = n.parentElement) {
+                    if (n.hasAttribute(name)) return n;
+                }
+                return null;
+            },
+        };
+        return node;
+    };
+    const parseAttrs = (text) =>
+        Object.fromEntries([...text.matchAll(/([^\s=/]+)(?:="([^"]*)")?/g)].map((m) => [m[1], m[2] ?? '']));
+    const form = element('FORM', { id: 'device-form' }, null);
+    const controls = [];
+    let parent = form;
+    for (const [, close, tag, attrs] of deviceFormHtml(source).matchAll(/<(\/?)(div|input|select|textarea)\b([^>]*)>/g)) {
+        if (tag === 'div') {
+            parent = close ? parent.parentElement : element('DIV', parseAttrs(attrs), parent);
+        } else if (!close) {
+            controls.push(element(tag.toUpperCase(), parseAttrs(attrs), parent));
+        }
+    }
+    return controls;
+}
+
+// The browser half of the fill reads the form with readFormFields; every test
+// reads it with the formFields() helper. Running the real readFormFields over
+// index.html ties the two: each key the helper reports for a mapped control
+// (manual, readOnly, configKey, ...) must come out of app.js the same.
+test('readFormFields in app.js reports what the formFields helper reports for every mapped control', () => {
+    const helperOnly = ['name', 'tag', 'markupDefault'];
+    const controls = deviceFormStub(html);
+    const document = {
+        querySelectorAll(selector) {
+            assert.equal(selector, '#device-form [data-config-key]');
+            return controls.filter((c) => c.hasAttribute('data-config-key'));
+        },
+    };
+    const source = `${wholeFunction('readFormFields')}\n}\nreturn readFormFields();`;
+    const fromApp = new Function('document', source)(document);
+    const expected = formFields(html).filter((f) => f.configKey !== null).map((f) =>
+        Object.fromEntries(Object.entries(f).filter(([key]) => !helperOnly.includes(key))));
+    assert.ok(expected.length > 100, `only ${expected.length} mapped controls`);
+    assert.ok(expected.some((f) => f.manual) && expected.some((f) => f.readOnly));
+    assert.deepEqual(JSON.parse(JSON.stringify(fromApp)), expected);
 });

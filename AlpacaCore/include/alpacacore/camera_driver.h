@@ -186,8 +186,8 @@ public:
     // get_percent_completed_checked(), which applies the ICameraV4 rule.
     virtual double get_percent_completed() const = 0;
 
-    // ICameraV4 PercentCompleted: valid (0..100) while Exposing; "in all other states an
-    // InvalidOperationException must be raised". Both the GET route and the DeviceState builder call this, so
+    // Project policy: PercentCompleted is valid (0..100) only while Exposing; ICameraV4 also optionally permits
+    // Waiting, Reading and Downloading. Both the GET route and the DeviceState builder call this, so
     // no driver can answer 0 or 100 while Idle. CameraState and the raw getter are read first, so a lost link
     // or a latched fault (ADR 0006, 0009) surfaces before the InvalidOperation. Defined inline for the same
     // vtable reason as get_device_state().

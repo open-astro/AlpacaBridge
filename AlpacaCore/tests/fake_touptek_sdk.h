@@ -22,6 +22,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -82,6 +83,17 @@ public:
         if (!hold) sync_->wait_cv.notify_all();
     }
     void release_wait_image() { hold_wait_image(false); }
+    // Arm only after joining the previous acquisition. A stream-restart stop()
+    // before wait_image must not release the next acquisition's hold.
+    void hold_next_wait_image() {
+        std::lock_guard<std::mutex> lock(sync_->wait_mutex);
+        sync_->hold_next_wait = true;
+        sync_->held_wait_entered = false;
+    }
+    bool wait_for_held_image(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+        return sync_->wait_cv.wait_for(lock, timeout, [this] { return sync_->held_wait_entered && sync_->wait_hold; });
+    }
     bool deliver_frame = false;
     // What is_guiding() answers: the SDK side of a pulse the driver started.
     bool guiding = false;
@@ -180,6 +192,12 @@ public:
         require_open(h);
         {
             std::unique_lock<std::mutex> lock(sync_->wait_mutex);
+            if (sync_->hold_next_wait) {
+                sync_->hold_next_wait = false;
+                sync_->wait_hold = true;
+                sync_->held_wait_entered = true;
+                sync_->wait_cv.notify_all();
+            }
             sync_->wait_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this] { return !sync_->wait_hold; });
         }
         if (!deliver_frame) {
@@ -202,11 +220,18 @@ public:
         }
         actual_width = delivered_dimensions ? delivered_dimensions->first : modelled_width;
         actual_height = delivered_dimensions ? delivered_dimensions->second : modelled_height;
+        // Inject malformed metadata without touching pixels; the driver must
+        // reject these dimensions before converting them to its signed geometry.
+        if (actual_width > static_cast<unsigned>(std::numeric_limits<int>::max()) ||
+            actual_height > static_cast<unsigned>(std::numeric_limits<int>::max())) {
+            return true;
+        }
         // Real SDK: nRowPitch is the destination stride and must hold a whole
         // delivered row; a shorter pitch is E_INVALIDARG (GPCMOS01200KPF,
         // 2026-10-14). The driver once relied on a short pitch to crop an
         // odd-NumX frame and every such sub-frame failed on hardware.
-        if (row_pitch < static_cast<int>(actual_width) * (bits > 8 ? 2 : 1)) {
+        if (row_pitch < 0 ||
+            static_cast<std::size_t>(row_pitch) < static_cast<std::size_t>(actual_width) * (bits > 8 ? 2U : 1U)) {
             throw alpacacore::AlpacaException("Toupcam_WaitImageV4: E_INVALIDARG",
                                               alpacacore::AlpacaError::DriverException);
         }
@@ -543,6 +568,8 @@ private:
         std::mutex wait_mutex;
         std::condition_variable wait_cv;
         bool wait_hold = false;
+        bool hold_next_wait = false;
+        bool held_wait_entered = false;
     };
     std::unique_ptr<Sync> sync_ = std::make_unique<Sync>();
 

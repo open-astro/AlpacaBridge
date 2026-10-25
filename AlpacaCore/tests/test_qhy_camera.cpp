@@ -44,6 +44,7 @@ void require_alpaca_error(const std::function<void()>& fn, int expected_code) {
 
 using alpacacore::test::FakeQHYSDK;
 using alpacacore::test::LockedQHYSDK;
+namespace AlpacaError = alpacacore::AlpacaError;
 
 // Connect coverage runs over the SDK seam (issue #321). The real QHY SDK
 // cannot initialise on a test runner at all -- its libusb hotplug init
@@ -175,6 +176,10 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
 
 TEST_CASE("QHY Camera Driver - Disconnected state", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
+
+    for (double duration : {-1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        require_alpaca_error([&] { driver->start_exposure(duration, true); }, AlpacaError::InvalidValue);
+    }
 
     require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
@@ -1301,6 +1306,394 @@ int logged_ms(const std::string& line) {
 }
 
 }  // namespace
+
+TEST_CASE("QHY Camera Driver - exposure limits fail fast during connect", "[qhy][camera][unit][getter-stall]") {
+    const bool maximum = GENERATE(false, true);
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    gate.arm(fake, "init_camera");
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0, fake, clock);
+    TeardownGuard teardown{clock, driver, &gate};
+    driver->connect();
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    std::atomic<int> error{0};
+    std::thread reader([&] {
+        try {
+            if (maximum)
+                (void)driver->get_exposure_max();
+            else
+                (void)driver->get_exposure_min();
+            error = -1;
+        } catch (const alpacacore::AlpacaException& ex) {
+            error = ex.error_code();
+        }
+    });
+    JoinPumped joiner{clock, reader, &gate};
+    CHECK(eventually([&] { return error.load() != 0; }, milliseconds(500)));
+    CHECK(error.load() == AlpacaError::NotConnected);
+}
+
+TEST_CASE("QHY Camera Driver - metadata is tied to worker arm not request or readout",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    gate.arm(fake, "register_exposure_worker");
+    auto hold_registration = fake.before_call;
+    std::thread::id arm_thread, download_thread;
+    std::chrono::system_clock::time_point arm_upper;
+    fake.before_call = [&](const std::string& name) {
+        hold_registration(name);
+        if (name == "start_single_frame") {
+            arm_thread = std::this_thread::get_id();
+            arm_upper = std::chrono::system_clock::now();
+        } else if (name == "get_single_frame") {
+            download_thread = std::this_thread::get_id();
+        }
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    std::thread starter([&] { driver->start_exposure(0.012345, true); });
+    JoinPumped joiner{clock, starter, &gate};
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    alpacacore::test::require_last_exposure_unset(*driver);
+    clock.advance(milliseconds(500));
+    CHECK(driver->get_percent_completed() == 0.0);
+    const auto arm_lower = std::chrono::system_clock::now();
+    gate.release = true;
+    starter.join();
+    REQUIRE(clock.wait_for_waiters(1, seconds(2)));  // mandatory post-arm settle
+    alpacacore::test::require_last_exposure_unset(*driver);
+    CHECK_FALSE(driver->get_image_ready());
+    clock.advance(milliseconds(6));
+    ALPACA_REQUIRE_APPROX(driver->get_percent_completed(), 100.0 * 0.006 / 0.012345);
+    clock.advance(milliseconds(994));
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 0.012345);
+    const auto start = driver->get_last_exposure_start_time();
+    CHECK(start >= arm_lower);
+    CHECK(start <= arm_upper);
+    CHECK(arm_thread == download_thread);
+    CHECK(arm_thread != std::this_thread::get_id());
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+TEST_CASE("QHY Camera Driver - pending cancelled and timed out frames cannot publish metadata",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "get_single_frame");
+    gate.armed = false;
+    auto hold_frame = fake.before_call;
+    std::atomic<bool> cancelled{false};
+    fake.before_call = [&](const std::string& name) {
+        hold_frame(name);
+        if (name == "cancel_exposure") cancelled = true;
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    const auto not_connected = [&] {
+        CHECK(error_code_of([&] { (void)driver->get_last_exposure_duration(); }) == AlpacaError::NotConnected);
+        CHECK(error_code_of([&] { (void)driver->get_last_exposure_start_time(); }) == AlpacaError::NotConnected);
+    };
+    not_connected();
+    driver->set_connected(true);
+    alpacacore::test::require_last_exposure_unset(*driver);
+    const bool previous_success = GENERATE(false, true);
+    std::chrono::system_clock::time_point previous_start{};
+    if (previous_success) {
+        driver->start_exposure(0.02, true);
+        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        REQUIRE_NOTHROW(previous_start = driver->get_last_exposure_start_time());
+        driver->set_connected(true);  // redundant connect keeps the pair
+    }
+    const auto unchanged = [&] {
+        if (previous_success) {
+            CHECK(driver->get_last_exposure_duration() == 0.02);
+            CHECK(driver->get_last_exposure_start_time() == previous_start);
+        } else {
+            alpacacore::test::require_last_exposure_unset(*driver);
+        }
+    };
+    gate.armed = true;
+    driver->start_exposure(2.0, true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    unchanged();
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(error_code_of([&] { driver->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
+    unchanged();
+    SECTION("abort rejects even a late successful SDK frame") {
+        cancelled = false;
+        std::atomic<bool> abort_done{false};
+        std::thread aborter([&] {
+            driver->abort_exposure();
+            abort_done = true;
+        });
+        JoinPumped joiner{clock, aborter, &gate};
+        REQUIRE(eventually([&] { return cancelled.load(); }));
+        gate.release = true;
+        // A broken worker can report Idle before the aborter's clock-driven reap has finished.
+        step_until(clock, [&] { return abort_done.load(); });
+        REQUIRE(abort_done.load());
+        aborter.join();
+        CHECK_FALSE(driver->get_image_ready());
+    }
+    SECTION("watchdog rejects even a late successful SDK frame") {
+        clock.advance(seconds(62));
+        CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
+        gate.release = true;
+    }
+    SECTION("download failure preserves the pair") {
+        fake.frame_ok = false;
+        gate.release = true;
+        REQUIRE(eventually(
+            [&] { return error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException; }));
+    }
+    SECTION("a new success replaces both values") {
+        gate.release = true;
+        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        CHECK(driver->get_last_exposure_duration() == 2.0);
+        CHECK(driver->get_last_exposure_start_time() >= previous_start);
+        CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+        not_connected();
+        driver->set_connected(true);
+        alpacacore::test::require_last_exposure_unset(*driver);
+        return;
+    }
+    unchanged();
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+    not_connected();
+    driver->set_connected(true);
+    alpacacore::test::require_last_exposure_unset(*driver);
+}
+
+namespace {
+
+void check_failed_qhy_mode_configuration(bool fail_reinitialization) {
+    // Model the real wrapper's mode selection followed by a potentially throwing InitQHYCCD.
+    struct ModeSDK : FakeQHYSDK {
+        ModeSDK() : FakeQHYSDK(FakeQHYSDK::with_one_camera()) {}
+        void set_readout_mode(const std::string& id, uint32_t mode) override {
+            FakeQHYSDK::set_readout_mode(id, mode);
+            init_camera(id);
+        }
+    } fake;
+    FakeTaskClock clock;
+    fake.read_directly = true;
+    fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].max = 5'000'000.0;
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver};
+    driver->set_connected(true);
+    REQUIRE(driver->get_exposure_max() == 5.0);
+    fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].max = 3'000'000.0;
+    const bool range_returns_failure = !fail_reinitialization && GENERATE(false, true);
+    if (range_returns_failure) {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].available = false;
+    } else {
+        fake.throw_from.insert(fail_reinitialization ? "init_camera" : "get_param_range");
+    }
+    CHECK(error_code_of([&] { driver->set_readout_mode(1); }) == AlpacaError::DriverException);
+    CHECK(fake.call_count("set_readout_mode") == 1);
+    CHECK(fake.call_count("init_camera") == 2);
+    CHECK(fake.call_count("get_param_range") == (fail_reinitialization ? 1 : 2));
+    CHECK(driver->get_connected());
+    const int cancellations = fake.call_count("cancel_exposure");
+    const int arms = fake.call_count("start_single_frame");
+    CHECK(error_code_of([&] { (void)driver->get_exposure_max(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_exposure_min(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->start_exposure(1.0, true); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { driver->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
+    CHECK(error_code_of([&] { driver->set_readout_mode(-1); }) == AlpacaError::InvalidValue);
+    CHECK(fake.call_count("cancel_exposure") == cancellations);
+    CHECK(fake.call_count("start_single_frame") == arms);
+    alpacacore::test::require_last_exposure_unset(*driver);
+    // Removing injection alone must not make the old cached limits authoritative again.
+    fake.throw_from.clear();
+    fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].available = true;
+    CHECK(error_code_of([&] { (void)driver->get_exposure_max(); }) == AlpacaError::DriverException);
+    if (GENERATE(false, true)) {
+        CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+        driver->set_connected(true);
+    } else {
+        driver->set_readout_mode(1);
+    }
+    CHECK(driver->get_exposure_max() == 3.0);
+    CHECK(driver->get_exposure_min() == 0.0001);
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 1.0);
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+}  // namespace
+
+TEST_CASE("QHY Camera Driver - failed reinitialization after mode selection invalidates exposure limits",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    check_failed_qhy_mode_configuration(true);
+}
+
+TEST_CASE("QHY Camera Driver - failed range refresh invalidates exposure limits",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    check_failed_qhy_mode_configuration(false);
+}
+
+TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition in flight",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].max = 5'000'000.0;
+    gate.arm(fake, "get_single_frame");
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    const bool changed_mode = GENERATE(false, true);
+    if (changed_mode) {
+        fake.param_ranges[alpacacore::vendor::qhy::control::EXPOSURE].max = 3'000'000.0;
+        driver->set_readout_mode(1);
+    }
+    const double maximum = driver->get_exposure_max();
+    CHECK(maximum == (changed_mode ? 3.0 : 5.0));
+    for (double duration : {-1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        require_alpaca_error([&] { driver->start_exposure(duration, true); }, AlpacaError::InvalidValue);
+    }
+    driver->start_exposure(2.0, true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    const int cancellations = fake.call_count("cancel_exposure");
+    const int range_reads = fake.call_count("get_param_range");
+    std::atomic<bool> done{false};
+    int error = 0;
+    std::thread rejecter([&] {
+        error = error_code_of([&] { driver->start_exposure(maximum + 1.0, true); });
+        done = true;
+    });
+    JoinPumped joiner{clock, rejecter, &gate};
+    REQUIRE(eventually([&] { return done.load(); }));  // must not wait behind the held SDK download
+    rejecter.join();
+    CHECK(error == AlpacaError::InvalidValue);
+    CHECK(fake.call_count("cancel_exposure") == cancellations);
+    CHECK(fake.call_count("get_param_range") == range_reads);
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    gate.release = true;
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 2.0);
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
+
+TEST_CASE("QHY Camera Driver - failed replacement setup retires the cancelled acquisition",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    const auto failing_call =
+        GENERATE("set_param", "is_control_available", "set_resolution", "set_bin_mode", "set_bits_mode");
+    const bool previous_success = GENERATE(false, true);
+    CAPTURE(failing_call, previous_success);
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "get_single_frame");
+    gate.armed = false;
+    const auto hold_frame = fake.before_call;
+    std::atomic<bool> cancel_releases_frame{false};
+    fake.before_call = [&](const std::string& name) {
+        if (name == "cancel_exposure" && cancel_releases_frame.load()) gate.release = true;
+        hold_frame(name);
+    };
+    LockedQHYSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    std::chrono::system_clock::time_point previous_start{};
+    if (previous_success) {
+        driver->start_exposure(0.02, true);
+        REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+        previous_start = driver->get_last_exposure_start_time();
+    }
+    gate.armed = true;
+    gate.release = false;
+    {
+        ClockPump pump(clock);
+        driver->start_exposure(3000.0, true);
+    }
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    fake.throw_from.insert(failing_call);
+    cancel_releases_frame = true;
+    {
+        ClockPump pump(clock);
+        CHECK(error_code_of([&] { driver->start_exposure(1.0, false); }) == AlpacaError::DriverException);
+    }
+    fake.throw_from.clear();
+    CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == AlpacaError::InvalidOperation);
+    CHECK_NOTHROW(driver->set_gain(12));
+    clock.advance(seconds(3601));
+    CHECK_FALSE(driver->get_image_ready());  // The cancelled deadline must not expire later.
+    if (previous_success) {
+        CHECK(driver->get_last_exposure_duration() == 0.02);
+        CHECK(driver->get_last_exposure_start_time() == previous_start);
+    } else {
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    gate.armed = false;
+    driver->start_exposure(1.0, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 1.0);
+}
+
+TEST_CASE("QHY Camera Driver - an unpolled deadline rejects a late successful frame",
+          "[qhy][camera][unit][taskclock][metadata]") {
+    // Observe worker completion without calling a getter that could expire the deadline itself.
+    struct ObservedSDK : LockedQHYSDK {
+        using LockedQHYSDK::LockedQHYSDK;
+        std::shared_ptr<std::atomic<bool>> running;
+        void register_exposure_worker(const std::string& id, std::shared_ptr<std::atomic<bool>> flag) override {
+            running = flag;
+            LockedQHYSDK::register_exposure_worker(id, std::move(flag));
+        }
+    };
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    fake.read_directly = true;
+    gate.arm(fake, "get_single_frame");
+    gate.armed = false;
+    ObservedSDK sdk(fake);
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera(0, "fake-qhy-0", sdk, clock);
+    TeardownGuard guard{clock, driver, &gate};
+    driver->set_connected(true);
+    const bool previous_success = GENERATE(false, true);
+    std::chrono::system_clock::time_point previous_start{};
+    if (previous_success) {
+        driver->start_exposure(0.02, true);
+        REQUIRE(eventually([&] { return !sdk.running->load(); }));
+        REQUIRE(driver->get_image_ready());
+        previous_start = driver->get_last_exposure_start_time();
+    }
+    gate.armed = true;
+    driver->start_exposure(2.0, true);
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    clock.advance(seconds(63));  // exposure + default 60s margin, with no watchdog getter
+    gate.release = true;
+    REQUIRE(eventually([&] { return !sdk.running->load(); }));
+    if (previous_success) {
+        CHECK(driver->get_last_exposure_duration() == 0.02);
+        CHECK(driver->get_last_exposure_start_time() == previous_start);
+    } else {
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    CHECK(error_code_of([&] { (void)driver->get_image_ready(); }) == AlpacaError::DriverException);
+    CHECK(error_code_of([&] { (void)driver->get_image_array(); }) == AlpacaError::DriverException);
+    CHECK(disconnect_stepping(clock, *driver) < seconds(2));
+}
 
 TEST_CASE("QHY Camera Driver - the exposure watchdog expires on the injected clock", "[qhy][camera][unit][taskclock]") {
     // Falsified by: qhy_camera_driver.cpp start_exposure() stamping

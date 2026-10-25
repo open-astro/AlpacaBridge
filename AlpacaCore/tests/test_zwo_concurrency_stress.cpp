@@ -125,6 +125,8 @@ TEST_CASE("ZWO camera - connected SDK acquisition lifecycle stress", "[zwo][came
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { camera.start_exposure(0.001, true); });
         guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(camera.get_image_array()); });
         guard([&] { camera.stop_exposure(); });
         guard([&] { static_cast<void>(camera.get_camera_state()); });
@@ -153,6 +155,8 @@ TEST_CASE("ZWO camera - connected lifecycle stress behind LockedZWOSDK", "[zwo][
         auto& camera = static_cast<alpacacore::CameraDriver&>(d);
         guard([&] { camera.start_exposure(0.001, true); });
         guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(camera.get_image_array()); });
         guard([&] { camera.stop_exposure(); });
         guard([&] { static_cast<void>(camera.get_camera_state()); });

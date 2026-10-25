@@ -124,6 +124,8 @@ TEST_CASE("Player One camera - concurrent connect/disconnect/operate stress", "[
         guard([&] { static_cast<void>(camera.get_cooler_on()); });
         guard([&] { camera.start_exposure(0.000001, true); });
         guard([&] { static_cast<void>(camera.get_image_ready()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(camera.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(camera.get_image_array()); });
         guard([&] { camera.stop_exposure(); });
     });

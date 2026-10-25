@@ -46,6 +46,8 @@ TEST_CASE("QHY camera - concurrent connect/disconnect/exposure stress", "[qhy][c
         auto& cam = static_cast<alpacacore::CameraDriver&>(device);
         guard([&] { static_cast<void>(cam.get_camera_state()); });
         guard([&] { static_cast<void>(cam.get_image_ready()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { static_cast<void>(cam.get_image_array()); });
         guard([&] { cam.start_exposure(0.001, true); });
         guard([&] { cam.abort_exposure(); });

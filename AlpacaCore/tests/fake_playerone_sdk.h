@@ -126,11 +126,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("get_config_int");
         if (is_auto) *is_auto = false;
+        if (config_id == 0) return exposure_us_;
         return config_id == 1 ? gain_.load() : 0;
     }
     void set_config_int(int, int config_id, long value, bool) override {
         std::lock_guard<std::mutex> lock(mutex_);
         require_open_locked("set_config_int");
+        if (config_id == 0) exposure_us_ = value;
         if (config_id == 1) gain_ = value;
     }
     double get_config_float(int, int, bool* is_auto = nullptr) override {
@@ -535,6 +537,7 @@ private:
     int start_x_{0};
     int start_y_{0};
     int bin_{1};
+    long exposure_us_{1};
     std::optional<int> returned_width_;
     std::optional<int> returned_height_;
     std::vector<std::uint8_t> frame_data_ = std::vector<std::uint8_t>(16 * 8 * 2, 0);

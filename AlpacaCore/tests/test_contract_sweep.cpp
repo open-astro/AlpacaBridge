@@ -329,6 +329,8 @@ std::vector<Probe> not_connected_probes(AlpacaDriver& d, DeviceType type, const 
             auto& c = dynamic_cast<alpacacore::CameraDriver&>(d);
             p.push_back({"get_gain", [&] { (void)c.get_gain(); }});
             p.push_back({"get_image_ready", [&] { (void)c.get_image_ready(); }});
+            p.push_back({"get_last_exposure_duration", [&] { (void)c.get_last_exposure_duration(); }});
+            p.push_back({"get_last_exposure_start_time", [&] { (void)c.get_last_exposure_start_time(); }});
             p.push_back({"get_camera_state", [&] { (void)c.get_camera_state(); }});
             p.push_back({"get_percent_completed", [&] { (void)c.get_percent_completed(); }});
             p.push_back({"get_ccd_temperature", [&] { (void)c.get_ccd_temperature(); }});
@@ -2238,8 +2240,7 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_IMAGE_PRB(id)
 #define CS2_IMAGE_NPR(id)
 // LastExposure* before any image: cameras only. Every camera id is named here, so a new camera host fails to
-// compile until it says whether it takes the case. ToupTek and Altair are skipped until open PR #1397 (which
-// rewrites touptek_camera_driver.cpp) lands; they then join (issue #1477, remaining rows).
+// compile until it says whether it takes the case. The #1397 hold still applies to ToupTek/Altair cooler work.
 #define CS2_LASTEXP(id, kind) CS2_LASTEXP_##kind(id)
 #define CS2_LASTEXP_TEL(id)
 #define CS2_LASTEXP_PRB(id)
@@ -2253,8 +2254,8 @@ TEST_CASE("Contract sweep - filter wheels - names and offsets while disconnected
 #define CS2_LASTEXP_svbony_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_playerone_camera(id) CS2_LASTEXP_RUN(id)
 #define CS2_LASTEXP_gphoto_camera(id) CS2_LASTEXP_RUN(id)
-#define CS2_LASTEXP_touptek_camera(id)
-#define CS2_LASTEXP_altair_camera(id)
+#define CS2_LASTEXP_touptek_camera(id) CS2_LASTEXP_RUN(id)
+#define CS2_LASTEXP_altair_camera(id) CS2_LASTEXP_RUN(id)
 
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_CONNECTING)
 CONTRACT_SWEEP_TIER2_HOSTS(CS2_TARGETS)

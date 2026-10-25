@@ -43,7 +43,12 @@ test('the focus motor port input has a unique vendor-prefixed name', () => {
 });
 
 test('the focus motor port is loaded on edit and sent on submit', () => {
-    assert.ok(app.includes("setFormValue('celestron-focuser-port-path', config.portPath);"));
+    const { readCatalogFixture, formFields } = require('./catalog_form_fields.js');
+    const { editAssignments } = require(path.join(web, 'catalog_schema.js'));
+    const descriptor = readCatalogFixture().find((d) => d.vendor === 'celestron' && d.deviceType === 'focuser');
+    const filled = editAssignments(descriptor, { portPath: '/dev/ttyUSB3' }, formFields(html))
+        .find((a) => a.id === 'celestron-focuser-port-path');
+    assert.deepEqual(filled && [filled.key, filled.value], ['portPath', '/dev/ttyUSB3']);
     assert.ok(app.includes("deviceData.portPath = (formData.get('celestronFocuserPortPath') || '').trim();"));
 });
 
