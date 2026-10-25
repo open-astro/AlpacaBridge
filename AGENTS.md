@@ -62,7 +62,7 @@ Each line is a summary; the linked topic file holds the rule and its history.
   `with_camera`/`with_handle` SDK calls (kept until a stall is measured); one per-link
   I/O lock serialises the wire. Lock order in a converted driver: `transition_mutex_` →
   I/O lock → `mutex_` (leaf of the driver's own locks) → SDK-wrapper mutex, with the
-  `StateSnapshot` and slot mutexes as leaves under `mutex_`. Cameras and unconverted
+  `StateSnapshot`, slot and `CaptureSession` mutexes as leaves under `mutex_`. Cameras and unconverted
   drivers keep `mutex_` → operation lock → SDK-wrapper mutex
   ([decision 0016](docs/decisions/0016-getters-never-wait-on-device-io.md)).
 - `set_connected(false)` clears driver state before the SDK close; a connect guards all
