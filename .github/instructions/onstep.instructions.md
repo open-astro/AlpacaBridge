@@ -501,7 +501,8 @@ it is never reachable through `router.cpp` or the web UI.
 - **`UTCDate` is the mount's clock or a client's write, never the host's** (#1478): the connect
   reads the mount clock once (`:GL#`/`:GC#`/`:GG#`, `seed_utc_from_mount_locked()`, after any
   `syncTimeOnConnect` write, which makes the read unneeded), so `UTCDate`, and so `DeviceState`,
-  never waits on a serial exchange. If that read fails, `UTCDate` throws `InvalidOperation` with
+  performs no serial exchange of its own (it still takes `mutex_`, so it can queue behind another
+  member's exchange until #1449). If that read fails, `UTCDate` throws `InvalidOperation` with
   the reason, with no further read, until a `UTCDate` write or the next connect. The LST
   computations still fall back to the host clock, without storing it. `SiteElevation` throws
   `InvalidOperation` until the device config or a client sets it: the protocol has no elevation

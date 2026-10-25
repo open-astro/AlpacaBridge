@@ -423,7 +423,7 @@ public:
                 }
             }
             // The mount clock is read here, once, so UTCDate (and so DeviceState)
-            // never waits on a serial exchange (#1478); a written UTCDate needs none.
+            // performs no serial exchange of its own (#1478); a written UTCDate needs none.
             if (!utc_offset_.valid()) {
                 seed_utc_from_mount_locked();
             }
@@ -2405,8 +2405,9 @@ private:
     mutable std::chrono::steady_clock::time_point last_site_info_attempt_;
     std::atomic<double> site_elevation_m_;  // NaN until set or configured
 
-    // Decision 0014: the UTCDate a client wrote (or the seed) and the task-clock
-    // time since. Cleared on connect and disconnect. Under mutex_.
+    // Decision 0014: the UTCDate a client wrote, or the mount clock the connect
+    // read (seed_utc_from_mount_locked()), and the task-clock time since.
+    // Cleared on connect and disconnect. Under mutex_.
     mutable util::UtcOffset utc_offset_;
     // Why the connect could not read the mount clock (#1478); under mutex_,
     // cleared on connect, disconnect and a UTCDate write.
