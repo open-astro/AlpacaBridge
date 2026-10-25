@@ -41,10 +41,19 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   delay and exception text and decides what `LinkDead` means. It is two concrete overloads, not a `ByteChannel`
   (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the Gemini focuser and flat
   panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that hears a hangup logs "no
-  ack" and does not report a lost link). The iOptron mount, Celestron NexStar, SynScan and ZWO mount loops, the
-  QHY CFW3 and Q-Focuser readers and the probe and handshake loops still use their own loops and move in later
-  slices (upstream issue #1604). The Sky-Watcher and Celestron CGX loops (decision 0017 rule 9) and the stream
-  readers (Wanderer, Gemini PDH) keep their own shape.
+  ack" and does not report a lost link), the serial auto-detect probe and handshake loops (Gemini, iEAF/iEFW, iOptron,
+  Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the SynScan handset probe and
+  the QHY CFW3 `read_reply`. Each probe judges the bytes it got, as its old loop did, and a hangup means
+  "not this device", except the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening
+  until their deadline as before. The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial
+  or overflowed reply as it stands; the Wanderer probes drop an overflowed token and keep listening. Still on their
+  own loops, moving in later slices (upstream issue #1604): the connected-path `read_serial_char` readers of the
+  iOptron mount, Celestron NexStar, SynScan and ZWO mount, the Q-Focuser JSON reader, the OnStep probe and
+  connected reader, the ZWO owed-reply drain and pre-flush peek, the iOptron and ZWO mount TCP probes
+  (`probe_ioptron_network`, `probe_network_mount`), and the `read_network_char` readers of the iOptron mount,
+  Celestron NexStar, SynScan, ZWO mount and OnStep (no caller uses `read_until_socket()` yet). The Sky-Watcher
+  connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer, Gemini PDH)
+  keep their own shape.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
   pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,

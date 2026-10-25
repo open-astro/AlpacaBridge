@@ -21,17 +21,20 @@
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/qhy/qhy_cfw3_protocol_wrapper.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <mutex>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
@@ -82,32 +85,32 @@ void configure_tty(struct termios& tty) { util::make_raw_8n1(tty, B9600); }
 
 // Read up to `max_len` bytes: wait up to `first_byte_ms` for the first byte,
 // then keep collecting until `max_len` is reached or the line has been idle
-// for kReplyIdleMs. Sets link_dead when the port is gone (a hangup, EOF, or
-// EIO/ENXIO/ENODEV/EBADF) so the caller fails the transaction at once instead
+// for kReplyIdleMs (util::read_until, IdleGap). Sets link_dead when the port
+// is gone (a hangup, EOF, or EIO/ENXIO/ENODEV/EBADF) so the caller fails the transaction at once instead
 // of re-polling to the deadline.
 std::string read_reply(int fd, int first_byte_ms, std::size_t max_len, bool& link_dead) {
+    // Bounded by poll() on the non-blocking fd: a retune to VMIN=1 by another
+    // program cannot park this read (#1202). A hangup reads as LinkDead, never
+    // as a quiet timeout. The reply is raw bytes, so nothing is skipped; the
+    // overall deadline is the first-byte window plus one idle window per byte.
+    // That cap cannot cut a reply the idle rule would accept: every byte after
+    // the first must arrive within kReplyIdleMs of the one before it, so
+    // max_len bytes need at most first_byte_ms + (max_len - 1) * kReplyIdleMs,
+    // and the closing idle window of the last byte fits in the one spare window.
     link_dead = false;
-    std::string buf;
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(first_byte_ms);
-    while (buf.size() < max_len) {
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) break;
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
-        char ch = 0;
-        // Bounded by poll() on the non-blocking fd: a retune to VMIN=1 by
-        // another program cannot park this read (#1202). A hangup reads as
-        // -1/EIO, never as a quiet 0.
-        const ssize_t n = util::tty_read(fd, &ch, 1, static_cast<int>(remaining));
-        if (n == 0) continue;  // nothing within the window; the deadline check ends the loop
-        if (n < 0) {
-            if (errno == EIO || errno == ENXIO || errno == ENODEV || errno == EBADF) link_dead = true;
-            return buf;
-        }
-        buf += ch;
-        // First byte in: the rest of the reply follows within the idle window.
-        deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kReplyIdleMs);
-    }
-    return buf;
+    // max_len 0 asks for no bytes; read_until would still return one as Overflow.
+    if (max_len == 0) return {};
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::IdleGap;
+    spec.idle_gap = std::chrono::milliseconds(kReplyIdleMs);
+    spec.skip.clear();
+    spec.max_len = max_len;
+    spec.first_byte_timeout = std::chrono::milliseconds(first_byte_ms);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(first_byte_ms) +
+                          static_cast<std::int64_t>(max_len) * std::chrono::milliseconds(kReplyIdleMs);
+    util::ReadResult reply = util::read_until(fd, spec, deadline);
+    link_dead = reply.outcome == util::ReadOutcome::LinkDead;
+    return std::move(reply.bytes);
 }
 
 // Wait for the boot byte the wheel emits once it has homed after the DTR

@@ -24,6 +24,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifndef _WIN32
@@ -108,24 +109,16 @@ bool probe_ieaf_port(const std::string& port_path, IeafDeviceInfo& info) {
             continue;
         }
 
-        std::string resp;
-        auto start = std::chrono::steady_clock::now();
-        while (resp.length() < MAX_RESPONSE_LEN) {
-            auto elapsed =
-                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count();
-            if (elapsed > HANDSHAKE_READ_TIMEOUT_S) {
-                break;
-            }
-            char ch = 0;
-            ssize_t r = util::tty_read(fd, &ch, 1, READ_CHAR_TIMEOUT_MS);
-            if (r == 1) {
-                if (ch == '\r' || ch == '\n') continue;
-                if (ch == '#') break;
-                resp += ch;
-            } else if (r != 0) {
-                break;
-            }
-        }
+        // The '#' ends the reply and is not part of it; a reply of
+        // MAX_RESPONSE_LEN kept bytes without one is Overflow and is parsed as is.
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Terminator;
+        spec.terminators = "#";
+        spec.max_len = MAX_RESPONSE_LEN;
+        auto reply = util::read_until(
+            fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(HANDSHAKE_READ_TIMEOUT_S));
+        std::string resp = std::move(reply.bytes);
+        if (reply.outcome == util::ReadOutcome::Terminator) resp.pop_back();
 
         IeafDeviceInfo parsed;
         if (parse_device_info(resp, parsed) && is_ieaf_model(parsed.model)) {
