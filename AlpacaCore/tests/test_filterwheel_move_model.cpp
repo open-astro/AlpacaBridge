@@ -212,50 +212,62 @@ void position_ignores_transit_slots_until_the_target_is_reported() {
 // case the ZWO driver diverges on (decision 0020): CI then fails if the divergence goes away without the record being
 // updated.
 
-TEST_CASE("Filter wheel move model - Position is -1 while moving, then the target (ZWO EFW)", "[filterwheel][move-model][zwo][unit]") {
+TEST_CASE("Filter wheel move model - Position is -1 while moving, then the target (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit]") {
     position_is_minus_one_while_moving_then_the_target<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - Position is -1 while moving, then the target (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - Position is -1 while moving, then the target (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     position_is_minus_one_while_moving_then_the_target<QhyRig>();
 }
 
-TEST_CASE("Filter wheel move model - a valid write returns without waiting (ZWO EFW)", "[filterwheel][move-model][zwo][unit]") {
+TEST_CASE("Filter wheel move model - a valid write returns without waiting (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit]") {
     a_valid_write_returns_without_waiting_for_the_move<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - a valid write returns without waiting (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - a valid write returns without waiting (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     a_valid_write_returns_without_waiting_for_the_move<QhyRig>();
 }
 
-TEST_CASE("Filter wheel move model - an out-of-range write is InvalidValue (ZWO EFW)", "[filterwheel][move-model][zwo][unit]") {
+TEST_CASE("Filter wheel move model - an out-of-range write is InvalidValue (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit]") {
     an_out_of_range_write_is_invalid_value_and_starts_no_move<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - an out-of-range write is InvalidValue (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - an out-of-range write is InvalidValue (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     an_out_of_range_write_is_invalid_value_and_starts_no_move<QhyRig>();
 }
 
-TEST_CASE("Filter wheel move model - InvalidValue precedes NotConnected (ZWO EFW)", "[filterwheel][move-model][zwo][unit]") {
+TEST_CASE("Filter wheel move model - InvalidValue precedes NotConnected (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit]") {
     invalid_value_precedes_not_connected<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - InvalidValue precedes NotConnected (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - InvalidValue precedes NotConnected (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     invalid_value_precedes_not_connected<QhyRig>();
 }
 
-TEST_CASE("Filter wheel move model - a cache primed at connect needs no read (ZWO EFW)", "[filterwheel][move-model][zwo][unit][!shouldfail]") {
+TEST_CASE("Filter wheel move model - a cache primed at connect needs no read (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit][!shouldfail]") {
     a_cache_primed_at_connect_answers_without_a_device_read<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - a cache primed at connect needs no read (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - a cache primed at connect needs no read (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     a_cache_primed_at_connect_answers_without_a_device_read<QhyRig>();
 }
 
-TEST_CASE("Filter wheel move model - transit slots never reach Position (ZWO EFW)", "[filterwheel][move-model][zwo][unit][!shouldfail]") {
+TEST_CASE("Filter wheel move model - transit slots never reach Position (ZWO EFW)",
+          "[filterwheel][move-model][zwo][unit][!shouldfail]") {
     position_ignores_transit_slots_until_the_target_is_reported<ZwoRig>();
 }
 
-TEST_CASE("Filter wheel move model - transit slots never reach Position (QHY CFW3)", "[filterwheel][move-model][qhy][unit]") {
+TEST_CASE("Filter wheel move model - transit slots never reach Position (QHY CFW3)",
+          "[filterwheel][move-model][qhy][unit]") {
     position_ignores_transit_slots_until_the_target_is_reported<QhyRig>();
 }
