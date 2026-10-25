@@ -1836,8 +1836,7 @@ TEST_CASE("Player One Camera Driver - settings stay locked while a cancelled bod
     driver->set_connected(false);
 }
 
-TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked too early",
-          "[playerone][camera][unit]") {
+TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked too early", "[playerone][camera][unit]") {
     alpacacore::test::FakePlayerOneSDK sdk;
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
     driver->set_connected(true);
