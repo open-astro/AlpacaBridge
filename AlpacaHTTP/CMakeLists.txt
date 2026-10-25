@@ -260,6 +260,7 @@ set(ALPACAHTTP_SOURCES
     src/core/catalog_json.cpp
     src/http/router.cpp
     src/http/device_call.cpp
+    src/http/image_payload.cpp
     src/http/server.cpp
     src/http/thread_join.cpp
     src/util/threading.cpp
@@ -413,6 +414,11 @@ if(ALPACAHTTP_BUILD_TESTS)
     add_executable(test_device_call tests/test_device_call.cpp)
     target_link_libraries(test_device_call alpacahttp)
     add_test(NAME test_device_call COMMAND test_device_call)
+
+    # Camera imagearray payload (ImageBytes and JSON ImageArray) on synthetic images.
+    add_executable(test_image_payload tests/test_image_payload.cpp)
+    target_link_libraries(test_image_payload alpacahttp)
+    add_test(NAME test_image_payload COMMAND test_image_payload)
 
     # Threaded storm over the router's persisted_devices_ store (audit 3.0.1
     # follow-up): configure/remove/configureddevices from concurrent threads,
