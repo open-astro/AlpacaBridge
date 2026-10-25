@@ -733,6 +733,7 @@ public:
     double get_last_exposure_duration() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!last_exposure_valid_) {
             throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
         }
@@ -741,6 +742,7 @@ public:
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected_locked();
         if (!last_exposure_valid_) {
             throw AlpacaException("No image has been successfully acquired yet", AlpacaError::InvalidOperation);
         }
@@ -828,8 +830,7 @@ public:
         if (!exposure_failure_.empty()) return 0.0;
         if (!sdk_exposure_started_) return 0.0;
         if (exposure_duration_ <= 0.0) return 0.0;
-        auto now = std::chrono::system_clock::now();
-        double elapsed = std::chrono::duration<double>(now - exposure_start_).count();
+        double elapsed = std::chrono::duration<double>(clock_.now() - exposure_steady_start_).count();
         double pct = (elapsed / exposure_duration_) * 100.0;
         if (pct < 0.0) return 0.0;
         if (pct > 100.0) return 100.0;

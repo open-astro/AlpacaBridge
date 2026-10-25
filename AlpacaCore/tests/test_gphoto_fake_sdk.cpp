@@ -24,6 +24,7 @@
 #include <cctype>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -80,6 +81,15 @@ void wait_for_exposure_to_finish(alpacacore::CameraDriver& driver) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+}
+
+void await_exposure_worker(alpacacore::CameraDriver& driver) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (driver.get_camera_state() == alpacacore::CameraState::Exposing &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(driver.get_camera_state() != alpacacore::CameraState::Exposing);
 }
 
 // A camera whose longest native shutter choice is very short (1/50s), so a
@@ -141,10 +151,43 @@ TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close
     CHECK(decoder.decode_call_count.load() >= 1);
     // Priming must not look like a real exposure to an ASCOM client.
     CHECK(driver->get_image_ready() == false);
+    alpacacore::test::require_last_exposure_unset(*driver);
 
     driver->set_connected(false);
     CHECK(driver->get_connected() == false);
     CHECK(fake.close_count == 1);
+}
+
+TEST_CASE("GPhoto camera fake - exposure validation distinguishes global and connected camera limits",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto camera = make_camera();
+    camera.toggle_value.erase("bulb");
+    camera.choices["shutterspeed2"] = {"1/200", "1", "30"};
+    fake.cameras.push_back(std::move(camera));
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+
+    SECTION("before connecting") {}
+    SECTION("after disconnecting") {
+        driver->set_connected(true);
+        driver->set_connected(false);
+    }
+    SECTION("connected native-only camera") {
+        driver->set_connected(true);
+        REQUIRE(driver->get_exposure_max() == 30.0);
+    }
+
+    for (const double invalid :
+         {-1.0, 3601.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->start_exposure(invalid, true); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    for (const double duration : {60.0, 100.0, 3600.0}) {
+        require_alpaca_error(
+            [&] { driver->start_exposure(duration, true); },
+            driver->get_connected() ? alpacacore::AlpacaError::InvalidValue : alpacacore::AlpacaError::NotConnected);
+    }
 }
 
 TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names no library",
@@ -386,6 +429,8 @@ TEST_CASE("GPhoto camera fake - LastExposure values follow successful images onl
     fake.cameras.push_back(make_camera());
     FakeRawDecoder decoder;
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); }, alpacacore::AlpacaError::NotConnected);
     driver->set_connected(true);
 
     SECTION("before any exposure") { alpacacore::test::require_last_exposure_unset(*driver); }
@@ -394,6 +439,13 @@ TEST_CASE("GPhoto camera fake - LastExposure values follow successful images onl
         driver->start_exposure(0.01, true);
         wait_for_exposure_to_finish(*driver);
         require_exposure_failure_reported(*driver, "injected failure in capture_and_download");
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+    SECTION("a failed first decode publishes nothing") {
+        decoder.should_throw = true;
+        driver->start_exposure(0.01, true);
+        await_exposure_worker(*driver);
+        require_exposure_failure_reported(*driver, "injected decode failure");
         alpacacore::test::require_last_exposure_unset(*driver);
     }
     SECTION("a later failure keeps the earlier success") {
@@ -423,11 +475,12 @@ TEST_CASE("GPhoto camera fake - LastExposureDuration is the shutter speed actual
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
 
-    const std::pair<double, std::pair<const char*, double>> cases[] = {{0.1, {"1/200", 0.005}}, {0.6, {"1", 1.0}}};
+    const std::pair<double, std::pair<const char*, double>> cases[] = {
+        {0.0, {"1/4000", 0.00025}}, {0.1, {"1/200", 0.005}}, {0.6, {"1", 1.0}}};
     for (const auto& [requested, expected] : cases) {
         INFO("requested " << requested);
         driver->start_exposure(requested, true);
-        wait_for_exposure_to_finish(*driver);
+        await_exposure_worker(*driver);
         REQUIRE(driver->get_image_ready());
         CHECK(fake.cameras[0].choice_value.at("shutterspeed2") == expected.first);
         CHECK(driver->get_last_exposure_duration() == Catch::Approx(expected.second));
@@ -435,33 +488,206 @@ TEST_CASE("GPhoto camera fake - LastExposureDuration is the shutter speed actual
     driver->set_connected(false);
 }
 
-// A bulb exposure holds the shutter for the duration the driver times itself, so the requested value is the actual
-// one (the driver has no read-back of the real shutter-open time).
-TEST_CASE("GPhoto camera fake - LastExposureDuration of a bulb exposure is the held duration",
-          "[gphoto][camera][unit][fakesdk]") {
+TEST_CASE("GPhoto camera fake - native metadata starts after shutter setup and commits after decode",
+          "[gphoto][camera][unit][fakesdk][metadata]") {
     reset_gphoto_sensor_cache();
     alpacacore::test::FakeTaskClock clock;
     FakeGPhotoSDK fake;
-    fake.cameras.push_back(make_bulb_camera());
-    fake.skip_sleeps = true;
-    // The hold runs on the driver's TaskClock: each drained slice advances virtual time, no real wait.
-    fake.before_call = [&](const std::string& name) {
-        if (name == "drain_events") clock.advance(std::chrono::milliseconds(100));
-    };
+    fake.cameras.push_back(make_camera());
     FakeRawDecoder decoder;
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
     driver->set_connected(true);
 
-    driver->start_exposure(0.05, true);  // > 1/50 s native ceiling => bulb path
-    wait_for_exposure_to_finish(*driver);
+    std::chrono::system_clock::time_point setup_finished, triggered;
+    double setup_progress = -1.0, triggered_progress = -1.0;
+    fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value" && fake.current_widget == "shutterspeed2") {
+            clock.advance(std::chrono::seconds(2));
+            setup_progress = driver->get_percent_completed();
+            setup_finished = std::chrono::system_clock::now();
+        }
+        if (name == "capture_and_download") {
+            triggered = std::chrono::system_clock::now();
+            clock.advance(std::chrono::milliseconds(50));
+            triggered_progress = driver->get_percent_completed();
+        }
+    };
+    bool unset_during_decode = false;
+    bool duration_unset_during_decode = false;
+    decoder.on_decode = [&] {
+        try {
+            (void)driver->get_last_exposure_start_time();
+        } catch (const AlpacaException& e) {
+            unset_during_decode = e.error_code() == alpacacore::AlpacaError::InvalidOperation;
+        }
+        try {
+            (void)driver->get_last_exposure_duration();
+        } catch (const AlpacaException& e) {
+            duration_unset_during_decode = e.error_code() == alpacacore::AlpacaError::InvalidOperation;
+        }
+    };
+    driver->start_exposure(0.1, true);
+    await_exposure_worker(*driver);
     REQUIRE(driver->get_image_ready());
-    CHECK(driver->get_last_exposure_duration() == 0.05);
+    CHECK(unset_during_decode);
+    CHECK(duration_unset_during_decode);
+    const auto start_a = driver->get_last_exposure_start_time();
+    const auto duration_a = driver->get_last_exposure_duration();
+    CHECK(start_a >= setup_finished);
+    CHECK(start_a <= triggered);
+    CHECK(duration_a == Catch::Approx(0.005));
+    CHECK(setup_progress == 0.0);
+    CHECK(triggered_progress == Catch::Approx(50.0));  // Requested 0.1 s, not the selected 0.005 s.
+
+    bool prior_during_decode = false;
+    bool invalid_refused = false;
+    decoder.on_decode = [&] {
+        prior_during_decode = driver->get_last_exposure_duration() == duration_a &&
+                              driver->get_last_exposure_start_time() == start_a && !driver->get_image_ready();
+        try {
+            driver->start_exposure(3601.0, true);
+        } catch (const AlpacaException& e) {
+            invalid_refused = e.error_code() == alpacacore::AlpacaError::InvalidValue;
+        }
+    };
+    decoder.should_throw = true;
+    driver->start_exposure(0.6, true);
+    await_exposure_worker(*driver);
+    CHECK(prior_during_decode);
+    CHECK(invalid_refused);
+    require_exposure_failure_reported(*driver, "injected decode failure");
+    CHECK(driver->get_last_exposure_duration() == duration_a);
+    CHECK(driver->get_last_exposure_start_time() == start_a);
+
+    driver->set_connected(true);  // Not a new session.
+    CHECK(driver->get_last_exposure_start_time() == start_a);
+    decoder.should_throw = false;
+    driver->start_exposure(0.6, true);
+    await_exposure_worker(*driver);
+    REQUIRE(driver->get_image_ready());
+    CHECK(driver->get_last_exposure_duration() == 1.0);
+    CHECK(driver->get_last_exposure_start_time() >= setup_finished);
+    CHECK(driver->get_last_exposure_start_time() <= triggered);
+    const auto start_b = driver->get_last_exposure_start_time();
+    for (const double invalid :
+         {-1.0, 3601.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->start_exposure(invalid, true); }, alpacacore::AlpacaError::InvalidValue);
+        CHECK(driver->get_image_ready());
+        CHECK(driver->get_last_exposure_duration() == 1.0);
+        CHECK(driver->get_last_exposure_start_time() == start_b);
+    }
+    driver->set_connected(false);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); }, alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    alpacacore::test::require_last_exposure_unset(*driver);
+    driver->set_connected(false);
+}
+
+TEST_CASE("GPhoto camera fake - late decoded frames retain a deadline failure without CameraState polling",
+          "[gphoto][camera][unit][fakesdk][metadata][taskclock]") {
+    const bool prior_image = GENERATE(false, true);
+    const bool poll_watchdog = GENERATE(false, true);
+    CAPTURE(prior_image, poll_watchdog);
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    fake.cameras.push_back(make_camera());
+    FakeRawDecoder decoder;
+    std::atomic<bool> in_decode{false}, release{false}, decode_timed_out{false};
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    std::chrono::system_clock::time_point prior_start;
+    if (prior_image) {
+        driver->start_exposure(0.6, true);
+        await_exposure_worker(*driver);
+        REQUIRE(driver->get_image_ready());
+        prior_start = driver->get_last_exposure_start_time();
+    }
+
+    decoder.on_decode = [&] {
+        in_decode.store(true);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        if (!release.load()) decode_timed_out.store(true);
+    };
+    driver->start_exposure(0.01, true);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_decode.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    const bool saw_decode = in_decode.load();
+    clock.advance(std::chrono::seconds(61));  // Native deadline is request + 60 seconds.
+    bool watchdog_idle = false;
+    if (poll_watchdog) watchdog_idle = driver->get_camera_state() == alpacacore::CameraState::Idle;
+    release.store(true);
+
+    // Deliberately do not read CameraState: publication itself must reject an expired frame.
+    bool completed = false;
+    while (!completed && std::chrono::steady_clock::now() < deadline) {
+        try {
+            completed = driver->get_image_ready();
+        } catch (const AlpacaException&) {
+            completed = true;
+        }
+        std::this_thread::yield();
+    }
+    REQUIRE(saw_decode);
+    REQUIRE(completed);
+    if (poll_watchdog) CHECK(watchdog_idle);
+    require_exposure_failure_reported(*driver, "Exposure deadline exceeded");
+    if (prior_image) {
+        CHECK(driver->get_last_exposure_duration() == 1.0);
+        CHECK(driver->get_last_exposure_start_time() == prior_start);
+    } else {
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
+
+    // Joining the expired worker precedes recovery and keeps the hook's captures alive on every exit.
+    driver->start_exposure(0.1, true);
+    await_exposure_worker(*driver);
+    REQUIRE(driver->get_image_ready());
+    CHECK_FALSE(decode_timed_out.load());
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.005));
+    driver->set_connected(false);
+}
+
+// A host-timed bulb hold can overrun its request; file wait and decode must not inflate it further.
+TEST_CASE("GPhoto camera fake - LastExposureDuration of a bulb exposure is the held duration",
+          "[gphoto][camera][unit][fakesdk]") {
+    const int mechanism = GENERATE(0, 1, 2);  // Nikon toggle, Canon M, Canon B-only.
+    CAPTURE(mechanism);
+    reset_gphoto_sensor_cache();
+    alpacacore::test::FakeTaskClock clock;
+    FakeGPhotoSDK fake;
+    auto camera = mechanism == 0 ? make_bulb_camera() : make_canon_camera();
+    if (mechanism == 2) camera.choices["shutterspeed2"] = {"bulb"};
+    fake.cameras.push_back(camera);
+    fake.skip_sleeps = true;
+    // The hold runs on the driver's TaskClock: each drained slice advances virtual time, no real wait.
+    fake.before_call = [&](const std::string& name) {
+        if (name == "drain_events") clock.advance(std::chrono::milliseconds(100));
+        if (name == "poll_bulb_file_and_download") clock.advance(std::chrono::seconds(7));
+    };
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock);
+    driver->set_connected(true);
+    decoder.on_decode = [&] { clock.advance(std::chrono::seconds(3)); };
+
+    driver->start_exposure(0.05, true);  // > 1/50 s native ceiling => bulb path
+    await_exposure_worker(*driver);
+    REQUIRE(driver->get_image_ready());
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.1));
+    if (mechanism == 0) {
+        CHECK(fake.bulb_toggle_history == std::vector<bool>{true, false});
+    } else {
+        CHECK(fake.remote_release_history == std::vector<std::string>{"Press Full", "Release Full"});
+    }
     driver->set_connected(false);
 }
 
 // An abort while the frame decodes discards the image, so LastExposure* stay unset.
 TEST_CASE("GPhoto camera fake - an abort during the decode publishes no LastExposure values",
           "[gphoto][camera][unit][fakesdk]") {
+    const bool prior_image = GENERATE(false, true);
     reset_gphoto_sensor_cache();
     FakeGPhotoSDK fake;
     fake.cameras.push_back(make_camera());
@@ -470,21 +696,40 @@ TEST_CASE("GPhoto camera fake - an abort during the decode publishes no LastExpo
     std::atomic<bool> release{false};
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
     driver->set_connected(true);
+    std::chrono::system_clock::time_point prior_start;
+    if (prior_image) {
+        driver->start_exposure(0.6, true);
+        await_exposure_worker(*driver);
+        REQUIRE(driver->get_image_ready());
+        prior_start = driver->get_last_exposure_start_time();
+    }
     // Armed after connect: the connect-time priming capture decodes too.
     decoder.on_decode = [&] {
         in_decode.store(true);
-        while (!release.load()) std::this_thread::yield();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!release.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
     };
 
     driver->start_exposure(0.01, true);
-    while (!in_decode.load()) std::this_thread::yield();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!in_decode.load() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+    const bool saw_decode = in_decode.load();
     std::thread aborter([&] { driver->abort_exposure(); });
     // abort_exposure clears the active flag before it joins the worker; release the decode once it has.
-    while (driver->get_camera_state() == alpacacore::CameraState::Exposing) std::this_thread::yield();
+    while (driver->get_camera_state() == alpacacore::CameraState::Exposing &&
+           std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
     release.store(true);
     aborter.join();
 
-    alpacacore::test::require_last_exposure_unset(*driver);
+    REQUIRE(saw_decode);
+    CHECK_FALSE(driver->get_image_ready());
+    if (prior_image) {
+        CHECK(driver->get_last_exposure_duration() == 1.0);
+        CHECK(driver->get_last_exposure_start_time() == prior_start);
+    } else {
+        alpacacore::test::require_last_exposure_unset(*driver);
+    }
     driver->set_connected(false);
 }
 
@@ -1305,21 +1550,38 @@ TEST_CASE("GPhoto camera fake - MLU on runs press release settle press release o
     // Runs on the exposure worker: how many eosremoterelease writes had landed at each settle slice, and a
     // virtual-time slice per drain_events call.
     std::vector<std::size_t> writes_at_slice;
+    std::chrono::system_clock::time_point settled, shutter_press;
+    alpacacore::CameraDriver* progress_driver = nullptr;
+    std::vector<double> settle_progress;
+    double triggered_progress = -1.0, file_wait_progress = -1.0;
     fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value" && fake.current_widget == "eosremoterelease" &&
+            fake.remote_release_history.size() == 2) {
+            shutter_press = std::chrono::system_clock::now();
+            clock.advance(std::chrono::milliseconds(5));
+            triggered_progress = progress_driver->get_percent_completed();
+        }
+        if (name == "poll_bulb_file_and_download") {
+            clock.advance(std::chrono::milliseconds(5));
+            file_wait_progress = progress_driver->get_percent_completed();
+        }
         if (name != "drain_events") return;
         if (writes_at_slice.size() >= kCap) {
             throw AlpacaException("settle loop ran past the cap", alpacacore::AlpacaError::DriverException);
         }
         writes_at_slice.push_back(fake.remote_release_history.size());
         clock.advance(std::chrono::milliseconds(100));
+        settle_progress.push_back(progress_driver->get_percent_completed());
+        settled = std::chrono::system_clock::now();
     };
 
     GPhotoOptions options;
     options.mirror_lockup_settle = std::chrono::milliseconds(2000);
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock, options);
     driver->set_connected(true);
+    progress_driver = driver.get();
     driver->start_exposure(0.01, true);
-    wait_for_exposure_to_finish(*driver);
+    await_exposure_worker(*driver);
 
     CHECK(driver->get_image_ready() == true);
     CHECK(fake.remote_release_history == kPressReleasePressRelease);
@@ -1328,6 +1590,12 @@ TEST_CASE("GPhoto camera fake - MLU on runs press release settle press release o
     CHECK(fake.drained_budget == std::chrono::milliseconds(2000));
     CHECK(count_calls(fake, "capture_and_download") == 0);  // gp_camera_capture times out after 60 s with MLU on
     CHECK(fake.bulb_file_polls == 1);                       // the frame comes from the file-added event
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.005));
+    CHECK(driver->get_last_exposure_start_time() >= settled);
+    CHECK(driver->get_last_exposure_start_time() <= shutter_press);
+    CHECK(settle_progress == std::vector<double>(20, 0.0));
+    CHECK(triggered_progress == Catch::Approx(50.0));
+    CHECK(file_wait_progress == 100.0);
 
     driver->set_connected(false);
 }
@@ -1343,21 +1611,40 @@ TEST_CASE("GPhoto camera fake - MLU on bulb holds the second press for the expos
     FakeRawDecoder decoder;
 
     std::vector<std::size_t> writes_at_slice;
+    std::chrono::system_clock::time_point settled, shutter_press;
+    alpacacore::CameraDriver* progress_driver = nullptr;
+    std::vector<double> settle_progress, hold_progress;
+    double file_wait_progress = -1.0;
     fake.before_call = [&](const std::string& name) {
+        if (name == "set_choice_value" && fake.current_widget == "eosremoterelease" &&
+            fake.remote_release_history.size() == 2) {
+            shutter_press = std::chrono::system_clock::now();
+        }
+        if (name == "poll_bulb_file_and_download") {
+            clock.advance(std::chrono::seconds(7));
+            file_wait_progress = progress_driver->get_percent_completed();
+        }
         if (name != "drain_events") return;
         if (writes_at_slice.size() >= kCap) {
             throw AlpacaException("hold loop ran past the cap", alpacacore::AlpacaError::DriverException);
         }
         writes_at_slice.push_back(fake.remote_release_history.size());
         clock.advance(std::chrono::milliseconds(100));
+        if (fake.remote_release_history.size() == 2) {
+            settled = std::chrono::system_clock::now();
+            settle_progress.push_back(progress_driver->get_percent_completed());
+        } else {
+            hold_progress.push_back(progress_driver->get_percent_completed());
+        }
     };
 
     GPhotoOptions options;
     options.mirror_lockup_settle = std::chrono::milliseconds(2000);
     auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder, clock, options);
     driver->set_connected(true);
+    progress_driver = driver.get();
     driver->start_exposure(1.0, true);  // > 1/50 s native ceiling => bulb path
-    wait_for_exposure_to_finish(*driver);
+    await_exposure_worker(*driver);
 
     CHECK(driver->get_image_ready() == true);
     CHECK(fake.remote_release_history == kPressReleasePressRelease);
@@ -1369,6 +1656,13 @@ TEST_CASE("GPhoto camera fake - MLU on bulb holds the second press for the expos
     CHECK(count_calls(fake, "capture_and_download") == 0);
     CHECK(fake.bulb_file_polls == 1);
     CHECK(fake.choice_write_history["shutterspeed2"].back() == "bulb");
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(1.0));
+    CHECK(driver->get_last_exposure_start_time() >= settled);
+    CHECK(driver->get_last_exposure_start_time() <= shutter_press);
+    CHECK(settle_progress == std::vector<double>(20, 0.0));
+    REQUIRE(hold_progress.size() == 10);
+    CHECK(hold_progress[4] == Catch::Approx(50.0));
+    CHECK(file_wait_progress == 100.0);
 
     driver->set_connected(false);
 }

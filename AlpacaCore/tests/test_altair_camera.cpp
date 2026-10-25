@@ -22,6 +22,7 @@
 
 #include <functional>
 #include <string>
+#include <thread>
 
 #include "catch2_compat.h"
 #include "fake_touptek_sdk.h"
@@ -235,4 +236,58 @@ TEST_CASE("Altair Camera Driver - Unsupported members", "[altair][camera][unit]"
     driver->set_cooler_on(false);
     CHECK(driver->get_cooler_on() == false);
     driver->set_connected(false);
+}
+
+TEST_CASE("Altair Camera Driver - LastExposure follows successful frames across abort and reconnect",
+          "[altair][camera][unit][last-exposure]") {
+    auto fake = make_fake_with_178m();
+    auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, fake);
+    const auto check_error = [&](int code) {
+        require_alpaca_error([&] { driver->get_last_exposure_duration(); }, code);
+        require_alpaca_error([&] { driver->get_last_exposure_start_time(); }, code);
+    };
+    const auto wait_for = [](auto&& predicate) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!predicate() && std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+        return predicate();
+    };
+    check_error(AlpacaError::NotConnected);
+    driver->set_connected(true);
+    driver->set_num_x(2);
+    driver->set_num_y(2);
+    check_error(AlpacaError::InvalidOperation);
+    fake.deliver_frame = true;
+    fake.hold_next_wait_image();
+    driver->start_exposure(0.0123456, true);
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
+    check_error(AlpacaError::InvalidOperation);
+    fake.release_wait_image();
+    REQUIRE(wait_for([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == 0.012346);
+    const auto start = driver->get_last_exposure_start_time();
+    driver->set_connected(true);
+    CHECK(driver->get_last_exposure_start_time() == start);
+    driver->abort_exposure();  // reap before installing the next held wait
+
+    fake.hold_next_wait_image();
+    CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+    driver->start_exposure(1.0, true);
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
+    CHECK(driver->get_last_exposure_duration() == 0.012346);
+    CHECK(driver->get_last_exposure_start_time() == start);
+    driver->abort_exposure();
+    CHECK_FALSE(driver->get_image_ready());
+    CHECK(driver->get_last_exposure_duration() == 0.012346);
+    CHECK(driver->get_last_exposure_start_time() == start);
+
+    fake.hold_next_wait_image();
+    CHECK_FALSE(fake.wait_for_held_image(std::chrono::milliseconds(0)));
+    driver->start_exposure(1.0, true);
+    REQUIRE(fake.wait_for_held_image(std::chrono::seconds(2)));
+    // Disconnect releases a valid fake frame too; it must never publish into
+    // the next session while the disconnect joins the old worker.
+    driver->set_connected(false);
+    check_error(AlpacaError::NotConnected);
+    driver->set_connected(true);
+    check_error(AlpacaError::InvalidOperation);
 }

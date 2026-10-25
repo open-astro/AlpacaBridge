@@ -51,6 +51,9 @@ FakeToupTekSDK make_fake_with_camera() {
 
 TEST_CASE("Altair camera - concurrent connect/disconnect/operate stress", "[altair][camera][stress]") {
     auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    fake.cameras[0].max_width = 2;
+    fake.cameras[0].max_height = 2;
     LockedToupTekSDK sdk(fake);
     auto driver = alpacacore::vendor::altair::create_altair_camera(0, 0, sdk);
 
@@ -68,6 +71,8 @@ TEST_CASE("Altair camera - concurrent connect/disconnect/operate stress", "[alta
         guard([&] { static_cast<void>(cam.get_readout_mode()); });
         guard([&] { static_cast<void>(cam.get_cooler_on()); });
         guard([&] { cam.start_exposure(0.001, true); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_duration()); });
+        guard([&] { static_cast<void>(cam.get_last_exposure_start_time()); });
         guard([&] { cam.abort_exposure(); });
     });
 
