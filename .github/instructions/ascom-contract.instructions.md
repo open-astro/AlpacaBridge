@@ -159,8 +159,9 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 
 ### Camera PercentCompleted and cooler members (all camera vendors)
 
-- **`PercentCompleted` is valid only while `CameraState` is `Exposing`** (ICameraV4: "in all other states an
-  InvalidOperationException must be raised"). The rule lives once, in `CameraDriver::get_percent_completed_checked()`;
+- **AlpacaBridge supports `PercentCompleted` only while `CameraState` is `Exposing`.** ICameraV4 optionally permits
+  Waiting, Reading and Downloading too, and requires `InvalidOperation` in every other state. The project's
+  exposing-only policy lives once, in `CameraDriver::get_percent_completed_checked()`;
   the GET route and the DeviceState builder both call it, never the virtual `get_percent_completed()` (the raw
   driver value, 0..100). It reads `CameraState` and the raw value first, so a link fault or `NotConnected` still
   surfaces before the `InvalidOperation` (ADR 0006, 0009). DeviceState therefore omits `PercentCompleted` while the
@@ -177,15 +178,20 @@ odd-bin-factor note for the 3×3 subtlety and the #977 odd-NumX rule).
 - **Both raise `InvalidOperation` until an image has been successfully acquired** (ICameraV4: "if no image has yet
   been successfully acquired"), never `ValueNotSet`. A failed exposure publishes nothing and never erases the
   values of an earlier success; only a new success replaces them. Keep the exposure in flight in pending fields
-  (`PercentCompleted` reads them) and commit them to `util::LastExposure` (`util/last_exposure.h`) at the point
-  the image is acquired; clear it on disconnect. While disconnected both raise `NotConnected` first
+  (`PercentCompleted` reads them) and publish under the state lock when the image is acquired
+  (`util::LastExposure`, `util/last_exposure.h`, for supported pairs); clear them on disconnect. While disconnected both raise `NotConnected` first
   (`ensure_connected()`); a GPhoto abort during the decode re-checks `exposure_active_` under `mutex_` and publishes nothing.
-- **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): GPhoto reports the
-  parsed shutter speed it wrote (`1/200` is 0.005), the bulb or B-mode requested value when the driver times the
-  exposure itself, and iGuider the step taken. `PercentCompleted` keeps the requested duration for progress.
-- **The start time is when the camera started to collect photons**, not the `StartExposure` call: SVBONY stamps
-  it in the worker after the deferred `FrameSpeedMode` write. QHY, Player One, GPhoto and iGuider still stamp at
-  the request or just before their trigger (no timing seam yet; measure on a rig before changing them).
+- In cameras that hold the state lock across initialization, fast-fail disconnected reads before taking that
+  lock, then recheck connection under it. The first check avoids waiting behind connect I/O; the second closes
+  the disconnect race. iGuider's connect I/O already runs outside its leaf state lock.
+- **The duration is the actual one** (ICameraV4: "may differ from the requested duration"): report the applied
+  register or shutter value after rounding/clamping, or monotonic shutter-open elapsed time for a driver-timed
+  exposure. Configuration, mirror settling, readout, download and decode do not count as integration.
+- **The start time is when the camera started to collect photons**, not the `StartExposure` request. Capture
+  candidate UTC at the acquisition boundary after deferred configuration, and refresh it for a retried attempt;
+  use `TaskClock` for elapsed time and progress, never as UTC. Host SDK-call timestamps still need rig evidence
+  for sensor-start accuracy. If no trustworthy source exists, the optional property may raise
+  `PropertyNotImplemented` rather than invent a timestamp; document that vendor's limitation.
 
 ### Camera values the SDK cannot give (all camera vendors)
 

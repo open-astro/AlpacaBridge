@@ -94,9 +94,9 @@ public:
           image_cached_(false),
           last_image_(),
           image_failure_(),
-          last_exposure_duration_(0.0),
-          last_exposure_start_(),
-          last_exposure_valid_(false),
+          pending_exposure_duration_(0.0),
+          pending_exposure_start_(),
+          acquisition_valid_(false),
           pulse_guiding_(std::make_shared<std::atomic<bool>>(false)),
           pulse_guiding_end_(util::TaskClock::clock::time_point{}) {
         preload_camera_info_locked();
@@ -511,7 +511,7 @@ public:
                 throw AlpacaException("Exposure start is in progress", AlpacaError::InvalidOperation);
             }
             if (!image_failure_.empty()) throw_image_failure_locked();
-            if (!last_exposure_valid_ || !exposure_frame_.has_value()) {
+            if (!acquisition_valid_ || !exposure_frame_.has_value()) {
                 throw AlpacaException::asked_too_early("Image not ready");
             }
             if (image_cached_) return last_image_;
@@ -527,13 +527,16 @@ public:
             const auto status = poll_exposure_status();
             if (status == ZWOExposureStatus::Failed) {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (last_exposure_valid_ && exposure_seq_ == download_seq) {
+                // A failed retry bumps the generation but keeps its acquisition error.
+                if (!image_failure_.empty()) throw_image_failure_locked();
+                if (acquisition_valid_ && exposure_seq_ == download_seq) {
                     latch_image_failure_locked("camera exposure failed after SDK retries");
                     throw_image_failure_locked();
                 }
                 throw AlpacaException("Exposure stopped during image retrieval", AlpacaError::InvalidOperation);
             }
             if (status != ZWOExposureStatus::Success) {
+                // A retry still in progress has no image yet, just like the initial attempt.
                 throw AlpacaException::asked_too_early("Image not ready");
             }
         }
@@ -543,12 +546,13 @@ public:
             if (!connected_.load()) {
                 throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
             }
-            if (!last_exposure_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
+            if (!acquisition_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
             try {
                 validate_frame_format_locked(active_camera_id, frame);
                 bytes = image_buffer_size(frame);
+                published_exposure_.commit(pending_exposure_duration_, pending_exposure_start_);
             } catch (const std::exception& e) {
                 latch_image_failure_locked(e.what());
                 throw_image_failure_locked();
@@ -562,7 +566,7 @@ public:
             buffer.resize(bytes);
         } catch (const std::exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!last_exposure_valid_ || exposure_seq_ != download_seq) {
+            if (!acquisition_valid_ || exposure_seq_ != download_seq) {
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
             latch_image_failure_locked(e.what());
@@ -577,7 +581,7 @@ public:
             }
             if (!image_failure_.empty()) throw_image_failure_locked();
             if (image_cached_) return last_image_;
-            if (!last_exposure_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
+            if (!acquisition_valid_ || exposure_seq_ != download_seq || !exposure_frame_.has_value()) {
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
             if (exposure_starting_) {
@@ -593,7 +597,7 @@ public:
         } catch (const std::exception& e) {
             image_lock.unlock();
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!last_exposure_valid_ || exposure_seq_ != download_seq) {
+            if (!acquisition_valid_ || exposure_seq_ != download_seq) {
                 throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
             }
             latch_image_failure_locked(e.what());
@@ -607,7 +611,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         if (!image_failure_.empty()) throw_image_failure_locked();
         if (image_cached_) return last_image_;
-        if (!last_exposure_valid_ || exposure_seq_ != download_seq) {
+        if (!acquisition_valid_ || exposure_seq_ != download_seq) {
             throw AlpacaException("Exposure stopped during image download", AlpacaError::InvalidOperation);
         }
         ImageArray image;
@@ -621,7 +625,6 @@ public:
         last_image_ = std::move(image);
         image_cached_ = true;
         image_ready_ = true;
-        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
         return last_image_;
     }
 
@@ -639,7 +642,7 @@ public:
                 return false;
             }
             if (!image_failure_.empty()) throw_image_failure_locked();
-            if (!last_exposure_valid_ || !exposure_frame_.has_value()) {
+            if (!acquisition_valid_ || !exposure_frame_.has_value()) {
                 image_ready_ = false;
                 image_cached_ = false;
                 return false;
@@ -658,7 +661,7 @@ public:
         if (exposure_starting_) {
             return false;
         }
-        if (!last_exposure_valid_ || exposure_seq_ != poll_seq) {
+        if (!acquisition_valid_ || exposure_seq_ != poll_seq) {
             // A stop/abort or disconnect raced the unlocked poll — do not
             // overwrite the stop's image_ready_=false with a stale Success
             // (PR #119 round 8).
@@ -683,7 +686,7 @@ public:
         }
         image_ready_ = ready;
         if (ready) {
-            published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
+            published_exposure_.commit(pending_exposure_duration_, pending_exposure_start_);
         } else {
             image_cached_ = false;
         }
@@ -709,12 +712,14 @@ public:
     double get_last_exposure_duration() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.start_time();
     }
 
@@ -782,12 +787,11 @@ public:
             return image_ready_ ? 100.0 : 0.0;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (last_exposure_duration_ <= 0.0) {
+        if (exposure_starting_ || pending_exposure_duration_ <= 0.0) {
             return 0.0;
         }
-        auto now = std::chrono::system_clock::now();
-        auto elapsed = std::chrono::duration<double>(now - last_exposure_start_).count();
-        double percent = (elapsed / last_exposure_duration_) * 100.0;
+        auto elapsed = std::chrono::duration<double>(clock_.now() - exposure_started_monotonic_).count();
+        double percent = (elapsed / pending_exposure_duration_) * 100.0;
         if (percent < 0.0) {
             return 0.0;
         }
@@ -986,7 +990,7 @@ public:
             }
             start_seq = exposure_seq_;
             prior_exposure_needs_check =
-                last_exposure_valid_ && exposure_frame_.has_value() && !image_cached_ && image_failure_.empty();
+                acquisition_valid_ && exposure_frame_.has_value() && !image_cached_ && image_failure_.empty();
             exposure_starting_ = true;
         }
 
@@ -999,11 +1003,16 @@ public:
         // error surfaced to the caller, which is the correct outcome for a
         // StartExposure that lost to a disconnect (round 10).
         auto& sdk = sdk_;
+        std::chrono::system_clock::time_point started_at;
+        util::TaskClock::clock::time_point started_monotonic;
         try {
             if (prior_exposure_needs_check && sdk.get_exposure_status(active_camera_id) == ZWOExposureStatus::Working) {
                 throw AlpacaException("A camera exposure is already in progress", AlpacaError::InvalidOperation);
             }
             sdk.set_control_value(active_camera_id, ZWOControlType::Exposure, exposure_us, false);
+            // The SDK has no sensor timestamp; stamp its trigger, not setup or return latency.
+            started_at = std::chrono::system_clock::now();
+            started_monotonic = clock_.now();
             sdk.start_exposure(active_camera_id, !light);
         } catch (...) {
             image_lock.unlock();
@@ -1025,9 +1034,10 @@ public:
         exposure_failed_ = false;
         last_exposure_retry_ = {};
         image_failure_.clear();
-        last_exposure_duration_ = duration;
-        last_exposure_start_ = std::chrono::system_clock::now();
-        last_exposure_valid_ = true;
+        pending_exposure_duration_ = static_cast<double>(exposure_us) / 1'000'000.0;
+        pending_exposure_start_ = started_at;
+        exposure_started_monotonic_ = started_monotonic;
+        acquisition_valid_ = true;
         exposure_frame_ = ExposureFrame{num_x_,
                                         num_y_,
                                         roi_width_effective_,
@@ -1092,7 +1102,7 @@ private:
                 throw AlpacaException("Camera ID not set", AlpacaError::NotConnected);
             }
             if (image_failure_.empty()) {
-                if (image_cached_ || !last_exposure_valid_ || !exposure_frame_.has_value()) return;
+                if (image_cached_ || !acquisition_valid_ || !exposure_frame_.has_value()) return;
             }
             std::unique_lock<std::mutex> image_lock(image_operation_mutex_, std::try_to_lock);
             if (!image_lock.owns_lock()) {
@@ -1176,15 +1186,17 @@ private:
     mutable bool image_cached_;
     mutable ImageArray last_image_;
     mutable std::string image_failure_;
-    bool exposure_starting_{false};
+    mutable bool exposure_starting_{false};
     std::optional<ExposureFrame> exposure_frame_;
-    double last_exposure_duration_;
+    double pending_exposure_duration_;
     // mutable: the retry path in poll_exposure_status (reached from
     // const status readers) restarts the exposure clock.
-    mutable std::chrono::system_clock::time_point last_exposure_start_;
-    bool last_exposure_valid_;
-    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
-    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    mutable std::chrono::system_clock::time_point pending_exposure_start_;
+    mutable util::TaskClock::clock::time_point exposure_started_monotonic_{};
+    // Current acquisition validity only: never use this for the published LastExposure pair.
+    bool acquisition_valid_;
+    // SDK Success plus validated frame geometry is acquisition success; transfer stays lazy. A later
+    // transfer error cannot invalidate this pair (the SDK reports neither sensor time nor received bytes).
     mutable util::LastExposure published_exposure_;
     // Transient-failure recovery (see poll_exposure_status): mutable
     // because the const status readers drive the retry state machine.
@@ -1215,10 +1227,10 @@ private:
     // retry: the SDK is not guaranteed to retain control registers across an
     // ASI_EXP_FAILED (e.g. a USB re-enumeration coinciding with the error).
     long exposure_reg_us_{0};
-    // Bumped by every start_exposure and exposure-state reset; an unlocked
+    // Bumped by every start, retry and exposure-state reset; an unlocked
     // image download validates it after relocking so pixels from a previous
     // exposure sequence can never be cached as a fresh image.
-    std::uint64_t exposure_seq_{0};
+    mutable std::uint64_t exposure_seq_{0};
     mutable int exposure_retries_left_{0};
     mutable bool exposure_failed_{false};
     mutable util::TaskClock::clock::time_point last_exposure_retry_{};
@@ -1238,7 +1250,7 @@ private:
     }
 
     void ensure_frame_geometry_mutable_locked() const {
-        if (last_exposure_valid_ && exposure_frame_.has_value() && !image_cached_ && image_failure_.empty()) {
+        if (acquisition_valid_ && exposure_frame_.has_value() && !image_cached_ && image_failure_.empty()) {
             throw AlpacaException("Cannot change camera ROI before retrieving the current exposure image",
                                   AlpacaError::InvalidOperation);
         }
@@ -1288,9 +1300,10 @@ private:
         image_cached_ = false;
         exposure_starting_ = false;
         image_failure_.clear();
-        last_exposure_duration_ = 0.0;
-        last_exposure_start_ = std::chrono::system_clock::time_point{};
-        last_exposure_valid_ = false;
+        pending_exposure_duration_ = 0.0;
+        pending_exposure_start_ = std::chrono::system_clock::time_point{};
+        exposure_started_monotonic_ = {};
+        acquisition_valid_ = false;
         published_exposure_.clear();
         exposure_is_dark_ = false;
         exposure_reg_us_ = 0;
@@ -1321,7 +1334,7 @@ private:
         std::uint64_t poll_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!camera_id_.has_value() || !last_exposure_valid_ || !exposure_frame_.has_value()) {
+            if (!camera_id_.has_value() || !acquisition_valid_ || !exposure_frame_.has_value()) {
                 // A disconnect completed between the caller's connected_
                 // check and this snapshot — report Idle like the guarded
                 // status read below, or no current frame is pending, instead
@@ -1341,7 +1354,7 @@ private:
             // is still the current exposure so ImageReady cannot wait forever.
             ALPACA_LOG_DEBUG("ZWO", "exposure status read failed: " + std::string(e.what()));
             std::lock_guard<std::mutex> lock(mutex_);
-            if (last_exposure_valid_ && exposure_seq_ == poll_seq) {
+            if (acquisition_valid_ && exposure_seq_ == poll_seq) {
                 latch_image_failure_locked("exposure status read failed: " + std::string(e.what()));
                 return ZWOExposureStatus::Failed;
             }
@@ -1364,7 +1377,10 @@ private:
         std::uint64_t retry_seq = 0;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_failed_ || !last_exposure_valid_) {
+            if (exposure_seq_ != poll_seq || !acquisition_valid_ || !exposure_frame_.has_value()) {
+                return ZWOExposureStatus::Idle;
+            }
+            if (exposure_failed_) {
                 return ZWOExposureStatus::Failed;
             }
             if (exposure_retries_left_ <= 0) {
@@ -1388,11 +1404,9 @@ private:
             retries_left = exposure_retries_left_;
             is_dark = exposure_is_dark_;
             reg_us = exposure_reg_us_;
-            retry_seq = exposure_seq_;
-            // The exposure effectively restarts now — without this,
-            // PercentCompleted computes elapsed >= duration immediately and
-            // reports a false 100% for the whole retried exposure.
-            last_exposure_start_ = std::chrono::system_clock::now();
+            // Polls from the failed attempt cannot publish success for the retry.
+            retry_seq = ++exposure_seq_;
+            exposure_starting_ = true;
         }
         // Stop the failed exposure before re-triggering: a stop on an
         // already-failed/idle camera is a no-op, and if the SDK requires
@@ -1411,18 +1425,31 @@ private:
         // unlocked window makes them throw, and that must surface as a
         // Failed status to the poller, not as a raw exception through a
         // state getter (round 9).
+        std::chrono::system_clock::time_point started_at;
+        util::TaskClock::clock::time_point started_monotonic;
         try {
             sdk_.set_control_value(id, ZWOControlType::Exposure, reg_us, false);
             ALPACA_LOG_WARN("ZWO", "exposure failed (transient SDK/USB error); retrying, " +
                                        std::to_string(retries_left) + " retries left");
+            started_at = std::chrono::system_clock::now();
+            started_monotonic = clock_.now();
             sdk_.start_exposure(id, is_dark);
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN("ZWO", "exposure retry re-trigger failed: " + std::string(e.what()));
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_seq_ == retry_seq) {
+                exposure_starting_ = false;
+                exposure_failed_ = true;
+                latch_image_failure_locked("exposure retry re-trigger failed: " + std::string(e.what()));
+            }
             return ZWOExposureStatus::Failed;
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (exposure_seq_ == retry_seq) {
+                pending_exposure_start_ = started_at;
+                exposure_started_monotonic_ = started_monotonic;
+                exposure_starting_ = false;
                 return ZWOExposureStatus::Working;
             }
         }

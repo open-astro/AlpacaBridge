@@ -237,6 +237,8 @@ TEST_CASE("Player One Camera Driver - Disconnected state", "[playerone][camera][
 
     require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_ready(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); }, alpacacore::AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
     CHECK(driver->get_can_stop_exposure() == false);
@@ -376,6 +378,16 @@ TEST_CASE("Player One Camera Driver - AbortExposure discards the frame and keeps
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
     driver->set_connected(true);
 
+    sdk.set_image_ready(false);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 1; }));
+    driver->abort_exposure();
+    require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); },
+                         alpacacore::AlpacaError::InvalidOperation);
+
+    sdk.set_image_ready(true);
     driver->start_exposure(0.001, true);
     REQUIRE(eventually([&] {
         try {
@@ -385,6 +397,7 @@ TEST_CASE("Player One Camera Driver - AbortExposure discards the frame and keeps
         }
     }));
     const int stops_after_frame = sdk.stop_count();
+    const auto completed_start = driver->get_last_exposure_start_time();
     driver->abort_exposure();  // AbortExposure while idle must preserve the completed frame.
     CHECK(sdk.stop_count() == stops_after_frame);
     CHECK(driver->get_image_ready());
@@ -392,13 +405,15 @@ TEST_CASE("Player One Camera Driver - AbortExposure discards the frame and keeps
 
     sdk.set_image_ready(false);
     driver->start_exposure(10.0, true);
-    REQUIRE(eventually([&] { return sdk.exposure_start_count() >= 2; }));
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 3; }));
     REQUIRE(driver->get_camera_state() == alpacacore::CameraState::Exposing);
     const int stops_before_abort = sdk.stop_count();
     driver->abort_exposure();
     CHECK(sdk.stop_count() > stops_before_abort);
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
     CHECK(driver->get_image_ready() == false);
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.001));
+    CHECK(driver->get_last_exposure_start_time() == completed_start);
     require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
                          alpacacore::AlpacaError::InvalidOperation);
     const int abort_stop_count = sdk.stop_count();
@@ -426,6 +441,8 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
     sdk.set_frame_data(std::vector<std::uint8_t>(20 * 10 * 2, 0));
     require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_duration()); },
                          alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); },
+                         alpacacore::AlpacaError::InvalidOperation);
 
     const auto failed = [&] {
         try {
@@ -444,6 +461,8 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
                              alpacacore::AlpacaError::DriverException);
     }
     require_alpaca_error([&] { static_cast<void>(driver->get_last_exposure_duration()); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); },
                          alpacacore::AlpacaError::InvalidOperation);
 
     sdk.set_returned_size(16, 8);
@@ -472,11 +491,13 @@ TEST_CASE("Player One Camera Driver - Rejects malformed frames and recovers", "[
     CHECK(image.data.size() == 16 * 8);
     CHECK(image.data.front() == 0x1234);
     ALPACA_REQUIRE_APPROX(driver->get_last_exposure_duration(), 0.001);
+    const auto successful_start = driver->get_last_exposure_start_time();
 
     sdk.set_returned_size(0, 8);
     driver->start_exposure(0.002, true);
     REQUIRE(eventually(failed));
     ALPACA_REQUIRE_APPROX(driver->get_last_exposure_duration(), 0.001);
+    CHECK(driver->get_last_exposure_start_time() == successful_start);
     require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
                          alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
@@ -566,6 +587,10 @@ TEST_CASE("Player One Camera Driver - Readiness timeout is raised by image reade
         return false;
     };
     REQUIRE(eventually(failed));
+    require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); },
+                         alpacacore::AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); },
+                         alpacacore::AlpacaError::InvalidOperation);
     require_alpaca_error([&] { static_cast<void>(driver->get_image_array()); },
                          alpacacore::AlpacaError::DriverException);
     driver->set_connected(false);
@@ -1136,16 +1161,26 @@ TEST_CASE("Player One Camera Driver - readiness poll sleeps on the task clock",
     alpacacore::test::FakeTaskClock clock;
     auto driver = make_clocked_driver(sdk, clock);
 
-    driver->start_exposure(0.001, true);
+    const auto before_start = std::chrono::system_clock::now();
+    driver->start_exposure(1.0, true);
     REQUIRE(clock.wait_for_wait_count(1, 5s));  // the poll's 50 ms sleep
+    const auto after_start = std::chrono::system_clock::now();
+    CHECK(driver->get_percent_completed() == Catch::Approx(0.0));
+    clock.advance(250ms);
+    REQUIRE(clock.wait_for_wait_count(2, 5s));
+    CHECK(driver->get_percent_completed() == Catch::Approx(25.0));
     sdk.set_image_ready(true);
     // Real time passes, virtual time does not: the poll must not look again.
     std::this_thread::sleep_for(200ms);
     CHECK_FALSE(driver->get_image_ready());
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Exposing);
+    CHECK(driver->get_percent_completed() == Catch::Approx(25.0));
     clock.advance(50ms);
     CHECK(eventually([&] { return driver->get_image_ready(); }));
     CHECK(driver->get_camera_state() == alpacacore::CameraState::Idle);
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(1.0));
+    CHECK(driver->get_last_exposure_start_time() >= before_start);
+    CHECK(driver->get_last_exposure_start_time() <= after_start);
     driver->set_connected(false);
 }
 
@@ -1325,6 +1360,101 @@ TEST_CASE("Player One Camera Driver - FakePlayerOneSDK exposure behind LockedPla
     CHECK(fake.exposure_start_count() == 1);
     driver->set_connected(false);
     CHECK(fake.close_count() == 1);
+}
+
+TEST_CASE("Player One Camera Driver - LastExposure describes only successful frames in this session",
+          "[playerone][camera][unit][metadata]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    const auto require_unset = [&](int code) {
+        require_alpaca_error([&] { (void)driver->get_last_exposure_duration(); }, code);
+        require_alpaca_error([&] { (void)driver->get_last_exposure_start_time(); }, code);
+    };
+    require_unset(alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    require_unset(alpacacore::AlpacaError::InvalidOperation);
+
+    sdk.set_hold_image_data(true);
+    driver->start_exposure(0.001, true);
+    REQUIRE(eventually([&] { return sdk.image_data_started(); }));
+    require_unset(alpacacore::AlpacaError::InvalidOperation);
+    CHECK_FALSE(driver->get_image_ready());
+    sdk.set_download_failure(true);
+    sdk.set_hold_image_data(false);
+    const auto failed = [&] {
+        try {
+            (void)driver->get_image_ready();
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::DriverException;
+        }
+        return false;
+    };
+    REQUIRE(eventually(failed));
+    require_unset(alpacacore::AlpacaError::InvalidOperation);
+
+    sdk.set_download_failure(false);
+    driver->start_exposure(0.002, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    const auto start_a = driver->get_last_exposure_start_time();
+    const auto require_a = [&] {
+        CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.002));
+        CHECK(driver->get_last_exposure_start_time() == start_a);
+    };
+    require_a();
+    driver->set_connected(true);  // No new session: keep the last success.
+    require_a();
+    require_alpaca_error([&] { driver->start_exposure(20.0, true); }, alpacacore::AlpacaError::InvalidValue);
+    require_a();
+    CHECK(driver->get_image_ready());
+
+    sdk.set_hold_image_data(true);
+    driver->start_exposure(0.003, true);
+    REQUIRE(eventually([&] { return sdk.exposure_start_count() == 3 && sdk.image_data_started(); }));
+    require_a();
+    CHECK_FALSE(driver->get_image_ready());
+    sdk.set_download_failure(true);
+    sdk.set_hold_image_data(false);
+    REQUIRE(eventually(failed));
+    require_a();
+    require_alpaca_error([&] { (void)driver->get_image_array(); }, alpacacore::AlpacaError::DriverException);
+
+    sdk.set_download_failure(false);
+    const auto before_b = std::chrono::system_clock::now();
+    driver->start_exposure(0.004, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.004));
+    CHECK(driver->get_last_exposure_start_time() >= before_b);
+    driver->set_connected(false);
+    require_unset(alpacacore::AlpacaError::NotConnected);
+    driver->set_connected(true);
+    require_unset(alpacacore::AlpacaError::InvalidOperation);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - LastExposure uses SDK microseconds and post-setup start",
+          "[playerone][camera][unit][metadata]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    driver->set_num_x(12);
+    sdk.set_hold_start_readback(true);
+    driver->start_exposure(0.0010006, true);
+    const bool reached_setup = eventually([&] { return sdk.start_readback_started(); });
+    const auto after_setup_wait = std::chrono::system_clock::now();
+    // Always release before asserting so a failure cannot strand the worker in destruction.
+    sdk.set_hold_start_readback(false);
+    REQUIRE(reached_setup);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(sdk.get_config_int(17, 0) == 1001);
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.001001));
+    CHECK(driver->get_last_exposure_start_time() >= after_setup_wait);
+    CHECK(driver->get_last_exposure_start_time() <= std::chrono::system_clock::now());
+
+    driver->start_exposure(0.0, false);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(sdk.get_config_int(17, 0) == 1);
+    CHECK(driver->get_last_exposure_duration() == Catch::Approx(0.000001));
+    driver->set_connected(false);
 }
 
 // Issue #1477: ICameraV4 PercentCompleted raises InvalidOperation outside Exposing; the cooler members raise

@@ -675,14 +675,7 @@ public:
         ensure_connected();
         if (exposure_active_.load()) {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (exposure_deadline_valid_ && clock_.now() >= exposure_deadline_) {
-                ALPACA_LOG_WARN(kLogTag,
-                                "Exposure deadline exceeded; forcing CameraState=Idle. "
-                                "Exposure thread may still be blocked inside libgphoto2.");
-                exposure_active_.store(false);
-                exposure_deadline_valid_ = false;
-                return CameraState::Idle;
-            }
+            if (expire_exposure_locked()) return CameraState::Idle;
             return CameraState::Exposing;
         }
         return CameraState::Idle;
@@ -868,12 +861,14 @@ public:
     double get_last_exposure_duration() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.start_time();
     }
 
@@ -912,8 +907,8 @@ public:
             return image_ready_ ? 100.0 : 0.0;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (last_exposure_duration_ <= 0.0) return 0.0;
-        double elapsed = std::chrono::duration<double>(std::chrono::system_clock::now() - last_exposure_start_).count();
+        if (last_exposure_duration_ <= 0.0 || !pending_progress_start_) return 0.0;
+        double elapsed = std::chrono::duration<double>(clock_.now() - *pending_progress_start_).count();
         double percent = (elapsed / last_exposure_duration_) * 100.0;
         return std::clamp(percent, 0.0, 100.0);
     }
@@ -986,40 +981,31 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        ensure_connected();
         (void)light;  // A DSLR's mechanical shutter always opens; dark frames require capping the lens.
 
-        if (duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative", AlpacaError::InvalidValue);
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
+        }
+        if (duration > 3600.0) {
+            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
 
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            validate_exposure_locked(duration);
+        }
         stop_exposure_thread();
 
         int active_handle;
         std::string shutter_choice;
         std::string shutter_widget_name;
+        double actual_duration;
         bool use_bulb;
         bool use_mlu;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (handle_ < 0) {
-                throw AlpacaException("Camera handle not set", AlpacaError::NotConnected);
-            }
-            if (duration > get_exposure_max_locked()) {
-                throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
-            }
-            if (geometry_known_) {
-                if (num_x_ <= 0 || num_y_ <= 0) {
-                    throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
-                }
-                if (start_x_ < 0 || start_y_ < 0 || start_x_ >= camera_x_size_ || start_y_ >= camera_y_size_) {
-                    throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
-                }
-                if (start_x_ + num_x_ > camera_x_size_ || start_y_ + num_y_ > camera_y_size_) {
-                    throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
-                }
-            }
+            validate_exposure_locked(duration);
             active_handle = handle_;
             // Follow the camera's own mirror lock-up menu setting; the driver never writes it. With it on, the
             // body answers gp_camera_capture only after a 60 s timeout, so the shutter is fired with two
@@ -1044,7 +1030,14 @@ public:
             // speed to fall back on: every duration takes the bulb path.
             use_bulb = has_bulb_ && ((native_shutter_choices_.empty() && to_lower(bulb_choice_) == "bulb") ||
                                      duration > max_native_shutter_seconds_ + 1e-9);
-            shutter_choice = use_bulb ? bulb_choice_ : nearest_shutter_choice_locked(duration);
+            actual_duration = duration;
+            if (use_bulb) {
+                shutter_choice = bulb_choice_;
+            } else {
+                const auto selected = nearest_shutter_choice_locked(duration);
+                shutter_choice = selected.first;
+                actual_duration = selected.second;
+            }
             // In B mode the body owns the shutter and refuses a shutterspeed write ("I/O in progress");
             // the press/release pair alone drives the exposure.
             if (native_shutter_choices_.empty() && !remote_press_choice_.empty()) {
@@ -1053,17 +1046,7 @@ public:
             shutter_widget_name = shutter_widget_name_;
 
             last_exposure_duration_ = duration;
-            // ICameraV4 LastExposureDuration is the actual duration: a native exposure runs at the shutter speed
-            // written, which is the nearest choice, not the requested value. A bulb exposure is held for the
-            // duration the driver times itself, and a body that owns its shutter (B mode) writes none, so both
-            // report the requested value. PercentCompleted keeps the requested duration for progress.
-            pending_actual_duration_ = duration;
-            if (!use_bulb && !shutter_choice.empty()) {
-                if (const auto set_speed = parse_shutter_speed_seconds(shutter_choice)) {
-                    pending_actual_duration_ = *set_speed;
-                }
-            }
-            last_exposure_start_ = std::chrono::system_clock::now();
+            pending_progress_start_.reset();
             last_exposure_valid_ = true;
             image_ready_ = false;
             image_cached_ = false;
@@ -1093,9 +1076,10 @@ public:
             exposure_active_.store(true);
         }
 
-        exposure_thread_ =
-            std::thread([this, active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration]() {
-                run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration);
+        exposure_thread_ = std::thread(
+            [this, active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration, actual_duration]() {
+                run_exposure(active_handle, shutter_choice, shutter_widget_name, use_bulb, use_mlu, duration,
+                             actual_duration);
             });
     }
 
@@ -1111,11 +1095,7 @@ public:
         // lock-up exposure has no such call: an abort cuts the settle short and
         // still fires the second press/release pair (the mirror is up), then
         // run_exposure discards the frame.
-        abort_requested_.store(true);
-        exposure_active_.store(false);
-        if (exposure_thread_.joinable()) {
-            exposure_thread_.join();
-        }
+        stop_exposure_thread();
         std::lock_guard<std::mutex> lock(mutex_);
         image_ready_ = false;
         image_cached_ = false;
@@ -1185,19 +1165,17 @@ private:
     mutable bool image_cached_{false};
     mutable ImageArray last_image_{};
     double last_exposure_duration_{0.0};  // requested; PercentCompleted's denominator
-    double pending_actual_duration_{0.0};
-    std::chrono::system_clock::time_point last_exposure_start_{};
+    std::optional<util::TaskClock::clock::time_point> pending_progress_start_;
     bool last_exposure_valid_{false};
-    // What LastExposureDuration / LastExposureStartTime report: the exposure in flight (the pending fields above)
-    // copied here only when its image is acquired (issue #1477).
+    // Last successful image only; in-flight timing stays local to the exposure worker.
     util::LastExposure published_exposure_;
     std::optional<double> sensor_temperature_;
 
     mutable std::atomic<bool> exposure_active_{false};
-    // Set when the exposure worker fails; cleared by the next StartExposure, AbortExposure and
+    // Set when the exposure worker fails or its deadline expires; cleared by StartExposure, AbortExposure and
     // disconnect. Both guarded by mutex_.
-    bool exposure_failed_{false};
-    std::string exposure_error_;
+    mutable bool exposure_failed_{false};
+    mutable std::string exposure_error_;
     std::atomic<bool> abort_requested_{false};
     std::thread exposure_thread_;
     std::mutex exposure_lifecycle_mutex_;
@@ -1248,9 +1226,8 @@ private:
         image_ready_ = false;
         image_cached_ = false;
         last_exposure_duration_ = 0.0;
-        last_exposure_start_ = std::chrono::system_clock::time_point{};
+        pending_progress_start_.reset();
         last_exposure_valid_ = false;
-        pending_actual_duration_ = 0.0;
         published_exposure_.clear();
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
@@ -1260,8 +1237,11 @@ private:
     }
 
     void stop_exposure_thread() {
-        abort_requested_.store(true);
-        exposure_active_.store(false);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            abort_requested_.store(true);
+            exposure_active_.store(false);
+        }
         if (exposure_thread_.joinable()) {
             exposure_thread_.join();
         }
@@ -1269,7 +1249,25 @@ private:
 
     double get_exposure_max_locked() const { return has_bulb_ ? 3600.0 : max_native_shutter_seconds_; }
 
-    std::string nearest_shutter_choice_locked(double duration) const {
+    void validate_exposure_locked(double duration) const {
+        ensure_connected();
+        if (duration > get_exposure_max_locked()) {
+            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
+        }
+        if (geometry_known_) {
+            if (num_x_ <= 0 || num_y_ <= 0) {
+                throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);
+            }
+            if (start_x_ < 0 || start_y_ < 0 || start_x_ >= camera_x_size_ || start_y_ >= camera_y_size_) {
+                throw AlpacaException("Start position outside sensor bounds", AlpacaError::InvalidValue);
+            }
+            if (start_x_ + num_x_ > camera_x_size_ || start_y_ + num_y_ > camera_y_size_) {
+                throw AlpacaException("ROI extends beyond sensor bounds", AlpacaError::InvalidValue);
+            }
+        }
+    }
+
+    std::pair<std::string, double> nearest_shutter_choice_locked(double duration) const {
         if (native_shutter_choices_.empty()) {
             throw AlpacaException("No shutter speed control exposed by this camera", AlpacaError::NotImplemented);
         }
@@ -1282,7 +1280,7 @@ private:
                 best_diff = diff;
             }
         }
-        return best->first;
+        return *best;
     }
 
     void set_roi_dimension_locked(int* field, int value) {
@@ -1493,6 +1491,21 @@ private:
         }
     }
 
+    // Requires mutex_ held; late frames fail admission even if no client polled the watchdog.
+    bool expire_exposure_locked() const {
+        if (!exposure_active_.load() || !exposure_deadline_valid_ || clock_.now() < exposure_deadline_) return false;
+        exposure_error_ = "Exposure deadline exceeded";
+        exposure_failed_ = true;
+        image_ready_ = false;
+        image_cached_ = false;
+        exposure_active_.store(false);
+        exposure_deadline_valid_ = false;
+        ALPACA_LOG_WARN(kLogTag,
+                        "Exposure deadline exceeded; discarding frame. "
+                        "Exposure thread may still be blocked inside libgphoto2.");
+        return true;
+    }
+
     // Record the failure so ImageReady and ImageArray say why. A camera that left the USB bus
     // (auto power-off) is also reported disconnected, so the client reconnects; reconnecting enumerates the
     // camera again. Runs on the exposure worker; stop_exposure()/set_connected(false) join it before they
@@ -1501,8 +1514,12 @@ private:
     void record_exposure_failure(int handle, const char* what, bool device_gone) {
         if (abort_requested_.load()) return;
         std::lock_guard<std::mutex> lock(mutex_);
-        exposure_error_ = what;
-        exposure_failed_ = true;
+        if (!exposure_failed_) {
+            exposure_error_ = what;
+            exposure_failed_ = true;
+        }
+        exposure_active_.store(false);
+        exposure_deadline_valid_ = false;
         if (!device_gone) return;
         mark_device_gone_locked(handle);
     }
@@ -1520,8 +1537,13 @@ private:
         }
     }
 
+    struct ExposureTiming {
+        double duration{0.0};
+        std::chrono::system_clock::time_point start;
+    };
+
     void run_exposure(int handle, const std::string& shutter_choice, const std::string& shutter_widget_name,
-                      bool use_bulb, bool use_mlu, double duration) {
+                      bool use_bulb, bool use_mlu, double duration, double actual_duration) {
         auto& sdk = sdk_;
         try {
             if (!shutter_choice.empty() && !shutter_widget_name.empty()) {
@@ -1529,11 +1551,18 @@ private:
             }
 
             GPhotoCaptureResult capture;
+            ExposureTiming timing{actual_duration, {}};
             if (use_mlu) {
-                capture = mlu_capture_with_abort(handle, duration, use_bulb);
+                capture = mlu_capture_with_abort(handle, duration, use_bulb, timing);
             } else if (use_bulb) {
-                capture = bulb_capture_with_abort(handle, duration);
+                capture = bulb_capture_with_abort(handle, duration, timing);
             } else {
+                // Host trigger-call boundary, not a measured photon edge; the camera clock's EXIF time is not UTC.
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    pending_progress_start_ = clock_.now();
+                    timing.start = std::chrono::system_clock::now();
+                }
                 capture = sdk.capture_and_download(handle);
             }
 
@@ -1546,20 +1575,21 @@ private:
             DecodedFrame decoded = decoder_.decode(capture.data);
 
             std::lock_guard<std::mutex> lock(mutex_);
-            if (!exposure_active_.load()) {
-                // Aborted while the frame was decoding: the image is discarded,
+            if (expire_exposure_locked() || !exposure_active_.load()) {
+                // Aborted or expired while the frame was decoding: the image is discarded,
                 // so nothing is applied or published.
                 return;
             }
             apply_decoded_frame_locked(decoded);
             image_cached_ = true;
             image_ready_ = true;
-            published_exposure_.commit(pending_actual_duration_, last_exposure_start_);
+            published_exposure_.commit(timing.duration, timing.start);
+            exposure_active_.store(false);
+            exposure_deadline_valid_ = false;
         } catch (const std::exception& e) {
             ALPACA_LOG_WARN(kLogTag, "Exposure failed: " + std::string(e.what()));
             record_exposure_failure(handle, e.what(), dynamic_cast<const GPhotoDeviceGoneException*>(&e) != nullptr);
         }
-        exposure_active_.store(false);
     }
 
     // How long to keep polling for the frame after a bulb (or mirror lock-up) shutter closes. A
@@ -1643,7 +1673,7 @@ private:
 
     // Bulb capture with early-abort support: open the shutter, hold_with_events() for the exposure, close it,
     // then wait_for_bulb_file().
-    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s) {
+    GPhotoCaptureResult bulb_capture_with_abort(int handle, double duration_s, ExposureTiming& timing) {
         auto& sdk = sdk_;
         using clock = util::TaskClock::clock;
 
@@ -1656,7 +1686,17 @@ private:
                 sdk.set_toggle_value(handle, "bulb", true);
             }
         };
+        // Elapsed host open/close command boundaries include event-pump overruns, not file wait or decode.
+        // Physical shutter latency is camera-dependent and needs rig measurement.
+        util::TaskClock::clock::time_point opened_at;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            opened_at = clock_.now();
+            timing.start = std::chrono::system_clock::now();
+            pending_progress_start_ = opened_at;
+        }
         const auto shutter_close = [&] {
+            timing.duration = std::chrono::duration<double>(clock_.now() - opened_at).count();
             if (use_remote_release) {
                 sdk.set_choice_value(handle, "eosremoterelease", remote_release_choice_);
             } else {
@@ -1678,7 +1718,7 @@ private:
     // The settle runs on the TaskClock and pumps events like the hold. An abort cuts it short but does not skip
     // the second pair: the mirror is up, and a body left there would fire on the NEXT exposure's first press.
     // The frame it takes is discarded by run_exposure().
-    GPhotoCaptureResult mlu_capture_with_abort(int handle, double duration_s, bool hold) {
+    GPhotoCaptureResult mlu_capture_with_abort(int handle, double duration_s, bool hold, ExposureTiming& timing) {
         using clock = util::TaskClock::clock;
         auto& sdk = sdk_;
         const auto press = [&] { sdk.set_choice_value(handle, "eosremoterelease", remote_release_pair_->first); };
@@ -1687,11 +1727,20 @@ private:
         press();
         release();  // the mirror is up
         hold_with_events(handle, options_.mirror_lockup_settle, [] {});
+        util::TaskClock::clock::time_point opened_at;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            opened_at = clock_.now();
+            timing.start = std::chrono::system_clock::now();
+            pending_progress_start_ = opened_at;
+        }
         press();
         if (hold) {
-            hold_with_events(handle,
-                             std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s)),
-                             release);
+            hold_with_events(
+                handle, std::chrono::duration_cast<clock::duration>(std::chrono::duration<double>(duration_s)), [&] {
+                    timing.duration = std::chrono::duration<double>(clock_.now() - opened_at).count();
+                    release();
+                });
         } else {
             release();
         }

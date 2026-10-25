@@ -1204,6 +1204,98 @@ int main() {
     }
 
     {
+        // case: LastExposure getters map disconnected and fresh-session errors to HTTP 200 (#1477)
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        EXPECT(registry.register_device(camera));
+        for (bool connected : {false, true}) {
+            camera->set_connected(connected);
+            for (const std::string method : {"lastexposureduration", "lastexposurestarttime"}) {
+                const auto response = route_request(
+                    router, "GET",
+                    "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method + "?ClientTransactionID=1477");
+                EXPECT(response.status_code() == 200);
+                const auto body = nlohmann::json::parse(response.body());
+                EXPECT(body.at("ErrorNumber") == (connected ? 0x40B : 0x407));
+                EXPECT(!body.at("ErrorMessage").get<std::string>().empty());
+                EXPECT(body.at("ClientTransactionID") == 1477);
+                EXPECT(body.at("ServerTransactionID") == 1);
+                EXPECT(!body.contains("Value"));
+            }
+        }
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: LastExposure success serializes a double duration and whole-second UTC ISO time (#1477)
+        struct TimezoneRestore {
+            std::optional<std::string> previous;
+            TimezoneRestore() {
+                if (const char* tz = std::getenv("TZ")) previous = tz;
+                EXPECT(setenv("TZ", "EST5", 1) == 0);
+                tzset();
+            }
+            ~TimezoneRestore() {
+                if (previous) {
+                    EXPECT(setenv("TZ", previous->c_str(), 1) == 0);
+                } else {
+                    EXPECT(unsetenv("TZ") == 0);
+                }
+                tzset();
+            }
+        } timezone_restore;
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_connected(true);
+        const auto start = std::chrono::sys_days{std::chrono::year{2026} / 10 / 24} + std::chrono::hours{12} +
+                           std::chrono::minutes{34} + std::chrono::seconds{56} + std::chrono::milliseconds{789};
+        camera->set_last_exposure(1.25, start);
+        EXPECT(registry.register_device(camera));
+
+        const auto duration_response =
+            route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/lastexposureduration");
+        EXPECT(duration_response.status_code() == 200);
+        const auto duration = nlohmann::json::parse(duration_response.body());
+        EXPECT(duration.at("ErrorNumber") == 0);
+        EXPECT(duration.at("Value").is_number_float());
+        EXPECT(duration.at("Value").get<double>() == 1.25);
+
+        const auto start_response =
+            route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/lastexposurestarttime");
+        EXPECT(start_response.status_code() == 200);
+        const auto timestamp = nlohmann::json::parse(start_response.body());
+        EXPECT(timestamp.at("ErrorNumber") == 0);
+        EXPECT(timestamp.at("Value").is_string());
+        // format_utc currently emits seconds, without fractional digits or a timezone suffix.
+        EXPECT(timestamp.at("Value") == "2026-10-24T12:34:56");
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
+        // case: LastExposure driver failures preserve exact Alpaca codes and messages at HTTP 200 (#1477)
+        constexpr int kCameraNumber = 8984;
+        auto& registry = alpacacore::management::DeviceRegistry::instance();
+        auto camera = std::make_shared<route_table_stubs::CameraStub>(kCameraNumber);
+        camera->set_connected(true);
+        EXPECT(registry.register_device(camera));
+        for (int error : {alpacacore::AlpacaError::PropertyNotImplemented, alpacacore::AlpacaError::DriverException}) {
+            camera->set_last_exposure_error(alpacacore::AlpacaException("Metadata read failed", error));
+            for (const std::string method : {"lastexposureduration", "lastexposurestarttime"}) {
+                const auto response =
+                    route_request(router, "GET", "/api/v1/camera/" + std::to_string(kCameraNumber) + "/" + method);
+                EXPECT(response.status_code() == 200);
+                const auto body = nlohmann::json::parse(response.body());
+                EXPECT(body.at("ErrorNumber") == error);
+                EXPECT(body.at("ErrorMessage") == "Metadata read failed");
+                EXPECT(!body.contains("Value"));
+            }
+        }
+        registry.unregister_device(alpacacore::DeviceType::Camera, kCameraNumber);
+    }
+
+    {
         // case: ImageBytes preserves metadata, ordering, and element bytes
         constexpr int kCameraNumber = 8980;
         auto& registry = alpacacore::management::DeviceRegistry::instance();

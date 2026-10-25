@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "catch2_compat.h"
+#include "fake_task_clock.h"
 #include "fake_zwo_sdk.h"
 #include "locked_zwo_sdk.h"
 
@@ -59,6 +60,263 @@ int error_code(const std::function<void()>& fn) {
 }
 
 }  // namespace
+
+TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    sdk.auto_complete_exposure = false;
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    const auto expect_unset = [&](int code) {
+        CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) == code);
+        CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) == code);
+    };
+    expect_unset(AlpacaError::NotConnected);
+    connect_camera(*camera);
+    expect_unset(AlpacaError::InvalidOperation);
+    camera->start_exposure(0.01, true);
+    CHECK_FALSE(camera->get_image_ready());
+    expect_unset(AlpacaError::InvalidOperation);
+    camera->abort_exposure();
+    expect_unset(AlpacaError::InvalidOperation);
+    camera->start_exposure(0.01, true);
+    sdk.set_exposure_status_error("first acquisition failed");
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    expect_unset(AlpacaError::InvalidOperation);
+    sdk.set_exposure_status_error("");
+
+    camera->start_exposure(0.0100006, true);
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    REQUIRE(camera->get_image_ready());
+    CHECK(sdk.call_count("get_data_after_exposure") == 0);
+    const auto start_a = camera->get_last_exposure_start_time();
+    const auto duration_a = camera->get_last_exposure_duration();
+    CHECK(duration_a == 0.010001);
+    const auto expect_a = [&] {
+        CHECK(camera->get_last_exposure_duration() == duration_a);
+        CHECK(camera->get_last_exposure_start_time() == start_a);
+    };
+    camera->set_connected(true);  // redundant connection is not a new session
+    expect_a();
+    CHECK(error_code([&] { camera->start_exposure(-1.0, true); }) == AlpacaError::InvalidValue);
+    expect_a();
+    camera->start_exposure(0.02, true);
+    CHECK_FALSE(camera->get_image_ready());
+    expect_a();
+    camera->abort_exposure();
+    expect_a();
+    CHECK_FALSE(camera->get_image_ready());
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    camera->start_exposure(0.03, true);
+    sdk.set_exposure_status_error("later acquisition failed");
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    expect_a();
+    sdk.set_exposure_status_error("");
+    camera->start_exposure(0.04, true);
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    REQUIRE(camera->get_image_ready());
+    CHECK(camera->get_last_exposure_duration() == 0.04);
+    CHECK(camera->get_last_exposure_start_time() > start_a);
+
+    // Acquisition is validated SDK Success, not the later lazy USB transfer.
+    const auto start_b = camera->get_last_exposure_start_time();
+    sdk.download_error = "late transfer failure";
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(camera->get_last_exposure_duration() == 0.04);
+    CHECK(camera->get_last_exposure_start_time() == start_b);
+    camera->set_connected(false);
+    expect_unset(AlpacaError::NotConnected);
+    camera->set_connected(true);
+    expect_unset(AlpacaError::InvalidOperation);
+}
+
+TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    clock.advance(std::chrono::seconds(1));
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    connect_camera(*camera);
+    std::chrono::system_clock::time_point setup_finished, trigger_entered;
+    bool observe_retry_setup = false;
+    double retry_setup_progress = -1.0;
+    sdk.before_call = [&](const std::string& call) {
+        if (call == "set_control_value") {
+            if (observe_retry_setup) retry_setup_progress = camera->get_percent_completed();
+            setup_finished = std::chrono::system_clock::now();
+        }
+        if (call == "start_exposure") trigger_entered = std::chrono::system_clock::now();
+    };
+    camera->start_exposure(0.0200006, true);
+    REQUIRE(camera->get_image_ready());
+    CHECK(camera->get_last_exposure_start_time() >= setup_finished);
+    CHECK(camera->get_last_exposure_start_time() <= trigger_entered);
+    CHECK(camera->get_last_exposure_duration() == 0.020001);
+    const auto start_a = camera->get_last_exposure_start_time();
+
+    sdk.auto_complete_exposure = false;
+    camera->start_exposure(2.0000006, true);
+    clock.advance(std::chrono::seconds(3));
+    observe_retry_setup = true;
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+    // Direct retrieval drives the retry but remains InvalidOperation until an image is ready.
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
+    CHECK(retry_setup_progress == 0.0);
+    CHECK(camera->get_last_exposure_start_time() == start_a);
+    clock.advance(std::chrono::milliseconds(500));
+    CHECK(camera->get_percent_completed() == Catch::Approx(50.0 / 2.000001));
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    REQUIRE(camera->get_image_ready());
+    CHECK(camera->get_last_exposure_start_time() >= setup_finished);
+    CHECK(camera->get_last_exposure_start_time() <= trigger_entered);
+    CHECK(camera->get_last_exposure_duration() == 2.000001);
+    CHECK(sdk.call_count("start_exposure") == 3);
+    CHECK(sdk.call_count("get_data_after_exposure") == 0);
+}
+
+TEST_CASE("ZWO fake SDK - exhausted retries never publish candidate metadata", "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    clock.advance(std::chrono::seconds(1));
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    connect_camera(*camera);
+    for (const bool prior_success : {false, true}) {
+        if (prior_success) {
+            camera->start_exposure(0.01, true);
+            REQUIRE(camera->get_image_ready());
+        }
+        std::chrono::system_clock::time_point prior_start{};
+        if (prior_success) prior_start = camera->get_last_exposure_start_time();
+        camera->start_exposure(0.02, true);
+        for (int retry = 0; retry < 2; ++retry) {
+            sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+            CHECK_FALSE(camera->get_image_ready());
+            clock.advance(std::chrono::milliseconds(250));
+        }
+        sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+        CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+        if (prior_success) {
+            CHECK(camera->get_last_exposure_duration() == 0.01);
+            CHECK(camera->get_last_exposure_start_time() == prior_start);
+        } else {
+            CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+                  AlpacaError::InvalidOperation);
+            CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+                  AlpacaError::InvalidOperation);
+        }
+    }
+}
+
+TEST_CASE("ZWO fake SDK - direct retrieval publishes at validated SDK success", "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    sdk.frame_bytes = make_raw16_frame(16, 8);
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    connect_camera(*camera);
+    sdk.fail_exposure_start = true;
+    CHECK(error_code([&] { camera->start_exposure(0.01, true); }) == AlpacaError::DriverException);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+          AlpacaError::InvalidOperation);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+          AlpacaError::InvalidOperation);
+    camera->start_exposure(0.02, true);
+    sdk.roi_readback_override = FakeZWOSDK::ROIDescription{0, 8, 1, FakeZWOSDK::ImageType::Raw16};
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+          AlpacaError::InvalidOperation);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+          AlpacaError::InvalidOperation);
+    sdk.roi_readback_override.reset();
+    camera->start_exposure(0.03, true);
+    const auto image = camera->get_image_array();  // no ImageReady prerequisite
+    CHECK(image.data.front() == 1);
+    CHECK(camera->get_last_exposure_duration() == 0.03);
+    camera->start_exposure(0.04, true);
+    sdk.download_error = "transfer failed after acquisition";
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(camera->get_last_exposure_duration() == 0.04);
+    CHECK(camera->get_last_exposure_start_time() != std::chrono::system_clock::time_point{});
+}
+
+TEST_CASE("ZWO fake SDK - retry trigger failure stays failed without publishing",
+          "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    clock.advance(std::chrono::seconds(1));
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    connect_camera(*camera);
+    camera->start_exposure(0.01, true);
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+    sdk.fail_exposure_start = true;
+    SECTION("ImageReady drives the failed retry") {
+        CHECK_FALSE(camera->get_image_ready());  // retry replaced the polled generation
+    }
+    SECTION("Direct ImageArray reports the failed retry on its first read") {
+        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    }
+    const int starts = sdk.call_count("start_exposure");
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(sdk.call_count("get_data_after_exposure") == 0);
+    clock.advance(std::chrono::seconds(1));
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+    static_cast<void>(camera->get_camera_state());
+    CHECK(sdk.call_count("start_exposure") == starts);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+          AlpacaError::InvalidOperation);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+          AlpacaError::InvalidOperation);
+    camera->start_exposure(0.02, true);
+    REQUIRE(camera->get_image_ready());
+    CHECK(camera->get_last_exposure_duration() == 0.02);
+}
+
+TEST_CASE("ZWO fake SDK - stale failed poll cannot retry a newer exposure", "[zwo][camera][unit][last-exposure]") {
+    FakeZWOSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    clock.advance(std::chrono::seconds(1));
+    auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
+    connect_camera(*camera);
+    camera->start_exposure(0.01, true);
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false, release = false;
+    std::atomic<int> polls{0};
+    sdk.before_call = [&](const std::string& call) {
+        if (call != "get_exposure_status" || polls.fetch_add(1) != 0) return;
+        std::unique_lock lock(mutex);
+        entered = true;
+        cv.notify_all();
+        cv.wait(lock, [&] { return release; });
+    };
+    std::atomic<bool> old_ready{true};
+    std::thread reader([&] { old_ready.store(camera->get_image_ready()); });
+    bool saw_poll;
+    {
+        std::unique_lock lock(mutex);
+        saw_poll = cv.wait_for(lock, std::chrono::seconds(2), [&] { return entered; });
+    }
+    // Always release/join before a fatal assertion, including a failed rendezvous.
+    if (saw_poll) {
+        camera->start_exposure(0.02, true);
+        sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
+    }
+    {
+        std::lock_guard lock(mutex);
+        release = true;
+    }
+    cv.notify_all();
+    reader.join();
+    REQUIRE(saw_poll);
+    CHECK_FALSE(old_ready.load());
+    CHECK(sdk.call_count("start_exposure") == 2);
+    CHECK(sdk.call_count("stop_exposure") == 0);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_duration()); }) ==
+          AlpacaError::InvalidOperation);
+    CHECK(error_code([&] { static_cast<void>(camera->get_last_exposure_start_time()); }) ==
+          AlpacaError::InvalidOperation);
+    sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Success);
+    REQUIRE(camera->get_image_ready());
+    CHECK(camera->get_last_exposure_duration() == 0.02);
+}
 
 TEST_CASE("ZWO fake SDK - lazy download preserves padded ROI pixels", "[zwo][camera][unit]") {
     FakeZWOSDK sdk;

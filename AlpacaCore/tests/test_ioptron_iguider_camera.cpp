@@ -23,9 +23,11 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -138,6 +140,7 @@ TEST_CASE("iOptron iGuider Camera Driver - Not connected throws", "[ioptron][igu
     require_alpaca_error([&] { (void)c.get_camera_x_size(); }, nc);
     require_alpaca_error([&] { (void)c.get_exposure_max(); }, nc);
     require_alpaca_error([&] { (void)c.get_last_exposure_duration(); }, nc);
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, nc);
     require_alpaca_error([&] { (void)c.get_is_pulse_guiding(); }, nc);
     // Unsupported members answer NotConnected first, as the contract sweep expects.
     require_alpaca_error([&] { (void)c.get_ccd_temperature(); }, nc);
@@ -487,12 +490,141 @@ TEST_CASE("iOptron iGuider Camera Driver - LastExposure values follow successful
     }
     SECTION("a later failure keeps the earlier success") {
         expose(c, 0.01);
-        const auto start = c.get_last_exposure_start_time();
+        require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
         CHECK(c.get_last_exposure_duration() == 0.01);
         fail_exposure(0.02);
         CHECK(c.get_last_exposure_duration() == 0.01);
-        CHECK(c.get_last_exposure_start_time() == start);
+        require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
+        rig.fake.stalled = false;
+        REQUIRE(wait_until([&] { return c.get_link_fault().empty(); }));
+        CHECK(c.get_last_exposure_duration() == 0.01);
+        expose(c, 0.05);
+        CHECK(c.get_last_exposure_duration() == 0.05);
+        require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
     }
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - LastExposure duration survives pending abort and resets by session",
+          "[ioptron][iguider][camera][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    Rig rig("", clock);
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    const auto stall = [&] {
+        rig.fake.stalled = true;
+        const int reads = rig.fake.stalled_reads.load();
+        REQUIRE(wait_until([&] { return rig.fake.stalled_reads.load() > reads; }));
+    };
+
+    alpacacore::test::require_last_exposure_unset(c);
+    stall();
+    c.start_exposure(1.2, true);
+    alpacacore::test::require_last_exposure_unset(c);
+    c.abort_exposure();
+    alpacacore::test::require_last_exposure_unset(c);
+    CHECK_FALSE(c.get_image_ready());
+
+    rig.fake.stalled = false;
+    const auto image_a = expose(c, 1.2);
+    CHECK(image_a.data[0] == FakeIGuiderV4L2::exposure_marker(78));
+    CHECK(c.get_last_exposure_duration() == 1.0);
+    stall();
+    c.start_exposure(2.2, true);
+    CHECK(c.get_last_exposure_duration() == 1.0);
+    CHECK_FALSE(c.get_image_ready());
+    require_alpaca_error([&] { (void)c.get_image_array(); }, AlpacaError::InvalidOperation);
+    require_alpaca_error([&] { c.start_exposure(-1.0, true); }, AlpacaError::InvalidValue);
+    CHECK(c.get_camera_state() == CameraState::Exposing);
+    CHECK(c.get_last_exposure_duration() == 1.0);
+    c.abort_exposure();
+    CHECK(c.get_last_exposure_duration() == 1.0);
+    CHECK_FALSE(c.get_image_ready());
+    c.set_connected(true);  // not a new session
+    CHECK(c.get_last_exposure_duration() == 1.0);
+
+    // A superseded request must never publish its duration or its old-control frames.
+    c.start_exposure(3.5, true);
+    c.start_exposure(0.3, true);
+    CHECK(c.get_last_exposure_duration() == 1.0);
+    rig.fake.stalled = false;
+    REQUIRE(wait_until([&] { return c.get_image_ready(); }));
+    CHECK(c.get_image_array().data[0] == FakeIGuiderV4L2::exposure_marker(20));
+    CHECK(c.get_last_exposure_duration() == 0.2);
+    CHECK(rig.fake.stream_starts == 1);
+    CHECK(rig.fake.stream_stops == 0);
+
+    c.set_connected(false);
+    require_alpaca_error([&] { (void)c.get_last_exposure_duration(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::NotConnected);
+    c.set_connected(true);
+    alpacacore::test::require_last_exposure_unset(c);
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - LastExposure start refuses an unverified streaming timestamp",
+          "[ioptron][iguider][camera][unit]") {
+    Rig rig;
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    alpacacore::test::require_last_exposure_unset(c);
+    expose(c, 0.01);
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
+    rig.fake.stalled = true;
+    c.start_exposure(0.02, true);
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
+    c.abort_exposure();
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
+    c.set_connected(false);
+    require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::NotConnected);
+}
+
+TEST_CASE("iOptron iGuider Camera Driver - A late selected frame cannot publish without watchdog polling",
+          "[ioptron][iguider][camera][unit]") {
+    alpacacore::test::FakeTaskClock clock;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool held = false;
+    bool released = false;
+    Rig rig("", clock);
+    rig.fake.before_frame_return = [&](std::int32_t ticks) {
+        if (ticks != 78) return;  // first frame at the new duration: after the three old-control frames
+        std::unique_lock<std::mutex> lock(mutex);
+        held = true;
+        cv.notify_all();
+        // Bounded even if a test assertion fails before releasing the frame.
+        cv.wait_for(lock, std::chrono::seconds(3), [&] { return released; });
+    };
+    auto& c = *rig.camera;
+    c.set_connected(true);
+    bool prior_success = false;
+    SECTION("a first exposure cannot become successful after its deadline") {}
+    SECTION("a late second exposure preserves the earlier successful duration") {
+        expose(c, 0.01);
+        prior_success = true;
+    }
+
+    c.start_exposure(1.2, true);
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        REQUIRE(cv.wait_for(lock, std::chrono::seconds(2), [&] { return held; }));
+    }
+    rig.fake.stalled = true;  // the next read proves on_frame() has finished
+    const int reads = rig.fake.stalled_reads.load();
+    clock.advance(std::chrono::seconds(60));
+    // No driver getter between expiry and releasing the selected frame.
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+    }
+    cv.notify_all();
+    REQUIRE(wait_until([&] { return rig.fake.stalled_reads.load() > reads; }));
+    if (prior_success) {
+        CHECK(c.get_last_exposure_duration() == 0.01);
+        require_alpaca_error([&] { (void)c.get_last_exposure_start_time(); }, AlpacaError::PropertyNotImplemented);
+    } else {
+        alpacacore::test::require_last_exposure_unset(c);
+    }
+    require_alpaca_error([&] { (void)c.get_image_ready(); }, AlpacaError::DriverException);
+    require_alpaca_error([&] { (void)c.get_image_array(); }, AlpacaError::DriverException);
 }
 
 TEST_CASE("iOptron iGuider Camera Driver - An unplugged camera is a lost link", "[ioptron][iguider][camera][unit]") {

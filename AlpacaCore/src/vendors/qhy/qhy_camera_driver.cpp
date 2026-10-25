@@ -260,6 +260,7 @@ private:
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     cancel_id = camera_id_.value_or("");
+                    exposure_thread_superseded_->store(true);
                 }
                 if (!cancel_id.empty()) {
                     try {
@@ -333,6 +334,7 @@ private:
             telemetry_temp_unsupported_ = false;
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
+            exposure_range_valid_ = false;
             connected_.store(false);
             const std::string& id = camera_id_.value_or("");
             if (!id.empty()) {
@@ -403,6 +405,7 @@ private:
         // connect — it would pin the handle (CloseQHYCCD never firing) for the
         // life of the process. Same pattern as the filter wheel's connect path.
         try {
+            exposure_range_valid_ = false;
             sdk_.init_camera(id);
 
             // Populate full camera info
@@ -437,6 +440,8 @@ private:
 
             // Enumerate readout modes
             load_readout_modes_locked(id);
+            refresh_exposure_range_locked(id);
+            exposure_range_valid_ = true;
 
             reset_exposure_state_locked();
 
@@ -814,7 +819,10 @@ public:
 
     double get_exposure_max() const override {
         ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::EXPOSURE);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        ensure_exposure_range_valid_locked();
+        const auto& range = exposure_range_;
         if (!range.available) {
             return 3600.0; // 1 hour default
         }
@@ -823,7 +831,10 @@ public:
 
     double get_exposure_min() const override {
         ensure_connected();
-        auto range = sdk_.get_param_range(camera_id_value(), control::EXPOSURE);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
+        ensure_exposure_range_valid_locked();
+        const auto& range = exposure_range_;
         if (!range.available) {
             return 0.000001; // 1 µs default
         }
@@ -986,12 +997,14 @@ public:
     double get_last_exposure_duration() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.duration();
     }
 
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
         ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
+        ensure_connected();
         return published_exposure_.start_time();
     }
 
@@ -1082,10 +1095,10 @@ public:
         if (exposure_status_ != QHYExposureStatus::Working) {
             return 0.0;
         }
-        if (last_exposure_duration_ <= 0.0) {
+        if (!exposure_armed_ || last_exposure_duration_ <= 0.0) {
             return 0.0;
         }
-        auto now = std::chrono::system_clock::now();
+        auto now = clock_.now();
         double elapsed = std::chrono::duration<double>(now - last_exposure_start_).count();
         double percent = (elapsed / last_exposure_duration_) * 100.0;
         return std::clamp(percent, 0.0, 100.0);
@@ -1125,7 +1138,9 @@ public:
         if (id.empty()) {
             throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
         }
+        exposure_range_valid_ = false;  // The SDK can change hardware before its re-initialization throws.
         sdk_.set_readout_mode(id, static_cast<uint32_t>(mode));
+        refresh_exposure_range_locked(id);
 
         // set_readout_mode() re-runs InitQHYCCD on the same handle to fix
         // "Linearity HDR"'s slow download (see its own comment). Switching
@@ -1183,6 +1198,7 @@ public:
         } else {
             readout_mode_ = mode;
         }
+        exposure_range_valid_ = true;
     }
 
     std::vector<std::string> get_readout_modes() const override {
@@ -1326,11 +1342,10 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        ensure_connected();
-        if (duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative",
-                                  AlpacaError::InvalidValue);
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
         }
+        ensure_connected();
 
         // Held through the thread spawn at the end: serialises the spawn against
         // the join in stop_exposure (join racing the thread-assignment is UB on
@@ -1362,6 +1377,11 @@ public:
                     throw AlpacaException("Start position + ROI exceeds sensor area",
                                           AlpacaError::InvalidValue);
                 }
+            }
+            ensure_exposure_range_valid_locked();
+            const double maximum = exposure_range_.available ? exposure_range_.max / 1'000'000.0 : 3600.0;
+            if (duration > maximum) {
+                throw AlpacaException("Exposure duration exceeds ExposureMax", AlpacaError::InvalidValue);
             }
         }
 
@@ -1397,6 +1417,10 @@ public:
         // unblock before the mutexed setters below would otherwise hang.
         bool worker_may_still_be_running = exposure_thread_running_ && exposure_thread_running_->load();
         if (exposure_thread_.joinable() || worker_may_still_be_running) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                exposure_thread_superseded_->store(true);
+            }
             try {
                 sdk_.cancel_exposure(id);
             } catch (const std::exception& e) {
@@ -1421,12 +1445,14 @@ public:
                 throw AlpacaException("Camera is finishing a previous exposure; try again shortly",
                                       AlpacaError::InvalidOperation);
             }
-        }
-
-        // After the reap above: get_exposure_max() queries the SDK, which a
-        // detached stuck download could otherwise block.
-        if (duration > get_exposure_max()) {
-            throw AlpacaException("Exposure duration exceeds ExposureMax", AlpacaError::InvalidValue);
+            // The superseded worker cannot retire its state if replacement setup throws.
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (exposure_status_ == QHYExposureStatus::Working) {
+                exposure_status_ = QHYExposureStatus::Idle;
+                exposure_deadline_valid_ = false;
+                exposure_armed_ = false;
+                last_exposure_valid_ = false;
+            }
         }
 
         // Apply exposure time (microseconds)
@@ -1475,9 +1501,10 @@ public:
             // readout mode reliably takes ~64s to download regardless of
             // exposure duration, exceeding even this flat margin).
             std::lock_guard<std::mutex> lock(mutex_);
-            last_exposure_duration_ = duration;
-            last_exposure_start_ = std::chrono::system_clock::now();
+            last_exposure_duration_ = exposure_us / 1'000'000.0;
+            last_exposure_start_ = clock_.now();
             last_exposure_valid_ = true;
+            exposure_armed_ = false;
             image_ready_ = false;
             exposure_failure_.clear();
             exposure_status_ = QHYExposureStatus::Working;
@@ -1535,7 +1562,7 @@ public:
         // 4s exposure cleanly -- the one thing that sample does that this
         // driver didn't was keep Exp and Get on the SAME thread). QHY's SDK
         // appears to keep thread-affine state for a single-frame session.
-        exposure_thread_ = std::thread([this, id, exposure_running, exposure_superseded, sdk_ptr = &sdk_,
+        exposure_thread_ = std::thread([this, id, exposure_us, exposure_running, exposure_superseded, sdk_ptr = &sdk_,
                                         clock = &clock_]() {
             struct RunningGuard {
                 std::shared_ptr<std::atomic<bool>> flag;
@@ -1546,6 +1573,9 @@ public:
 
             ALPACA_LOG_DEBUG("QHY", "exposure worker: calling start_single_frame...");
             bool read_directly = false;
+            // Host trigger boundary, not setup, settle or download time; SDK latency is unmeasured.
+            const auto acquisition_start = std::chrono::system_clock::now();
+            const auto acquisition_tick = clock->now();
             try {
                 read_directly = sdk.start_single_frame(id);
                 ALPACA_LOG_DEBUG("QHY", "exposure worker: start_single_frame returned, read_directly=" +
@@ -1580,6 +1610,18 @@ public:
                 image_ready_ = false;
                 exposure_deadline_valid_ = false;
                 return;
+            }
+
+            if (exposure_superseded->load()) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                if (exposure_superseded->load()) {
+                    return;
+                }
+                last_exposure_start_ = acquisition_tick;
+                exposure_armed_ = true;
             }
 
             // Per QHY's own SingleFrameMode.cpp sample: when ExpQHYCCDSingleFrame
@@ -1754,6 +1796,7 @@ public:
             if (exposure_superseded->load()) {
                 return;
             }
+            expire_overdue_exposure_locked();
             // The watchdog may have already marked this exposure Failed: that
             // failure stands until the next StartExposure or AbortExposure, so a
             // late frame (or a late error) must not overwrite it.
@@ -1807,7 +1850,7 @@ public:
                         alpacacore::util::validate_image_shape(expected_shape);
                         exposure_status_ = QHYExposureStatus::Success;
                         image_ready_ = true;
-                        published_exposure_.commit(last_exposure_duration_, last_exposure_start_);
+                        published_exposure_.commit(exposure_us / 1'000'000.0, acquisition_start);
                     } catch (const std::exception& e) {
                         exposure_status_ = QHYExposureStatus::Failed;
                         exposure_failure_ = e.what();
@@ -1853,6 +1896,15 @@ private:
         // Serialise this join against start_exposure's spawn (join vs
         // thread-assignment on the same std::thread is UB).
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ensure_connected();
+            if (exposure_status_ != QHYExposureStatus::Working) {
+                return;
+            }
+            // A late successful SDK return after AbortExposure is not an accepted image.
+            exposure_thread_superseded_->store(true);
+        }
         // Cancel exposure (causes GetSingleFrame to return with an error)
         try {
             sdk_.cancel_exposure(camera_id_value());
@@ -1940,11 +1992,14 @@ private:
     int image_height_{};
     uint32_t exposure_bpp_{};
     uint32_t exposure_channels_{};
+    QHYControlRange exposure_range_{};  // Refreshed outside acquisitions; validation must not queue behind download.
+    bool exposure_range_valid_{false};
+    // Current acquisition only; successful metadata lives in published_exposure_.
     double last_exposure_duration_;
-    std::chrono::system_clock::time_point last_exposure_start_;
+    std::chrono::steady_clock::time_point last_exposure_start_;
     bool last_exposure_valid_;
-    // What LastExposureDuration / LastExposureStartTime report: the values above (the exposure in flight, which
-    // PercentCompleted reads) copied here only when that exposure's image is acquired (issue #1477).
+    bool exposure_armed_{false};  // Progress only; last_exposure_valid_ also exposes pre-arm failures.
+    // Applied duration and worker-local UTC arm time, published only with an accepted image (issue #1477).
     util::LastExposure published_exposure_;
     std::thread exposure_thread_;
     // Serialises the exposure thread's lifecycle: spawn (start_exposure) vs join
@@ -2085,6 +2140,23 @@ private:
         }
     }
 
+    void ensure_exposure_range_valid_locked() const {
+        if (!exposure_range_valid_) {
+            throw AlpacaException(
+                "Exposure configuration is unknown after a failed readout mode change; "
+                "set ReadoutMode again or reconnect",
+                AlpacaError::DriverException);
+        }
+    }
+
+    void refresh_exposure_range_locked(const std::string& id) {
+        const auto range = sdk_.get_param_range(id, control::EXPOSURE);
+        if (!range.available && sdk_.is_control_available(id, control::EXPOSURE)) {
+            throw AlpacaException("Failed to read the camera's exposure range", AlpacaError::DriverException);
+        }
+        exposure_range_ = range;
+    }
+
     // Reject runtime register writes (gain/offset/bin/ROI/readout/temp) while a
     // frame is integrating: the exposure worker is blocked in
     // GetQHYCCDSingleFrame holding no lock, so a mid-exposure write would race
@@ -2176,8 +2248,9 @@ private:
         exposure_deadline_valid_ = false;
         image_ready_       = false;
         last_exposure_duration_ = 0.0;
-        last_exposure_start_    = std::chrono::system_clock::time_point{};
+        last_exposure_start_ = std::chrono::steady_clock::time_point{};
         last_exposure_valid_    = false;
+        exposure_armed_ = false;
         published_exposure_.clear();
         exposure_buffer_.clear();
         exposure_width_    = 0;

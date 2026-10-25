@@ -15,8 +15,8 @@
 // One do-nothing driver per Alpaca device type, used by test_route_table and
 // test_routing to reach the router's per-type dispatchers (#646). Every pure
 // virtual of the device interface returns a value-initialised default, except
-// that FilterWheelStub returns the focus offsets last set; nothing else models
-// device behaviour. If a driver interface gains or loses a pure virtual this
+// that FilterWheelStub returns the focus offsets last set and CameraStub exposes
+// scripted images and LastExposure metadata/errors. If an interface gains or loses a pure virtual this
 // header stops compiling, which is the cue to update it deliberately.
 
 #include <alpacacore/alpaca_defs.h>
@@ -32,6 +32,7 @@
 #include <alpacacore/switch_driver.h>
 #include <alpacacore/telescope_driver.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/last_exposure.h>
 
 #include <chrono>
 #include <optional>
@@ -72,6 +73,12 @@ public:
     // ImageArray throws this instead of returning the image while set.
     void set_image_array_error(std::optional<alpacacore::AlpacaException> error) {
         image_array_error_ = std::move(error);
+    }
+    void set_last_exposure(double duration, std::chrono::system_clock::time_point start) {
+        last_exposure_.commit(duration, start);
+    }
+    void set_last_exposure_error(std::optional<alpacacore::AlpacaException> error) {
+        last_exposure_error_ = std::move(error);
     }
     mutable int image_getter_calls = 0;
 
@@ -123,9 +130,13 @@ public:
         return bool{};
     }
     bool get_is_pulse_guiding() const override { return bool{}; }
-    double get_last_exposure_duration() const override { return double{}; }
+    double get_last_exposure_duration() const override {
+        check_last_exposure_read();
+        return last_exposure_.duration();
+    }
     std::chrono::system_clock::time_point get_last_exposure_start_time() const override {
-        return std::chrono::system_clock::time_point{};
+        check_last_exposure_read();
+        return last_exposure_.start_time();
     }
     int get_max_adu() const override { return int{}; }
     int get_max_bin_x() const override { return int{}; }
@@ -161,10 +172,17 @@ public:
     void stop_exposure() override {}
 
 private:
+    void check_last_exposure_read() const {
+        if (!connected_) throw AlpacaException("Camera not connected", AlpacaError::NotConnected);
+        if (last_exposure_error_) throw *last_exposure_error_;
+    }
+
     int number_;
     bool connected_ = false;
     ImageArray image_array_;
     std::optional<alpacacore::AlpacaException> image_array_error_;
+    util::LastExposure last_exposure_;
+    std::optional<alpacacore::AlpacaException> last_exposure_error_;
 };
 
 class TelescopeStub final : public alpacacore::TelescopeDriver {

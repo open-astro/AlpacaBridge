@@ -15,6 +15,7 @@
 #include <alpacacore/version.h>
 
 #include <functional>
+#include <limits>
 
 #include "catch2_compat.h"
 
@@ -125,10 +126,18 @@ TEST_CASE("GPhoto Camera Driver - Value range validation and ASCOM error codes",
     require_alpaca_error([&]() { driver->stop_exposure(); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->pulse_guide(0, 100); }, alpacacore::AlpacaError::NotConnected);
     require_alpaca_error([&]() { driver->get_image_array(); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->start_exposure(-1.0, true); }, alpacacore::AlpacaError::NotConnected);
-    require_alpaca_error([&]() { driver->set_bin_x(2); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->set_bin_y(0); }, alpacacore::AlpacaError::InvalidValue);
-    require_alpaca_error([&]() { driver->set_readout_mode(1); }, alpacacore::AlpacaError::InvalidValue);
+    // Invalid arguments take precedence over disconnection; valid requests above still require a connection.
+    for (const double duration : {-1.0, 3601.0, std::numeric_limits<double>::infinity(),
+                                  -std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&]() { driver->start_exposure(duration, true); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    for (const int bin : {0, 2}) {
+        require_alpaca_error([&]() { driver->set_bin_x(bin); }, alpacacore::AlpacaError::InvalidValue);
+        require_alpaca_error([&]() { driver->set_bin_y(bin); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    for (const int mode : {-1, 1}) {
+        require_alpaca_error([&]() { driver->set_readout_mode(mode); }, alpacacore::AlpacaError::InvalidValue);
+    }
 }
 
 TEST_CASE("GPhoto Camera Driver - Unsupported method error codes", "[gphoto][camera][unit]") {
