@@ -58,6 +58,8 @@ namespace {
 // Names this wrapper's probe and its connected serial link in the serial-port
 // registry (#1202). The Wi-Fi path holds no serial port and takes no claim.
 constexpr const char* kSerialOwner = "iOptron mount";
+// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
+constexpr std::size_t kMaxReplyLen = 65536;
 
 #ifndef _WIN32
 // 8N1 raw at @p speed. The mount reads through tty_read(), so VMIN/VTIME
@@ -1074,22 +1076,25 @@ public:
     }
 
     // Wait up to wait_ms for acknowledgment bytes and discard them; once any
-    // byte has arrived, return as soon as the line goes idle (read_serial_char
-    // waits <=100 ms per attempt via tty_read()/COMMTIMEOUTS). Never throws: a
-    // silent mount is the expected case for a blind command.
+    // byte has arrived, read on past wait_ms until the line goes idle
+    // (util::read_until in idle-gap mode), so acks that straddle wait_ms are
+    // all drained. Never throws and never reports a lost link: a silent
+    // mount, or one that hung up, is the expected "no ack" for a blind command.
     void drain_serial_stale(int wait_ms) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
-        bool got_any = false;
-        while (true) {
-            char ch;
-            if (read_serial_char(ch)) {
-                got_any = true;
-                continue;
-            }
-            if (got_any || std::chrono::steady_clock::now() >= deadline) {
-                return;
-            }
-        }
+#ifndef _WIN32
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::IdleGap;
+        spec.idle_gap = std::chrono::milliseconds(100);
+        spec.first_byte_timeout = std::chrono::milliseconds(wait_ms);
+        spec.skip.clear();  // every byte is an ack byte, CR/LF included
+        spec.max_len = kMaxReplyLen;
+        // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
+        (void)util::read_until(link_.fd(), spec,
+                               std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
+                                   spec.idle_gap * static_cast<int>(spec.max_len));
+#else
+        (void)wait_ms;
+#endif
     }
 
     void drain_network_stale(int wait_ms) {
@@ -1141,11 +1146,17 @@ public:
             }
 #endif
         } else {
-            char discard[64];
-            for (int i = 0; i < 16; ++i) {
-                bool got = read_network_char(discard[0]);
-                if (!got) break;
-            }
+            // Up to 16 stale bytes, each waited for one read slice (the old
+            // 200 ms receive timeout per byte): a quiet slice ends it, so a
+            // stale reply that comes in two segments is drained whole.
+            constexpr std::size_t kMaxStale = 16;
+            util::ReadSpec spec;
+            spec.stop = util::ReadSpec::Stop::IdleGap;
+            spec.idle_gap = read_slice();
+            spec.first_byte_timeout = read_slice();
+            spec.skip.clear();
+            spec.max_len = kMaxStale;
+            (void)read_reply(spec, std::chrono::steady_clock::now() + kMaxStale * read_slice());
         }
     }
 
@@ -1460,86 +1471,84 @@ private:
 #endif
     }
 
+    // One reply read for both transports: util::read_until on the tty or
+    // util::read_until_socket on the TCP fd. The wait is poll()-bounded, so the
+    // old 10 ms pacing sleep is gone.
+    util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+#ifndef _WIN32
+        if (connection_type_ == ConnectionType::Serial) {
+            return util::read_until(link_.fd(), spec, deadline);
+        }
+        return util::read_until_socket(socket_fd_, spec, deadline);
+#else
+        (void)spec;
+        (void)deadline;
+        throw AlpacaException("iOptron mount reads are Linux-only");
+#endif
+    }
+
+    [[noreturn]] void throw_link_lost(int err) const {
+        throw AlpacaException(std::string("iOptron mount ") +
+                              (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
+                              " link lost (hangup): " + util::errno_string(err));
+    }
+
+    // The read slice of the byte-at-a-time loop: 100 ms over serial, the
+    // socket's 200 ms SO_RCVTIMEO over TCP.
+    std::chrono::milliseconds read_slice() const {
+        return std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+    }
+
+    // The byte the line sends in the read slice after a reply's timeout ran
+    // out, or "" when it stays quiet. The byte-at-a-time loop checked the
+    // timeout after each byte and never after a '#', so the byte in flight when
+    // the timeout ran out settled the reply: a '#' still ended it, any other
+    // byte was kept and the reply had timed out. A strict deadline would leave
+    // a late '#' to answer the next command; a deadline one slice later would
+    // take a whole late reply.
+    std::string late_byte(const std::string& skip) {
+        util::ReadSpec spec;
+        spec.stop = util::ReadSpec::Stop::Length;
+        spec.length = 1;
+        spec.skip = skip;
+        const auto r = read_reply(spec, std::chrono::steady_clock::now() + read_slice());
+        if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
+        return r.bytes;
+    }
+
+    // The reply without its '#': a read that ended on the terminator holds it
+    // as its last byte; an idle or timed-out read holds no '#'.
+    static std::string without_terminator(const util::ReadResult& r) {
+        std::string bytes = r.bytes;
+        if (r.outcome == util::ReadOutcome::Terminator) bytes.pop_back();
+        return bytes;
+    }
+
     std::string read_response(bool require_hash_terminator, int timeout_ms) {
-        std::string response;
-        auto start = std::chrono::steady_clock::now();
-        
-        auto last_char_time = start;
-        const int idle_break_ms = 100;
-        
-        while (true) {
-            char ch;
-            bool got_char = false;
-            
-            if (connection_type_ == ConnectionType::Serial) {
-                got_char = read_serial_char(ch);
-            } else {
-                got_char = read_network_char(ch);
-            }
-            
-            if (got_char) {
-                last_char_time = std::chrono::steady_clock::now();
-
-                // TCP bridges can insert CR/LF; ignore them to keep parsing aligned.
-                if (ch == '\r' || ch == '\n') {
-                    continue;
-                }
-
-                if (ch == '#') {
-                    break;  // Command terminator found
-                }
-                
-                response += ch;
-            }
-            
-            // Check timeout
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
-                if (!require_hash_terminator) {
-                    return response;
-                }
+        // The terminator ends the reply; without one the reply ends when the
+        // line goes quiet for 100 ms after its first byte. CR/LF are dropped
+        // (TCP bridges insert them).
+        util::ReadSpec spec;
+        spec.max_len = kMaxReplyLen;
+        if (!require_hash_terminator) {
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
+            spec.idle_gap = std::chrono::milliseconds(100);
+        }
+        const auto r = read_reply(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        switch (r.outcome) {
+            case util::ReadOutcome::LinkDead:
+                throw_link_lost(r.err);
+            case util::ReadOutcome::Overflow:
+                throw AlpacaException("iOptron mount response too long");
+            case util::ReadOutcome::Timeout: {
+                const std::string late = late_byte(spec.skip);
+                if (late == "#") return r.bytes;
+                if (!require_hash_terminator) return r.bytes + late;
                 throw AlpacaException("Timeout waiting for mount response");
             }
-
-            if (!require_hash_terminator && !got_char && !response.empty()) {
-                auto idle_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
-                if (idle_elapsed.count() > idle_break_ms) {
-                    break;
-                }
-            }
-            
-            // Small delay to avoid busy-waiting
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            default:
+                return without_terminator(r);
         }
-        
-        return response;
-    }
-    
-    bool read_serial_char(char& ch) {
-#ifdef _WIN32
-        DWORD bytes_read = 0;
-        if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-            return true;
-        }
-        return false;
-#else
-        // Bounded read (<=100 ms, the old VTIME=1 window) intentionally under
-        // the wrapper mutex for transaction atomicity — the documented
-        // protocol-wrapper pattern. tty_read() polls a non-blocking fd, so a
-        // port another program retuned to VMIN=1 cannot park it.
-        return util::tty_read(link_.fd(), &ch, 1, 100) == 1;
-#endif
-    }
-    
-    bool read_network_char(char& ch) {
-#ifdef _WIN32
-        int bytes_received = recv(socket_handle_, &ch, 1, 0);
-        return bytes_received == 1;
-#else
-        ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
-        return bytes_received == 1;
-#endif
     }
 
     void configure_network_timeouts() {

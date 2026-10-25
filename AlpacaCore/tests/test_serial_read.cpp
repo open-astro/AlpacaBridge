@@ -167,6 +167,66 @@ TEST_CASE("read_until - an IdleGap read ends after the gap that follows the firs
     CHECK(Clock::now() - start < 2s);
 }
 
+// Falsified by: serial_read.h read_until_impl() not ending a TerminatorOrIdleGap read on a byte of spec.terminators
+TEST_CASE("read_until - a TerminatorOrIdleGap read ends at the terminator and leaves later bytes in the fd",
+          "[serial][serial_read][issue1644]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "ab#late");
+    ReadSpec spec;
+    spec.stop = ReadSpec::Stop::TerminatorOrIdleGap;
+    spec.idle_gap = 2s;
+    const auto start = Clock::now();
+    const auto r = read_until(link.fd(), spec, start + 5s);
+    CHECK(r.outcome == ReadOutcome::Terminator);
+    CHECK(r.bytes == "ab#");
+    CHECK(Clock::now() - start < 1s);
+
+    ReadSpec rest;
+    rest.stop = ReadSpec::Stop::Length;
+    rest.length = 4;
+    const auto tail = read_until(link.fd(), rest, Clock::now() + 1s);
+    CHECK(tail.outcome == ReadOutcome::Length);
+    CHECK(tail.bytes == "late");
+}
+
+// Falsified by: serial_read.h read_until_impl() not shortening the wait to last_kept + spec.idle_gap in
+// TerminatorOrIdleGap mode
+TEST_CASE("read_until - a TerminatorOrIdleGap read with no terminator ends after the idle gap",
+          "[serial][serial_read][issue1644]") {
+    PtyPair pty("serial_read");
+    auto link = open_slave(pty);
+    feed(pty.master_fd(), "abc");
+    ReadSpec spec;
+    spec.stop = ReadSpec::Stop::TerminatorOrIdleGap;
+    spec.idle_gap = 60ms;
+    const auto start = Clock::now();
+    const auto r = read_until(link.fd(), spec, start + 5s);
+    CHECK(r.outcome == ReadOutcome::Idle);
+    CHECK(r.bytes == "abc");
+    CHECK(Clock::now() - start < 2s);
+}
+
+// Falsified by: serial_read.h read_until_impl() not ending a TerminatorOrIdleGap read on a byte of spec.terminators
+TEST_CASE("read_until_socket - a TerminatorOrIdleGap read ends at the terminator or after the idle gap",
+          "[serial][serial_read][issue1644]") {
+    SocketPair sp;
+    feed(sp.b, "\r1#xy");
+    ReadSpec spec;
+    spec.stop = ReadSpec::Stop::TerminatorOrIdleGap;
+    spec.idle_gap = 60ms;
+    auto start = Clock::now();
+    const auto r = read_until_socket(sp.a, spec, start + 5s);
+    CHECK(r.outcome == ReadOutcome::Terminator);
+    CHECK(r.bytes == "1#");
+
+    start = Clock::now();
+    const auto idle = read_until_socket(sp.a, spec, start + 5s);
+    CHECK(idle.outcome == ReadOutcome::Idle);
+    CHECK(idle.bytes == "xy");
+    CHECK(Clock::now() - start < 2s);
+}
+
 // Falsified by: serial_read.h read_until_impl() not applying first_limit while no byte has arrived
 TEST_CASE("read_until - first_byte_timeout ends a read that hears nothing", "[serial][serial_read][issue1604]") {
     PtyPair pty("serial_read");
