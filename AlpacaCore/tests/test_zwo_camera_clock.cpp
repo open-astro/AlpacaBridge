@@ -56,18 +56,19 @@ TEST_CASE("ZWO camera clock - first CCDTemperature retry sleeps on the task cloc
     sdk.zero_temperature_reads_after_open = 1000;
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk, clock);
     camera->set_connected(true);
+    const int connect_reads = sdk.call_count("get_control_value");
 
     double reading = -1.0;
     std::thread reader([&] { reading = camera->get_ccd_temperature(); });
     // Six reads: the first, then five retries, each behind a 50 ms clock sleep.
     for (int retry = 1; retry <= 5; ++retry) {
         REQUIRE(clock.wait_for_wait_count(static_cast<std::uint64_t>(retry), kRendezvous));
-        CHECK(sdk.call_count("get_control_value") == retry);
+        CHECK(sdk.call_count("get_control_value") == connect_reads + retry);
         clock.advance(milliseconds(50));
     }
     reader.join();
     CHECK(reading == Catch::Approx(0.0));
-    CHECK(sdk.call_count("get_control_value") == 6);
+    CHECK(sdk.call_count("get_control_value") == connect_reads + 6);
 }
 
 TEST_CASE("ZWO camera clock - IsPulseGuiding ends at the task clock deadline", "[zwo][camera][unit][clock]") {

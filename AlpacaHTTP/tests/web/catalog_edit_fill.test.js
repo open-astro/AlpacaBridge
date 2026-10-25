@@ -88,6 +88,45 @@ test('editAssignments fills saved values, leaves absent ones to the markup, and 
     ]);
 });
 
+test('ZWO USB Limit edits explicit values and leaves default blank without affecting switches', () => {
+    const bandwidth = descriptor('zwo', 'camera').fields.find((field) => field.key === 'usbBandwidth');
+    const input = html.match(/<input[^>]*id="zwo-usb-bandwidth"[^>]*>/)[0];
+    assert.ok(input.includes(`placeholder="Default: ${bandwidth.default}"`));
+    assert.ok(html.includes(`Blank uses ${bandwidth.default}, clamped to the camera's range, in manual mode.`));
+    for (const value of [0, 40, 65, 100]) {
+        assert.equal(shown('zwo', 'camera', { usbBandwidth: value })('zwo-usb-bandwidth'), String(value));
+    }
+    for (const config of [{}, { usbBandwidth: null }]) {
+        assert.equal(shown('zwo', 'camera', config)('zwo-usb-bandwidth'), '');
+    }
+    assert.ok(!schema().editAssignments(descriptor('zwo', 'switch'), { usbBandwidth: 65 }, fields)
+        .some((a) => a.key === 'usbBandwidth'));
+    const { zwoUsbBandwidth } = require(path.join(WEB, 'format.js'));
+    for (const value of ['', ' ', null, undefined]) assert.equal(zwoUsbBandwidth(value), undefined);
+    for (const value of ['0', '40', '65', '100']) assert.equal(zwoUsbBandwidth(value), Number(value));
+    for (const value of ['40.5', '40garbage', '-1', '101', 'NaN', 'Infinity']) {
+        assert.throws(() => zwoUsbBandwidth(value), /USB Limit/);
+    }
+});
+
+test('ZWO camera controls are disabled when another vendor is selected', () => {
+    const body = functionBody(app, 'updateZwoConfigFields');
+    assert.match(body, /setFieldGroupEnabled\(cameraFields,\s*isCamera\s*&&\s*document\.getElementById\('vendor'\)\?\.value\s*===\s*'zwo'\)/);
+});
+
+test('ZWO USB Limit submit sends the parsed value and omits blank input', () => {
+    assert.ok(Number(html.match(/src="\/web\/format\.js\?v=(\d+)"/)[1]) > 15,
+        'invalidate the cached format.js that lacks zwoUsbBandwidth');
+    assert.ok(Number(html.match(/src="\/web\/app\.js\?v=(\d+)"/)[1]) > 48,
+        'invalidate the cached app.js that does not submit USB Limit');
+    const start = app.indexOf("} else if (deviceData.vendor === 'zwo')");
+    const branch = app.slice(start, app.indexOf("} else if (deviceData.vendor === 'qhy'", start));
+    const camera = branch.slice(branch.indexOf("if (normalizedType === 'camera')"),
+        branch.indexOf("if (normalizedType === 'switch' &&"));
+    assert.ok(camera.includes("const bandwidth = zwoUsbBandwidth(formData.get('zwoUsbBandwidth'));"));
+    assert.match(camera, /if\s*\(bandwidth !== undefined\)\s*deviceData\.usbBandwidth = bandwidth;/);
+});
+
 test('an absent or null Discriminator opens on its catalog default', () => {
     const d = descriptor('touptek', 'switch');
     for (const config of [{}, { switchType: null }]) {

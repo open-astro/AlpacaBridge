@@ -3869,7 +3869,7 @@ function updateZwoConfigFields() {
     const isDewHeater = isSwitch && !isAsiairSwitch && !isAsiairPlusSwitch;
     if (cameraFields) {
         cameraFields.style.display = isCamera ? 'block' : 'none';
-        setFieldGroupEnabled(cameraFields, isCamera);
+        setFieldGroupEnabled(cameraFields, isCamera && document.getElementById('vendor')?.value === 'zwo');
     }
     const dewHeaterFields = document.getElementById('zwo-dewheater-fields');
     if (dewHeaterFields) {
@@ -4227,6 +4227,13 @@ document.getElementById('device-form').addEventListener('submit', async function
             }
             if (normalizedType === 'camera') {
                 Object.assign(deviceData, zwoCameraIdentityFields(formData));
+                try {
+                    const bandwidth = zwoUsbBandwidth(formData.get('zwoUsbBandwidth'));
+                    if (bandwidth !== undefined) deviceData.usbBandwidth = bandwidth;
+                } catch (error) {
+                    alert(error.message);
+                    return;
+                }
             }
             if (normalizedType === 'switch' && (formData.get('switchType') || 'dewheater') === 'dewheater') {
                 const dewCamera = zwoDewHeaterPicker.read();

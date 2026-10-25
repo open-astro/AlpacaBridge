@@ -15,7 +15,8 @@
 // ZWO catalog field declarations for the telescope (AM mounts), camera, EFW
 // filter wheel, EAF focuser, CAA rotator and the three switch backends (dew
 // heater, ASIAIR Pro / Plus CM4, ASIAIR Plus RK3568), shared by zwo_schema.cpp
-// (no vendor header) and zwo_catalog.cpp (the factory, vendor header allowed).
+// (no vendor header), zwo_catalog.cpp (the factory, vendor header allowed), and
+// the camera driver (the USB bandwidth default).
 // No vendor header here either: the schema file includes this one and compiles
 // in every build (including vendors-OFF).
 
@@ -114,6 +115,7 @@ inline const Field<std::int64_t> kZwoCamIndex{
 inline const Field<std::int64_t> kZwoCamId{.key = "cameraId", .default_value = -1, .role = Role::DeviceId};
 inline const Field<std::string> kZwoCamSerial{.key = "serialNumber", .default_value = ""};
 inline const Field<std::string> kZwoCamName{.key = "cameraName", .default_value = ""};
+inline const Field<std::int64_t> kZwoCamUsbBandwidth{.key = "usbBandwidth", .default_value = 40, .min = 0, .max = 100};
 
 // Switch. "dewheater" (a camera's heater through the camera SDK, the default),
 // "asiair" (Pro, Pi 4), "asiair-plus-picm4" (Plus, Pi CM4; same wiring) and
@@ -171,7 +173,7 @@ inline const std::vector<FieldRef>& zwo_telescope_fields() {
 inline const std::vector<FieldRef>& zwo_camera_fields() {
     // uniqueId is not a ZWO field: the router owns it for every device (decision 0018).
     static const std::vector<FieldRef> fields{kZwoCamIndex.ref(), kZwoCamId.ref(), kZwoCamSerial.ref(),
-                                              kZwoCamName.ref()};
+                                              kZwoCamName.ref(), kZwoCamUsbBandwidth.ref()};
     return fields;
 }
 

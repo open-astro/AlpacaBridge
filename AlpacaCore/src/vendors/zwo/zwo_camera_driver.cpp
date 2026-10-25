@@ -33,6 +33,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "zwo_fields.h"
+
 namespace alpacacore::vendor::zwo {
 
 namespace {
@@ -203,6 +205,7 @@ public:
 
                 refresh_camera_info_locked(resolved_id);
                 load_control_caps_locked(resolved_id);
+                apply_usb_bandwidth_locked(resolved_id);
                 select_default_image_type_locked();
 
                 bin_x_ = 1;
@@ -1639,6 +1642,59 @@ private:
         for (const auto& cap : caps) {
             control_caps_[cap.type] = cap;
         }
+    }
+
+    void apply_usb_bandwidth_locked(int camera_id) {
+        const auto it = control_caps_.find(ZWOControlType::BandwidthOverload);
+        if (it == control_caps_.end() || !it->second.is_writable) {
+            if (binding_.usb_bandwidth) {
+                throw AlpacaException("USB Limit is not writable on this camera; clear usbBandwidth in setup",
+                                      AlpacaError::DriverException);
+            }
+            ALPACA_LOG_INFO("ZWO", camera_info_.name + ": USB Limit unavailable; leaving SDK setting unchanged");
+            return;
+        }
+        const auto& caps = it->second;
+        if (caps.min_value > caps.max_value) {
+            throw AlpacaException("USB Limit: camera reported an invalid range", AlpacaError::DriverException);
+        }
+        const auto requested = binding_.usb_bandwidth;
+        if (requested &&
+            (*requested < 0 || *requested > 100 || *requested < caps.min_value || *requested > caps.max_value)) {
+            throw AlpacaException("USB Limit usbBandwidth must be within the camera range " +
+                                      std::to_string(caps.min_value) + ".." + std::to_string(caps.max_value) +
+                                      " (setup accepts 0..100)",
+                                  AlpacaError::DriverException);
+        }
+        const auto default_bandwidth = static_cast<long>(catalog::kZwoCamUsbBandwidth.default_value);
+        const long applied =
+            requested ? static_cast<long>(*requested) : std::clamp(default_bandwidth, caps.min_value, caps.max_value);
+        try {
+            sdk_.set_control_value(camera_id, ZWOControlType::BandwidthOverload, applied, false);
+            long actual = 0;
+            bool is_auto = false;
+            if (!sdk_.get_control_value(camera_id, ZWOControlType::BandwidthOverload, actual, is_auto)) {
+                throw AlpacaException("camera did not return the USB Limit readback", AlpacaError::DriverException);
+            }
+            if (actual != applied || is_auto) {
+                if (requested) {
+                    throw AlpacaException("camera did not confirm the requested value in manual mode",
+                                          AlpacaError::DriverException);
+                }
+                ALPACA_LOG_WARN("ZWO", camera_info_.name + ": USB Limit default requested " +
+                                           std::to_string(default_bandwidth) + " (clamped to " +
+                                           std::to_string(applied) + "), read back " + std::to_string(actual) +
+                                           (is_auto ? " auto" : " manual") + "; continuing connection");
+                return;
+            }
+        } catch (const std::exception& e) {
+            throw AlpacaException("USB Limit: " + std::string(e.what()), AlpacaError::DriverException);
+        }
+        ALPACA_LOG_INFO(
+            "ZWO", camera_info_.name + " (camera id " + std::to_string(camera_id) + "): USB Limit " +
+                       (requested ? std::to_string(*requested) : "default " + std::to_string(default_bandwidth)) +
+                       " applied " + std::to_string(applied) + " manual; range " + std::to_string(caps.min_value) +
+                       ".." + std::to_string(caps.max_value) + ", SDK default " + std::to_string(caps.default_value));
     }
 
     void select_default_image_type_locked() {

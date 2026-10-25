@@ -72,6 +72,44 @@ BindResult bind(Rig& rig, const DeviceConfig& config, int number, Source source,
 
 }  // namespace
 
+TEST_CASE("ZWO camera catalog carries USB Limit without persisting an implicit default",
+          "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    auto config = camera_config();
+    SECTION("implicit default") {}
+    SECTION("explicit") { config.set("usbBandwidth", std::int64_t{65}); }
+    const auto normalized = rig.catalog.normalize(kCameraKey, config, Source::Api);
+    REQUIRE_FALSE(normalized.rejection);
+    const auto saved = rig.catalog.sanitize(kCameraKey, normalized.config);
+    CHECK((saved.find_value("usbBandwidth") != nullptr) == (config.find_value("usbBandwidth") != nullptr));
+    auto result = bind(rig, saved, 0, Source::Api, {});
+    REQUIRE(result.driver);
+    result.driver->set_connected(true);
+    long value = 0;
+    bool is_auto = true;
+    REQUIRE(rig.sdk.get_control_value(rig.sdk.camera.camera_id, FakeZWOSDK::ControlType::BandwidthOverload, value,
+                                      is_auto));
+    CHECK(value == (config.find_value("usbBandwidth") ? 65 : 40));
+    CHECK_FALSE(is_auto);
+}
+
+TEST_CASE("ZWO camera catalog validates USB Limit and isolates it from switches", "[catalog][zwo][camera][unit]") {
+    Rig rig;
+    for (const ConfigValue& value : {ConfigValue{std::int64_t{-1}}, ConfigValue{std::int64_t{101}}, ConfigValue{40.5},
+                                     ConfigValue{true}, ConfigValue{std::string("40")}}) {
+        auto config = camera_config();
+        config.set("usbBandwidth", value);
+        CHECK(rig.catalog.normalize(kCameraKey, config, Source::Api).rejection.has_value());
+        const auto loaded = rig.catalog.normalize(kCameraKey, config, Source::Persisted);
+        CHECK_FALSE(loaded.rejection);
+        CHECK_FALSE(loaded.warnings.empty());
+        CHECK(loaded.config.find_value("usbBandwidth") == nullptr);
+    }
+    auto config = camera_config();
+    config.set("usbBandwidth", std::int64_t{65});
+    CHECK(rig.catalog.sanitize({"zwo", DeviceType::Switch}, config).find_value("usbBandwidth") == nullptr);
+}
+
 TEST_CASE("ZWO camera catalog - registers a bind-only factory", "[catalog][zwo][camera][unit]") {
     Rig rig;
     CHECK(rig.catalog.has_bind(kCameraKey));
