@@ -62,6 +62,12 @@ namespace alpacacore::test {
  * under mutex_ and give up the overtaking property. slowest_call_ms() is the
  * mechanical check that no OTHER fake method has quietly gained a blocking
  * call.
+ *
+ * Since open-astro#1646 get_sdk_version() likewise takes its own version_mutex_,
+ * because QHYSDKWrapper reads its cached version under a leaf mutex that
+ * open_camera() never holds: the hook overtakes an in-flight open_camera.
+ * That is sound only because the fake's get_sdk_version reads just the
+ * sdk_version member, set at construction.
  */
 class LockedQHYSDK : public vendor::qhy::QHYSDK {
 public:

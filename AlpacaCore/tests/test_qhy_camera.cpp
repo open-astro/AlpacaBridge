@@ -2018,11 +2018,13 @@ TEST_CASE("QHY Camera Driver - CoolerOn works with the cooler capability", "[qhy
     driver->set_connected(false);
 }
 
-TEST_CASE("QHY Camera Driver - SDK version and firmware hooks do not wait on an in-flight open",
+TEST_CASE("FakeQHYSDK via LockedQHYSDK - SDK version hook does not wait on an in-flight open",
           "[qhy][camera][unit]") {
     // open-astro#1646: QHYSDKWrapper::get_sdk_version() took the same mutex
     // open_camera() holds for the whole USB open, so configureddevices and
-    // DriverInfo stalled behind a connect.
+    // DriverInfo stalled behind a connect. This pins the LockedQHYSDK layout
+    // (the wrapper itself sits on libqhyccd and has no seam). The camera
+    // driver does not override get_device_firmware(), so it is not checked.
     auto fake = make_fake();
     fake.before_call = [](const std::string& fn) {
         if (fn == "open_camera") {
@@ -2046,7 +2048,6 @@ TEST_CASE("QHY Camera Driver - SDK version and firmware hooks do not wait on an 
             .count();
     };
     CHECK(elapsed_ms([&] { (void)driver->get_device_sdk_version(); }) < 100);
-    CHECK(elapsed_ms([&] { (void)driver->get_device_firmware(); }) < 100);
 
     connector.join();
 }
