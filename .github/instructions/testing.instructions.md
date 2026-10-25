@@ -195,6 +195,14 @@ Dropping a reply is the correct answer here: a reply the driver is not draining
 is one it was never going to read, and a fake whose destructor can hang is worse
 than one that drops a frame.
 
+### Filter wheel move model: one case set over ZWO EFW and QHY CFW3 (#1629)
+
+`AlpacaCore/tests/test_filterwheel_move_model.cpp` runs six case bodies unchanged over the ZWO EFW driver and the QHY CFW3 driver: `Position` is -1 while moving then the target, a valid write returns without waiting, an out-of-range write is `InvalidValue`, `InvalidValue` precedes `NotConnected`, a cache primed at connect needs no device read, and transit slots (including the pre-move slot) never reach `Position` (failure 0001). The bodies are templates over a rig struct; a rig only builds the driver, scripts a slow move and counts device reads. The QHY CFW3 passes all six. The ZWO EFW diverges on the last two: `set_connected(true)` only resets the TTL frame, so the first `Position` is an SDK read, and the driver has no pending target, so it passes only the SDK's own -1 through. Those two ZWO cases carry `[!shouldfail]`, so CI fails when the driver starts to pass them; remove the tag in the PR that fixes the driver.
+
+- No shared filter wheel move-model module is extracted while a case diverges on a driver it would serve. The ZWO driver gets a pending target and a cache seeded at connect first.
+- A wheel driver that joins the test adds a rig and the `TEST_CASE` pair; it does not edit or copy a case body.
+- The ZWO upper slot bound (`set_position`) is not proven by the out-of-range case: the SDK fake also refuses the slot. The QHY transit rig only calls `slow_moves()`, so its transit case is the same evidence as the moving case.
+
 ### Test CMake Integration
 
 When adding a test file for a new vendor device:
