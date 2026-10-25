@@ -100,6 +100,7 @@ struct Rig {
         int y = 0, mo = 0, d = 0, h = 0, mi = 0, s = 0, ms = 0;
         REQUIRE(std::sscanf(std::get<std::string>(entry->value).c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &y, &mo, &d, &h, &mi,
                             &s, &ms) == 7);
+        REQUIRE((ms >= 0 && ms < 1000));
         const auto stamp = std::chrono::sys_days{std::chrono::year{y} / mo / d} + std::chrono::hours(h) +
                            std::chrono::minutes(mi) + std::chrono::seconds(s) + std::chrono::milliseconds(ms);
         // UTC advances in real time, not with the fake clock; allow only timestamp millisecond truncation.
