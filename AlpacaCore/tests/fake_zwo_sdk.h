@@ -74,11 +74,13 @@ public:
     static constexpr long kUsb2FailMinExposureUs{3'000'000};
 
     // Issue #1500: a USB drop. remove() makes every per-camera call throw what the wrapper throws for
-    // ASI_ERROR_CAMERA_REMOVED (NotConnected) and the camera vanish from enumeration; replug(id) brings it
-    // back under a new SDK id with no open handle behind it, as the real SDK does.
+    // ASI_ERROR_CAMERA_REMOVED (NotConnected), the close that drops the last open too, and the camera vanish
+    // from enumeration; replug(id) brings it back under a new SDK id with no open handle behind it, as the
+    // real SDK does. A download that began before either fails with ASI_ERROR_CAMERA_CLOSED when released.
     void remove() {
         std::lock_guard lock(mutex_);
         removed_ = true;
+        ++plug_generation_;
     }
 
     void replug(int new_camera_id) {
@@ -86,7 +88,12 @@ public:
         removed_ = false;
         camera.camera_id = new_camera_id;
         open_count_ = 0;
+        ++plug_generation_;
     }
+
+    // A second camera of the same model, listed before this one (issue #1500 id swap). It is never
+    // opened: a call with its id fails as any id this fake does not own.
+    std::optional<std::pair<int, std::string>> other_camera;
 
     static CameraInfo default_camera() {
         CameraInfo info;
@@ -172,6 +179,14 @@ public:
     std::vector<CameraInfo> enumerate_cameras(std::vector<vendor::zwo::ZwoUnreadableSlot>* = nullptr) override {
         hit("enumerate_cameras");
         if (is_removed()) return {};
+        if (other_camera.has_value()) {
+            CameraInfo other = camera;
+            other.camera_id = other_camera->first;
+            other.slot_index = 0;
+            CameraInfo self = camera;
+            self.slot_index = 1;
+            return {other, self};
+        }
         return {camera};
     }
 
@@ -180,6 +195,10 @@ public:
         hit("enumerate_identified_cameras");
         if (is_removed()) return {};
         if (!only_model_name.empty() && only_model_name != camera.name) return {};
+        if (other_camera.has_value()) {
+            return {{0, other_camera->first, camera.name, other_camera->second},
+                    {1, camera.camera_id, camera.name, "FAKE-ZWO-17"}};
+        }
         return {{0, camera.camera_id, camera.name, "FAKE-ZWO-17"}};
     }
 
@@ -226,6 +245,10 @@ public:
         std::lock_guard lock(mutex_);
         if (open_count_ <= 0) throw AlpacaException("fake ZWO camera is not open", AlpacaError::DriverException);
         --open_count_;
+        // The wrapper drops its count, then ASICloseCamera fails on the removed camera.
+        if (open_count_ == 0 && removed_) {
+            throw AlpacaException("ASICloseCamera: ASI_ERROR_CAMERA_REMOVED", AlpacaError::NotConnected);
+        }
     }
 
     std::vector<ControlCaps> get_control_caps(int camera_id) override {
@@ -350,11 +373,13 @@ public:
 
     void get_data_after_exposure(int camera_id, std::uint8_t* buffer, long buffer_size) override {
         hit("get_data_after_exposure");
+        int generation_at_start = 0;
         {
             std::unique_lock lock(download_mutex_);
             {
                 std::lock_guard sdk_lock(mutex_);
                 require_open_locked(camera_id);
+                generation_at_start = plug_generation_;
             }
             download_entered_ = true;
             download_in_progress_ = true;
@@ -362,9 +387,15 @@ public:
             download_cv_.wait(lock, [this] { return !download_held_; });
         }
         std::string error;
+        int error_code = AlpacaError::DriverException;
         {
             std::lock_guard lock(mutex_);
             error = download_error;
+            if (plug_generation_ != generation_at_start) {
+                // The camera dropped off USB during the transfer: its handle is dead even if it is back.
+                error = "ASIGetDataAfterExp: ASI_ERROR_CAMERA_CLOSED";
+                error_code = AlpacaError::NotConnected;
+            }
             if (error.empty()) {
                 const auto copy_size = std::min(static_cast<std::size_t>(buffer_size), frame_bytes.size());
                 if (copy_size > 0) std::memcpy(buffer, frame_bytes.data(), copy_size);
@@ -374,7 +405,7 @@ public:
             std::lock_guard lock(download_mutex_);
             download_in_progress_ = false;
         }
-        if (!error.empty()) throw AlpacaException(error, AlpacaError::DriverException);
+        if (!error.empty()) throw AlpacaException(error, error_code);
         if (usb2_settle_clock != nullptr) {
             const auto now = usb2_settle_clock->now();
             std::lock_guard lock(mutex_);
@@ -453,6 +484,7 @@ private:
     std::optional<util::TaskClock::clock::time_point> last_download_time_;
     int open_count_{0};
     bool removed_{false};
+    int plug_generation_{0};
     int temperature_reads_since_open_{0};
     bool download_held_{false};
     bool download_entered_{false};

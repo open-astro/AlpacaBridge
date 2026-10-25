@@ -582,3 +582,58 @@ TEST_CASE("ZWO EAF Focuser Driver - A replugged focuser is reopened by one Conne
     wait_past_status_ttl();
     CHECK(driver->get_position() == 500);
 }
+
+// Issue #1500, the rig step: the client toggles Connected off and on across the replug. The Disconnect must
+// not throw for the dead handle, and the Connect must find the focuser under its new id (decision 0009 point 4).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed focuser, or Connect reopening the id
+// the driver was created with.
+TEST_CASE("ZWO EAF Focuser Driver - A Connected toggle across a replug reopens the focuser",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.remove();
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    sdk.replug(9);
+
+    CHECK_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 9);
+}
+
+// Issue #1500: every Connect binds the serial the focuser had, so a replug while the client is disconnected that
+// swaps two focusers' SDK ids still opens the same unit.
+// Falsified by: Connect opening the id the driver was created with, or the first enumerated focuser.
+TEST_CASE("ZWO EAF Focuser Driver - Two focusers swapped while disconnected are told apart by serial",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    sdk.second_id = 4;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    sdk.remove();
+    sdk.second_id = 3;
+    sdk.replug(4);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 4);
+}
+
+// Issue #1500: Disconnect from the lost state clears the driver without throwing (invariant 5).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed focuser.
+TEST_CASE("ZWO EAF Focuser Driver - Disconnect after a removal does not throw",
+          "[zwo][focuser][unit][fake-sdk][link]") {
+    FakeEAFSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_eaf_focuser(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}

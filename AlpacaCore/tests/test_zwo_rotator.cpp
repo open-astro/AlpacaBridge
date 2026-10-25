@@ -735,3 +735,61 @@ TEST_CASE("ZWO CAA Rotator Driver - A replugged rotator is reopened by one Conne
     wait_past_status_ttl();
     CHECK(driver->get_position() == 10.0);
 }
+
+// Issue #1500, the rig step: the client toggles Connected off and on across the replug. The Disconnect must
+// not throw for the dead handle, and the Connect must find the rotator under its new id (decision 0009 point 4).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed rotator, or Connect reopening the id
+// the driver was created with.
+TEST_CASE("ZWO CAA Rotator Driver - A Connected toggle across a replug reopens the rotator",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.remove();
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    sdk.replug(12);
+
+    CHECK_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 12);
+}
+
+// Issue #1500: every Connect binds the serial the rotator had, so a replug while the client is disconnected that
+// swaps two rotators' SDK ids still opens the same unit.
+// Falsified by: Connect opening the id the driver was created with, or the first enumerated rotator.
+TEST_CASE("ZWO CAA Rotator Driver - Two rotators swapped while disconnected are told apart by serial",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.second_id = 8;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    sdk.remove();
+    sdk.second_id = 7;
+    sdk.replug(8);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 8);
+}
+
+// Issue #1500: Disconnect from the lost state clears the driver without throwing (invariant 5).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed rotator.
+TEST_CASE("ZWO CAA Rotator Driver - Disconnect after a removal does not throw",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    wait_past_status_ttl();
+    CHECK_THROWS(driver->get_position());
+
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}

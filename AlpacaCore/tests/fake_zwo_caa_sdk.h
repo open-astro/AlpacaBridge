@@ -26,7 +26,8 @@
 namespace alpacacore::test {
 
 // Scripted ZWO CAA SDK: one rotator (id 7), shared by the rotator unit tests, the
-// connected stress case and the contract sweep.
+// connected stress case and the contract sweep. second_id >= 0 adds a second rotator
+// (serial second_serial) to enumeration, open and the serial read.
 // Every override runs under one internal mutex, so the fake is race-free under a
 // concurrent storm (the ZWO driver tests run it through lifecycle stress and TSan);
 // the public knobs and counters are plain fields for single-threaded tests, set before
@@ -45,6 +46,9 @@ public:
 
     int id{7};
     std::string serial{"CAA-SN-1"};
+    // A second rotator on the same SDK (issue #1500 id swap); -1 = none.
+    int second_id{-1};
+    std::string second_serial{"CAA-SN-2"};
     // The logical (reverse-applied) angle CAAGetDegree() reports, as in the driver.
     double degree{0.0};
     double max_degree{360.0};
@@ -74,9 +78,9 @@ public:
     std::atomic<int> busy{0};
     std::atomic<bool> closed_while_busy{false};
 
-    // Issue #1500: a USB drop. remove() makes open/read/move throw what the wrapper throws for
-    // CAA_ERROR_REMOVED (NotConnected) and the rotator vanish from enumeration; replug(id) brings it back
-    // under a new SDK id.
+    // Issue #1500: a USB drop. remove() makes open/close/read/serial throw what the wrapper throws for
+    // CAA_ERROR_REMOVED (NotConnected) and the rotators vanish from enumeration; replug(id) brings this one
+    // back under a new SDK id.
     bool removed{false};
     void remove() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -91,14 +95,17 @@ public:
     std::vector<Info> enumerate_rotators() override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (removed) return {};
-        return {Info{id, "CAA", max_degree}};
+        std::vector<Info> rotators{Info{id, "CAA", max_degree}};
+        if (second_id >= 0)
+            rotators.insert(second_id < id ? rotators.begin() : rotators.end(), Info{second_id, "CAA", max_degree});
+        return rotators;
     }
     bool get_rotator_info_by_id(int rotator_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (fail_info || removed || rotator_id != id) {
+        if (fail_info || removed || (rotator_id != id && rotator_id != second_id)) {
             return false;
         }
-        info = Info{id, "CAA", max_degree};
+        info = Info{rotator_id, "CAA", max_degree};
         return true;
     }
     bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
@@ -114,6 +121,8 @@ public:
         if (busy.load() > 0) closed_while_busy = true;
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls;
+        // The wrapper erases its bookkeeping, then CAAClose fails on the removed unit.
+        throw_if_removed();
     }
     vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override {
         const InFlight in_flight(*this, read_delay, read_entered);
@@ -174,9 +183,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         reverse = value;
     }
-    std::string get_serial_number(int) override {
+    std::string get_serial_number(int rotator_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return serial;
+        throw_if_removed();
+        return rotator_id == second_id ? second_serial : serial;
     }
     std::string get_firmware_version(int) override { return "1.0"; }
     std::string get_rotator_type(int) override { return "CAA"; }

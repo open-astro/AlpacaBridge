@@ -14,6 +14,7 @@
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/version.h>
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <limits>
@@ -359,4 +360,120 @@ TEST_CASE("ZWO Camera Driver - A replugged camera is found by serial and reopene
     CHECK(camera->get_connected());
     CHECK(camera->get_ccd_temperature() == 15.0);
     CHECK(sdk.open_count() == 1);  // the new handle only: the dead one is not counted again
+}
+
+// Issue #1500, the rig step: the client toggles Connected off and on across the replug, with no failed call in
+// between. The Disconnect must not throw for the dead handle, and the Connect must find the camera by the serial
+// it read at the first connect, though the entry names only an SDK id (decision 0009 point 4).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed camera, or Connect resolving the stale
+// id the entry was created with.
+TEST_CASE("ZWO Camera Driver - A Connected toggle across a replug reopens the camera by its serial",
+          "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+
+    sdk.remove();
+    CHECK_NOTHROW(camera->set_connected(false));
+    CHECK_FALSE(camera->get_connected());
+    sdk.replug(21);
+
+    CHECK_NOTHROW(camera->set_connected(true));
+    CHECK(camera->get_connected());
+    CHECK(sdk.open_count() == 1);
+    CHECK(camera->get_ccd_temperature() == 15.0);
+}
+
+// Issue #1500: after the replug another camera of the same model holds the old SDK id and is listed first. The
+// relink binds the serial, never the old id or the first body found.
+// Falsified by: the relink opening the stale id or the first enumerated camera.
+TEST_CASE("ZWO Camera Driver - A relink after a replug skips the camera that took the old id",
+          "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "FAKE-ZWO-17";
+    binding.identity.camera_name = sdk.camera.name;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+    camera->set_connected(true);
+
+    sdk.remove();
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    sdk.other_camera = std::make_pair(17, std::string("FAKE-ZWO-99"));
+    sdk.replug(21);
+
+    camera->set_connected(true);
+    CHECK(camera->get_connected());
+    CHECK(camera->get_ccd_temperature() == 15.0);
+    CHECK(sdk.open_count() == 1);
+}
+
+// Issue #1500 invariant 1: only REMOVED, CLOSED and INVALID_ID on an open handle mean the camera is gone. Any
+// other SDK failure keeps the link and surfaces as the error it is.
+// Falsified by: treating every exception from an SDK call as a lost link.
+TEST_CASE("ZWO Camera Driver - A generic SDK failure is not a lost link", "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
+    camera->set_connected(true);
+    CHECK(camera->get_ccd_temperature() == 15.0);
+
+    sdk.before_call = [](const std::string& name) {
+        if (name == "get_control_value") {
+            throw alpacacore::AlpacaException("ASIGetControlValue: ASI_ERROR_GENERAL_ERROR",
+                                              alpacacore::AlpacaError::DriverException);
+        }
+    };
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, alpacacore::AlpacaError::DriverException);
+    CHECK(camera->get_connected());
+    sdk.before_call = nullptr;
+    CHECK(camera->get_ccd_temperature() == 15.0);
+}
+
+// Issue #1500 invariant 2 (link epoch): an ImageArray download that took the old id before the removal fails
+// with CAMERA_CLOSED only after the client relinked the replugged camera. That stale failure must not drop the
+// new link.
+// Falsified by: applying a loss without checking that the link epoch captured with the id is still current.
+TEST_CASE("ZWO Camera Driver - A download that fails after the relink does not drop the new link",
+          "[zwo][camera][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOSDK sdk;
+    alpacacore::vendor::zwo::ZwoCameraBinding binding;
+    binding.identity.serial = "FAKE-ZWO-17";
+    binding.identity.camera_name = sdk.camera.name;
+    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+    camera->set_connected(true);
+    camera->start_exposure(0.001, true);
+    REQUIRE(camera->get_image_ready());
+    sdk.hold_download();
+    std::atomic<bool> reader_done{false};
+    std::thread reader([&] {
+        try {
+            (void)camera->get_image_array();
+        } catch (const std::exception&) {
+            // The stale transfer fails; what it throws is not the subject here.
+        }
+        reader_done = true;
+    });
+    REQUIRE(sdk.wait_for_download(std::chrono::seconds(2)));
+
+    sdk.remove();
+    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
+    sdk.replug(21);
+    std::atomic<bool> relinked{false};
+    std::thread relink([&] {
+        try {
+            camera->set_connected(true);
+        } catch (const std::exception&) {
+            // Checked below through Connected.
+        }
+        relinked = true;
+    });
+    // Either the relink finishes while the transfer is held, or it waits for the transfer: both are allowed.
+    for (int i = 0; i < 40 && !relinked.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    sdk.release_download();
+    relink.join();
+    reader.join();
+
+    CHECK(reader_done.load());
+    CHECK(camera->get_connected());
+    CHECK(camera->get_ccd_temperature() == 15.0);
+    CHECK(sdk.open_count() == 1);
 }

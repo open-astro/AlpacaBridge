@@ -144,3 +144,58 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - A replugged wheel is reopened by one Co
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     CHECK(driver->get_position() == 0);
 }
+
+// Issue #1500, the rig step: the client toggles Connected off and on across the replug. The Disconnect must
+// not throw for the dead handle, and the Connect must find the wheel under its new id (decision 0009 point 4).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed wheel, or Connect reopening the id
+// the driver was created with.
+TEST_CASE("ZWO EFW Filter Wheel Driver - A Connected toggle across a replug reopens the wheel",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+
+    sdk.remove();
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+    sdk.replug(4);
+
+    CHECK_NOTHROW(driver->set_connected(true));
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 4);
+}
+
+// Issue #1500: every Connect binds the serial the wheel had, so a replug while the client is disconnected that
+// swaps two wheels' SDK ids still opens the same wheel.
+// Falsified by: Connect opening the id the driver was created with, or the first enumerated wheel.
+TEST_CASE("ZWO EFW Filter Wheel Driver - Two wheels swapped while disconnected are told apart by serial",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    sdk.second_id = 6;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    driver->set_connected(false);
+
+    sdk.remove();
+    sdk.second_id = 5;
+    sdk.replug(6);
+
+    driver->set_connected(true);
+    CHECK(driver->get_connected());
+    CHECK(sdk.last_open_id == 6);
+}
+
+// Issue #1500: Disconnect from the lost state clears the driver without throwing (invariant 5).
+// Falsified by: Disconnect rethrowing the NotConnected close of a removed wheel.
+TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnect after a removal does not throw",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    auto driver = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, sdk.id, sdk);
+    driver->set_connected(true);
+    sdk.remove();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_THROWS(driver->get_position());
+
+    CHECK_NOTHROW(driver->set_connected(false));
+    CHECK_FALSE(driver->get_connected());
+}
