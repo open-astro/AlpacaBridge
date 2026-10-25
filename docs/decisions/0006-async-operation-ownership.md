@@ -64,11 +64,11 @@ Symbol: `AsyncOperation`
 | Bisque telescope | | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | |
 | Celestron CGX telescope | | `AlpacaCore/src/vendors/celestron/celestron_cgx_telescope_driver.cpp` | adopted | | refuses a second motion command while one runs |
 | Gemini flat panel | | `AlpacaCore/src/vendors/gemini/gemini_flatpanel_driver.cpp` | adopted | #1255 | |
-| Gemini focuser | | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
+| Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | poll body |
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | poll body |
 | QHY CFW3 filter wheel | | `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp` | adopted | #1510 | goto arrival-wait body |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | poll body |
-| Celestron focus motor | | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
+| Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | MoveAxis re-send body |
 | iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
 | Player One camera | | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pulse-guide off-timer body; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |

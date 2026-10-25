@@ -45,9 +45,8 @@
 #include <alpacacore/async_connectable.h>
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
 #include <alpacacore/vendor/celestron/celestron_focuser_driver.h>
@@ -80,9 +79,10 @@ constexpr std::uint32_t kMaxRawPosition = 0x00ffffffU;
 
 constexpr auto kExchangeTimeout = std::chrono::milliseconds(500);
 // One poll is two exchanges of about 10 bytes each way at 9600 baud, so the
-// period leaves the wire mostly free for Move/Halt (same shape as Gemini).
+// period leaves the wire mostly free for Move/Halt (same shape as Gemini). The
+// freshness bound is two periods; the cadence, the fault latch and the
+// link-loss rule live in util::PolledState.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
-constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
 constexpr int kFaultThreshold = 3;
 // INDI waits about a second after the start before it reads 0x2B; a status
 // read sooner could still say idle and end a calibration the motor runs.
@@ -118,13 +118,16 @@ public:
         : AsyncConnectable("Celestron Focuser"),
           clock_(clock),
           device_number_(device_number),
-          port_path_(std::move(port_path)) {}
+          port_path_(std::move(port_path)),
+          state_(
+              clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, "Celestron"},
+              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {}
 
     ~CelestronFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one; MUST be
         // first, before members the task touches are destroyed (base contract).
         shutdown_connection();
-        state_poll_.cancel_all_and_join();
+        state_.stop_and_join();
         if (connected_.load()) {
             try {
                 // Qualified: virtual dispatch is gone in a destructor anyway;
@@ -154,7 +157,10 @@ public:
         return firmware_;
     }
 
-    bool get_connected() const override { return connected_.load(); }
+    // Lock-free. A poll that has gone unanswered for util::kLinkStalenessBound
+    // latches the loss in state_ (decision 0009), and Connected reads false
+    // without a reconnect.
+    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -172,17 +178,26 @@ public:
     void set_connected(bool connected) override {
         // One transition at a time (open-astro#333); getters never take this.
         std::lock_guard<std::mutex> transition(transition_mutex_);
+        // A lost link counts as disconnected for a connect: Connected=true
+        // against a lost link reconnects instead of taking the idempotency
+        // return. The disconnect gate takes the raw connected_, so
+        // Connected=false still tears down a lost link (decision 0009).
+        const bool live = connected_.load() && !state_.link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                // Stale connection over a lost link: start from a clean driver.
+                teardown_locked();
+            }
             protocol_.connect_serial(port_path_, AuxLinkSpeed::Baud9600);
             {
                 std::lock_guard<std::mutex> lock(calibration_mutex_);
@@ -199,25 +214,15 @@ public:
                 throw;
             }
             read_firmware();
-            snapshot_.reset();
-            {
-                std::lock_guard<std::mutex> lock(health_mutex_);
-                health_.reset();
-            }
             // First frame before Connected reads true, so a getter has an
             // answer the moment Connect returns. Connect may do I/O (decision
             // 0016 rule 4); a getter may not. A lost first reply gets one
-            // retry here. A connect whose retry also publishes nothing
-            // fails: Connected true means the getters have a frame to serve.
-            poll_state_once();
-            if (!snapshot_.read().has_value()) {
-                poll_state_once();
-            }
-            if (!snapshot_.read().has_value()) {
-                {
-                    std::lock_guard<std::mutex> lock(health_mutex_);
-                    health_.reset();
-                }
+            // retry. A connect whose retry also publishes nothing fails:
+            // Connected true means the getters have a frame to serve.
+            state_.reset();
+            if (!state_.start()) {
+                state_.stop_and_join();
+                state_.reset();
                 {
                     std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
                     firmware_.clear();
@@ -231,26 +236,27 @@ public:
                                       AlpacaError::DriverException);
             }
             connected_.store(true);
-            start_state_poll();
             const auto limits = current_limits();
             ALPACA_LOG_INFO("Celestron", "Focuser connected (limits " + std::to_string(limits.low) + ".." +
                                              std::to_string(limits.high) + ")");
         } else {
-            // Driver state first, transport close second (driver-lifecycle.instructions.md, issue #387).
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            state_poll_.cancel_all_and_join();
-            snapshot_.reset();
-            {
-                std::lock_guard<std::mutex> lock(health_mutex_);
-                health_.reset();
-            }
-            protocol_.disconnect();
+            teardown_locked();
             ALPACA_LOG_INFO("Celestron", "Focuser disconnected");
         }
+    }
+
+    // The disconnect body, shared by the explicit disconnect and the
+    // stale-link reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, transport close second (driver-lifecycle.instructions.md, issue #387).
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
+        connected_.store(false);
+        state_.stop_and_join();
+        state_.reset();
+        protocol_.disconnect();
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -358,12 +364,11 @@ public:
         if (!abort_calibration_if_running()) {
             exchange(kMovePositive, {0x00});
         }
-        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
+        state_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
-        ensure_connected();
-        throw_if_faulted();
+        (void)served_frame();  // refused while the link is faulted or lost
         const auto limits = usable_limits();
         const int max_step = static_cast<int>(limits.high - limits.low);
         // ConformU expects graceful clamping, not an exception (as Gemini).
@@ -379,7 +384,7 @@ public:
         exchange(kGotoFast, {static_cast<std::uint8_t>(raw >> 16), static_cast<std::uint8_t>(raw >> 8),
                              static_cast<std::uint8_t>(raw)});
         // Write-through: IsMoving reads true right after a successful Move.
-        snapshot_.write([](StateFrame& frame) { frame.moving = true; });
+        state_.write([](StateFrame& frame) { frame.moving = true; });
     }
 
 private:
@@ -467,7 +472,6 @@ private:
 
     void start_calibration() {
         ensure_connected();
-        throw_if_faulted();
         {
             std::lock_guard<std::mutex> lock(calibration_mutex_);
             if (calibration_.running) {
@@ -508,7 +512,7 @@ private:
             calibration_.started = clock_.now();
             ++calibration_.generation;
         }
-        snapshot_.write([](StateFrame& frame) { frame.moving = true; });
+        state_.write([](StateFrame& frame) { frame.moving = true; });
         ALPACA_LOG_INFO("Celestron", "Focus motor calibration started");
     }
 
@@ -552,7 +556,7 @@ private:
             calibration_.refresh_limits = true;
             ++calibration_.generation;
         }
-        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
+        state_.write([](StateFrame& frame) { frame.moving = false; });
         ALPACA_LOG_INFO("Celestron", "Focus motor calibration aborted");
         return true;
     }
@@ -619,97 +623,57 @@ private:
         firmware_ = text;
     }
 
-    void throw_if_faulted() const {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        if (health_.faulted()) {
-            throw AlpacaException("Celestron focuser communications compromised: " + health_.fault(),
-                                  AlpacaError::DriverException);
-        }
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        auto fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
 
+    // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
+
+    // The frame the getters serve (decisions 0009 and 0010): stale is served,
+    // a faulted link throws DriverException, a lost one NotConnected. Getters
+    // never touch the device (decisions 0010 and 0016).
     StateFrame served_frame() const {
         ensure_connected();
-        throw_if_faulted();
-        auto reading = snapshot_.read();
-        if (!reading.has_value()) {
-            // Connected but no frame: a call that raced a disconnect and
-            // reconnect (connect publishes the first frame before Connected
-            // reads true). Getters never touch the device (decisions 0010
-            // and 0016).
-            ensure_connected();
-            throw_if_faulted();
-            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
-        }
-        return reading->value;
+        return state_.served().value;
     }
 
-    void poll_state_once() {
-        const auto token = snapshot_.begin_poll();
+    // The poll's exchanges, on the poll thread with no driver lock held.
+    StateFrame probe() {
         StateFrame frame;
-        try {
-            resync_if_needed();
-            const auto position = exchange(kGetPosition);
-            if (position.size() != 3) {
-                throw AlpacaException("position reply is not 24 bits", AlpacaError::DriverException);
-            }
-            const auto done = exchange(kSlewDone);
-            if (done.size() != 1) {
-                throw AlpacaException("slew-done reply is not one byte", AlpacaError::DriverException);
-            }
-            poll_calibration();
-            CalibrationState state;
-            {
-                std::lock_guard<std::mutex> lock(calibration_mutex_);
-                state = calibration_;
-            }
-            // Meaningless while uncalibrated; the getters refuse it then.
-            frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
-                                              static_cast<std::int64_t>(read_be(position, 0, 3)));
-            frame.moving = done[0] != 0xff || state.running;
-        } catch (const std::exception&) {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
-                ALPACA_LOG_ERROR("Celestron", "Focuser communications compromised: " + health_.fault());
-            } else {
-                ALPACA_LOG_DEBUG("Celestron", "Focuser state poll failed; the frame keeps its age");
-            }
-            return;
+        resync_if_needed();
+        const auto position = exchange(kGetPosition);
+        if (position.size() != 3) {
+            throw AlpacaException("position reply is not 24 bits", AlpacaError::DriverException);
         }
+        const auto done = exchange(kSlewDone);
+        if (done.size() != 1) {
+            throw AlpacaException("slew-done reply is not one byte", AlpacaError::DriverException);
+        }
+        poll_calibration();
+        CalibrationState state;
         {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.on_reply()) {
-                ALPACA_LOG_INFO("Celestron", "Focuser communications restored");
-            }
+            std::lock_guard<std::mutex> lock(calibration_mutex_);
+            state = calibration_;
         }
-        snapshot_.publish(token, frame);
-    }
-
-    void run_state_poll(util::OperationContext& ctx) {
-        if (!ctx.wait_for(kStatePollPeriod)) {
-            return;
-        }
-        for (;;) {
-            const auto started = clock_.now();
-            poll_state_once();
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatePollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatePollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
-    void start_state_poll() {
-        try {
-            state_poll_.start([this](util::OperationContext& ctx) { run_state_poll(ctx); });
-        } catch (const std::exception&) {
-            ALPACA_LOG_ERROR("Celestron", "Focuser state poll did not start");
-        }
+        // Meaningless while uncalibrated; the getters refuse it then.
+        frame.position = static_cast<int>(static_cast<std::int64_t>(state.limits.high) -
+                                          static_cast<std::int64_t>(read_be(position, 0, 3)));
+        frame.moving = done[0] != 0xff || state.running;
+        return frame;
     }
 
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        if (state_.link_lost()) {
+            throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
+                                  AlpacaError::NotConnected);
         }
     }
 
@@ -725,11 +689,11 @@ private:
     // Limits and calibration progress; never held across an exchange.
     mutable std::mutex calibration_mutex_;
     CalibrationState calibration_;
-    mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
-    mutable std::mutex health_mutex_;
-    util::PolledLinkHealth health_;
     util::OperationGeneration state_poll_generation_;
-    util::AsyncOperation state_poll_{"Celestron focuser state poll", state_poll_generation_, clock_};
+    // Position and motion served to the getters. Declared after clock_,
+    // protocol_ and the calibration members its probe uses: it is destroyed
+    // first and joins its poll body while they are alive.
+    util::PolledState<StateFrame> state_;
     // Own mutex, not the base's connection mutex (see the Gemini focuser).
     mutable std::mutex firmware_mutex_;
     std::string firmware_;
