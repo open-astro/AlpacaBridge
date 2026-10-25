@@ -258,6 +258,7 @@ function resetDeviceForm() {
     }
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
+    keepVendor = '';
     updateVendorOptions();
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
@@ -267,6 +268,7 @@ function resetDeviceForm() {
     if (messageDiv) {
         messageDiv.style.display = 'none';
     }
+    ensureCatalog();
 }
 
 let currentDevices = [];
@@ -320,51 +322,73 @@ function getNextDeviceNumberForType(deviceType) {
     return getNextAvailableNumber(used);
 }
 
-// Index-addressed config fields that auto-increment per (vendor, deviceType).
-//
-// The Alpaca device *number* (handled above, vendor-agnostic per type) is how a
-// client addresses a device. A vendor *index* is different: it selects which
-// physical unit a vendor SDK enumerates on the bus (camera 0, 1, 2 ...). Each
-// SDK counts from 0 independently, so the index is scoped per (vendor,
-// deviceType) - a ZWO camera and a Player One camera can both be index 0.
-// Vendors that connect by serial port or network (iOptron, SynScan, Celestron,
-// Bisque) identify the device by path/host and have no index field, so they
-// aren't listed here. `idFieldId`, when present, is a serial/ID input that pins
-// a specific unit; if the user filled it, we don't impose an auto index.
-const INDEX_FIELDS = [
-    { fieldId: 'camera-index', vendor: 'zwo', deviceType: 'camera', configKey: 'cameraIndex', idFieldId: 'camera-id' },
-    { fieldId: 'filterwheel-index', vendor: 'zwo', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'filterwheel-id' },
-    { fieldId: 'focuser-index', vendor: 'zwo', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'focuser-id' },
-    { fieldId: 'rotator-index', vendor: 'zwo', deviceType: 'rotator', configKey: 'rotatorIndex', idFieldId: 'rotator-id' },
-    { fieldId: 'qhy-camera-index', vendor: 'qhy', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'qhy-cfw-camera-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'cameraIndex', idFieldId: 'qhy-cfw-camera-id' },
-    { fieldId: 'qhy-cfw3-index', vendor: 'qhy', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'qhy-focuser-index', vendor: 'qhy', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'svbony-camera-index', vendor: 'svbony', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'altair-camera-index', vendor: 'altair', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'gphoto-camera-index', vendor: 'gphoto', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'touptek-camera-index', vendor: 'touptek', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'touptek-focuser-index', vendor: 'touptek', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'touptek-focuser-id' },
-    { fieldId: 'touptek-filterwheel-index', vendor: 'touptek', deviceType: 'filterwheel', configKey: 'filterwheelIndex', idFieldId: 'touptek-filterwheel-id' },
-    { fieldId: 'playerone-camera-index', vendor: 'playerone', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'playerone-filterwheel-index', vendor: 'playerone', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'astroasis-focuser-index', vendor: 'astroasis', deviceType: 'focuser', configKey: 'focuserIndex', idFieldId: 'astroasis-hid-path' },
-    { fieldId: 'gemini-focuser-index', vendor: 'gemini', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'ioptron-ieaf-focuser-index', vendor: 'ioptron', deviceType: 'focuser', configKey: 'focuserIndex' },
-    { fieldId: 'ioptron-camera-index', vendor: 'ioptron', deviceType: 'camera', configKey: 'cameraIndex' },
-    { fieldId: 'ioptron-filterwheel-index', vendor: 'ioptron', deviceType: 'filterwheel', configKey: 'filterwheelIndex' },
-    { fieldId: 'gemini-flatpanel-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    // Same configKey as the Lite field above: panelIndex is an index into
-    // enumerate_gemini_flatpanel_ports(), a scan shared by both models, so
-    // devices of either model correctly compete for the same index namespace.
-    { fieldId: 'gemini-flatpanel-v2-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    { fieldId: 'gemini-flatpanel-pro-index', vendor: 'gemini', deviceType: 'covercalibrator', configKey: 'panelIndex' },
-    { fieldId: 'gemini-pdh-index', vendor: 'gemini', deviceType: 'switch', configKey: 'hubIndex' },
-    { fieldId: 'wandererastro-cover-index', vendor: 'wandererastro', deviceType: 'covercalibrator', configKey: 'coverIndex' },
-    { fieldId: 'wandererastro-rotator-index', vendor: 'wandererastro', deviceType: 'rotator', configKey: 'rotatorIndex' },
-    { fieldId: 'wandererastro-filterwheel-index', vendor: 'wandererastro', deviceType: 'filterwheel', configKey: 'wandererFilterwheelIndex' },
-    { fieldId: 'wandererastro-box-index', vendor: 'wandererastro', deviceType: 'switch', configKey: 'boxIndex' },
-];
+// Index-addressed config fields that auto-increment per (vendor, deviceType),
+// derived from the device catalog and the annotated form by ensureCatalog().
+// See deriveIndexFields() in catalog_schema.js for what counts as one and how
+// its `idFieldId` (the serial/ID input that pins a specific unit) is chosen.
+let indexFields = [];
+
+// The device catalog (GET /management/v1/devicecatalog), fetched once per page
+// load through loadCatalog(); null until it has loaded, so no vendor is offered
+// and #vendor stays disabled (fail closed). keepVendor is the vendor of the
+// device being edited: it stays offered even if this build lacks it.
+let catalogData = null;
+let keepVendor = '';
+const loadCatalog = catalogLoader(() => fetch('/management/v1/devicecatalog').then(response => {
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    return response.json();
+}));
+
+// The device form's catalog-mapped inputs, as catalog_schema.js reads them:
+// { id, vendor, deviceType, configKey, control, path } from the data-vendor,
+// data-device-type and data-config-key attributes in index.html. path lists the
+// ids of the enclosing <div>s, outermost first.
+function readFormFields() {
+    return Array.from(document.querySelectorAll('#device-form [data-config-key]')).map(element => {
+        const path = [];
+        for (let node = element.parentElement; node && node.id !== 'device-form'; node = node.parentElement) {
+            if (node.tagName === 'DIV' && node.id) {
+                path.unshift(node.id);
+            }
+        }
+        const vendorScope = element.closest('[data-vendor]');
+        const typeScope = element.closest('[data-device-type]');
+        return {
+            id: element.id,
+            vendor: vendorScope ? vendorScope.dataset.vendor : null,
+            deviceType: typeScope ? typeScope.dataset.deviceType : null,
+            configKey: element.dataset.configKey,
+            control: element.tagName === 'INPUT' ? (element.getAttribute('type') || 'text') : element.tagName.toLowerCase(),
+            path
+        };
+    });
+}
+
+// Waits for the catalog and applies it: the index fields, the vendor list.
+// A failed load is shown as text (never markup) and the next form open tries
+// again. Returns the catalog, or null when there is none.
+async function ensureCatalog() {
+    const messageDiv = document.getElementById('form-message');
+    try {
+        catalogData = await loadCatalog();
+        indexFields = deriveIndexFields(catalogData, readFormFields());
+        if (messageDiv && messageDiv.dataset.catalogError === 'true') {
+            delete messageDiv.dataset.catalogError;
+            messageDiv.style.display = 'none';
+        }
+    } catch (error) {
+        if (messageDiv) {
+            messageDiv.dataset.catalogError = 'true';
+            messageDiv.style.display = 'block';
+            messageDiv.className = 'message error';
+            messageDiv.textContent = `Could not load the device list: ${error.message}`;
+        }
+    }
+    updateVendorOptions();
+    return catalogData;
+}
 
 // Lowest unused value of field.configKey across already-configured devices that
 // match this field's (vendor, deviceType). Each SDK enumerates from 0, so the
@@ -423,7 +447,7 @@ function maybeAutoFillIndexFields() {
     }
     const vendor = vendorSelect.value;
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    INDEX_FIELDS.forEach(field => {
+    indexFields.forEach(field => {
         if (field.vendor !== vendor || field.deviceType !== deviceType) {
             return;
         }
@@ -815,7 +839,7 @@ async function handleEditDeviceClick(event) {
     if (!device) {
         return;
     }
-    startEditDevice(device);
+    await startEditDevice(device);
 }
 
 function handleDeleteDeviceClick(event) {
@@ -993,7 +1017,7 @@ function setEditMode(isEditing) {
             // Clear the manual-edit flag on every vendor index field so the next
             // fresh "Add Device" re-derives them instead of treating a prior
             // edit's value as user-pinned.
-            INDEX_FIELDS.forEach(field => {
+            indexFields.forEach(field => {
                 const input = document.getElementById(field.fieldId);
                 if (input) {
                     delete input.dataset.userModified;
@@ -1067,7 +1091,11 @@ function updateApertureAreaFromDiameter(diameterId, areaId) {
     areaEl.value = area.toFixed(6);
 }
 
-function startEditDevice(device) {
+async function startEditDevice(device) {
+    const catalog = await ensureCatalog();
+    if (!catalog) {
+        return;
+    }
     const config = device.Config || device.config || {};
     const vendor = device.Vendor || config.vendor || '';
     const deviceType = normalizeDeviceType(device.DeviceType || device.deviceType);
@@ -1075,6 +1103,7 @@ function startEditDevice(device) {
     setEditMode(true);
     setFormValue('device-type', deviceType);
     setFormValue('device-number', device.DeviceNumber);
+    keepVendor = vendor;
     setFormValue('vendor', vendor);
     updateVendorOptions();
 
@@ -3161,186 +3190,17 @@ function updateVendorOptions() {
     }
 
     const deviceType = normalizeDeviceType(deviceTypeSelect.value);
-    const isTelescope = deviceType === 'telescope';
-    const isCamera = deviceType === 'camera';
-    const isSwitch = deviceType === 'switch';
-    const isFilterWheel = deviceType === 'filterwheel';
-    const isFocuser = deviceType === 'focuser';
-    const isRotator = deviceType === 'rotator';
-    const isObservingConditions = deviceType === 'observingconditions';
-    const isCoverCalibrator = deviceType === 'covercalibrator';
-    const astroasisOption = vendorSelect.querySelector('option[value="astroasis"]');
-    if (astroasisOption) {
-        // Astroasis provides only the Oasis Focuser.
-        astroasisOption.disabled = !isFocuser;
-        astroasisOption.hidden = !isFocuser;
-    }
-    const ioptronOption = vendorSelect.querySelector('option[value="ioptron"]');
-    if (ioptronOption) {
-        // iOptron provides the mount (telescope), the iMate PowerBox (switch),
-        // the iEAF / iAFS2/3 focusers, the iEFW filter wheel and the iCAM
-        // cameras (Player One SDK).
-        const ioptronAllowed = isTelescope || isSwitch || isFocuser || isFilterWheel || isCamera;
-        ioptronOption.disabled = !ioptronAllowed;
-        ioptronOption.hidden = !ioptronAllowed;
-    }
-    const synscanOption = vendorSelect.querySelector('option[value="synscan"]');
-    if (synscanOption) {
-        synscanOption.disabled = !isTelescope;
-        synscanOption.hidden = !isTelescope;
-    }
-    const skywatcherOption = vendorSelect.querySelector('option[value="skywatcher"]');
-    if (skywatcherOption) {
-        skywatcherOption.disabled = !isTelescope;
-        skywatcherOption.hidden = !isTelescope;
-    }
-    const celestronOption = vendorSelect.querySelector('option[value="celestron"]');
-    if (celestronOption) {
-        // Celestron provides the mount (telescope) and the focus motor (issue #896).
-        const celestronAllowed = isTelescope || isFocuser;
-        celestronOption.disabled = !celestronAllowed;
-        celestronOption.hidden = !celestronAllowed;
-    }
-    const onstepOption = vendorSelect.querySelector('option[value="onstep"]');
-    if (onstepOption) {
-        onstepOption.disabled = !isTelescope;
-        onstepOption.hidden = !isTelescope;
-    }
-    const bisqueOption = vendorSelect.querySelector('option[value="bisque"]');
-    if (bisqueOption) {
-        bisqueOption.disabled = !isTelescope;
-        bisqueOption.hidden = !isTelescope;
-    }
-    const zwoOption = vendorSelect.querySelector('option[value="zwo"]');
-    if (zwoOption) {
-        const zwoAllowed = isTelescope || isCamera || isSwitch || isFilterWheel || isFocuser || isRotator;
-        zwoOption.disabled = !zwoAllowed;
-        zwoOption.hidden = !zwoAllowed;
-    }
-    const qhyOption = vendorSelect.querySelector('option[value="qhy"]');
-    if (qhyOption) {
-        // QHY provides cameras, filter wheels (the integrated CFW on models
-        // like the miniCam8M, and the standalone CFW3 over USB serial), and
-        // the Q-Focuser (serial, no SDK).
-        const qhyAllowed = isCamera || isFilterWheel || isFocuser;
-        qhyOption.disabled = !qhyAllowed;
-        qhyOption.hidden = !qhyAllowed;
-    }
-    const svbonyOption = vendorSelect.querySelector('option[value="svbony"]');
-    if (svbonyOption) {
-        svbonyOption.disabled = !isCamera;
-        svbonyOption.hidden = !isCamera;
-    }
-    const altairOption = vendorSelect.querySelector('option[value="altair"]');
-    if (altairOption) {
-        altairOption.disabled = !isCamera;
-        altairOption.hidden = !isCamera;
-    }
-    const iguiderOption = vendorSelect.querySelector('option[value="iguider"]');
-    if (iguiderOption) {
-        iguiderOption.disabled = !isCamera;
-        iguiderOption.hidden = !isCamera;
-    }
-    const gphotoOption = vendorSelect.querySelector('option[value="gphoto"]');
-    if (gphotoOption) {
-        gphotoOption.disabled = !isCamera;
-        gphotoOption.hidden = !isCamera;
-    }
-    const touptekOption = vendorSelect.querySelector('option[value="touptek"]');
-    if (touptekOption) {
-        // ToupTek provides cameras, the AAF focuser, the AFW filter wheel, and
-        // the StellaVita PowerBox (switch).
-        const allowTouptek = isCamera || isFocuser || isFilterWheel || isSwitch;
-        touptekOption.disabled = !allowTouptek;
-        touptekOption.hidden = !allowTouptek;
-    }
-    const playerOneOption = vendorSelect.querySelector('option[value="playerone"]');
-    if (playerOneOption) {
-        // Player One provides cameras, the Phoenix filter wheel, and the
-        // thermal switch (cooled-camera dew heater / fan).
-        const playerOneAllowed = isCamera || isFilterWheel || isSwitch;
-        playerOneOption.disabled = !playerOneAllowed;
-        playerOneOption.hidden = !playerOneAllowed;
-    }
-    const weewxOption = vendorSelect.querySelector('option[value="weewx"]');
-    if (weewxOption) {
-        weewxOption.disabled = !isObservingConditions;
-        weewxOption.hidden = !isObservingConditions;
-    }
-    const geminiOption = vendorSelect.querySelector('option[value="gemini"]');
-    if (geminiOption) {
-        // Gemini provides the Automatic Astro Focuser Pro (focuser), the
-        // flat panels (CoverCalibrator) and the Power & Data Hubs Advanced 3
-        // power box (Switch).
-        const geminiAllowed = isFocuser || isCoverCalibrator || isSwitch;
-        geminiOption.disabled = !geminiAllowed;
-        geminiOption.hidden = !geminiAllowed;
-    }
-    const wandererastroOption = vendorSelect.querySelector('option[value="wandererastro"]');
-    if (wandererastroOption) {
-        // WandererAstro provides the WandererCover V4 (CoverCalibrator), the
-        // WandererRotator Mini (Rotator), the SFW filter wheels (FilterWheel)
-        // and the WandererBox Pro V3 power box (Switch).
-        const wandererastroAllowed = isCoverCalibrator || isRotator || isFilterWheel || isSwitch;
-        wandererastroOption.disabled = !wandererastroAllowed;
-        wandererastroOption.hidden = !wandererastroAllowed;
-    }
-
-    if (!isFocuser && vendorSelect.value === 'astroasis') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isSwitch && !isFocuser && !isFilterWheel && !isCamera && vendorSelect.value === 'ioptron') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'synscan') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'skywatcher') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isFocuser && vendorSelect.value === 'celestron') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'onstep') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && vendorSelect.value === 'bisque') {
-        vendorSelect.value = '';
-    }
-    if (!isTelescope && !isCamera && !isSwitch && !isFilterWheel && !isFocuser && !isRotator &&
-        vendorSelect.value === 'zwo') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFilterWheel && !isFocuser && vendorSelect.value === 'qhy') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'svbony') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'altair') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'iguider') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && vendorSelect.value === 'gphoto') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFocuser && !isFilterWheel && !isSwitch && vendorSelect.value === 'touptek') {
-        vendorSelect.value = '';
-    }
-    if (!isCamera && !isFilterWheel && !isSwitch && vendorSelect.value === 'playerone') {
-        vendorSelect.value = '';
-    }
-    if (!isObservingConditions && vendorSelect.value === 'weewx') {
-        vendorSelect.value = '';
-    }
-    if (!isFocuser && !isCoverCalibrator && vendorSelect.value === 'gemini') {
-        vendorSelect.value = '';
-    }
-    if (!isCoverCalibrator && !isRotator && !isFilterWheel && !isSwitch && vendorSelect.value === 'wandererastro') {
-        vendorSelect.value = '';
-    }
+    const state = vendorSelectState(catalogData, deviceType, vendorSelect.value, keepVendor);
+    vendorSelect.querySelectorAll('option').forEach(option => {
+        if (option.value === '') {
+            return;
+        }
+        const offered = state.offered.includes(option.value);
+        option.hidden = !offered;
+        option.disabled = !offered;
+    });
+    vendorSelect.disabled = state.disabled;
+    vendorSelect.value = state.value;
 
     vendorSelect.dispatchEvent(new Event('change'));
 }
@@ -3763,14 +3623,11 @@ if (deviceNumberInput) {
 }
 
 // Mark any vendor index field as user-modified once edited, so auto-numbering
-// leaves it alone. Driven off INDEX_FIELDS so every vendor's index field
-// (not just ZWO's) is covered.
-INDEX_FIELDS.forEach(field => {
-    const input = document.getElementById(field.fieldId);
-    if (input) {
-        input.addEventListener('input', () => {
-            input.dataset.userModified = 'true';
-        });
+// leaves it alone. One delegated listener, so it covers every field in
+// indexFields whenever the catalog arrives.
+document.getElementById('device-form').addEventListener('input', event => {
+    if (indexFields.some(field => field.fieldId === event.target.id)) {
+        event.target.dataset.userModified = 'true';
     }
 });
 
@@ -5306,6 +5163,7 @@ function escapeHtml(text) {
 
 // Initialize on page load
 document.addEventListener('DOMContentLoaded', function() {
+    ensureCatalog();
     loadDevices();
     startDeviceStatusPoll();
     loadServerInfo();
