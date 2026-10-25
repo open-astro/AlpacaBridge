@@ -14,12 +14,11 @@
 #include <alpacacore/vendor/zwo/zwo_filterwheel_driver.h>
 #include <alpacacore/version.h>
 
+#include <chrono>
 #include <functional>
+#include <thread>
 #include <variant>
 #include <vector>
-
-#include <chrono>
-#include <thread>
 
 #include "catch2_compat.h"
 #include "fake_zwo_efw_sdk.h"

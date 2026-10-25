@@ -325,7 +325,8 @@ TEST_CASE("ZWO Camera Driver - ElectronsPerADU and FullWellCapacity are not impl
 // wrapper maps CAMERA_REMOVED to NotConnected; on that evidence the transport is gone (decision 0009 point 2a),
 // so Connected reads false and the client's Connect relinks.
 // Falsified by: the camera driver keeping connected_ true after an SDK call threw NotConnected.
-TEST_CASE("ZWO Camera Driver - A camera removed from USB reads Connected false", "[zwo][camera][unit][fake-sdk][link]") {
+TEST_CASE("ZWO Camera Driver - A camera removed from USB reads Connected false",
+          "[zwo][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeZWOSDK sdk;
     auto camera = alpacacore::vendor::zwo::create_zwo_camera(0, sdk.camera.camera_id, sdk);
     camera->set_connected(true);
