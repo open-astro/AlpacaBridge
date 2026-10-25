@@ -69,6 +69,9 @@ public:
     int hardware_error_code{0};
     int open_calls{0};
     int last_open_id{-1};
+    // The SDK id of the last position read and of the last move (issue #1500: which wheel a driver talks to).
+    int last_read_id{-1};
+    int last_move_id{-1};
     int close_calls{0};
     int position_calls{0};
     int set_position_calls{0};
@@ -145,6 +148,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++position_calls;
+        last_read_id = wheel_id;
         throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
@@ -159,6 +163,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_id(wheel_id);
         ++set_position_calls;
+        last_move_id = wheel_id;
         throw_if_removed();
         if (fail_set_position) throw AlpacaException("scripted set_position failure", AlpacaError::DriverException);
         last_set_position = slot;

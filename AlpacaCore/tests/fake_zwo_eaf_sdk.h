@@ -66,6 +66,9 @@ public:
     int last_set_max_step{-1};
     int open_calls{0};
     int last_open_id{-1};
+    // The SDK id of the last position read and of the last move (issue #1500: which unit a driver talks to).
+    int last_read_id{-1};
+    int last_move_id{-1};
     int close_calls{0};
     bool step_range_fails{false};
     bool removed{false};
@@ -137,18 +140,20 @@ public:
         }
         return moving;
     }
-    int get_position(int) override {
+    int get_position(int focuser_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++position_calls;
+        last_read_id = focuser_id;
         throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
         return position;
     }
-    void move(int, int target) override {
+    void move(int focuser_id, int target) override {
         const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
+        last_move_id = focuser_id;
         position = target;
     }
     void stop(int) override {

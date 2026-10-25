@@ -758,8 +758,9 @@ TEST_CASE("ZWO CAA Rotator Driver - A Connected toggle across a replug reopens t
 }
 
 // Issue #1500: every Connect binds the serial the rotator had, so a replug while the client is disconnected that
-// swaps two rotators' SDK ids still opens the same unit.
-// Falsified by: Connect opening the id the driver was created with, or the first enumerated rotator.
+// swaps two rotators' SDK ids still opens the same unit, and its reads go to that unit's new id.
+// Falsified by: Connect opening the id the driver was created with, or the first enumerated rotator, or keeping
+// the first candidate it opened.
 TEST_CASE("ZWO CAA Rotator Driver - Two rotators swapped while disconnected are told apart by serial",
           "[zwo][rotator][unit][fake-sdk][link]") {
     alpacacore::test::TempSyncOffsetDir dir;
@@ -776,6 +777,9 @@ TEST_CASE("ZWO CAA Rotator Driver - Two rotators swapped while disconnected are 
     driver->set_connected(true);
     CHECK(driver->get_connected());
     CHECK(sdk.last_open_id == 8);
+    wait_past_status_ttl();
+    (void)driver->get_position();
+    CHECK(sdk.last_read_id == 8);
 }
 
 // Issue #1500: Disconnect from the lost state clears the driver without throwing (invariant 5).
@@ -792,4 +796,49 @@ TEST_CASE("ZWO CAA Rotator Driver - Disconnect after a removal does not throw",
 
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #1500 (B7): two rotators, and a replug swaps their SDK ids while Y is idle (no call fails on it). X's
+// Connect binds its own serial, now on Y's old id. Y must not keep talking to that id: its next read is
+// NotConnected, Connected reads false, and none of its calls reach X's unit.
+// Falsified by: the wrapper serving a holder whose id now names another unit (no serial check at the shared open).
+TEST_CASE("ZWO CAA Rotator Driver - An idle rotator does not drive the unit that took its id",
+          "[zwo][rotator][unit][fake-sdk][link]") {
+    alpacacore::test::TempSyncOffsetDir dir;
+    FakeCAASDK sdk;
+    sdk.second_id = 8;
+    auto y = alpacacore::vendor::zwo::create_zwo_caa_rotator(0, 7, sdk);  // CAA-SN-1
+    auto x = alpacacore::vendor::zwo::create_zwo_caa_rotator(1, 8, sdk);  // CAA-SN-2
+    y->set_connected(true);
+    x->set_connected(true);
+
+    sdk.remove();
+    sdk.second_id = 7;  // X's unit (CAA-SN-2) comes back on id 7, Y's (CAA-SN-1) on id 8
+    sdk.replug(8);
+    x->set_connected(false);
+    x->set_connected(true);
+    REQUIRE(x->get_connected());
+    wait_past_status_ttl();
+    (void)x->get_position();
+    CHECK(sdk.last_read_id == 7);
+
+    sdk.last_read_id = -1;
+    sdk.last_move_id = -1;
+    wait_past_status_ttl();
+    // Every check runs, so a red run shows each of Y's calls that reached X's unit.
+    const auto error_of = [](const std::function<void()>& fn) -> int {
+        try {
+            fn();
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    CHECK(error_of([&] { (void)y->get_position(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(sdk.last_read_id == -1);
+    CHECK_FALSE(y->get_connected());
+    CHECK(error_of([&] { y->move_absolute(90.0); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(sdk.last_move_id == -1);
+    CHECK_NOTHROW(y->set_connected(false));
+    CHECK(x->get_connected());
 }

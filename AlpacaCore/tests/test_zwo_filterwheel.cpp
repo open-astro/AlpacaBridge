@@ -166,8 +166,9 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - A Connected toggle across a replug reop
 }
 
 // Issue #1500: every Connect binds the serial the wheel had, so a replug while the client is disconnected that
-// swaps two wheels' SDK ids still opens the same wheel.
-// Falsified by: Connect opening the id the driver was created with, or the first enumerated wheel.
+// swaps two wheels' SDK ids still opens the same wheel, and its reads go to that wheel's new id.
+// Falsified by: Connect opening the id the driver was created with, or the first enumerated wheel, or keeping
+// the first candidate it opened.
 TEST_CASE("ZWO EFW Filter Wheel Driver - Two wheels swapped while disconnected are told apart by serial",
           "[zwo][filterwheel][unit][fake-sdk][link]") {
     alpacacore::test::FakeZWOEFWSDK sdk;
@@ -183,6 +184,9 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Two wheels swapped while disconnected a
     driver->set_connected(true);
     CHECK(driver->get_connected());
     CHECK(sdk.last_open_id == 6);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(driver->get_position() == 0);
+    CHECK(sdk.last_read_id == 6);
 }
 
 // Issue #1500: Disconnect from the lost state clears the driver without throwing (invariant 5).
@@ -198,4 +202,48 @@ TEST_CASE("ZWO EFW Filter Wheel Driver - Disconnect after a removal does not thr
 
     CHECK_NOTHROW(driver->set_connected(false));
     CHECK_FALSE(driver->get_connected());
+}
+
+// Issue #1500 (B7): two wheels, and a replug swaps their SDK ids while Y is idle (no call fails on it). X's
+// Connect binds its own serial, now on Y's old id. Y must not keep talking to that id: its next read is
+// NotConnected, Connected reads false, and none of its calls reach X's wheel.
+// Falsified by: the wrapper serving a holder whose id now names another wheel (no serial check at the shared open).
+TEST_CASE("ZWO EFW Filter Wheel Driver - An idle wheel does not drive the wheel that took its id",
+          "[zwo][filterwheel][unit][fake-sdk][link]") {
+    alpacacore::test::FakeZWOEFWSDK sdk;
+    sdk.second_id = 6;
+    auto y = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(0, 5, sdk);  // EFW-SN-1
+    auto x = alpacacore::vendor::zwo::create_zwo_efw_filterwheel(1, 6, sdk);  // EFW-SN-2
+    y->set_connected(true);
+    x->set_connected(true);
+
+    sdk.remove();
+    sdk.second_id = 5;  // X's wheel (EFW-SN-2) comes back on id 5, Y's (EFW-SN-1) on id 6
+    sdk.replug(6);
+    x->set_connected(false);
+    x->set_connected(true);
+    REQUIRE(x->get_connected());
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(x->get_position() == 0);
+    CHECK(sdk.last_read_id == 5);
+
+    sdk.last_read_id = -1;
+    sdk.last_move_id = -1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    // Every check runs, so a red run shows each of Y's calls that reached X's unit.
+    const auto error_of = [](const std::function<void()>& fn) -> int {
+        try {
+            fn();
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code();
+        }
+        return 0;
+    };
+    CHECK(error_of([&] { (void)y->get_position(); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(sdk.last_read_id == -1);
+    CHECK_FALSE(y->get_connected());
+    CHECK(error_of([&] { y->set_position(2); }) == alpacacore::AlpacaError::NotConnected);
+    CHECK(sdk.last_move_id == -1);
+    CHECK_NOTHROW(y->set_connected(false));
+    CHECK(x->get_connected());
 }

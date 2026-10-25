@@ -364,9 +364,10 @@ TEST_CASE("ZWO Camera Driver - A replugged camera is found by serial and reopene
 
 // Issue #1500, the rig step: the client toggles Connected off and on across the replug, with no failed call in
 // between. The Disconnect must not throw for the dead handle, and the Connect must find the camera by the serial
-// it read at the first connect, though the entry names only an SDK id (decision 0009 point 4).
+// it read at the first connect, though the entry names only an SDK id (decision 0009 point 4). Another camera of
+// the same model now holds the old id and is listed first, so neither the stale id nor the first body found will do.
 // Falsified by: Disconnect rethrowing the NotConnected close of a removed camera, or Connect resolving the stale
-// id the entry was created with.
+// id the entry was created with or the first camera of the model.
 TEST_CASE("ZWO Camera Driver - A Connected toggle across a replug reopens the camera by its serial",
           "[zwo][camera][unit][fake-sdk][link]") {
     alpacacore::test::FakeZWOSDK sdk;
@@ -376,6 +377,7 @@ TEST_CASE("ZWO Camera Driver - A Connected toggle across a replug reopens the ca
     sdk.remove();
     CHECK_NOTHROW(camera->set_connected(false));
     CHECK_FALSE(camera->get_connected());
+    sdk.other_camera = std::make_pair(17, std::string("FAKE-ZWO-99"));
     sdk.replug(21);
 
     CHECK_NOTHROW(camera->set_connected(true));

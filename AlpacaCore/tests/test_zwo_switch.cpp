@@ -544,7 +544,7 @@ TEST_CASE("ZWO Dew Heater Switch Driver - A replug the camera driver relinked le
     REQUIRE(sdk.open_count() == 1);
 
     wait_past_status_ttl();
-    CHECK_THROWS(heater->get_switch_value(0));
+    require_alpaca_error([&] { (void)heater->get_switch_value(0); }, alpacacore::AlpacaError::NotConnected);
     CHECK_FALSE(heater->get_connected());
     CHECK_NOTHROW(heater->set_connected(false));
     CHECK(sdk.open_count() == 1);

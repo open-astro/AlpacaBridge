@@ -56,6 +56,9 @@ public:
     bool fail_info{false};
     int open_calls{0};
     int last_open_id{-1};
+    // The SDK id of the last angle read and of the last move (issue #1500: which unit a driver talks to).
+    int last_read_id{-1};
+    int last_move_id{-1};
     int close_calls{0};
     double last_move_absolute{-1.0};
     double last_move_mechanical{-1.0};
@@ -134,28 +137,32 @@ public:
         }
         return {moving, false};
     }
-    double get_degree(int) override {
+    double get_degree(int rotator_id) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++degree_calls;
+        last_read_id = rotator_id;
         throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
         return degree;
     }
-    void move_relative(int, double angle) override {
+    void move_relative(int rotator_id, double angle) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        last_move_id = rotator_id;
         degree += angle;
     }
-    void move_absolute(int, double angle) override {
+    void move_absolute(int rotator_id, double angle) override {
         const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
+        last_move_id = rotator_id;
         last_move_absolute = angle;
         degree = angle;
     }
-    void move_mechanical(int, double angle) override {
+    void move_mechanical(int rotator_id, double angle) override {
         const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
+        last_move_id = rotator_id;
         last_move_mechanical = angle;
         degree = reverse ? 360.0 - angle : angle;
     }
