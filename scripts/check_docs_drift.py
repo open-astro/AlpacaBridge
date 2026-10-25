@@ -886,13 +886,11 @@ def check_qhy_seam_lists():
             "LockedQHYSDK::%s() overrides nothing on QHYSDK -- stale forward, or the interface lost a "
             "method." % name)
 
-    # cancel_exposure is the one documented exception (open-astro#339): the real
-    # QHYSDKWrapper::cancel_exposure() deliberately skips the per-handle call
-    # mutex so it can interrupt a GetQHYCCDSingleFrame already blocked on the
-    # same handle, and routing it through the shared mutex here inverted that
-    # invariant. It still takes A mutex -- its own -- so it is not an unlocked
-    # forward and the fake stays non-racy; it just does not queue behind the
-    # call it exists to interrupt.
+    # Two documented exemptions from the shared mutex, each taking its own
+    # mutex so the fake stays non-racy (rationale in the helper's docstring):
+    # cancel_exposure (open-astro#339) must not queue behind the call it
+    # interrupts, and get_sdk_version (open-astro#1646) must not queue behind
+    # an in-flight open_camera.
     failures.extend(_qhy_forward_lock_findings(locked_methods, interface_methods))
 
     # The hand-written sweep list in the test.
