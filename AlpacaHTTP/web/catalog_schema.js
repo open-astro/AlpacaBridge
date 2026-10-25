@@ -76,6 +76,16 @@ function vendorSelectState(catalog, deviceType, vendor, keepVendor = '') {
     };
 }
 
+// The device types, out of deviceTypes, that the #device-type select offers:
+// those with at least one available descriptor (the test offeredVendors
+// applies), plus keepType (the type of the device being edited). Nothing is
+// offered until a non-empty catalog is loaded.
+function offeredDeviceTypes(catalog, deviceTypes, keepType = '') {
+    const keep = String(keepType).toLowerCase();
+    return deviceTypes.filter((type) => type === keep && Array.isArray(catalog) && catalog.length > 0
+        || offeredVendors(catalog, type).length > 0);
+}
+
 // The auto-numbered index fields: each number input mapped to an
 // EnumerationIndex catalog field, paired with the input that pins a specific
 // unit (the descriptor's first DeviceId field, else its first PortPath field,
@@ -216,6 +226,6 @@ function applicability(descriptor, formFields, valuesById) {
 // Browsers ignore this; `node --test` uses it. Guarded rather than a real
 // module so index.html can keep loading the file with a plain <script> tag.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { catalogFromResponse, catalogLoader, offeredVendors, vendorSelectState, deriveIndexFields,
+    module.exports = { catalogFromResponse, catalogLoader, offeredVendors, vendorSelectState, offeredDeviceTypes, deriveIndexFields,
         editAssignments, applicability };
 }

@@ -71,6 +71,7 @@ Symbol: `AsyncOperation`
 | Celestron focus motor | | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | poll body |
 | OnStep telescope | | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | adopted | #1378 | MoveAxis re-send body |
 | iOptron iGuider camera | | `AlpacaCore/src/vendors/ioptron/ioptron_iguider_camera_driver.cpp` | adopted | | stream worker body, connect to disconnect |
+| Player One camera | | `AlpacaCore/src/vendors/playerone/playerone_camera_driver.cpp` | adopted | #1605 | pulse-guide off-timer body; the exposure runs in a `CaptureSession` ([decision 0020](0020-capture-session.md)) |
 | ZWO telescope | | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | partial | #1432, #1433 | telemetry poll slot; existing GOTO, pulse and disconnect workers remain joined raw threads |
 
 ## Links
