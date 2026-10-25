@@ -1178,11 +1178,11 @@ private:
                               " link lost (hangup): " + util::errno_string(err));
     }
 
-    // Everything before the first '#': a reply read in idle-gap mode may hold
-    // bytes after the terminator, which the old loop never read.
-    static std::string before_hash(std::string bytes) {
-        const auto hash = bytes.find('#');
-        if (hash != std::string::npos) bytes.resize(hash);
+    // The reply without its '#': a read that ended on the terminator holds it
+    // as its last byte; an idle or timed-out read holds no '#'.
+    static std::string without_terminator(const util::ReadResult& r) {
+        std::string bytes = r.bytes;
+        if (r.outcome == util::ReadOutcome::Terminator) bytes.pop_back();
         return bytes;
     }
 
@@ -1210,7 +1210,7 @@ private:
         // The terminator ends the reply; without one the reply ends when the
         // line goes quiet for 100 ms after its first byte. CR/LF are dropped.
         if (!require_hash_terminator) {
-            spec.stop = util::ReadSpec::Stop::IdleGap;
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
         const auto r = read_reply(spec, deadline);
@@ -1220,10 +1220,10 @@ private:
             case util::ReadOutcome::Overflow:
                 throw AlpacaException("SynScan response too long");
             case util::ReadOutcome::Timeout:
-                if (!require_hash_terminator) return before_hash(r.bytes);
+                if (!require_hash_terminator) return r.bytes;
                 throw AlpacaException("Timeout waiting for SynScan response");
             default:
-                return before_hash(r.bytes);
+                return without_terminator(r);
         }
     }
 

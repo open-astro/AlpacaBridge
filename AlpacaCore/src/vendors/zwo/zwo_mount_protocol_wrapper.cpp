@@ -1313,12 +1313,12 @@ private:
         spec.max_len = kMaxReplyLen;
         if (preserve_whitespace) spec.skip.clear();
         if (!require_hash_terminator) {
-            spec.stop = util::ReadSpec::Stop::IdleGap;
+            spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(kIdleBreakMs);
         }
 
-        // A reply read in idle-gap mode may hold bytes after the '#', which the old loop never read: the reply
-        // is what precedes the first '#', and finding one tells a blind command its own reply is gone.
+        // A read that ended on the '#' holds it as its last byte: the reply is what precedes it, and finding one
+        // tells a blind command its own reply is gone.
         const auto finish = [&]() {
             const auto hash = response.find('#');
             if (hash != std::string::npos) {
