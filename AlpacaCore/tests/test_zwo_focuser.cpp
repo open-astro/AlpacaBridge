@@ -451,8 +451,9 @@ TEST_CASE("ZWO EAF Focuser Driver - Identity and limits answer while a status re
 }
 
 // A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
-// Falsified by: zwo_focuser_driver.cpp set_connected(false) calling close_focuser_link() without io_mutex_, or move()
-// reading the id and then calling the SDK without it (closed_while_busy is set).
+// Falsified by: zwo_focuser_driver.cpp set_connected(false) calling close_focuser_link() without io_mutex_ (the move
+// and halt sections; the status read section is also held back by status_cache_.reset()), or move() calling the SDK
+// without it (closed_while_busy is set: the fake samples it before the table mutex, which would queue the close).
 TEST_CASE("ZWO EAF Focuser Driver - A disconnect waits for the exchange in flight instead of closing under it",
           "[zwo][focuser][unit][fake-sdk][getter-stall]") {
     using namespace alpacacore::test;

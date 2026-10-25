@@ -52,7 +52,7 @@ public:
     virtual std::optional<SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) = 0;
     /// Drops this holder's open; a retired link is a no-op.
     virtual void close_focuser_link(int focuser_id, std::uint64_t link) = 0;
-    /// Runs @p fn with @p link as this thread's link for @p focuser_id; takes no lock across @p fn.
+    /// Runs @p fn with @p link as this thread's link for @p focuser_id; the wrapper takes no lock across @p fn.
     virtual void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) = 0;
 
     virtual bool is_moving(int focuser_id) = 0;

@@ -42,8 +42,8 @@ namespace alpacacore::test {
 // the driver starts and read after it stops. No call blocks except the explicit
 // delays: open_delay holds a connect open (contract sweep tier 2), read_delay holds an
 // is_moving() read and move_delay a move() or stop() in flight (getters-never-wait tests).
-// The *_entered flags and `busy` are atomics a test polls from another thread; the raw close
-// sets closed_while_busy when it runs while a delayed call is still in flight.
+// The *_entered flags and `busy` are atomics a test polls from another thread; close_focuser_link()
+// sets closed_while_busy when a driver asks to close while a delayed call is still in flight.
 
 // KNOWN PARITY GAPS: move() settles a move at once (position/degree jump to the target and
 // the moving flag stays whatever a test set), where the real EAFIsMoving reports motion until the unit
@@ -132,7 +132,11 @@ public:
     std::optional<vendor::zwo::SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override {
         return table_.open_candidate(focuser_id);
     }
-    void close_focuser_link(int focuser_id, std::uint64_t link) override { table_.close(focuser_id, link); }
+    void close_focuser_link(int focuser_id, std::uint64_t link) override {
+        // Sampled before the table: the table mutex would hold the close back until the call in flight ends.
+        if (busy.load() > 0) closed_while_busy = true;
+        table_.close(focuser_id, link);
+    }
     void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) override {
         table_.with_link(focuser_id, link, fn);
     }
@@ -180,7 +184,6 @@ private:
         last_open_id = focuser_id;
     }
     void raw_close(int focuser_id) {
-        if (busy.load() > 0) closed_while_busy = true;
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls;
         // The table erases its bookkeeping, then EAFClose fails on a removed unit or a vanished id.
