@@ -38,6 +38,7 @@
 #ifndef _WIN32
 #include "concurrency_stress.h"
 #include "fake_mount_server.h"
+#include "fake_task_clock.h"
 #endif
 #include "fake_ioptron_mount.h"
 #include "fake_pty_write.h"
@@ -721,6 +722,33 @@ TEST_CASE("iOptron Telescope Driver - a far-off client UTCDate is logged once pe
     REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
     driver->set_utc_date(far);
     CHECK(warns.load() == 2);
+    driver->set_connected(false);
+}
+
+// #1590: the UTCDate readback ages by the driver's TaskClock, not the host's steady clock.
+TEST_CASE("iOptron Telescope Driver - the UTCDate readback after a write moves by the advanced TaskClock time",
+          "[ioptron][telescope][unit][taskclock]") {
+    alpacacore::test::FakeMountServer server;
+    REQUIRE(server.ok());
+    alpacacore::vendor::ioptron::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    conn.host = "127.0.0.1";
+    conn.tcp_port = server.port();
+    conn.response_timeout_ms = 50;
+    alpacacore::test::FakeTaskClock clock;
+    // Clock sync off: its body waits on the same clock, so advance() would wake it and it would
+    // overwrite the written UTC with the host's.
+    auto driver = alpacacore::vendor::ioptron::create_ioptron_telescope_with_site(0, conn, std::nullopt, std::nullopt,
+                                                                                  std::nullopt, false, clock);
+    REQUIRE(alpacacore::test::settle_connected(*driver, true, std::chrono::seconds(5)));
+
+    const auto written = std::chrono::system_clock::time_point{} + std::chrono::hours(24 * 365 * 30);
+    driver->set_utc_date(written);
+    CHECK(driver->get_utc_date() == written);
+    clock.advance(std::chrono::seconds(90));
+    CHECK(driver->get_utc_date() == written + std::chrono::seconds(90));
+    clock.advance(std::chrono::milliseconds(250));
+    CHECK(driver->get_utc_date() == written + std::chrono::seconds(90) + std::chrono::milliseconds(250));
     driver->set_connected(false);
 }
 

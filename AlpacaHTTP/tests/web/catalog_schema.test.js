@@ -480,3 +480,38 @@ test('readFormFields in app.js reports what the formFields helper reports for ev
     assert.ok(expected.some((f) => f.manual) && expected.some((f) => f.readOnly));
     assert.deepEqual(JSON.parse(JSON.stringify(fromApp)), expected);
 });
+
+const FORM_TYPES = ['camera', 'covercalibrator', 'dome', 'filterwheel', 'focuser', 'observingconditions', 'rotator',
+    'switch', 'telescope'];
+
+test('offeredDeviceTypes hides dome, which the fixture catalog has no entry for, and offers the other 8 types', () => {
+    const { offeredDeviceTypes } = schema();
+    assert.deepEqual(offeredDeviceTypes(catalog, FORM_TYPES), FORM_TYPES.filter((t) => t !== 'dome'));
+});
+
+test('offeredDeviceTypes hides a type whose only entries are not available, unless it is the edited type', () => {
+    const { offeredDeviceTypes } = schema();
+    const only = (type) => catalog.filter((d) => d.deviceType !== type || !d.available)
+        .concat(catalog.filter((d) => d.deviceType === type).map((d) => ({ ...d, available: false })));
+    const cat = only('focuser');
+    assert.ok(!offeredDeviceTypes(cat, FORM_TYPES).includes('focuser'));
+    assert.ok(offeredDeviceTypes(cat, FORM_TYPES, 'focuser').includes('focuser'));
+});
+
+test('offeredDeviceTypes keeps a hidden edited type', () => {
+    const { offeredDeviceTypes } = schema();
+    assert.ok(offeredDeviceTypes(catalog, FORM_TYPES, 'Dome').includes('dome'));
+    assert.equal(offeredDeviceTypes(catalog, FORM_TYPES, 'dome').length, 9);
+});
+
+test('offeredDeviceTypes offers nothing for an empty or failed catalog, even for the edited type', () => {
+    const { offeredDeviceTypes } = schema();
+    assert.deepEqual(offeredDeviceTypes([], FORM_TYPES, 'camera'), []);
+    assert.deepEqual(offeredDeviceTypes(null, FORM_TYPES, 'camera'), []);
+});
+
+test('app.js applies offeredDeviceTypes where the catalog loads and before an edit selects its type', () => {
+    assert.match(app, /function updateDeviceTypeOptions\(\)[\s\S]*offeredDeviceTypes\(catalogData/);
+    assert.match(app, /updateDeviceTypeOptions\(\);\s*updateVendorOptions\(\);\s*return catalogData;/);
+    assert.match(app, /keepType = deviceType;\s*updateDeviceTypeOptions\(\);\s*setFormValue\('device-type'/);
+});
