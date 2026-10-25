@@ -7,9 +7,11 @@ applyTo: "AlpacaCore/src/vendors/onstep/**,AlpacaCore/include/alpacacore/vendor/
 Devices: Telescope.
 
 No vendor SDK — OnStep is open-source LX200-protocol firmware (Arduino Mega/Due, Teensy,
-ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own
-[OnStepX command reference](https://github.com/hjd1964/OnStepX/blob/097cc5797b4708e3787dd0b8bbbf81df66fdb5ff/docs/COMMAND_REFERENCE.md)
-(pinned at the commit read for the table below; GPL-3.0, so it is linked, not copied), then the firmware source itself
+ESP32, STM32) for DIY/retrofit mounts. The protocol reference is the firmware's own OnStepX
+command reference, kept unmodified in [`AlpacaCore/external/OnStep/`](../../AlpacaCore/external/OnStep/README.md)
+(GPL-3.0, with its license; upstream
+[at the same commit](https://github.com/hjd1964/OnStepX/blob/097cc5797b4708e3787dd0b8bbbf81df66fdb5ff/docs/COMMAND_REFERENCE.md),
+the one read for the table below), then the firmware source itself
 ([OnStepX](https://github.com/hjd1964/OnStepX), and [OnStep](https://github.com/hjd1964/OnStep)
 `Command.ino` for the older firmware). Check a reply format there before a driver change or a
 test fake relies on it. The driver was first written from INDI's `lx200_OnStep` driver
