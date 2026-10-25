@@ -22,11 +22,14 @@
 
 using alpacacore::util::LinkEpoch;
 
-// Falsified by: mark_lost leaving the open bit set, or applying a second loss of the same epoch.
+// Falsified by: mark_lost leaving the open bit set, applying a second loss of the same epoch, or reporting a
+// loss for a word that was already closed.
 TEST_CASE("Link epoch - A loss of the current epoch drops the link once", "[util][link]") {
     LinkEpoch link;
     CHECK_FALSE(link.is_open());
+    CHECK_FALSE(link.mark_lost(link.load()));  // a closed word has no link to lose
     link.begin_transition();
+    CHECK_FALSE(link.mark_lost(link.load()));
     const auto captured = link.publish_open();
     REQUIRE(link.is_open());
 
