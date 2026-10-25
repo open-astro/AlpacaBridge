@@ -486,9 +486,11 @@ std::string probe_serial_mount(const std::string& port_path, int timeout_ms) {
     spec.stop = util::ReadSpec::Stop::IdleGap;
     spec.idle_gap = std::chrono::milliseconds(100);
     spec.skip.clear();
+    // The old loop kept every byte up to the '#', so the cap only bounds a runaway stream.
+    spec.max_len = 4096;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-    const auto reply =
-        util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+    const auto reply = util::read_until(fd, spec, deadline);
     link.close();
 
     const std::size_t hash = reply.bytes.find('#');
