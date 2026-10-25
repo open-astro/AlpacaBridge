@@ -255,13 +255,20 @@ function functionBody(source, name) {
     return source.slice(start, source.indexOf('\n}\n', start) + 2);
 }
 
-// The element ids a piece of app.js sets a value on: setFormValue('<id>', ...),
-// document.getElementById('<id>').value / .checked = ..., or a const / let
-// bound to getElementById('<id>') whose .value / .checked is then assigned.
-function handFilledIds(body) {
+// The element ids a piece of app.js sets a value on by literal id:
+// setFormValue('<id>', ...) or document.getElementById('<id>').value / .checked = ...
+function literalFilledIds(source) {
     const ids = new Set();
-    for (const m of body.matchAll(/setFormValue\(\s*'([a-z0-9-]+)'/g)) ids.add(m[1]);
-    for (const m of body.matchAll(/getElementById\('([a-z0-9-]+)'\)\??\.(?:value|checked)\s*=(?!=)/g)) ids.add(m[1]);
+    for (const m of source.matchAll(/setFormValue\(\s*'([a-z0-9-]+)'/g)) ids.add(m[1]);
+    for (const m of source.matchAll(/getElementById\('([a-z0-9-]+)'\)\??\.(?:value|checked)\s*=(?!=)/g)) ids.add(m[1]);
+    return ids;
+}
+
+// The element ids a function body sets a value on: the literal patterns, or a
+// const / let bound to getElementById('<id>') whose .value / .checked is then
+// assigned.
+function handFilledIds(body) {
+    const ids = literalFilledIds(body);
     for (const m of body.matchAll(/(?:const|let) (\w+) = document\.getElementById\('([a-z0-9-]+)'\);/g)) {
         if (new RegExp(`\\b${m[1]}\\.(?:value|checked)\\s*=(?!=)`).test(body)) ids.add(m[2]);
     }
@@ -278,6 +285,12 @@ test('the drift check reads app.js: startEditDevice fills by hand only the field
         const dEl = document.getElementById('d-id');
         if (dEl.value === 'x') dEl.dispatchEvent(new Event('change'));
     `)].sort(), ['a-id', 'b-id', 'c-id']);
+    // The two literal-id patterns alone, so a fill moved into a helper
+    // function is still seen when they run over all of app.js.
+    assert.deepEqual([...literalFilledIds("setFormValue('e-id', 1);")], ['e-id']);
+    assert.deepEqual([...literalFilledIds("document.getElementById('f-id').value = 1; document.getElementById('g-id')?.checked = true;")]
+        .sort(), ['f-id', 'g-id']);
+    assert.deepEqual([...literalFilledIds("if (document.getElementById('h-id').value === 'x') {}")], []);
 
     const body = functionBody(app, 'startEditDevice');
     const handFilled = handFilledIds(body);
@@ -293,7 +306,10 @@ test('the drift check reads app.js: startEditDevice fills by hand only the field
         'weewx-url', 'touptek-focuser-id', 'skywatcher-backlash-steps-ra', 'zwo-mount-sync-time-on-connect']) {
         assert.ok(generic.includes(id), `#${id} is not a mapped field the generic fill owns`);
     }
-    assert.deepEqual(generic.filter((id) => handFilled.has(id)), [], 'filled by hand but not marked manual');
+    // startEditDevice, any const-bound pattern included, and every literal-id
+    // fill anywhere in app.js, so moving the chain into a helper cannot pass.
+    const everywhere = new Set([...handFilled, ...literalFilledIds(app)]);
+    assert.deepEqual(generic.filter((id) => everywhere.has(id)), [], 'filled by hand but not marked manual');
     assert.deepEqual(mapped.filter((f) => f.manual && !handFilled.has(f.id)).map((f) => f.id), [],
         'marked manual but startEditDevice does not fill it');
 });

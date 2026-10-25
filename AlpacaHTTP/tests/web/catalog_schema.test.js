@@ -330,3 +330,24 @@ test('index.html loads catalog_schema.js before app.js', () => {
     assert.ok(schemaTag >= 0, 'no <script src="/web/catalog_schema.js"> tag');
     assert.ok(schemaTag < appTag, 'catalog_schema.js must load before app.js');
 });
+
+// A failed catalog load writes its message to #form-message, which sits on the
+// Configure tab: the edit click must already be there, not on the Devices tab.
+test('startEditDevice opens the Configure tab before it waits for the catalog', () => {
+    const body = functionBody(app, 'startEditDevice');
+    const open = body.indexOf("showTab('configure', { preserveForm: true });");
+    assert.ok(open >= 0, "startEditDevice does not call showTab('configure', { preserveForm: true })");
+    assert.ok(open < body.indexOf('await ensureCatalog()'), 'the tab opens after the catalog wait, so the message lands on a hidden tab');
+    assert.equal(body.split("showTab('configure'").length - 1, 1, 'the tab is opened once');
+});
+
+// The delegated listener replaced 29 per-field ones: typing in an index field
+// must mark it user-modified so auto-numbering leaves it alone.
+test('the delegated input listener marks only index fields as user-modified', () => {
+    const start = app.indexOf("document.getElementById('device-form').addEventListener('input', event => {");
+    assert.ok(start >= 0, 'app.js has no delegated input listener on #device-form');
+    const body = app.slice(start, app.indexOf('\n});', start));
+    assert.match(body, /indexFields\.some\(field => field\.fieldId === event\.target\.id\)/);
+    assert.match(body, /event\.target\.dataset\.userModified = 'true'/);
+    assert.ok(body.indexOf('indexFields.some(') < body.indexOf('userModified'), 'the mark is not guarded by the index-field check');
+});

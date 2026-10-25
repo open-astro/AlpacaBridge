@@ -154,7 +154,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="aperture-diameter" name="apertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="aperture-diameter" name="apertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -164,7 +164,7 @@
                     </div>
                     <div class="form-group">
                         <label for="focal-length">Focal Length (mm):</label>
-                        <input type="number" id="focal-length" name="focalLength" data-config-key="focalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="focal-length" name="focalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                   </div>
@@ -344,7 +344,7 @@
 
                     <div class="form-group">
                         <label for="synscan-alignment-mode">Alignment Mode:</label>
-                        <select id="synscan-alignment-mode" name="synscanAlignmentMode" data-config-key="alignmentMode">
+                        <select id="synscan-alignment-mode" name="synscanAlignmentMode" data-config-key="alignmentMode" data-config-fill="manual">
                             <option value="auto">Auto (from the handset)</option>
                             <option value="altaz">Alt-Az</option>
                             <option value="equatorial">Equatorial</option>
@@ -390,7 +390,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="synscan-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="synscan-aperture-diameter" name="synscanApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="synscan-aperture-diameter" name="synscanApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -400,7 +400,7 @@
                     </div>
                     <div class="form-group">
                         <label for="synscan-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="synscan-focal-length" name="synscanFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="synscan-focal-length" name="synscanFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
@@ -454,7 +454,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="skywatcher-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="skywatcher-aperture-diameter" name="skywatcherApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="100">
+                        <input type="number" id="skywatcher-aperture-diameter" name="skywatcherApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -464,7 +464,7 @@
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="skywatcher-focal-length" name="skywatcherFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="800">
+                        <input type="number" id="skywatcher-focal-length" name="skywatcherFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
 
@@ -487,7 +487,7 @@
                     </div>
                     <div class="form-group">
                         <label for="skywatcher-learn-site-from-client">
-                            <input type="checkbox" id="skywatcher-learn-site-from-client" name="skywatcherLearnSiteFromClient" data-config-key="learnSiteFromClient" checked>
+                            <input type="checkbox" id="skywatcher-learn-site-from-client" name="skywatcherLearnSiteFromClient" data-config-key="learnSiteFromClient" data-config-fill="manual" checked>
                             Learn site from clients
                         </label>
                         <small>Keep a site latitude, longitude or elevation written by a client (an app with GPS, a planetarium program) as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
@@ -559,7 +559,7 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="onstep-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="onstep-aperture-diameter" name="onstepApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="200">
+                        <input type="number" id="onstep-aperture-diameter" name="onstepApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="200">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
@@ -569,7 +569,7 @@
                     </div>
                     <div class="form-group">
                         <label for="onstep-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="onstep-focal-length" name="onstepFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="1000">
+                        <input type="number" id="onstep-focal-length" name="onstepFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="1000">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
@@ -600,7 +600,7 @@
                     <div id="celestron-nexstar-only">
                     <div class="form-group">
                         <label for="celestron-alignment-mode">Alignment Mode:</label>
-                        <select id="celestron-alignment-mode" name="celestronAlignmentMode" data-config-key="alignmentMode">
+                        <select id="celestron-alignment-mode" name="celestronAlignmentMode" data-config-key="alignmentMode" data-config-fill="manual">
                             <option value="auto">Auto (from the handset)</option>
                             <option value="altaz">Alt-Az</option>
                             <option value="equatorial">Equatorial</option>
@@ -610,7 +610,7 @@
 
                     <div class="form-group">
                         <label for="celestron-connection-type">Connection Type:</label>
-                        <select id="celestron-connection-type" name="celestronConnectionType" data-config-key="connectionType" required>
+                        <select id="celestron-connection-type" name="celestronConnectionType" data-config-key="connectionType" data-config-fill="manual" required>
                             <option value="auto">Auto-Detect</option>
                             <option value="serial">Serial/USB (Manual)</option>
                             <option value="network">Network/WiFi</option>
@@ -666,12 +666,12 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="celestron-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="celestron-aperture-diameter" name="celestronApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="203">
+                        <input type="number" id="celestron-aperture-diameter" name="celestronApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="203">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
                         <label for="celestron-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="celestron-focal-length" name="celestronFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="2032">
+                        <input type="number" id="celestron-focal-length" name="celestronFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="2032">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                   </div>
@@ -695,12 +695,12 @@
                     <h4>Optics</h4>
                     <div class="form-group">
                         <label for="bisque-aperture-diameter">Aperture Diameter (mm):</label>
-                        <input type="number" id="bisque-aperture-diameter" name="bisqueApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="356">
+                        <input type="number" id="bisque-aperture-diameter" name="bisqueApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="356">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                     <div class="form-group">
                         <label for="bisque-focal-length">Focal Length (mm):</label>
-                        <input type="number" id="bisque-focal-length" name="bisqueFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="3454">
+                        <input type="number" id="bisque-focal-length" name="bisqueFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="3454">
                         <small>Optional. Some clients may ignore this value.</small>
                     </div>
                 </div>
@@ -747,7 +747,7 @@
                         <h4>Optics</h4>
                         <div class="form-group">
                             <label for="zwo-mount-aperture-diameter">Aperture Diameter (mm):</label>
-                            <input type="number" id="zwo-mount-aperture-diameter" name="zwoMountApertureDiameter" data-config-key="apertureDiameter" min="0" step="1" placeholder="100">
+                            <input type="number" id="zwo-mount-aperture-diameter" name="zwoMountApertureDiameter" data-config-key="apertureDiameter" data-config-fill="manual" min="0" step="1" placeholder="100">
                             <small>Optional. Some clients may ignore this value.</small>
                         </div>
                         <div class="form-group">
@@ -757,7 +757,7 @@
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-focal-length">Focal Length (mm):</label>
-                            <input type="number" id="zwo-mount-focal-length" name="zwoMountFocalLength" data-config-key="focalLength" min="0" step="1" placeholder="800">
+                            <input type="number" id="zwo-mount-focal-length" name="zwoMountFocalLength" data-config-key="focalLength" data-config-fill="manual" min="0" step="1" placeholder="800">
                             <small>Optional. Some clients may ignore this value.</small>
                         </div>
 
@@ -785,7 +785,7 @@
                         </div>
                         <div class="form-group">
                             <label for="zwo-mount-learn-site-from-client">
-                                <input type="checkbox" id="zwo-mount-learn-site-from-client" name="zwoMountLearnSiteFromClient" data-config-key="learnSiteFromClient" checked>
+                                <input type="checkbox" id="zwo-mount-learn-site-from-client" name="zwoMountLearnSiteFromClient" data-config-key="learnSiteFromClient" data-config-fill="manual" checked>
                                 Learn site from clients
                             </label>
                             <small>Keep a site latitude, longitude or elevation written by a client as this device's saved site, so it survives a restart. Untick to protect a surveyed position.</small>
@@ -912,8 +912,8 @@
                         </div>
                         <!-- Identity the server learned (#914). Carried through an edit,
                              which removes and re-adds the entry; see zwoCameraIdentityFields(). -->
-                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial" data-config-key="serialNumber">
-                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName" data-config-key="cameraName">
+                        <input type="hidden" id="zwo-camera-serial" name="zwoCameraSerial" data-config-key="serialNumber" data-config-fill="manual">
+                        <input type="hidden" id="zwo-camera-name" name="zwoCameraName" data-config-key="cameraName" data-config-fill="manual">
                         <input type="hidden" id="zwo-camera-loaded-index">
                         <input type="hidden" id="zwo-camera-loaded-id">
                     </div>
@@ -2043,7 +2043,7 @@
     </div>
 
     <script src="/web/format.js?v=15"></script>
-    <script src="/web/catalog_schema.js?v=1"></script>
-    <script src="/web/app.js?v=47"></script>
+    <script src="/web/catalog_schema.js?v=2"></script>
+    <script src="/web/app.js?v=48"></script>
 </body>
 </html>
