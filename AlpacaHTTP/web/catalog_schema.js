@@ -80,7 +80,7 @@ function vendorSelectState(catalog, deviceType, vendor, keepVendor = '') {
 // EnumerationIndex catalog field, paired with the input that pins a specific
 // unit (the descriptor's first DeviceId field, else its first PortPath field,
 // with the same appliesWhen; the one sharing the longest id path wins).
-// formFields entries: { id, vendor, deviceType, configKey, control, manual, path }.
+// formFields entries: { id, vendor, deviceType, configKey, control, manual, readOnly, path }.
 function deriveIndexFields(catalog, formFields) {
     const sameWhen = (a, b) => (a ? JSON.stringify(a) : '') === (b ? JSON.stringify(b) : '');
     const sharedPath = (a, b) => {
@@ -142,8 +142,9 @@ function elementsByField(descriptor, formFields) {
 // is assigned as saved (false and 0 included; a stringList joins with "\n").
 // An absent or null value is null, meaning "show the markup default", except
 // for a Discriminator, which gets its catalog default (the value the server
-// reads for an absent key). Record lists, secrets and elements marked
-// data-config-fill="manual" are not assigned. [] without a descriptor.
+// reads for an absent key). Record lists, secrets, read-only elements (their
+// value is fixed by the server) and elements marked data-config-fill="manual"
+// are not assigned. [] without a descriptor.
 function editAssignments(descriptor, config, formFields) {
     if (!descriptor) {
         return [];
@@ -151,7 +152,7 @@ function editAssignments(descriptor, config, formFields) {
     const saved = config || {};
     const assignments = [];
     for (const { field, element } of elementsByField(descriptor, formFields)) {
-        if (element.manual || field.type === 'recordList' || field.role === 'Secret') {
+        if (element.manual || element.readOnly || field.type === 'recordList' || field.role === 'Secret') {
             continue;
         }
         const discriminator = field.role === 'Discriminator';

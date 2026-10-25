@@ -362,6 +362,7 @@ function readFormFields() {
             configKey: element.dataset.configKey,
             control: element.tagName === 'INPUT' ? (element.getAttribute('type') || 'text') : element.tagName.toLowerCase(),
             manual: element.dataset.configFill === 'manual',
+            readOnly: element.hasAttribute('readonly'),
             path
         };
     });
@@ -1161,7 +1162,7 @@ async function startEditDevice(device) {
     // dispatch - no explicit toggler calls are needed here.
     document.getElementById('vendor').dispatchEvent(new Event('change'));
 
-    // Generic fill: every mapped, non-manual field of this vendor and type
+    // Generic fill: every mapped, non-manual, writable field of this vendor and type
     // takes its saved value from the catalog descriptor (catalog_schema.js).
     // An absent value shows the markup default. A Discriminator takes its
     // catalog default instead, and gets a change event in descriptor order so

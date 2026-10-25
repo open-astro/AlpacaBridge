@@ -351,3 +351,69 @@ test('the delegated input listener marks only index fields as user-modified', ()
     assert.match(body, /event\.target\.dataset\.userModified = 'true'/);
     assert.ok(body.indexOf('indexFields.some(') < body.indexOf('userModified'), 'the mark is not guarded by the index-field check');
 });
+
+// A read-only mapped control holds a value the server fixes (the ASIAIR GPIO
+// chip and PWM device path): a saved config naming another value must not be
+// loaded, or the edit sends it back and the server refuses it.
+test('editAssignments skips the read-only server-fixed controls, which keep their markup value', () => {
+    const fields = formFields(html);
+    const readOnly = fields.filter((f) => f.configKey && f.readOnly);
+    assert.deepEqual(readOnly.map((f) => f.id).sort(), ['asiair-gpio-chip', 'asiair-plus-device-path']);
+    const zwoSwitch = catalog.find((d) => d.vendor === 'zwo' && d.deviceType === 'switch');
+    const asiair = schema().editAssignments(zwoSwitch, { switchType: 'asiair', gpioChip: '/dev/gpiochip4' }, fields);
+    assert.equal(asiair.find((a) => a.id === 'asiair-gpio-chip'), undefined);
+    assert.ok(asiair.find((a) => a.id === 'zwo-switch-type'), 'the rest of the switch still fills');
+    const plus = schema().editAssignments(zwoSwitch, { switchType: 'asiair-plus-rk3568', devicePath: '/dev/other' }, fields);
+    assert.equal(plus.find((a) => a.id === 'asiair-plus-device-path'), undefined);
+    assert.equal(fields.find((f) => f.id === 'asiair-gpio-chip').markupDefault, '/dev/gpiochip0');
+    assert.equal(fields.find((f) => f.id === 'asiair-plus-device-path').markupDefault, '/dev/pwm-gpio-misc');
+});
+
+test('a checkbox is checked only by a saved true', () => {
+    const d = { vendor: 'acme', deviceType: 'focuser', available: true,
+        fields: [{ key: 'enabled', type: 'bool', role: 'Plain', default: false }] };
+    const ff = [{ id: 'acme-enabled', vendor: 'acme', deviceType: 'focuser', configKey: 'enabled',
+        control: 'checkbox', manual: false, path: [] }];
+    for (const saved of ['true', 1, 'yes']) {
+        assert.equal(schema().editAssignments(d, { enabled: saved }, ff)[0].value, false, JSON.stringify(saved));
+    }
+    assert.equal(schema().editAssignments(d, { enabled: true }, ff)[0].value, true);
+});
+
+function wholeFunction(name) {
+    const start = app.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `app.js has no function ${name}`);
+    return app.slice(start, app.indexOf('\n}\n', start));
+}
+
+// The togglers show the saved branch only if every Discriminator gets its
+// change event, after the fill and before the hiding pass.
+test('startEditDevice collects the Discriminators, puts the CGX connection type first and dispatches change on each before hiding', () => {
+    const body = wholeFunction('startEditDevice');
+    assert.match(body, /if \(assignment\.discriminator\) \{\s*discriminators\.push\(element\);/);
+    assert.match(body, /celestronConnection\.value = [^\n]*\n\s*discriminators\.unshift\(celestronConnection\);/);
+    const dispatch = body.indexOf("discriminators.forEach(element => element.dispatchEvent(new Event('change')));");
+    assert.ok(dispatch >= 0, 'no change dispatch on the Discriminators');
+    assert.ok(body.indexOf('editAssignments(') < body.indexOf('discriminators.push('));
+    assert.ok(body.indexOf('discriminators.unshift(') < dispatch);
+    assert.ok(dispatch < body.indexOf('updateFieldApplicability();'), 'the hiding pass runs before the dispatch');
+});
+
+test('startEditDevice restores the markup default for a null assignment and rebuilds the filter slot lists', () => {
+    const body = wholeFunction('startEditDevice');
+    assert.match(body, /if \(assignment\.value === null\) \{\s*restoreMarkupDefault\(element\);/);
+    assert.match(body, /if \(vendor === slotVendor && deviceType === slotType\) \{\s*slotUI\.syncSlotsFromTextarea\(\);/);
+    assert.ok(body.indexOf('syncSlotsFromTextarea()') > body.indexOf("discriminators.forEach("));
+});
+
+test('updateFieldApplicability hides a form group shared by several fields only when none of them applies', () => {
+    const body = wholeFunction('updateFieldApplicability');
+    assert.match(body, /groupApplies\.set\(group, groupApplies\.get\(group\) === true \|\| applies\[id\]\);/);
+    assert.match(body, /group\.hidden = !shown;/);
+});
+
+test('the disabled cue is scoped to the vendor select', () => {
+    const css = readWeb('style.css');
+    assert.match(css, /\.form-group #vendor:disabled \{/);
+    assert.doesNotMatch(css, /\.form-group select:disabled/);
+});

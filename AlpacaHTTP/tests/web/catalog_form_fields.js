@@ -125,6 +125,7 @@ function formFields(html) {
             deviceType: nearest(attr(attrs, 'data-device-type'), 'deviceType'),
             configKey: attr(attrs, 'data-config-key'),
             manual: attr(attrs, 'data-config-fill') === 'manual',
+            readOnly: hasAttr(attrs, 'readonly'),
             path: stack.map((s) => s.id).filter(Boolean),
             markupDefault: markupDefault(tag, control, attrs, form.slice(re.lastIndex)),
         });

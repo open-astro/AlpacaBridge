@@ -508,7 +508,7 @@ h2 {
 }
 
 /* The vendor list is empty until the device catalog has loaded. */
-.form-group select:disabled {
+.form-group #vendor:disabled {
     opacity: 0.6;
     cursor: not-allowed;
 }
