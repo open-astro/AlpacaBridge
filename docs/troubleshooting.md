@@ -54,7 +54,7 @@ Add `catch2` to build the tests. [development.md](development.md#prerequisites) 
 ### ZWO camera downloads fail or the USB link resets
 
 Edit the ZWO camera in the web UI and check **USB Limit** (`usbBandwidth` in its persisted
-configuration). Blank applies SDK control value **40**, clamped to the camera's supported range,
+configuration). Blank requests SDK control value **40**, clamped to the camera's supported range,
 in manual mode on each connect. This is a control value, not a measured throughput percentage.
 Lower values can improve marginal USB reliability but may slow downloads. Save and reconnect
 to apply a change; an explicit integer from 0 to 100 must also fit the camera's actual range.
@@ -62,6 +62,9 @@ The setting survives restart. INFO logs show the requested/default value, applie
 
 A camera without a writable bandwidth control still connects with the field blank; an explicit
 unsupported value or a failed write/readback refuses connect with a USB Limit explanation.
+If the field is blank and a successful readback reports a different value or auto mode,
+the driver logs a WARNING with the requested and read-back settings and continues connecting.
+An explicit setting still refuses connect on either mismatch.
 Check power, cables, ports and hubs as well: limiting bandwidth does not prove or repair every
 USB reset, and automatic recovery of stale SDK handles after re-enumeration is not included
 ([issue #1500](https://github.com/open-astro/AlpacaBridge/issues/1500)). A passing ASI6200/OPi6

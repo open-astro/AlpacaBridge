@@ -1670,10 +1670,18 @@ private:
             sdk_.set_control_value(camera_id, ZWOControlType::BandwidthOverload, applied, false);
             long actual = 0;
             bool is_auto = false;
-            if (!sdk_.get_control_value(camera_id, ZWOControlType::BandwidthOverload, actual, is_auto) ||
-                actual != applied || is_auto) {
-                throw AlpacaException("camera did not confirm the requested value in manual mode",
-                                      AlpacaError::DriverException);
+            if (!sdk_.get_control_value(camera_id, ZWOControlType::BandwidthOverload, actual, is_auto)) {
+                throw AlpacaException("camera did not return the USB Limit readback", AlpacaError::DriverException);
+            }
+            if (actual != applied || is_auto) {
+                if (requested) {
+                    throw AlpacaException("camera did not confirm the requested value in manual mode",
+                                          AlpacaError::DriverException);
+                }
+                ALPACA_LOG_WARN("ZWO", camera_info_.name + ": USB Limit default requested 40 (clamped to " +
+                                           std::to_string(applied) + "), read back " + std::to_string(actual) +
+                                           (is_auto ? " auto" : " manual") + "; continuing connection");
+                return;
             }
         } catch (const std::exception& e) {
             throw AlpacaException("USB Limit: " + std::string(e.what()), AlpacaError::DriverException);

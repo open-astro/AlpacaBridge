@@ -111,6 +111,10 @@ test('ZWO camera controls are disabled when another vendor is selected', () => {
 });
 
 test('ZWO USB Limit submit sends the parsed value and omits blank input', () => {
+    assert.ok(Number(html.match(/src="\/web\/format\.js\?v=(\d+)"/)[1]) > 15,
+        'invalidate the cached format.js that lacks zwoUsbBandwidth');
+    assert.ok(Number(html.match(/src="\/web\/app\.js\?v=(\d+)"/)[1]) > 48,
+        'invalidate the cached app.js that does not submit USB Limit');
     const start = app.indexOf("} else if (deviceData.vendor === 'zwo')");
     const branch = app.slice(start, app.indexOf("} else if (deviceData.vendor === 'qhy'", start));
     const camera = branch.slice(branch.indexOf("if (normalizedType === 'camera')"),

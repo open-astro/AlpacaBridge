@@ -11,6 +11,7 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/logging.h>
 #include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 
 #include <atomic>
@@ -154,8 +155,6 @@ TEST_CASE("ZWO USB Limit initialization failures close and allow reconnect", "[z
     SECTION("malformed range") { sdk.bandwidth_caps->min_value = 101; }
     SECTION("write failure") { sdk.fail_bandwidth_write = true; }
     SECTION("read failure") { sdk.fail_bandwidth_read = true; }
-    SECTION("value mismatch") { sdk.bandwidth_readback = 80; }
-    SECTION("auto mismatch") { sdk.bandwidth_auto_readback = true; }
     auto camera = create_zwo_camera(0, sdk.camera.camera_id, sdk);
     try {
         camera->set_connected(true);
@@ -172,6 +171,56 @@ TEST_CASE("ZWO USB Limit initialization failures close and allow reconnect", "[z
     sdk.bandwidth_readback.reset();
     connect_camera(*camera);
     CHECK(sdk.open_count() == 1);
+}
+
+TEST_CASE("ZWO USB Limit readback mismatches warn only for the implicit default",
+          "[zwo][camera][unit][usb-bandwidth]") {
+    FakeZWOSDK sdk;
+    SECTION("value mismatch") { sdk.bandwidth_readback = 80; }
+    SECTION("auto mismatch") { sdk.bandwidth_auto_readback = true; }
+    SECTION("value and auto mismatch") {
+        sdk.bandwidth_readback = 80;
+        sdk.bandwidth_auto_readback = true;
+    }
+    for (const bool explicit_setting : {false, true}) {
+        std::vector<std::string> warnings;
+        bool claimed_applied = false;
+        struct SinkGuard {
+            alpacacore::logging::LogSink previous = alpacacore::logging::get_log_sink();
+            alpacacore::logging::LogLevel level = alpacacore::logging::get_log_level();
+            ~SinkGuard() {
+                alpacacore::logging::set_log_sink(previous);
+                alpacacore::logging::set_log_level(level);
+            }
+        } sink_guard;
+        alpacacore::logging::set_log_level(alpacacore::logging::LogLevel::Info);
+        alpacacore::logging::set_log_sink([&](auto level, auto component, auto message) {
+            if (component != "ZWO" || message.find("USB Limit") == std::string_view::npos) return;
+            if (level == alpacacore::logging::LogLevel::Warn) warnings.emplace_back(message);
+            if (level == alpacacore::logging::LogLevel::Info && message.find(" applied ") != std::string_view::npos)
+                claimed_applied = true;
+        });
+        alpacacore::vendor::zwo::ZwoCameraBinding binding;
+        binding.identity.camera_id = sdk.camera.camera_id;
+        if (explicit_setting) binding.usb_bandwidth = 40;
+        auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
+        if (explicit_setting) {
+            CHECK(error_code([&] { camera->set_connected(true); }) == AlpacaError::DriverException);
+            CHECK_FALSE(camera->get_connected());
+            CHECK(sdk.open_count() == 0);
+            CHECK(sdk.call_count("open_camera") == sdk.call_count("close_camera"));
+        } else {
+            connect_camera(*camera);
+            CHECK(sdk.open_count() == 1);
+            REQUIRE(warnings.size() == 1);
+            CHECK(warnings.front().find("requested 40") != std::string::npos);
+            CHECK(warnings.front().find("read back " + std::to_string(sdk.bandwidth_readback.value_or(40))) !=
+                  std::string::npos);
+            CHECK(warnings.front().find(sdk.bandwidth_auto_readback ? "auto" : "manual") != std::string::npos);
+            camera->set_connected(false);
+        }
+        CHECK_FALSE(claimed_applied);
+    }
 }
 
 TEST_CASE("ZWO fake SDK - LastExposure publishes only acquisition success", "[zwo][camera][unit][last-exposure]") {
