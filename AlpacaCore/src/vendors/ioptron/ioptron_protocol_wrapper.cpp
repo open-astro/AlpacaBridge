@@ -1076,17 +1076,22 @@ public:
     }
 
     // Wait up to wait_ms for acknowledgment bytes and discard them; once any
-    // byte has arrived, return as soon as the line goes idle (util::read_until
-    // in idle-gap mode). Never throws and never reports a lost link: a silent
+    // byte has arrived, read on past wait_ms until the line goes idle
+    // (util::read_until in idle-gap mode), so acks that straddle wait_ms are
+    // all drained. Never throws and never reports a lost link: a silent
     // mount, or one that hung up, is the expected "no ack" for a blind command.
     void drain_serial_stale(int wait_ms) {
 #ifndef _WIN32
         util::ReadSpec spec;
         spec.stop = util::ReadSpec::Stop::IdleGap;
         spec.idle_gap = std::chrono::milliseconds(100);
+        spec.first_byte_timeout = std::chrono::milliseconds(wait_ms);
         spec.skip.clear();  // every byte is an ack byte, CR/LF included
         spec.max_len = kMaxReplyLen;
-        (void)util::read_until(link_.fd(), spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms));
+        // The deadline only caps a line that never goes idle: max_len bytes, each within one idle gap.
+        (void)util::read_until(link_.fd(), spec,
+                               std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms) +
+                                   spec.idle_gap * static_cast<int>(spec.max_len));
 #else
         (void)wait_ms;
 #endif

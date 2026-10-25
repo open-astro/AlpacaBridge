@@ -45,8 +45,8 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   (Gemini, iEAF/iEFW, iOptron, Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the
   SynScan handset probe and the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount,
   Celestron NexStar, SynScan and ZWO mount, over serial and TCP (`read_until()` / `read_until_socket()`; the iOptron
-  serial blind-command ack drain and the iOptron TCP `flush_input()` too, which still waits one 200 ms read slice for
-  each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
+  serial blind-command ack drain, which reads on past its wait until 100 ms of silence once an ack byte came, and the
+  iOptron TCP `flush_input()`, which still waits one 200 ms read slice for each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
   (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
   200 ms over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
   is a timeout. The Celestron and SynScan binary payloads are the exception: each payload byte within one read slice

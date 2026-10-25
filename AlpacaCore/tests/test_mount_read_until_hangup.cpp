@@ -28,7 +28,9 @@
 // exception: the loop read on after each payload byte without checking the
 // timeout, so a payload that starts after the timeout is still read whole.
 // The iOptron TCP flush before a command keeps the old loop's window as well:
-// up to 16 stale bytes, each waited for one 200 ms read slice.
+// up to 16 stale bytes, each waited for one 200 ms read slice; and so does the
+// serial blind-command ack drain: once an ack byte came it reads on until
+// 100 ms of silence, past its 300 ms wait.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -66,7 +68,9 @@ using Clock = std::chrono::steady_clock;
 // the command has been written, the reply never comes and the line is gone.
 // Armed with trickle_after_reply_on_next_command(), it answers the next
 // command with "1#" and then sends a '0' every 20 ms until it stops, so the
-// line never goes idle after the '#'.
+// line never goes idle after the '#'. Armed with slow_acks_on_next_command(), it
+// answers the next command with eight '1' ack bytes, 40 ms apart from 200 ms
+// on, so they straddle a 300 ms drain, and the command after it with "1#".
 class HangupMount {
 public:
     HangupMount() : pty_("HangupMount") {
@@ -82,6 +86,7 @@ public:
     std::string slave_path() const { return pty_.slave_path(); }
     void sever_on_next_command() { armed_.store(true); }
     void trickle_after_reply_on_next_command() { trickle_.store(true); }
+    void slow_acks_on_next_command() { slow_acks_.store(true); }
 
 private:
     void run() {
@@ -105,6 +110,19 @@ private:
                 }
                 return;
             }
+            if (slow_acks_.exchange(false)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                for (int i = 0; i < 8 && !stop_.load(); ++i) {
+                    if (i > 0) std::this_thread::sleep_for(std::chrono::milliseconds(40));
+                    alpacacore::test::pty_write_bounded(pty_.master_fd(), std::string("1"), stop_);
+                }
+                answer_next_.store(true);
+                continue;
+            }
+            if (answer_next_.exchange(false)) {
+                alpacacore::test::pty_write_bounded(pty_.master_fd(), std::string("1#"), stop_);
+                continue;
+            }
             const std::string reply =
                 alpacacore::test::answer_handset_echo(std::string(buf, static_cast<std::size_t>(n)));
             if (!reply.empty()) alpacacore::test::pty_write_bounded(pty_.master_fd(), reply, stop_);
@@ -115,6 +133,8 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> armed_{false};
     std::atomic<bool> trickle_{false};
+    std::atomic<bool> slow_acks_{false};
+    std::atomic<bool> answer_next_{false};
     std::thread worker_;
 };
 
@@ -248,6 +268,29 @@ TEST_CASE("iOptron mount - a read that does not require the '#' ends at the '#'"
     wrapper.disconnect();
     CHECK(reply == "1");
     CHECK(took < std::chrono::seconds(1));
+}
+
+// Falsified by: ioptron_protocol_wrapper.cpp drain_serial_stale() ending at its 300 ms deadline while ack bytes still
+// come (the acks after 300 ms answer "Next")
+TEST_CASE("iOptron mount - a blind-command ack drain reads on while acks keep coming",
+          "[ioptron][serial][serial_read][issue1644]") {
+    HangupMount mount;
+    auto& wrapper = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Serial;
+    info.port_path = mount.slave_path();
+    info.baud_rate = 9600;
+    REQUIRE(wrapper.connect(info));
+    mount.slow_acks_on_next_command();
+    wrapper.send_command_blind(":Q#");
+    std::string next;
+    try {
+        next = wrapper.send_command("Next", true, 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    wrapper.disconnect();
+    CHECK(next == "1");
 }
 #endif
 
