@@ -15,10 +15,9 @@
 // failure that lands after a relink cannot drop the new link. Single-threaded and deterministic: the
 // interleaving a driver test cannot force is written out step by step.
 
-#include "catch2_compat.h"
-
-#if __has_include(<alpacacore/util/link_epoch.h>)
 #include <alpacacore/util/link_epoch.h>
+
+#include "catch2_compat.h"
 
 using alpacacore::util::LinkEpoch;
 
@@ -64,13 +63,3 @@ TEST_CASE("Link epoch - A loss captured before a relink is a no-op", "[util][lin
     CHECK_FALSE(link.mark_lost(closed));
     CHECK(link.load() == reopened);
 }
-#else
-// RED until the helper exists (issue #1500 plan, invariant 2): the cases above compile only against
-// <alpacacore/util/link_epoch.h>. The fix deletes this branch together with the #if.
-TEST_CASE("Link epoch - A loss of the current epoch drops the link once", "[util][link]") {
-    FAIL("alpacacore/util/link_epoch.h is missing (issue #1500 link epoch helper)");
-}
-TEST_CASE("Link epoch - A loss captured before a relink is a no-op", "[util][link]") {
-    FAIL("alpacacore/util/link_epoch.h is missing (issue #1500 link epoch helper)");
-}
-#endif
