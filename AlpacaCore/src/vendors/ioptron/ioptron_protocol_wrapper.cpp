@@ -1141,14 +1141,17 @@ public:
             }
 #endif
         } else {
-            // Up to 16 stale bytes; 200 ms with no byte (the old receive
-            // timeout) ends it, and after the first byte a 1 ms gap does.
+            // Up to 16 stale bytes, each waited for one read slice (the old
+            // 200 ms receive timeout per byte): a quiet slice ends it, so a
+            // stale reply that comes in two segments is drained whole.
+            constexpr std::size_t kMaxStale = 16;
             util::ReadSpec spec;
             spec.stop = util::ReadSpec::Stop::IdleGap;
-            spec.idle_gap = std::chrono::milliseconds(1);
+            spec.idle_gap = read_slice();
+            spec.first_byte_timeout = read_slice();
             spec.skip.clear();
-            spec.max_len = 16;
-            (void)read_reply(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(200));
+            spec.max_len = kMaxStale;
+            (void)read_reply(spec, std::chrono::steady_clock::now() + kMaxStale * read_slice());
         }
     }
 

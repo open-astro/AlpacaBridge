@@ -27,6 +27,8 @@
 // that starts after the timeout is still a timeout. A binary payload is the
 // exception: the loop read on after each payload byte without checking the
 // timeout, so a payload that starts after the timeout is still read whole.
+// The iOptron TCP flush before a command keeps the old loop's window as well:
+// up to 16 stale bytes, each waited for one 200 ms read slice.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -389,6 +391,38 @@ TEST_CASE("iOptron mount - a reply that starts after the timeout is still a time
         [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
+}
+
+// Falsified by: ioptron_protocol_wrapper.cpp flush_input() ending the TCP drain at the first 1 ms gap after a byte (the
+// '#' of a stale "1#" that comes 20 ms after its '1' stays and answers "Next" with an empty reply)
+TEST_CASE("iOptron mount - a TCP flush waits one read slice for each stale byte",
+          "[ioptron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    // A late "1#" in two segments, 20 ms apart: the '1' is waiting when the flush starts, the '#' comes while it runs.
+    server.push("1");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    std::thread hash([&server] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        server.push("#");
+    });
+    wrapper.flush_input();
+    hash.join();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // a '#' the flush left is in the socket by now
+    std::string next;
+    try {
+        next = wrapper.send_command("Next", true, 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    wrapper.disconnect();
+    CHECK(next == "1");
 }
 #endif
 
