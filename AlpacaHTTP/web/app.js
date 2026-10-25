@@ -259,6 +259,8 @@ function resetDeviceForm() {
     // Re-run the vendor option/sub-section toggles against the reset values so
     // stale vendor-specific blocks are hidden and slot UIs reflect empty input.
     keepVendor = '';
+    keepType = '';
+    updateDeviceTypeOptions();
     updateVendorOptions();
     zwoFilterwheelSlotUI.syncSlotsFromTextarea();
     playerOneFilterwheelSlotUI.syncSlotsFromTextarea();
@@ -330,10 +332,12 @@ let indexFields = [];
 
 // The device catalog (GET /management/v1/devicecatalog), fetched once per page
 // load through loadCatalog(); null until it has loaded, so no vendor is offered
-// and #vendor stays disabled (fail closed). keepVendor is the vendor of the
-// device being edited: it stays offered even if this build lacks it.
+// and #vendor and #device-type stay disabled (fail closed). keepVendor and
+// keepType are the vendor and type of the device being edited: they stay
+// offered even if this build lacks them.
 let catalogData = null;
 let keepVendor = '';
+let keepType = '';
 const loadCatalog = catalogLoader(() => fetch('/management/v1/devicecatalog').then(response => {
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -432,6 +436,7 @@ async function ensureCatalog() {
             messageDiv.textContent = `Could not load the device list: ${error.message}`;
         }
     }
+    updateDeviceTypeOptions();
     updateVendorOptions();
     return catalogData;
 }
@@ -1150,6 +1155,8 @@ async function startEditDevice(device) {
     const deviceType = normalizeDeviceType(device.DeviceType || device.deviceType);
 
     setEditMode(true);
+    keepType = deviceType;
+    updateDeviceTypeOptions();
     setFormValue('device-type', deviceType);
     setFormValue('device-number', device.DeviceNumber);
     keepVendor = vendor;
@@ -2835,6 +2842,26 @@ async function deleteLogFile(filename) {
 }
 
 // Device form handling
+// Offers only the device types the catalog has an available descriptor for
+// (keepType, the type of the device being edited, stays); a hidden type is
+// never left selected. Disabled until a catalog is loaded.
+function updateDeviceTypeOptions() {
+    const deviceTypeSelect = document.getElementById('device-type');
+    if (!deviceTypeSelect) {
+        return;
+    }
+    const options = [...deviceTypeSelect.querySelectorAll('option')].filter(option => option.value !== '');
+    const offered = offeredDeviceTypes(catalogData, options.map(option => option.value), keepType);
+    options.forEach(option => {
+        option.hidden = !offered.includes(option.value);
+        option.disabled = option.hidden;
+    });
+    deviceTypeSelect.disabled = !Array.isArray(catalogData);
+    if (deviceTypeSelect.value !== '' && !offered.includes(deviceTypeSelect.value)) {
+        deviceTypeSelect.value = '';
+    }
+}
+
 function updateVendorOptions() {
     const deviceTypeSelect = document.getElementById('device-type');
     const vendorSelect = document.getElementById('vendor');
