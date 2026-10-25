@@ -13,7 +13,8 @@
 #pragma once
 
 // The read loop above util::tty_read(): read a reply to its terminator, its
-// length or an idle gap, drop the bytes the protocol ignores, cap the length,
+// length, an idle gap or the first of a terminator and an idle gap, drop the
+// bytes the protocol ignores, cap the length,
 // keep one steady_clock deadline and classify a hangup.
 //
 // read_until() reads a tty fd (SerialLink::fd()) through tty_read();
@@ -53,6 +54,10 @@ struct ReadSpec {
         Terminator,  ///< any byte of `terminators` ends the read (kept in the result)
         Length,      ///< `length` kept bytes end the read
         IdleGap,     ///< `idle_gap` of silence after the first kept byte ends the read
+        /// Terminator and IdleGap together: a byte of `terminators` ends the read
+        /// (kept, outcome Terminator), and so does `idle_gap` of silence after
+        /// the first kept byte (outcome Idle). For a reply whose terminator is optional.
+        TerminatorOrIdleGap,
     };
     Stop stop = Stop::Terminator;
     std::string terminators = "#";
@@ -125,6 +130,9 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
                            std::chrono::steady_clock::time_point deadline) {
     using Clock = std::chrono::steady_clock;
     ReadResult res;
+    const bool idle_stop = spec.stop == ReadSpec::Stop::IdleGap || spec.stop == ReadSpec::Stop::TerminatorOrIdleGap;
+    const bool terminator_stop =
+        spec.stop == ReadSpec::Stop::Terminator || spec.stop == ReadSpec::Stop::TerminatorOrIdleGap;
     const bool has_first_limit = spec.first_byte_timeout.has_value();
     const Clock::time_point first_limit =
         Clock::now() + (has_first_limit ? *spec.first_byte_timeout : std::chrono::milliseconds::zero());
@@ -134,7 +142,7 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
         auto limit = deadline;
         if (res.bytes.empty()) {
             if (has_first_limit && first_limit < limit) limit = first_limit;
-        } else if (spec.stop == ReadSpec::Stop::IdleGap && last_kept + spec.idle_gap < limit) {
+        } else if (idle_stop && last_kept + spec.idle_gap < limit) {
             limit = last_kept + spec.idle_gap;
         }
         char c = 0;
@@ -147,7 +155,7 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
         }
         if (r == 0) {
             const auto now = Clock::now();
-            if (!res.bytes.empty() && spec.stop == ReadSpec::Stop::IdleGap && now >= last_kept + spec.idle_gap) {
+            if (!res.bytes.empty() && idle_stop && now >= last_kept + spec.idle_gap) {
                 res.outcome = ReadOutcome::Idle;
                 return res;
             }
@@ -160,7 +168,7 @@ ReadResult read_until_impl(ReadByte read_byte, IsHangup is_hangup, const ReadSpe
         if (spec.skip.find(c) != std::string::npos) continue;
         res.bytes += c;
         last_kept = Clock::now();
-        if (spec.stop == ReadSpec::Stop::Terminator && spec.terminators.find(c) != std::string::npos) {
+        if (terminator_stop && spec.terminators.find(c) != std::string::npos) {
             res.outcome = ReadOutcome::Terminator;
             return res;
         }

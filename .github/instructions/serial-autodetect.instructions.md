@@ -34,26 +34,34 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   reader, and a bare `read()` returns `EAGAIN` at once. A read timeout also checks the line settings and puts
   back any another program changed. A streaming reader whose link-health latch trips calls
   `util::restore_serial_line_settings(fd)`, since a stream at the wrong baud delivers garbage, not silence.
-- **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written
-  loop around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a
-  length or an idle gap, drops CR/LF, caps the length, keeps one `steady_clock` deadline and returns `LinkDead` with
-  the errno for a hangup. It never latches, closes, throws, sleeps or flushes: the wrapper keeps its flush, command
-  delay and exception text and decides what `LinkDead` means. It is two concrete overloads, not a `ByteChannel`
-  (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the Gemini focuser and flat
-  panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that hears a hangup logs "no
-  ack" and does not report a lost link), the serial auto-detect probe and handshake loops (Gemini, iEAF/iEFW, iOptron,
-  Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the SynScan handset probe and
-  the QHY CFW3 `read_reply`. Each probe judges the bytes it got, as its old loop did, and a hangup means
-  "not this device", except the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening
-  until their deadline as before. The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial
-  or overflowed reply as it stands; the Wanderer probes drop an overflowed token and keep listening. Still on their
-  own loops, moving in later slices (upstream issue #1604): the connected-path `read_serial_char` readers of the
-  iOptron mount, Celestron NexStar, SynScan and ZWO mount, the Q-Focuser JSON reader, the OnStep probe and
-  connected reader, the ZWO owed-reply drain and pre-flush peek, the iOptron and ZWO mount TCP probes
-  (`probe_ioptron_network`, `probe_network_mount`), and the `read_network_char` readers of the iOptron mount,
-  Celestron NexStar, SynScan, ZWO mount and OnStep (no caller uses `read_until_socket()` yet). The Sky-Watcher
-  connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer, Gemini PDH)
-  keep their own shape.
+- **A reply is read with `util::read_until(fd, ReadSpec, deadline)`** (`util/serial_read.h`), not a hand-written loop
+  around `tty_read()`; `read_until_socket()` is the same read over a TCP fd. It stops on a terminator set, a length,
+  an idle gap or the first of a terminator and an idle gap, drops CR/LF, caps the length, keeps one `steady_clock`
+  deadline and returns `LinkDead` with the errno for a hangup. It never latches, closes, throws, sleeps or flushes:
+  the wrapper keeps its flush, command delay and exception text and decides what `LinkDead` means. It is two concrete
+  overloads, not a `ByteChannel` (decision 0013 section 7). The rule binds new reads and the ones migrated so far: the
+  Gemini focuser and flat panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that
+  hears a hangup logs "no ack" and does not report a lost link), the serial auto-detect probe and handshake loops
+  (Gemini, iEAF/iEFW, iOptron, Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the
+  SynScan handset probe and the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount,
+  Celestron NexStar, SynScan and ZWO mount, over serial and TCP (`read_until()` / `read_until_socket()`; the iOptron
+  serial blind-command ack drain, which reads on past its wait until 100 ms of silence once an ack byte came, and the
+  iOptron TCP `flush_input()`, which still waits one 200 ms read slice for each of up to 16 stale bytes). A read there that does not require the `#` still ends at the `#`
+  (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
+  200 ms over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
+  is a timeout. The Celestron and SynScan binary payloads are the exception: each payload byte within one read slice
+  of the last is still payload, so a payload that starts after the timeout is read whole. On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
+  a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount feeds
+  it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
+  is noticed. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
+  the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening until their deadline as before.
+  The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or overflowed reply as it stands;
+  the Wanderer probes drop an overflowed token and keep listening. Still on their own loops, moving in later slices
+  (upstream issue #1604): the Q-Focuser JSON reader, the OnStep probe and connected reader (and its
+  `read_network_char`), the ZWO owed-reply drain and pre-flush peek, the iOptron TCP ack drain
+  (`drain_network_stale`), and the iOptron and ZWO mount TCP probes (`probe_ioptron_network`, `probe_network_mount`).
+  The Sky-Watcher connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer,
+  Gemini PDH) keep their own shape.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)
   fails on a raw `O_NOCTTY` open, `tcsetattr`, `TIOCEXCL`, a `c_cc[VTIME]`/`c_cc[VMIN]` assignment, a
   pre-#1202 `mark_serial_port_*` call or a raw `read()`/`write()` on a link's fd (`x.fd()`, `x->fd()`,
