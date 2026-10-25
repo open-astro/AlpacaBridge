@@ -213,6 +213,36 @@ TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan]
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
 }
 
+// Falsified by: AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp get_destination_side_of_pier: putting back
+// the old "<op>: RA out of range" / "<op>: Dec out of range" check, or changing the validate_ra_dec message text in
+// util/pointing.h, fails the DestinationSideOfPier checks.
+TEST_CASE("SynScan Telescope Driver - out of range arguments report the shared message before the connection",
+          "[synscan][telescope][unit]") {
+    alpacacore::vendor::synscan::ConnectionInfo conn;
+    conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
+    conn.port_path = "/dev/null";
+    auto driver = alpacacore::vendor::synscan::create_synscan_telescope(
+        0, conn, alpacacore::vendor::synscan::SynScanVersion::Auto);
+    const auto message_of = [](const std::function<void()>& call) {
+        try {
+            call();
+        } catch (const alpacacore::AlpacaException& ex) {
+            return std::string(ex.what());
+        }
+        return std::string("no exception");
+    };
+    CHECK(message_of([&] { driver->set_target_right_ascension(24.0); }).find("TargetRightAscension must be in range") !=
+          std::string::npos);
+    CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
+          std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(24.0, 0.0);
+          }).find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(0.0, 90.1);
+          }).find("DestinationSideOfPier: Declination must be in range") != std::string::npos);
+}
+
 TEST_CASE("SynScan Telescope Driver - Site Property Validation", "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
     conn.type = alpacacore::vendor::synscan::ConnectionType::Serial;
