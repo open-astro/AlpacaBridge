@@ -213,7 +213,8 @@ TEST_CASE("SynScan Telescope Driver - Target Coordinate Persistence", "[synscan]
     ALPACA_REQUIRE_APPROX(driver->get_target_declination(), 90.0);
 }
 
-// Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message text fails this case.
+// Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message
+// text fails this case.
 TEST_CASE("SynScan Telescope Driver - out of range arguments report the shared message before the connection",
           "[synscan][telescope][unit]") {
     alpacacore::vendor::synscan::ConnectionInfo conn;
@@ -229,8 +230,8 @@ TEST_CASE("SynScan Telescope Driver - out of range arguments report the shared m
         }
         return std::string("no exception");
     };
-    CHECK(message_of([&] { driver->set_target_right_ascension(24.0); })
-              .find("TargetRightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] { driver->set_target_right_ascension(24.0); }).find("TargetRightAscension must be in range") !=
+          std::string::npos);
     CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
           std::string::npos);
 }

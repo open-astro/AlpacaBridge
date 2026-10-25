@@ -156,7 +156,8 @@ TEST_CASE("ZWO Mount Telescope Driver - Site Elevation Validation", "[zwo][teles
     ALPACA_REQUIRE_APPROX(driver->get_site_elevation(), 10000.0);
 }
 
-// Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message text fails this case.
+// Falsified by: AlpacaCore/include/alpacacore/util/pointing.h validate_ra, validate_latitude: changing either message
+// text fails this case.
 TEST_CASE("ZWO Mount Telescope Driver - out of range arguments report the shared message before the connection",
           "[zwo][telescope][unit]") {
     alpacacore::vendor::zwo::ConnectionInfo conn;
@@ -171,10 +172,12 @@ TEST_CASE("ZWO Mount Telescope Driver - out of range arguments report the shared
         }
         return std::string("no exception");
     };
-    CHECK(message_of([&] { (void)driver->get_destination_side_of_pier(24.0, 0.0); })
-              .find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
-    CHECK(message_of([&] { driver->sync_to_coordinates(12.0, 90.1); })
-              .find("SyncToCoordinates: Declination must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              (void)driver->get_destination_side_of_pier(24.0, 0.0);
+          }).find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              driver->sync_to_coordinates(12.0, 90.1);
+          }).find("SyncToCoordinates: Declination must be in range") != std::string::npos);
     CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
           std::string::npos);
 }
