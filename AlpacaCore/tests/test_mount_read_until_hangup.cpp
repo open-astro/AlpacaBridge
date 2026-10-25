@@ -67,7 +67,7 @@ public:
 private:
     void run() {
         while (!stop_.load()) {
-            struct pollfd pfd{};
+            pollfd pfd = {};
             pfd.fd = pty_.master_fd();
             pfd.events = POLLIN;
             if (::poll(&pfd, 1, 20) <= 0) continue;
