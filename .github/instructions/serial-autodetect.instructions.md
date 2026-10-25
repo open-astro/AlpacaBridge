@@ -43,7 +43,9 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that hears a hangup logs "no
   ack" and does not report a lost link), the serial auto-detect probe and handshake loops (Gemini, iEAF/iEFW, iOptron,
   Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the SynScan handset probe and
-  the QHY CFW3 `read_reply`. A probe maps `Timeout`, `Overflow` and `LinkDead` to "not this device". Still on their
+  the QHY CFW3 `read_reply`. Each probe judges the bytes it got, as its old loop did, and a hangup means
+  "not this device". The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial or
+  overflowed reply as it stands; the Wanderer probes drop an overflowed token and keep listening. Still on their
   own loops, moving in later slices (upstream issue #1604): the connected-path `read_serial_char` readers of the
   iOptron mount, Celestron NexStar, SynScan and ZWO mount, the Q-Focuser JSON reader, the OnStep probe and
   connected reader, the ZWO owed-reply drain and pre-flush peek, the iOptron and ZWO mount TCP probes
