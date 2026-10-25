@@ -252,13 +252,13 @@ public:
         raise_failure_locked();
         return state_ == State::Ready;
     }
-    /// The frame; InvalidOperation before one is ready, DriverException after a failure.
+    /// The frame; DriverException after a failure, else AskedTooEarly (InvalidOperation) before one is ready.
     std::shared_ptr<const ImageArray> image() const {
         std::unique_lock<std::mutex> lock(mutex_);
         apply_watchdog(lock);
         raise_failure_locked();
         if (state_ != State::Ready) {
-            throw AlpacaException(name_ + ": no image is ready", AlpacaError::InvalidOperation);
+            throw AlpacaException::asked_too_early(name_ + ": no image is ready");
         }
         return image_;
     }

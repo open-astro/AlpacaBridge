@@ -1342,10 +1342,19 @@ private:
     // held — the same lock start_exposure sets exposure_starting_ under,
     // closing the check/publish TOCTOU (M15; driver-lifecycle.instructions.md rule, matching
     // the ToupTek driver's ensure_not_exposing).
+    // A cancelled or failed body can still be configuring the camera (ROI, format, start position), so
+    // the settings stay locked while the session is busy, except once the frame is Ready (the body is
+    // only returning then).
     void ensure_not_exposing_locked() const {
         const CameraState state = session_.camera_state();
+        bool frame_ready = false;
+        try {
+            frame_ready = session_.image_ready();
+        } catch (const AlpacaException&) {
+            // A kept failure: not ready.
+        }
         if (exposure_starting_ || sdk_exposure_started_ || state == CameraState::Exposing ||
-            state == CameraState::Download) {
+            state == CameraState::Download || (session_.busy() && !frame_ready)) {
             throw AlpacaException("Cannot change camera settings during an exposure", AlpacaError::InvalidOperation);
         }
     }

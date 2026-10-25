@@ -1775,3 +1775,78 @@ TEST_CASE("Player One Camera Driver - an unknown SensorName is empty", "[playero
     auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
     CHECK(driver->get_sensor_name().empty());
 }
+
+// A cancelled or failed body can still be configuring the camera, so the exposure settings stay locked until it
+// returns and a client's write in that window is not lost.
+TEST_CASE("Player One Camera Driver - settings stay locked while a cancelled body is still in setup",
+          "[playerone][camera][unit][taskclock]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    alpacacore::test::FakeTaskClock clock;
+    auto driver = make_clocked_driver(sdk, clock, 80ms);
+    driver->set_num_x(12);  // makes the ROI dirty so the body reads the start position back
+    const int client_start_x = driver->get_start_x();
+    sdk.set_hold_start_readback(true);
+
+    std::thread canceller;
+    SECTION("watchdog timeout") {
+        driver->start_exposure(0.020, true);
+        REQUIRE(eventually([&] { return sdk.start_readback_started(); }));
+        clock.advance(500ms);  // past the 20 ms + 80 ms deadline
+        CHECK(eventually([&] {
+            try {
+                static_cast<void>(driver->get_image_ready());
+            } catch (const alpacacore::AlpacaException&) {
+                return true;
+            }
+            return false;
+        }));
+    }
+    SECTION("AbortExposure") {
+        driver->start_exposure(10.0, true);
+        REQUIRE(eventually([&] { return sdk.start_readback_started(); }));
+        canceller = std::thread([&] { driver->abort_exposure(); });
+        REQUIRE(eventually([&] { return driver->get_camera_state() == alpacacore::CameraState::Idle; }));
+    }
+    // Release the held readback before asserting so a failure cannot strand the body in destruction.
+    const auto refused = [&](const std::function<void()>& fn) {
+        try {
+            fn();
+        } catch (const alpacacore::AlpacaException& e) {
+            return e.error_code() == alpacacore::AlpacaError::InvalidOperation;
+        }
+        return false;
+    };
+    const bool start_refused = refused([&] { driver->set_start_x(client_start_x + 1); });
+    const bool bin_refused = refused([&] { driver->set_bin_x(2); });
+    const bool num_refused = refused([&] { driver->set_num_x(8); });
+    sdk.set_hold_start_readback(false);
+    CHECK(start_refused);
+    CHECK(bin_refused);
+    CHECK(num_refused);
+    if (canceller.joinable()) canceller.join();
+    CHECK(eventually([&] {
+        try {
+            driver->set_start_x(client_start_x + 1);
+            return true;
+        } catch (const alpacacore::AlpacaException&) {
+            return false;
+        }
+    }));
+    CHECK(driver->get_start_x() == client_start_x + 1);
+    driver->set_connected(false);
+}
+
+TEST_CASE("Player One Camera Driver - ImageArray before any exposure is asked too early",
+          "[playerone][camera][unit]") {
+    alpacacore::test::FakePlayerOneSDK sdk;
+    auto driver = alpacacore::vendor::playerone::create_playerone_camera(0, 0, sdk);
+    driver->set_connected(true);
+    try {
+        static_cast<void>(driver->get_image_array());
+        FAIL("Expected AlpacaException");
+    } catch (const alpacacore::AlpacaException& e) {
+        CHECK(e.is_asked_too_early());
+        CHECK(e.error_code() == alpacacore::AlpacaError::InvalidOperation);
+    }
+    driver->set_connected(false);
+}
