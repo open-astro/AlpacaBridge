@@ -739,6 +739,7 @@ TEST_CASE("Celestron Focuser Driver - a fault that stands past the link-loss bou
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, kBound));
     REQUIRE(driver->get_position() == 31000);
+    CHECK(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 
     // Three failed polls latch the fault; Connected is still true (decision 0009).
     fake.set_muted(true);
@@ -753,6 +754,8 @@ TEST_CASE("Celestron Focuser Driver - a fault that stands past the link-loss bou
     require_alpaca_error([&] { (void)driver->get_is_moving(); }, AlpacaError::NotConnected);
     require_alpaca_error([&] { driver->move(10); }, AlpacaError::NotConnected);
     CHECK(driver->get_device_state().empty());
+    // on_lost() released the transport.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 
     // No autonomous relink; the next Connect re-runs the probe and serves a fresh frame.
     fake.set_muted(false);

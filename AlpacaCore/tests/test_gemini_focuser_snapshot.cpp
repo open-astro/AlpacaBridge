@@ -17,6 +17,7 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 
 #include <chrono>
@@ -264,6 +265,7 @@ TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss boun
     driver->set_connected(true);
     REQUIRE(clock.wait_for_waiters(1, kBound));
     REQUIRE(driver->get_position() == 1000);
+    CHECK(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 
     // Three failed polls latch the fault; Connected is still true (decision 0009).
     fake.set_garbage_state_replies(true);
@@ -288,6 +290,8 @@ TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss boun
     expect_not_connected([&] { (void)driver->get_is_moving(); });
     expect_not_connected([&] { driver->move(500); });
     CHECK(driver->get_device_state().empty());
+    // on_lost() released the transport.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
 
     // No autonomous relink; the next Connect re-runs the probe and serves a fresh frame.
     fake.set_garbage_state_replies(false);
