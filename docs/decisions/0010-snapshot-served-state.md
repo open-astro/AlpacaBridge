@@ -88,10 +88,10 @@ Symbol: `StateSnapshot`
 | Celestron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_telescope_driver.cpp` | adopted | #1337 | 1 s; Celestron telescope adoption above |
 | Bisque telescope | `StateSnapshot` | `AlpacaCore/src/vendors/bisque/bisque_telescope_driver.cpp` | adopted | #1367 | 1 s; Bisque telescope adoption above |
 | SynScan telescope | `StateSnapshot` | `AlpacaCore/src/vendors/synscan/synscan_telescope_driver.cpp` | adopted | #1247 | 1 s; [SynScan instructions](../../.github/instructions/synscan.instructions.md) |
-| Gemini focuser | `StateSnapshot` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
+| Gemini focuser | `PolledState` | `AlpacaCore/src/vendors/gemini/gemini_focuser_driver.cpp` | adopted | #1229, #1643 | 250 ms; [Gemini instructions](../../.github/instructions/gemini.instructions.md) |
 | QHY Q-Focuser | `PolledState` | `AlpacaCore/src/vendors/qhy/qhy_focuser_driver.cpp` | adopted | #1310 | 250 ms; [QHY instructions](../../.github/instructions/qhy.instructions.md) |
 | Astroasis focuser | `PolledState` | `AlpacaCore/src/vendors/astroasis/astroasis_focuser_driver.cpp` | adopted | #1327 | 100 ms; [Astroasis instructions](../../.github/instructions/astroasis.instructions.md) |
-| Celestron focus motor | `StateSnapshot` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
+| Celestron focus motor | `PolledState` | `AlpacaCore/src/vendors/celestron/celestron_focuser_driver.cpp` | adopted | #1320, #1643 | 250 ms; [Celestron instructions](../../.github/instructions/celestron.instructions.md) |
 | OnStep telescope | `StateSnapshot` | `AlpacaCore/src/vendors/onstep/onstep_telescope_driver.cpp` | planned | — | |
 | iOptron telescope | `StateSnapshot` | `AlpacaCore/src/vendors/ioptron/ioptron_telescope_driver.cpp` | planned | — | |
 | ZWO telescope | `StateSnapshot` | `AlpacaCore/src/vendors/zwo/zwo_telescope_driver.cpp` | adopted | #1432, #1433, #1531 | 250 ms after each poll; 5 s freshness threshold; `device_state_age()` uses `mandatory_at` from accepted GU plus a complete RA/Dec pair, independent of later GU-only or optional publication; before the first mandatory pair it uses the partial frame's `measured_at`; [ZWO instructions](../../.github/instructions/zwo.instructions.md) |

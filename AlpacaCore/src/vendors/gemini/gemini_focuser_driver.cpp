@@ -15,9 +15,8 @@
 #include <alpacacore/util/auto_detect.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 #include <alpacacore/vendor/gemini/gemini_protocol_wrapper.h>
@@ -37,10 +36,9 @@ namespace {
 // State poll (open-astro#1229, decision 0010), start to start. One poll is
 // three request/response exchanges at 9600 baud, so the period leaves the wire
 // mostly free for Move/Halt. The freshness bound is two periods; a stale frame
-// is still served. Link health follows the #237 rule: kFaultThreshold failed
-// polls in a row latch a fault that the getters report until a poll succeeds.
+// is still served. The cadence, the #237 fault latch (kFaultThreshold failed
+// polls in a row) and the link-loss rule live in util::PolledState.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(250);
-constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
 constexpr int kFaultThreshold = 3;
 // A failed temperature read can cost the whole serial timeout while holding the
 // wrapper, which Move and Halt would queue behind; ask again after this.
@@ -62,7 +60,10 @@ public:
           config_(std::move(config)),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          protocol_() {}
+          protocol_(),
+          state_(
+              clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, "Gemini"},
+              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {}
 
     ~GeminiFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -70,7 +71,7 @@ public:
         shutdown_connection();
         // Joins the poll body before the members it touches go away; a driver
         // that never finished a connect has no body, so this is a no-op.
-        state_poll_.cancel_all_and_join();
+        state_.stop_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);
@@ -122,9 +123,10 @@ public:
 
     int get_interface_version() const override { return 4; }
 
-    bool get_connected() const override {
-        return connected_.load();
-    }
+    // Lock-free. A poll that has gone unanswered for util::kLinkStalenessBound
+    // latches the loss in state_ (decision 0009), and Connected reads false
+    // without a reconnect.
+    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
 
     void connect() override {
         start_connection_task(true);
@@ -165,17 +167,26 @@ public:
         // in-flight connect looks idempotent (both sides see disconnected) and
         // would be silently dropped without the record; a connect must honor a
         // newer pending disconnect by staying down.
+        // A lost link counts as disconnected for a connect: Connected=true
+        // against a lost link reconnects instead of taking the idempotency
+        // return. The disconnect gate takes the raw connected_, so
+        // Connected=false still tears down a lost link (decision 0009).
+        const bool live = connected_.load() && !state_.link_lost();
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
             return;
         }
-        if (connected && consume_pending_disconnect(connected_.load())) {
+        if (connected && consume_pending_disconnect(live)) {
             return;
         }
-        if (connected == connected_.load()) {
+        if (connected ? live : !connected_.load()) {
             return;
         }
 
         if (connected) {
+            if (connected_.load()) {
+                // Stale connection over a lost link: start from a clean driver.
+                teardown_locked();
+            }
             // An auto-detected focuser resolves its port here, not in the factory (#659).
             util::connect_resolved(
                 config_, connection_resolved_, connection_resolver_,
@@ -204,25 +215,15 @@ public:
                 firmware_.clear();
             }
             // First frame before Connected reads true, so a getter has an
-            // answer the moment Connect returns.
-            snapshot_.reset();
-            {
-                std::lock_guard<std::mutex> lock(health_mutex_);
-                health_.reset();
-                temperature_retry_at_.reset();
-            }
-            // A lost or dropped first reply gets one retry. A connect whose
-            // retry also publishes nothing fails: Connected true means the
-            // getters have a frame to serve (decisions 0010 and 0016).
-            poll_state_once();
-            if (!snapshot_.read().has_value()) {
-                poll_state_once();
-            }
-            if (!snapshot_.read().has_value()) {
-                {
-                    std::lock_guard<std::mutex> lock(health_mutex_);
-                    health_.reset();
-                }
+            // answer the moment Connect returns. A lost or dropped first
+            // reply gets one retry. A connect whose retry also publishes
+            // nothing fails: Connected true means the getters have a frame to
+            // serve (decisions 0010 and 0016).
+            state_.reset();
+            temperature_retry_at_.reset();
+            if (!state_.start()) {
+                state_.stop_and_join();
+                state_.reset();
                 {
                     std::lock_guard<std::mutex> fw_lock(firmware_mutex_);
                     firmware_.clear();
@@ -232,31 +233,32 @@ public:
                                       AlpacaError::DriverException);
             }
             connected_.store(true);
-            start_state_poll();
             ALPACA_LOG_INFO("Gemini", "Focuser connected");
         } else {
-            // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
-            // throwing close must not leave the driver reporting connected on
-            // a closed port. disconnect() cannot throw today; the order is
-            // the contract, not the current wrapper's behaviour.
-            // The cached firmware goes first, so the store(false) is never
-            // observable beside a stale firmware string.
-            {
-                std::lock_guard<std::mutex> lock(firmware_mutex_);
-                firmware_.clear();
-            }
-            connected_.store(false);
-            // Join the poll before the transport closes; its body takes no
-            // lock this thread holds (transition_mutex_, firmware_mutex_).
-            state_poll_.cancel_all_and_join();
-            snapshot_.reset();
-            {
-                std::lock_guard<std::mutex> lock(health_mutex_);
-                health_.reset();
-            }
-            protocol_.disconnect();
+            teardown_locked();
             ALPACA_LOG_INFO("Gemini", "Focuser disconnected");
         }
+    }
+
+    // The disconnect body, shared by the explicit disconnect and the
+    // stale-link reconnect. Caller holds transition_mutex_.
+    void teardown_locked() {
+        // Driver state first, SDK close second (driver-lifecycle.instructions.md, issue #387): a
+        // throwing close must not leave the driver reporting connected on
+        // a closed port. disconnect() cannot throw today; the order is
+        // the contract, not the current wrapper's behaviour.
+        // The cached firmware goes first, so the store(false) is never
+        // observable beside a stale firmware string.
+        {
+            std::lock_guard<std::mutex> lock(firmware_mutex_);
+            firmware_.clear();
+        }
+        connected_.store(false);
+        // Join the poll before the transport closes; its body takes no
+        // lock this thread holds (transition_mutex_, firmware_mutex_).
+        state_.stop_and_join();
+        state_.reset();
+        protocol_.disconnect();
     }
 
     std::vector<std::string> get_supported_actions() const override {
@@ -348,12 +350,11 @@ public:
         // Never refused for a link fault: Halt is the safety stop and the
         // blind command costs nothing if the link is down.
         protocol_.halt();
-        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
+        state_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
-        ensure_connected();
-        throw_if_faulted();
+        (void)served_frame();  // refused while the link is faulted or lost
         int max_step = protocol_.get_max_position();
         // ConformU requires graceful clamping, not exceptions
         if (position < 0) {
@@ -364,7 +365,7 @@ public:
         protocol_.move_to(position);
         // Write-through: IsMoving must read true right after a successful
         // Move, not after the next poll (decision 0010, point 3).
-        snapshot_.write([](StateFrame& frame) { frame.moving = true; });
+        state_.write([](StateFrame& frame) { frame.moving = true; });
     }
 
 private:
@@ -375,59 +376,32 @@ private:
         std::optional<double> temperature;  // empty: the probe did not answer
     };
 
-    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
-    // poll has failed kFaultThreshold times in a row; Connected stays true.
-    void throw_if_faulted() const {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        if (health_.faulted()) {
-            throw AlpacaException("Gemini focuser communications compromised: " + health_.fault(),
-                                  AlpacaError::DriverException);
-        }
+    // The single fault text (decision 0009, point 5): the latched poll fault,
+    // kept after the link is lost so the management listing says why.
+    std::string get_link_fault() const override {
+        auto fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
 
-    // The frame the getters serve. A stale frame is still served (decision
-    // 0010); a faulted link is not.
+    // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
+
+    // The frame the getters serve (decisions 0009 and 0010): stale is served,
+    // a faulted link throws DriverException, a lost one NotConnected.
     StateFrame served_frame() const {
         ensure_connected();
-        throw_if_faulted();
-        const auto reading = snapshot_.read();
-        if (!reading.has_value()) {
-            // A disconnect between the check and the read dropped the frame.
-            ensure_connected();
-            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
-        }
-        return reading->value;
+        return state_.served().value;
     }
 
-    // One poll: three exchanges with no driver lock held (the protocol wrapper
-    // serialises them), then publish. A write that landed since begin_poll()
-    // makes publish() drop the frame; the next poll publishes.
-    void poll_state_once() {
-        const auto token = snapshot_.begin_poll();
+    // One poll: three exchanges on the poll thread with no driver lock held
+    // (the protocol wrapper serialises them). The temperature is optional: a
+    // failed read leaves it empty (the getter reports it) without costing
+    // Position and IsMoving, and is not retried for kTemperatureRetry.
+    StateFrame probe() {
         StateFrame frame;
-        try {
-            frame.position = protocol_.get_position();
-            frame.moving = protocol_.is_moving();
-        } catch (const std::exception&) {
-            // The exception text can carry the device's reply; AlpacaCore has
-            // no log escaper (CWE-117), so the lines state the fact only.
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
-                ALPACA_LOG_ERROR("Gemini", "Focuser communications compromised: " + health_.fault());
-            } else {
-                ALPACA_LOG_DEBUG("Gemini", "Focuser state poll failed; the frame keeps its age");
-            }
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.on_reply()) {
-                ALPACA_LOG_INFO("Gemini", "Focuser communications restored");
-            }
-        }
-        // The temperature is optional: a failed read leaves it empty (the getter
-        // reports it) without costing Position and IsMoving, and is not retried
-        // for kTemperatureRetry.
+        frame.position = protocol_.get_position();
+        frame.moving = protocol_.is_moving();
         const auto now = clock_.now();
         if (!temperature_retry_at_ || now >= *temperature_retry_at_) {
             try {
@@ -437,40 +411,19 @@ private:
                 temperature_retry_at_ = now + kTemperatureRetry;
                 ALPACA_LOG_DEBUG("Gemini", "Focuser temperature read failed; retrying in 30 s");
             }
-        } else if (const auto last = snapshot_.read(); last && last->value.temperature) {
+        } else if (const auto last = state_.read(); last && last->value.temperature) {
             frame.temperature = last->value.temperature;  // keep the last good value meanwhile
         }
-        snapshot_.publish(token, frame);
-    }
-
-    void run_state_poll(util::OperationContext& ctx) {
-        if (!ctx.wait_for(kStatePollPeriod)) {
-            return;
-        }
-        for (;;) {
-            const auto started = clock_.now();
-            poll_state_once();
-            // Start to start: skip any tick a slow poll ran over (no catch-up).
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatePollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatePollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
-    // After the store(true), with no driver lock held (AsyncOperation rule 10).
-    void start_state_poll() {
-        try {
-            state_poll_.start([this](util::OperationContext& ctx) { run_state_poll(ctx); });
-        } catch (const std::exception&) {
-            ALPACA_LOG_ERROR("Gemini", "Focuser state poll did not start");
-        }
+        return frame;
     }
 
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
+        }
+        if (state_.link_lost()) {
+            throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
+                                  AlpacaError::NotConnected);
         }
     }
 
@@ -484,19 +437,13 @@ private:
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
     GeminiProtocolWrapper protocol_;
-    // Position, motion and temperature served to the getters (open-astro#1229).
-    // Declared after clock_ and protocol_: state_poll_ is destroyed first and
-    // joins its body while both are still alive.
-    mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
-    // Link health of the poll (issue #237). health_mutex_ is narrow: held for a
-    // counter or a string, never across an exchange, so a getter never waits
-    // behind the wire.
-    mutable std::mutex health_mutex_;
-    util::PolledLinkHealth health_;
     // Poll thread, and connect before it starts; never concurrent.
     std::optional<util::TaskClock::clock::time_point> temperature_retry_at_;
     util::OperationGeneration state_poll_generation_;
-    util::AsyncOperation state_poll_{"Gemini focuser state poll", state_poll_generation_, clock_};
+    // Position, motion and temperature served to the getters (open-astro#1229).
+    // Declared after clock_ and protocol_: it is destroyed first and joins its
+    // poll body while both are still alive.
+    util::PolledState<StateFrame> state_;
     // firmware_ has its OWN mutex, NOT the base's connection mutex:
     // set_connected() runs on the connection thread and caches firmware, while
     // the base joins that thread — sharing one mutex would deadlock.
