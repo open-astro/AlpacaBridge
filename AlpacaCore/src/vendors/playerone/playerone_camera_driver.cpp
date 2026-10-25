@@ -260,14 +260,17 @@ public:
             // leaves the exposure running: fail() keeps the error for ImageReady, nothing is joined and the
             // camera stays connected.
             exposure_stop_error = stop_sdk_exposure();
+            if (!exposure_stop_error.empty()) {
+                session_.fail(exposure_stop_error);
+            }
+            // The pulse stop comes before the join: it can throw and leave the camera connected, and the
+            // join clears the Ready frame, the kept failure and LastExposure*.
+            pulse_lifecycle_lock.lock();
+            stop_pulse_guide_thread_locked();
             if (exposure_stop_error.empty()) {
                 reopen.closed = true;
                 session_.disconnect_and_join();
-            } else {
-                session_.fail(exposure_stop_error);
             }
-            pulse_lifecycle_lock.lock();
-            stop_pulse_guide_thread_locked();
         }
         std::lock_guard<std::mutex> lock(mutex_);
         // Base gates BEFORE the idempotency check: a sync disconnect during an
