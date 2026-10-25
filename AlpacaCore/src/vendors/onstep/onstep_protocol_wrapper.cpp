@@ -857,22 +857,21 @@ public:
         }
     }
 
-    bool slew_to_target() {
+    std::string slew_to_target() {
         // Same bare-digit-no-'#' ack as the :S-prefixed setters (see
         // set_latitude()) — confirmed against real firmware (Command.ino:
         // the :MS# handler explicitly sets supress_frame=true) and hardware
         // (the mount visibly started slewing while this call sat waiting
         // for a '#' that was never coming).
-        std::string response = send_command(":MS#", false, kSetAckTimeoutMs);
-        // LX200 convention: "0" means the slew was accepted; a non-"0"
-        // response (often "1<reason>") means the mount rejected the target.
-        return !response.empty() && response[0] == '0';
+        // One digit: "0" means the slew was accepted; 1-9 is the refusal reason
+        // (OnStep Command.ino, OnStepX Goto.command.cpp), which the driver reports (#1379).
+        return send_command(":MS#", false, kSetAckTimeoutMs);
     }
 
-    void sync_to_target() {
-        // :CM# returns the name/description of the synced object — content
-        // isn't meaningful here, only that the mount responded.
-        (void)send_command(":CM#", true, 0);
+    std::string sync_to_target() {
+        // "N/A#" on success, "En#" on a refusal (n the :MS# digit); the driver
+        // reads it (#1379). Classic LX200 firmware returns an object name instead.
+        return send_command(":CM#", true, 0);
     }
 
     void abort_slew() { send_command_blind(":Q#"); }
@@ -891,15 +890,27 @@ public:
 
     void stop_tracking() { send_command_blind(":ST0#"); }
 
+    // A numeric reply: one bare digit, no '#' (OnStepX ProcessCmds.cpp).
+    bool set_tracking_checked(bool on) {
+        const std::string reply = send_command(on ? ":ST60.164275#" : ":ST0#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
+
     bool park() {
         // Bare digit, no '#' (OnStepX numeric reply): '1' accepted, '0' refused.
         const std::string reply = send_command(":hP#", false, kSetAckTimeoutMs);
         return !reply.empty() && reply[0] == '1';
     }
 
-    void set_park() { send_command_blind(":hQ#"); }
+    bool set_park() {
+        const std::string reply = send_command(":hQ#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
 
-    void unpark() { send_command_blind(":hR#"); }
+    bool unpark() {
+        const std::string reply = send_command(":hR#", false, kSetAckTimeoutMs);
+        return !reply.empty() && reply[0] == '1';
+    }
 
     void find_home() { send_command_blind(":hC#"); }
 
@@ -1541,21 +1552,22 @@ void OnStepProtocolWrapper::set_target_ra(double ra_hours) { pimpl_->set_target_
 
 void OnStepProtocolWrapper::set_target_dec(double dec_degrees) { pimpl_->set_target_dec(dec_degrees); }
 
-bool OnStepProtocolWrapper::slew_to_target() { return pimpl_->slew_to_target(); }
+std::string OnStepProtocolWrapper::slew_to_target() { return pimpl_->slew_to_target(); }
 
-void OnStepProtocolWrapper::sync_to_target() { pimpl_->sync_to_target(); }
+std::string OnStepProtocolWrapper::sync_to_target() { return pimpl_->sync_to_target(); }
 
 void OnStepProtocolWrapper::abort_slew() { pimpl_->abort_slew(); }
 
 void OnStepProtocolWrapper::start_tracking() { pimpl_->start_tracking(); }
 
 void OnStepProtocolWrapper::stop_tracking() { pimpl_->stop_tracking(); }
+bool OnStepProtocolWrapper::set_tracking_checked(bool on) { return pimpl_->set_tracking_checked(on); }
 
 bool OnStepProtocolWrapper::park() { return pimpl_->park(); }
 
-void OnStepProtocolWrapper::set_park() { pimpl_->set_park(); }
+bool OnStepProtocolWrapper::set_park() { return pimpl_->set_park(); }
 
-void OnStepProtocolWrapper::unpark() { pimpl_->unpark(); }
+bool OnStepProtocolWrapper::unpark() { return pimpl_->unpark(); }
 
 void OnStepProtocolWrapper::find_home() { pimpl_->find_home(); }
 
