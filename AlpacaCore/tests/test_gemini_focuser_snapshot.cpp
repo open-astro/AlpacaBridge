@@ -253,3 +253,48 @@ TEST_CASE("Gemini Focuser Driver - a getter after a successful connect never thr
     CHECK_NOTHROW(driver->get_is_moving());
     driver->set_connected(false);
 }
+
+// Falsified by: gemini_focuser_driver.cpp: Connected read connected_ alone (drop the !state_.link_lost() term), so a
+// fault standing past util::kLinkStalenessBound left Connected true and the getters on a latched DriverException.
+TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss bound drops Connected",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(driver->get_position() == 1000);
+
+    // Three failed polls latch the fault; Connected is still true (decision 0009).
+    fake.set_garbage_state_replies(true);
+    for (int i = 0; i < 3; ++i) {
+        tick(clock);
+    }
+    CHECK(driver->get_connected() == true);
+
+    // The fault stands past util::kLinkStalenessBound (30 s): the link is lost.
+    clock.advance(31s);
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    CHECK(driver->get_connected() == false);
+    const auto expect_not_connected = [](const std::function<void()>& call) {
+        try {
+            call();
+            FAIL("expected NotConnected");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        }
+    };
+    expect_not_connected([&] { (void)driver->get_position(); });
+    expect_not_connected([&] { (void)driver->get_is_moving(); });
+    expect_not_connected([&] { driver->move(500); });
+    CHECK(driver->get_device_state().empty());
+
+    // No autonomous relink; the next Connect re-runs the probe and serves a fresh frame.
+    fake.set_garbage_state_replies(false);
+    fake.set_position(1700);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_position() == 1700);
+
+    driver->set_connected(false);
+}

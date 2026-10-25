@@ -728,4 +728,38 @@ TEST_CASE("Celestron Focuser Driver - a getter after a successful connect never 
     driver->set_connected(false);
 }
 
+// Falsified by: celestron_focuser_driver.cpp: Connected read connected_ alone (drop the !state_.link_lost() term), so a
+// fault standing past util::kLinkStalenessBound left Connected true and the getters on a latched DriverException.
+TEST_CASE("Celestron Focuser Driver - a fault that stands past the link-loss bound drops Connected",
+          "[celestron][focuser][snapshot][unit][fake]") {
+    FakeCelestronFocuser fake;
+    REQUIRE(fake.ok());
+    FakeTaskClock clock;
+    auto driver = create_celestron_focuser(0, fake.slave_path(), clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(driver->get_position() == 31000);
+
+    // Three failed polls latch the fault; Connected is still true (decision 0009).
+    fake.set_muted(true);
+    for (int i = 0; i < 3; ++i) tick(clock);
+    CHECK(driver->get_connected() == true);
+
+    // The fault stands past util::kLinkStalenessBound (30 s): the link is lost.
+    clock.advance(31s);
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    CHECK(driver->get_connected() == false);
+    require_alpaca_error([&] { (void)driver->get_position(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { (void)driver->get_is_moving(); }, AlpacaError::NotConnected);
+    require_alpaca_error([&] { driver->move(10); }, AlpacaError::NotConnected);
+    CHECK(driver->get_device_state().empty());
+
+    // No autonomous relink; the next Connect re-runs the probe and serves a fresh frame.
+    fake.set_muted(false);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_position() == 31000);
+    driver->set_connected(false);
+}
+
 #endif  // _WIN32
