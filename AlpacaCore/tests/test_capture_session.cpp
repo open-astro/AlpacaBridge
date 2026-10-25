@@ -278,6 +278,12 @@ TEST_CASE("CaptureSession - image_ready publishes the frame and commits the last
     CHECK(error_of([&] { (void)h.session->last_exposure_duration(); }) == AlpacaError::InvalidOperation);
     CHECK(error_of([&] { (void)h.session->last_exposure_start_time(); }) == AlpacaError::InvalidOperation);
     CHECK(error_of([&] { (void)h.session->image(); }) == AlpacaError::InvalidOperation);
+    try {
+        (void)h.session->image();
+        FAIL("Expected AlpacaException");
+    } catch (const AlpacaException& e) {
+        CHECK(e.is_asked_too_early());
+    }
 
     const auto before = std::chrono::system_clock::now();
     h.session->start(10.0, [p, sdk, download](CaptureControl& c) {
