@@ -16,9 +16,6 @@
 // idle holder cannot drive the unit that took its id. SDK-free: the raw units below stand in for the library,
 // so these cases build and run on every host.
 
-#include "catch2_compat.h"
-
-#if __has_include(<alpacacore/vendor/zwo/shared_open_table.h>)
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/vendor/zwo/shared_open_table.h>
 
@@ -29,6 +26,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+
+#include "catch2_compat.h"
 
 namespace {
 
@@ -343,39 +342,3 @@ TEST_CASE("ZWO shared open table - A failed open leaves no entry behind", "[zwo]
     CHECK(table.open_count(3) == 1);
     CHECK(call_reaches(table, 3, y.link));
 }
-#else
-// RED until the table exists (issue #1500 plan, invariant 8): the cases above compile only against
-// <alpacacore/vendor/zwo/shared_open_table.h>. The fix deletes this branch together with the #if.
-TEST_CASE("ZWO shared open table - A second open with the same serial shares the real open", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A different serial behind a held id retires its link", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A lost serial read behind a held id retires its link", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A generic serial read failure fails the open and keeps the held one",
-          "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A link is never handed out twice", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A per-device call with no link for its id is refused", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A loss code from a call closes the handle at once", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - with_link restores the outer link and holds no lock across its body",
-          "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A candidate open skips a held id whose unit has no serial", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-TEST_CASE("ZWO shared open table - A failed open leaves no entry behind", "[zwo][link]") {
-    FAIL("alpacacore/vendor/zwo/shared_open_table.h is missing (issue #1500 open table)");
-}
-#endif
