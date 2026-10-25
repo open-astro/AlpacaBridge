@@ -236,7 +236,8 @@ TEST_CASE("ZWO shared open table - A loss code from a call closes the handle at 
 
     CHECK(error_of([&] {
               table.with_link(3, y.link, [&] {
-                  table.call(3, [] { throw AlpacaException("EAFGetPosition: EAF_ERROR_REMOVED", AlpacaError::NotConnected); });
+                  table.call(
+                      3, [] { throw AlpacaException("EAFGetPosition: EAF_ERROR_REMOVED", AlpacaError::NotConnected); });
               });
           }) == AlpacaError::NotConnected);
     CHECK(units.closes == 1);
