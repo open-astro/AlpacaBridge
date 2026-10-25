@@ -96,7 +96,8 @@ TEST_CASE("pointing - gmst_degrees keeps sub-second resolution", "[util][pointin
 
 // Falsified by: local_sidereal_hours() adding the longitude in hours instead of
 // degrees, subtracting it, or not wrapping into [0, 24).
-TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps into the 0 to 24 hour range", "[util][pointing]") {
+TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps into the 0 to 24 hour range",
+          "[util][pointing]") {
     const auto j2000 = at_unix(946728000);
     const double greenwich = 280.46061837 / 15.0;
     CHECK(pointing::local_sidereal_hours(j2000, 0.0) == Approx(greenwich).epsilon(0).margin(1e-9));
