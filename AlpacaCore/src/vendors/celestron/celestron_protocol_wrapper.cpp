@@ -1555,6 +1555,17 @@ private:
         return util::read_until_socket(socket_fd_, spec, deadline);
     }
 
+    // The deadline of a reply read: timeout_ms plus one read slice (100 ms over
+    // serial, the socket's 200 ms SO_RCVTIMEO over TCP). The byte-at-a-time
+    // loop checked the timeout only at the end of each slice and never after a
+    // '#', so a '#' that arrived in the slice in which the timeout ran out still
+    // ended its reply; a strict deadline would leave it to answer the next
+    // command.
+    std::chrono::steady_clock::time_point reply_deadline(int timeout_ms) const {
+        const auto slice = std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+        return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) + slice;
+    }
+
     [[noreturn]] void throw_link_lost(int err) const {
         throw AlpacaException(std::string("Celestron ") +
                               (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
@@ -1571,7 +1582,7 @@ private:
 
     std::string read_response(bool require_hash_terminator, int timeout_ms,
                               int binary_bytes = 0) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        const auto deadline = reply_deadline(timeout_ms);
         util::ReadSpec spec;
         spec.max_len = kMaxReplyLen;
         // When binary_bytes > 0, read exactly that many raw bytes first

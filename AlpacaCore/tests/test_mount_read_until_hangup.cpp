@@ -20,6 +20,10 @@
 // - a read that does not require the '#' still ends at the '#': the "mount"
 //   answers "1#" and then keeps the line busy, so a read that ran past the '#'
 //   would wait for the whole reply window.
+// And per wrapper over TCP: a '#' that arrives in the read slice in which the
+// timeout runs out still ends its own reply, as it did when the byte-at-a-time
+// loop checked the timeout only after each 200 ms recv() and never after a '#';
+// a '#' left in the line there would answer the next command.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -28,8 +32,10 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
 
 #include "catch2_compat.h"
+#include "fake_mount_server.h"
 #include "fake_pty_write.h"
 #include "pty_responder.h"
 
@@ -299,6 +305,126 @@ TEST_CASE("ZWO mount - a read that does not require the '#' ends at the '#'", "[
     wrapper.disconnect();
     CHECK(reply == "1");
     CHECK(took < std::chrono::seconds(1));
+}
+#endif
+
+// A TCP "mount" that answers "Late" with "#" kLateReply after it arrives, past the kLateTimeoutMs the case gives the
+// read but inside the 200 ms read slice that follows it, and answers "Next" with "1#" at once.
+constexpr int kLateTimeoutMs = 300;
+constexpr auto kLateReply = std::chrono::milliseconds(350);
+
+std::string late_hash_reply(const std::string& chunk) {
+    if (chunk.rfind("Late", 0) == 0) {
+        std::this_thread::sleep_for(kLateReply);
+        return "#";
+    }
+    if (chunk.rfind("Next", 0) == 0) return "1#";
+    return alpacacore::test::answer_handset_echo(chunk);
+}
+
+// Sends "Late" with the short timeout, then "Next": the error the first threw (empty when its '#' ended it) and the
+// reply to the second.
+template <typename Send>
+std::pair<std::string, std::string> late_then_next(Send&& send) {
+    std::string error;
+    try {
+        (void)send("Late", kLateTimeoutMs);
+    } catch (const alpacacore::AlpacaException& e) {
+        error = e.what();
+    }
+    std::string next;
+    try {
+        next = send("Next", 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    return {error, next};
+}
+
+#ifdef ALPACACORE_ENABLE_IOPTRON
+// Falsified by: ioptron_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
+// and the late '#' answers "Next")
+TEST_CASE("iOptron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
+          "[ioptron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::ioptron::iOptronProtocolWrapper::instance();
+    alpacacore::vendor::ioptron::ConnectionInfo info;
+    info.type = alpacacore::vendor::ioptron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto [error, next] =
+        late_then_next([&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); });
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(next == "1");
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_CELESTRON
+// Falsified by: celestron_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
+// and the late '#' answers "Next")
+TEST_CASE("Celestron mount - a '#' that arrives within one read slice after the timeout ends its own reply",
+          "[celestron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::celestron::CelestronProtocolWrapper::instance();
+    alpacacore::vendor::celestron::ConnectionInfo info;
+    info.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto [error, next] =
+        late_then_next([&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); });
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(next == "1");
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_SYNSCAN
+// Falsified by: synscan_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms
+// and the late '#' answers "Next")
+TEST_CASE("SynScan mount - a '#' that arrives within one read slice after the timeout ends its own reply",
+          "[synscan][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::synscan::SynScanProtocolWrapper::instance();
+    alpacacore::vendor::synscan::ConnectionInfo info;
+    info.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto [error, next] =
+        late_then_next([&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); });
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(next == "1");
+}
+#endif
+
+#ifdef ALPACACORE_ENABLE_ZWO
+// Falsified by: zwo_mount_protocol_wrapper.cpp reply_deadline() without the read slice (the read times out at 300 ms)
+TEST_CASE("ZWO mount - a '#' that arrives within one read slice after the timeout ends its own reply",
+          "[zwo][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    alpacacore::vendor::zwo::ZWOMountProtocolWrapper wrapper;
+    alpacacore::vendor::zwo::ConnectionInfo info;
+    info.type = alpacacore::vendor::zwo::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    REQUIRE(wrapper.connect(info));
+    const auto [error, next] =
+        late_then_next([&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); });
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(next == "1");
 }
 #endif
 

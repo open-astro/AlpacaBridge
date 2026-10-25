@@ -1479,6 +1479,17 @@ private:
 #endif
     }
 
+    // The deadline of a reply read: timeout_ms plus one read slice (100 ms over
+    // serial, the socket's 200 ms SO_RCVTIMEO over TCP). The byte-at-a-time
+    // loop checked the timeout only at the end of each slice and never after a
+    // '#', so a '#' that arrived in the slice in which the timeout ran out still
+    // ended its reply; a strict deadline would leave it to answer the next
+    // command.
+    std::chrono::steady_clock::time_point reply_deadline(int timeout_ms) const {
+        const auto slice = std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+        return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) + slice;
+    }
+
     [[noreturn]] void throw_link_lost(int err) const {
         throw AlpacaException(std::string("iOptron mount ") +
                               (connection_type_ == ConnectionType::Serial ? "serial" : "network") +
@@ -1503,7 +1514,7 @@ private:
             spec.stop = util::ReadSpec::Stop::TerminatorOrIdleGap;
             spec.idle_gap = std::chrono::milliseconds(100);
         }
-        const auto r = read_reply(spec, std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms));
+        const auto r = read_reply(spec, reply_deadline(timeout_ms));
         switch (r.outcome) {
             case util::ReadOutcome::LinkDead:
                 throw_link_lost(r.err);

@@ -1301,9 +1301,17 @@ private:
 #endif
     }
 
+    // The deadline of a reply read: timeout_ms plus one read slice (100 ms over serial, the socket's 200 ms
+    // SO_RCVTIMEO over TCP). The byte-at-a-time loop checked the timeout only at the end of each slice and never after
+    // a '#', so a '#' that arrived in the slice in which the timeout ran out still ended its reply.
+    std::chrono::steady_clock::time_point reply_deadline(int timeout_ms) const {
+        const auto slice = std::chrono::milliseconds(connection_type_ == ConnectionType::Serial ? 100 : 200);
+        return std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms) + slice;
+    }
+
     std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
                               bool* saw_hash = nullptr, bool preserve_whitespace = false) {
-        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        const auto end = reply_deadline(timeout_ms);
         std::string response;
 
         // The terminator ends the reply; without one the reply ends when the line goes quiet for kIdleBreakMs

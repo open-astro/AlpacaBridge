@@ -46,7 +46,9 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   SynScan handset probe and the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount,
   Celestron NexStar, SynScan and ZWO mount, over serial and TCP (`read_until()` / `read_until_socket()`; the iOptron
   serial blind-command ack drain too). A read there that does not require the `#` still ends at the `#`
-  (`TerminatorOrIdleGap`). On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
+  (`TerminatorOrIdleGap`). Their reply deadline keeps one read slice past the timeout (100 ms over serial, 200 ms over
+  TCP), as the old loop's last read did, so a `#` that arrives just late ends its own reply instead of answering the
+  next command. On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
   a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except
