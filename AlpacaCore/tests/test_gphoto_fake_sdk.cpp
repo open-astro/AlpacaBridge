@@ -158,6 +158,38 @@ TEST_CASE("GPhoto camera fake - connect populates handle and balances open/close
     CHECK(fake.close_count == 1);
 }
 
+TEST_CASE("GPhoto camera fake - exposure validation distinguishes global and connected camera limits",
+          "[gphoto][camera][unit][fakesdk]") {
+    reset_gphoto_sensor_cache();
+    FakeGPhotoSDK fake;
+    auto camera = make_camera();
+    camera.toggle_value.erase("bulb");
+    camera.choices["shutterspeed2"] = {"1/200", "1", "30"};
+    fake.cameras.push_back(std::move(camera));
+    FakeRawDecoder decoder;
+    auto driver = alpacacore::vendor::gphoto::create_gphoto_camera(0, 0, fake, decoder);
+
+    SECTION("before connecting") {}
+    SECTION("after disconnecting") {
+        driver->set_connected(true);
+        driver->set_connected(false);
+    }
+    SECTION("connected native-only camera") {
+        driver->set_connected(true);
+        REQUIRE(driver->get_exposure_max() == 30.0);
+    }
+
+    for (const double invalid :
+         {-1.0, 3601.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN()}) {
+        require_alpaca_error([&] { driver->start_exposure(invalid, true); }, alpacacore::AlpacaError::InvalidValue);
+    }
+    for (const double duration : {60.0, 100.0, 3600.0}) {
+        require_alpaca_error(
+            [&] { driver->start_exposure(duration, true); },
+            driver->get_connected() ? alpacacore::AlpacaError::InvalidValue : alpacacore::AlpacaError::NotConnected);
+    }
+}
+
 TEST_CASE("GPhoto camera fake - connected PulseGuide is NotImplemented and names no library",
           "[gphoto][camera][unit][fakesdk]") {
     reset_gphoto_sensor_cache();

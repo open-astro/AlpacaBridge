@@ -986,6 +986,9 @@ public:
         if (!std::isfinite(duration) || duration < 0.0) {
             throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
         }
+        if (duration > 3600.0) {
+            throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
+        }
 
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
         {
@@ -1247,10 +1250,10 @@ private:
     double get_exposure_max_locked() const { return has_bulb_ ? 3600.0 : max_native_shutter_seconds_; }
 
     void validate_exposure_locked(double duration) const {
+        ensure_connected();
         if (duration > get_exposure_max_locked()) {
             throw AlpacaException("Exposure duration out of range", AlpacaError::InvalidValue);
         }
-        ensure_connected();
         if (geometry_known_) {
             if (num_x_ <= 0 || num_y_ <= 0) {
                 throw AlpacaException("ROI is not valid for exposure", AlpacaError::InvalidValue);

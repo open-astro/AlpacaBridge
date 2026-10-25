@@ -180,7 +180,6 @@ TEST_CASE("SVBONY Camera - metadata stays unset until the first accepted frame",
             clock.advance(16s);
             wait_for_driver_exception(*camera, "completion deadline");
             require_metadata_unset(*camera);
-            sdk.release_video_data();
         }
         SECTION("abort while the read is held") {
             CHECK(camera->get_camera_state() == alpacacore::CameraState::Exposing);

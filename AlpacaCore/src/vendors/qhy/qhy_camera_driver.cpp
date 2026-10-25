@@ -334,6 +334,7 @@ private:
             telemetry_temp_unsupported_ = false;
             telemetry_power_valid_ = false;
             reset_exposure_state_locked();
+            exposure_range_valid_ = false;
             connected_.store(false);
             const std::string& id = camera_id_.value_or("");
             if (!id.empty()) {
@@ -817,6 +818,7 @@ public:
     }
 
     double get_exposure_max() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_exposure_range_valid_locked();
@@ -828,6 +830,7 @@ public:
     }
 
     double get_exposure_min() const override {
+        ensure_connected();
         std::lock_guard<std::mutex> lock(mutex_);
         ensure_connected();
         ensure_exposure_range_valid_locked();
@@ -1339,11 +1342,10 @@ public:
     }
 
     void start_exposure(double duration, bool light) override {
-        ensure_connected();
-        if (duration < 0.0) {
-            throw AlpacaException("Exposure duration must be non-negative",
-                                  AlpacaError::InvalidValue);
+        if (!std::isfinite(duration) || duration < 0.0) {
+            throw AlpacaException("Exposure duration must be finite and non-negative", AlpacaError::InvalidValue);
         }
+        ensure_connected();
 
         // Held through the thread spawn at the end: serialises the spawn against
         // the join in stop_exposure (join racing the thread-assignment is UB on

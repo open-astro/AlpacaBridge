@@ -157,7 +157,8 @@ TEST_CASE("ZWO fake SDK - LastExposure timing follows each SDK trigger", "[zwo][
     clock.advance(std::chrono::seconds(3));
     observe_retry_setup = true;
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
-    CHECK_FALSE(camera->get_image_ready());  // retry applies the register before its timestamp
+    // Direct retrieval drives the retry but remains InvalidOperation until an image is ready.
+    CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::InvalidOperation);
     CHECK(retry_setup_progress == 0.0);
     CHECK(camera->get_last_exposure_start_time() == start_a);
     clock.advance(std::chrono::milliseconds(500));
@@ -245,10 +246,16 @@ TEST_CASE("ZWO fake SDK - retry trigger failure stays failed without publishing"
     camera->start_exposure(0.01, true);
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
     sdk.fail_exposure_start = true;
-    CHECK_FALSE(camera->get_image_ready());  // retry replaced the polled generation
+    SECTION("ImageReady drives the failed retry") {
+        CHECK_FALSE(camera->get_image_ready());  // retry replaced the polled generation
+    }
+    SECTION("Direct ImageArray reports the failed retry on its first read") {
+        CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    }
     const int starts = sdk.call_count("start_exposure");
     CHECK(error_code([&] { static_cast<void>(camera->get_image_ready()); }) == AlpacaError::DriverException);
     CHECK(error_code([&] { static_cast<void>(camera->get_image_array()); }) == AlpacaError::DriverException);
+    CHECK(sdk.call_count("get_data_after_exposure") == 0);
     clock.advance(std::chrono::seconds(1));
     sdk.set_exposure_status(FakeZWOSDK::ExposureStatus::Failed);
     static_cast<void>(camera->get_camera_state());

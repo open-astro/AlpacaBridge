@@ -527,6 +527,8 @@ public:
             const auto status = poll_exposure_status();
             if (status == ZWOExposureStatus::Failed) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                // A failed retry bumps the generation but keeps its acquisition error.
+                if (!image_failure_.empty()) throw_image_failure_locked();
                 if (acquisition_valid_ && exposure_seq_ == download_seq) {
                     latch_image_failure_locked("camera exposure failed after SDK retries");
                     throw_image_failure_locked();
@@ -534,6 +536,7 @@ public:
                 throw AlpacaException("Exposure stopped during image retrieval", AlpacaError::InvalidOperation);
             }
             if (status != ZWOExposureStatus::Success) {
+                // A retry still in progress has no image yet, just like the initial attempt.
                 throw AlpacaException::asked_too_early("Image not ready");
             }
         }

@@ -26,6 +26,7 @@ EAF focuser `maxStep` (optional config): the unit clamps moves at its stored max
 - ZWO camera SDK calls go through the injected `ZWOSDK` reference; its owner must outlive the driver, in-flight calls, and any delayed pulse-guide turn-off. `ASIGetDataAfterExp` is the lazy, potentially multi-second transfer: keep it outside the state and SDK-global locks, using only the per-camera operation lock that serializes transfer against start/close so abort and status calls remain responsive.
 - A successful `ASIGetDataAfterExp` does not report the actual received byte count. Validate ROI/format readbacks and the converted array, but do not claim that a partially-written SDK buffer can be detected; retain fake coverage for transfer errors, not fabricated partial-length certainty.
 - **Acquisition metadata boundary** (issue #1477): SDK Success plus validated frame geometry publishes `LastExposure` before lazy transfer, whether reached through ImageReady or direct ImageArray. A later transfer failure retains that acquisition's metadata. Keep `acquisition_valid_` separate from published metadata, and refresh pending UTC/TaskClock start for each actual retry trigger after register reapplication. The UTC source is the host SDK invocation, not a measured sensor timestamp.
+- Direct ImageArray during a retry re-trigger raises `InvalidOperation` until the new attempt is ready; a failed re-trigger reports its latched `DriverException` on the first read, not a supersession error.
 
 #### ZWO AM telemetry (#1432, #1433)
 

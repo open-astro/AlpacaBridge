@@ -177,6 +177,10 @@ TEST_CASE("QHY Camera Driver - Not connected throws", "[qhy][camera][unit]") {
 TEST_CASE("QHY Camera Driver - Disconnected state", "[qhy][camera][unit]") {
     auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0);
 
+    for (double duration : {-1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        require_alpaca_error([&] { driver->start_exposure(duration, true); }, AlpacaError::InvalidValue);
+    }
+
     require_alpaca_error([&]() { (void)driver->get_camera_state(); }, alpacacore::AlpacaError::NotConnected);
     CHECK(driver->get_is_pulse_guiding() == false);
     CHECK(driver->get_can_abort_exposure() == true);
@@ -1303,6 +1307,33 @@ int logged_ms(const std::string& line) {
 
 }  // namespace
 
+TEST_CASE("QHY Camera Driver - exposure limits fail fast during connect", "[qhy][camera][unit][getter-stall]") {
+    const bool maximum = GENERATE(false, true);
+    FakeTaskClock clock;
+    SdkGate gate;
+    auto fake = make_fake();
+    gate.arm(fake, "init_camera");
+    auto driver = alpacacore::vendor::qhy::create_qhy_camera_by_index(0, 0, fake, clock);
+    TeardownGuard teardown{clock, driver, &gate};
+    driver->connect();
+    REQUIRE(eventually([&] { return gate.entered.load(); }));
+    std::atomic<int> error{0};
+    std::thread reader([&] {
+        try {
+            if (maximum)
+                (void)driver->get_exposure_max();
+            else
+                (void)driver->get_exposure_min();
+            error = -1;
+        } catch (const alpacacore::AlpacaException& ex) {
+            error = ex.error_code();
+        }
+    });
+    JoinPumped joiner{clock, reader, &gate};
+    CHECK(eventually([&] { return error.load() != 0; }, milliseconds(500)));
+    CHECK(error.load() == AlpacaError::NotConnected);
+}
+
 TEST_CASE("QHY Camera Driver - metadata is tied to worker arm not request or readout",
           "[qhy][camera][unit][taskclock][metadata]") {
     FakeTaskClock clock;
@@ -1532,6 +1563,9 @@ TEST_CASE("QHY Camera Driver - above maximum exposure preserves the acquisition 
     }
     const double maximum = driver->get_exposure_max();
     CHECK(maximum == (changed_mode ? 3.0 : 5.0));
+    for (double duration : {-1.0, std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity()}) {
+        require_alpaca_error([&] { driver->start_exposure(duration, true); }, AlpacaError::InvalidValue);
+    }
     driver->start_exposure(2.0, true);
     REQUIRE(eventually([&] { return gate.entered.load(); }));
     const int cancellations = fake.call_count("cancel_exposure");
