@@ -73,14 +73,19 @@ Header header_of(const std::string& body) {
             le32(body, 6), le32(body, 7), le32(body, 8), le32(body, 9), le32(body, 10)};
 }
 
+struct Refusal {
+    std::string message;
+    int code = 0;
+};
+
 template <typename Fn>
-std::string refusal_of(Fn&& fn) {
+Refusal refusal_of(Fn&& fn) {
     try {
         fn();
     } catch (const alpacacore::AlpacaException& e) {
-        return e.what();
+        return {e.what(), e.error_code()};
     }
-    return std::string();
+    return {};
 }
 
 // case: JSON ImageArray rank 2 is X-major with the envelope head
@@ -203,18 +208,22 @@ void case_imagebytes_element_types() {
 }
 
 // case: Invalid images are refused, including the size overflow guard
-// An image that cannot be encoded is refused with a DriverException message, never a short body.
-// Falsified by: removing the shape check, the data-length check or the size-overflow guard.
+// An image that cannot be encoded is refused with error code DriverException and a message, never a short body.
+// Falsified by: removing the shape check, the data-length check or the size-overflow guard; throwing InvalidOperation instead of DriverException.
 void case_invalid_images_refused() {
     const auto bad_rank = refusal_of([] { build_payload({{1}, 1, 1, 4}, kBytes); });
-    EXPECT(bad_rank.find("invalid rank or dimensions") != std::string::npos);
+    EXPECT(bad_rank.code == alpacacore::AlpacaError::DriverException);
+    EXPECT(bad_rank.message.find("invalid rank or dimensions") != std::string::npos);
     const auto bad_len_json = refusal_of([] { build_payload({{1, 2, 3}, 2, 2, 2}, kJson); });
-    EXPECT(bad_len_json.find("data length does not match dimensions") != std::string::npos);
+    EXPECT(bad_len_json.code == alpacacore::AlpacaError::DriverException);
+    EXPECT(bad_len_json.message.find("data length does not match dimensions") != std::string::npos);
     const auto bad_len_bytes = refusal_of([] { build_payload({{1, 2, 3}, 2, 2, 2}, kBytes); });
-    EXPECT(bad_len_bytes.find("data length does not match dimensions") != std::string::npos);
+    EXPECT(bad_len_bytes.code == alpacacore::AlpacaError::DriverException);
+    EXPECT(bad_len_bytes.message.find("data length does not match dimensions") != std::string::npos);
     const int huge = std::numeric_limits<int>::max();
     const auto overflow = refusal_of([&] { build_payload({{}, huge, huge, 3}, kBytes); });
-    EXPECT(overflow.find("payload size overflows addressable memory") != std::string::npos);
+    EXPECT(overflow.code == alpacacore::AlpacaError::DriverException);
+    EXPECT(overflow.message.find("payload size overflows addressable memory") != std::string::npos);
 }
 
 }  // namespace

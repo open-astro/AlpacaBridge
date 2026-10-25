@@ -31,8 +31,8 @@ bool accepts_imagebytes(std::string_view accept_header);
 
 // The camera imagearray response: ImageBytes when the Accept header asks for it,
 // else the JSON ImageArray envelope. Transaction ids come from `call`. Throws an
-// AlpacaException (InvalidOperation) for an image whose shape, data length or
-// encoded size is invalid.
+// AlpacaException with error code DriverException for an image whose shape, data
+// length or encoded size is invalid.
 ImagePayload build(const alpacacore::ImageArray& image, std::string_view accept_header, const DeviceCall& call);
 
 }  // namespace alpacahttp
