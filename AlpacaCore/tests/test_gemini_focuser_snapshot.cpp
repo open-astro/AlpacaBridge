@@ -17,12 +17,16 @@
 
 #include <alpacacore/alpaca_errors.h>
 #include <alpacacore/util/error_handling.h>
+#include <alpacacore/util/serial_port_registry.h>
 #include <alpacacore/vendor/gemini/gemini_focuser_driver.h>
 
 #include <chrono>
+#include <cstdio>
+#include <ctime>
 #include <functional>
 #include <string>
 #include <thread>
+#include <variant>
 
 #include "catch2_compat.h"
 #include "fake_gemini_focuser.h"
@@ -251,5 +255,110 @@ TEST_CASE("Gemini Focuser Driver - a getter after a successful connect never thr
     REQUIRE_NOTHROW(driver->set_connected(true));
     CHECK_NOTHROW(driver->get_position());
     CHECK_NOTHROW(driver->get_is_moving());
+    driver->set_connected(false);
+}
+
+// Falsified by: gemini_focuser_driver.cpp: Connected read connected_ alone (drop the !state_.link_lost() term), so a
+// fault standing past util::kLinkStalenessBound left Connected true and the getters on a latched DriverException.
+TEST_CASE("Gemini Focuser Snapshot - a fault that stands past the link-loss bound drops Connected",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    REQUIRE(driver->get_position() == 1000);
+    CHECK(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
+
+    // Three failed polls latch the fault; Connected is still true (decision 0009).
+    fake.set_garbage_state_replies(true);
+    for (int i = 0; i < 3; ++i) {
+        tick(clock);
+    }
+    CHECK(driver->get_connected() == true);
+
+    // The fault stands past util::kLinkStalenessBound (30 s): the link is lost.
+    clock.advance(31s);
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    CHECK(driver->get_connected() == false);
+    const auto expect_not_connected = [](const std::function<void()>& call) {
+        try {
+            call();
+            FAIL("expected NotConnected");
+        } catch (const alpacacore::AlpacaException& e) {
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
+        }
+    };
+    expect_not_connected([&] { (void)driver->get_position(); });
+    expect_not_connected([&] { (void)driver->get_is_moving(); });
+    expect_not_connected([&] { driver->move(500); });
+    CHECK(driver->get_device_state().empty());
+    // on_lost() released the transport.
+    CHECK_FALSE(alpacacore::util::is_serial_port_in_use(fake.slave_path()));
+
+    // No autonomous relink; the next Connect re-runs the probe and serves a fresh frame.
+    fake.set_garbage_state_replies(false);
+    fake.set_position(1700);
+    driver->set_connected(true);
+    CHECK(driver->get_connected() == true);
+    CHECK(driver->get_position() == 1700);
+
+    driver->set_connected(false);
+}
+
+// Falsified by: gemini_focuser_driver.cpp: get_link_fault() delete the override (the management listing never says why
+// the link is down).
+TEST_CASE(
+    "Gemini Focuser Snapshot - the link fault text is reported while faulted and after the loss, and cleared by "
+    "Disconnect",
+    "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    CHECK(driver->get_link_fault().empty());
+
+    fake.set_garbage_state_replies(true);
+    for (int i = 0; i < 3; ++i) tick(clock);
+    CHECK_FALSE(driver->get_link_fault().empty());  // latched, Connected still true
+
+    clock.advance(31s);
+    REQUIRE(clock.wait_for_woken_settled(kBound));
+    CHECK(driver->get_connected() == false);
+    CHECK_FALSE(driver->get_link_fault().empty());  // kept after the loss
+
+    driver->set_connected(false);
+    CHECK(driver->get_link_fault().empty());
+}
+
+// Falsified by: gemini_focuser_driver.cpp: device_state_age() delete the override (the TimeStamp is the request time,
+// not the frame's).
+TEST_CASE("Gemini Focuser Snapshot - DeviceState TimeStamp is when the frame was measured",
+          "[gemini][focuser][snapshot][unit][fake]") {
+    FakeGeminiFocuser fake;
+    FakeTaskClock clock;
+    auto driver = alpacacore::vendor::gemini::create_gemini_focuser(0, fake.slave_path(), 9600, clock);
+    driver->set_connected(true);
+    REQUIRE(clock.wait_for_waiters(1, kBound));
+    clock.advance(std::chrono::milliseconds(90));  // under the poll period: no poll, the frame ages
+    std::string stamp;
+    for (const auto& entry : driver->get_device_state()) {
+        if (entry.name == "TimeStamp") stamp = std::get<std::string>(entry.value);
+    }
+    const auto taken = std::chrono::system_clock::now();
+    REQUIRE_FALSE(stamp.empty());
+
+    std::tm tm{};
+    int ms = 0;
+    REQUIRE(std::sscanf(stamp.c_str(), "%d-%d-%dT%d:%d:%d.%dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday, &tm.tm_hour,
+                        &tm.tm_min, &tm.tm_sec, &ms) == 7);
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    const auto stamped = std::chrono::system_clock::from_time_t(timegm(&tm)) + std::chrono::milliseconds(ms);
+    const auto behind = std::chrono::duration_cast<std::chrono::milliseconds>(taken - stamped);
+    INFO("TimeStamp is " << behind.count() << " ms behind now");
+    CHECK(behind >= std::chrono::milliseconds(60));  // the 90 ms frame age; a request-time stamp is ~0
+    CHECK(behind < std::chrono::milliseconds(5000));
     driver->set_connected(false);
 }

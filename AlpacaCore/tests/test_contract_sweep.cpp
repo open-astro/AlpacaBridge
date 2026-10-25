@@ -2554,10 +2554,8 @@ TEST_CASE("Contract sweep - registry is not vacuous", "[contract][contract-sweep
 //    with no fault latched: Connected stays true, no link fault is reported, every snapshot-served getter
 //    still returns the value it returned before (within kSnapshotValueMargin), and DeviceState still lists
 //    the frame.
-//  - Past the bound (decision 0009), where the adopter has a lost-link stage: every one of the same getters
-//    throws NotConnected, Connected reads false and DeviceState is empty. The Gemini focuser and the Celestron
-//    focus motor have none (SnapshotRig::no_lost_link_stage): decision 0009 says a driver not yet adopted keeps
-//    Connected true while faulted, so their getters keep throwing the latched fault's DriverException.
+//  - Past the bound (decision 0009): every one of the same getters throws NotConnected, Connected reads false
+//    and DeviceState is empty.
 // How the frame is held differs by backend and each rig says where it comes from: a telescope with a poll
 // pause seam pauses its poll (no failed poll, so no latch); a focuser fake is muted or made to answer garbage
 // so the one poll the clock step wakes fails, which stays under every latch threshold.
@@ -2597,9 +2595,6 @@ struct SnapshotRig {
     std::function<void()> tick;
     // Getter names left out; the rig that fills it says why next to the assignment.
     std::vector<std::string> left_out;
-    // Non-null when the adopter has no lost-link stage yet, so a latched fault past the bound stays a fault
-    // (Connected true, getters DriverException) instead of NotConnected; the text says where that is decided.
-    const char* no_lost_link_stage = nullptr;
 
     SnapshotRig() = default;
     SnapshotRig(const SnapshotRig&) = delete;
@@ -2878,9 +2873,6 @@ std::unique_ptr<SnapshotRig> snapshot_rig_celestron_focuser() {
     rig.driver->set_connected(true);
     rig.await_poll();
     rig.hold_frame = [fake] { fake->set_muted(true); };
-    rig.no_lost_link_stage =
-        "decision 0009: a driver not yet adopted keeps Connected true while faulted (the Celestron focus motor has "
-        "no lost-link stage; celestron_focuser_driver.cpp throw_if_faulted)";
     return rig_owner;
 }
 #endif
@@ -2897,8 +2889,6 @@ std::unique_ptr<SnapshotRig> snapshot_rig_gemini_focuser() {
     rig.driver->set_connected(true);
     rig.await_poll();
     rig.hold_frame = [fake] { fake->set_garbage_state_replies(true); };
-    rig.no_lost_link_stage =
-        "decision 0009 roster: the Gemini focuser is planned, a polled latch where Connected stays true";
     return rig_owner;
 }
 #endif
@@ -3066,26 +3056,16 @@ std::vector<double> snapshot_baseline(SnapshotRig& rig, const std::vector<Snapsh
     for (int i = 0; i < kSnapshotLatchPolls; ++i) rig.pass(snap_chrono::seconds(1));
     rig.pass(kSnapshotLostStep);
     if (rig.tick) rig.tick();
-    // The code the getters throw past the bound: NotConnected once the link is lost (decision 0009), or, for an
-    // adopter with no lost-link stage yet, the DriverException of its latched fault with Connected still true.
-    const bool faulted_only = rig.no_lost_link_stage != nullptr;
-    if (faulted_only) {
-        INFO(rig.no_lost_link_stage);
-        CHECK(rig.driver->get_connected());
-    } else {
-        CHECK_FALSE(rig.driver->get_connected());
-        CHECK(rig.driver->get_device_state().empty());
-    }
-    const auto expected =
-        faulted_only ? alpacacore::AlpacaError::DriverException : alpacacore::AlpacaError::NotConnected;
+    CHECK_FALSE(rig.driver->get_connected());
+    CHECK(rig.driver->get_device_state().empty());
     for (const auto& g : getters) {
         if (std::find(rig.left_out.begin(), rig.left_out.end(), g.name) != rig.left_out.end()) continue;
-        INFO(g.name << " past the link-loss bound must throw " << (faulted_only ? "DriverException" : "NotConnected"));
+        INFO(g.name << " past the link-loss bound must throw NotConnected");
         try {
             (void)g.read(*rig.driver);
             FAIL_CHECK("no throw");
         } catch (const AlpacaException& e) {
-            CHECK(e.error_code() == expected);
+            CHECK(e.error_code() == alpacacore::AlpacaError::NotConnected);
         }
     }
 }
