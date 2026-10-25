@@ -42,7 +42,7 @@ The rules a change is checked against. Each names where it applies and what chec
 
 1. A shared filter wheel move-model module is not extracted while a case in `test_filterwheel_move_model.cpp` diverges on one of the drivers it would serve. Scope: `AlpacaCore/tests/test_filterwheel_move_model.cpp`, `AlpacaCore/src/vendors/zwo/zwo_filterwheel_driver.cpp`, `AlpacaCore/src/vendors/qhy/qhy_cfw3_filterwheel_driver.cpp`. Checked by: review (a diff that adds a move-model header or class under `AlpacaCore/include/alpacacore/util/` while a `[!shouldfail]` tag remains in the test).
 2. A `[!shouldfail]` tag on a move-model case is removed in the PR that makes the driver pass it, and that PR updates the table in this record. Scope: `AlpacaCore/tests/test_filterwheel_move_model.cpp`. Checked by: the test run (Catch2 reports a `[!shouldfail]` case that passes as a failure).
-3. A filter wheel driver that joins the move-model test adds a rig to the test file and runs the existing case bodies; it does not edit or copy a body. Scope: `AlpacaCore/tests/test_filterwheel_move_model.cpp`. Checked by: review (the `MOVE_MODEL_CASES` lines and the rig structs are the only parts of the file that grow).
+3. A filter wheel driver that joins the move-model test adds a rig to the test file and runs the existing case bodies; it does not edit or copy a body. Scope: `AlpacaCore/tests/test_filterwheel_move_model.cpp`. Checked by: review (the `TEST_CASE` pairs and the rig structs are the only parts of the file that grow).
 
 ## Alternatives rejected
 
