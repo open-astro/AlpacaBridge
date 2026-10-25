@@ -14,9 +14,8 @@
 #include <alpacacore/util/async_operation.h>
 #include <alpacacore/util/connection_resolver.h>
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
-#include <alpacacore/util/state_snapshot.h>
+#include <alpacacore/util/polled_state.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/vendor/astroasis/astroasis_focuser_driver.h>
 #include <alpacacore/vendor/astroasis/astroasis_protocol_wrapper.h>
@@ -34,15 +33,10 @@ namespace {
 
 // State poll (open-astro#1327, decision 0010), start to start. One poll is one
 // 0x32 exchange, which fills position, motion and temperature. Getters read the
-// snapshot and make no exchange. The freshness bound is two periods: a frame
-// older than that is still served, and one older than util::kLinkStalenessBound
-// is a lost link (decision 0009). kFaultThreshold failed polls in a row latch
-// the #237 "communications compromised" fault, which the getters report until a
-// poll succeeds.
+// state and make no exchange. The freshness bound is two periods; the cadence,
+// the fault latch and the link-loss rule live in util::PolledState.
 constexpr auto kStatePollPeriod = std::chrono::milliseconds(100);
-constexpr auto kSnapshotMaxAge = 2 * kStatePollPeriod;
 constexpr int kFaultThreshold = 3;
-static_assert(kSnapshotMaxAge < util::kLinkStalenessBound, "freshness must undercut the link-loss bound");
 
 }  // namespace
 
@@ -61,7 +55,10 @@ public:
           hid_path_(std::move(hid_path)),
           connection_resolver_(std::move(connection_resolver)),
           connected_(false),
-          protocol_(std::move(transport)) {}
+          protocol_(std::move(transport)),
+          state_(
+              clock_, state_poll_generation_, {kStatePollPeriod, kFaultThreshold, 2 * kStatePollPeriod, "Astroasis"},
+              [this] { return probe(); }, [this] { protocol_.disconnect(); }) {}
 
     ~AstroasisFocuserDriver() override {
         // Blocks new connection tasks, then joins the in-flight one — MUST be
@@ -69,7 +66,7 @@ public:
         shutdown_connection();
         // Joins the poll body before the members it touches go away; a driver
         // that never finished a connect has no body, so this is a no-op.
-        state_poll_.cancel_all_and_join();
+        state_.stop_and_join();
         if (connected_.load()) {
             try {
                 set_connected(false);  // NOLINT(clang-analyzer-optin.cplusplus.VirtualCall)
@@ -98,9 +95,9 @@ public:
     // Lock-free: two atomic reads, so a Connected poll landing during an
     // in-flight connect answers at once instead of waiting out the ~1.1 s HID
     // handshake. A poll that has gone unanswered for util::kLinkStalenessBound
-    // latches link_lost_ (decision 0009), and Connected reads false without a
-    // reconnect.
-    bool get_connected() const override { return connected_.load() && !link_lost_.load(); }
+    // latches the loss in state_ (decision 0009), and Connected reads false
+    // without a reconnect.
+    bool get_connected() const override { return connected_.load() && !state_.link_lost(); }
 
     void connect() override { start_connection_task(true); }
 
@@ -138,7 +135,7 @@ public:
         // against a lost link reconnects instead of taking the idempotency
         // return. The disconnect gate takes the raw connected_, so Connected=false
         // still tears down a lost link (QHY Q-Focuser shape, decision 0009).
-        const bool live = connected_.load() && !link_lost_.load();
+        const bool live = connected_.load() && !state_.link_lost();
         // See AsyncConnectable's class comment for why these gates run before
         // the idempotency check.
         if (!connected && record_disconnect_if_connect_in_flight(connected_.load())) {
@@ -180,24 +177,19 @@ public:
             }
             // First frame before Connected reads true, so a getter has an
             // answer the moment Connect returns.
-            reset_state();
-            link_lost_.store(false);
+            state_.reset();
             // A lost or dropped first reply gets one retry. A connect whose
             // retry also publishes nothing fails: Connected true means the
             // getters have a frame to serve (decisions 0010 and 0016).
-            poll_state_once();
-            if (!snapshot_.read().has_value()) {
-                poll_state_once();
-            }
-            if (!snapshot_.read().has_value()) {
-                reset_state();
+            if (!state_.start()) {
+                state_.stop_and_join();
+                state_.reset();
                 max_step_.store(0);
                 protocol_.disconnect();
                 throw AlpacaException("Astroasis focuser did not answer the first state poll",
                                       AlpacaError::DriverException);
             }
             connected_.store(true);
-            start_state_poll();
             ALPACA_LOG_INFO("Astroasis", "Focuser connected");
         } else {
             teardown_locked();
@@ -215,9 +207,8 @@ public:
         max_step_.store(0);
         // Join the poll before the transport closes; its body takes no lock
         // this thread holds.
-        state_poll_.cancel_all_and_join();
-        reset_state();
-        link_lost_.store(false);
+        state_.stop_and_join();
+        state_.reset();
         protocol_.disconnect();
     }
 
@@ -305,17 +296,16 @@ public:
         try {
             protocol_.stop_move();
         } catch (...) {
-            snapshot_.write([](StateFrame&) {});
+            state_.write([](StateFrame&) {});
             throw;
         }
         // Write-through (decision 0010, point 3): IsMoving reads false now, not after the next poll.
-        snapshot_.write([](StateFrame& frame) { frame.moving = false; });
+        state_.write([](StateFrame& frame) { frame.moving = false; });
     }
 
     void move(int position) override {
         // No transition_mutex_: see halt().
-        ensure_connected();
-        throw_if_faulted();
+        (void)served_frame();  // refused while the link is faulted or lost
         const int max_step = max_step_.load();
         // ConformU requires graceful clamping, not exceptions.
         if (position < 0) {
@@ -326,12 +316,12 @@ public:
         try {
             protocol_.move_to(position);
         } catch (...) {
-            snapshot_.write([](StateFrame&) {});  // the device may have moved; the next poll measures it
+            state_.write([](StateFrame&) {});  // the device may have moved; the next poll measures it
             throw;
         }
         // Write-through: IsMoving must read true right after a successful Move,
         // not after the next poll. Position stays the measured one.
-        snapshot_.write([position](StateFrame& frame) { frame.moving = frame.position != position; });
+        state_.write([position](StateFrame& frame) { frame.moving = frame.position != position; });
     }
 
 private:
@@ -345,148 +335,41 @@ private:
     // The single fault text (decision 0009, point 5): the latched poll fault,
     // kept after the link is lost so the management listing says why.
     std::string get_link_fault() const override {
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.faulted()) return health_.fault();
-        }
-        return link_lost_.load() ? "no answer to the state poll" : std::string();
+        auto fault = state_.fault();
+        if (!fault.empty()) return fault;
+        return state_.link_lost() ? "no answer to the state poll" : std::string();
     }
 
     // The TimeStamp of DeviceState is when the frame was measured (decision 0010).
-    std::optional<std::chrono::nanoseconds> device_state_age() const override {
-        const auto reading = snapshot_.read();
-        if (!reading.has_value()) return std::nullopt;
-        return clock_.now() - reading->measured_at;
-    }
+    std::optional<std::chrono::nanoseconds> device_state_age() const override { return state_.age(); }
 
     void ensure_connected() const {
         if (!connected_.load()) {
             throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
         }
-        if (link_lost_.load()) {
+        if (state_.link_lost()) {
             throw AlpacaException("Focuser link lost; set Connected false then true to reconnect",
                                   AlpacaError::NotConnected);
         }
     }
 
-    // "<device> communications compromised" (driver-lifecycle.instructions.md, issue #237) while the
-    // poll has failed kFaultThreshold times in a row; Connected stays true.
-    void throw_if_faulted() const {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        if (health_.faulted()) {
-            throw AlpacaException("Astroasis focuser communications compromised: " + health_.fault(),
-                                  AlpacaError::DriverException);
-        }
-    }
-
-    // The frame the getters serve. A stale frame is still served (decision
-    // 0010), until it is older than util::kLinkStalenessBound: then the link is
-    // lost (decision 0009) and the getter says NotConnected. A faulted link is
-    // not served.
+    // The frame the getters serve (decisions 0009 and 0010): stale is served,
+    // a faulted link throws DriverException, a lost one NotConnected.
     StateFrame served_frame() const {
         ensure_connected();
-        const auto reading = snapshot_.read();
-        if (reading.has_value() && clock_.now() - reading->measured_at >= util::kLinkStalenessBound) {
-            link_lost_.store(true);
-            ensure_connected();
-        }
-        throw_if_faulted();
-        if (!reading.has_value()) {
-            // A disconnect between the check and the read dropped the frame.
-            ensure_connected();
-            throw AlpacaException("Focuser not connected", AlpacaError::NotConnected);
-        }
-        return reading->value;
+        return state_.served().value;
     }
 
-    // One poll: one exchange with no driver lock held (the protocol wrapper
-    // serialises it), then publish. A write that landed since begin_poll()
-    // makes publish() drop the frame; the next poll publishes.
-    void poll_state_once() {
-        const auto token = snapshot_.begin_poll();
+    // The poll's one exchange, on the poll thread with no driver lock held
+    // (the protocol wrapper serialises it).
+    StateFrame probe() {
+        const auto status = protocol_.get_status();
         StateFrame frame;
-        try {
-            const auto status = protocol_.get_status();
-            frame.position = status.position;
-            frame.moving = status.moving;
-            frame.temperature =
-                status.temperature_external_valid ? status.temperature_external : status.temperature_internal;
-        } catch (const std::exception&) {
-            // The exception text can carry the device's reply; AlpacaCore has
-            // no log escaper (CWE-117), so the lines state the fact only.
-            note_poll_failure();
-            return;
-        }
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.on_reply()) {
-                ALPACA_LOG_INFO("Astroasis", "Focuser communications restored");
-            }
-        }
-        snapshot_.publish(token, frame);
-    }
-
-    void note_poll_failure() {
-        bool lost = false;
-        {
-            std::lock_guard<std::mutex> lock(health_mutex_);
-            if (health_.note_failure("no valid reply to the state poll", kFaultThreshold, clock_.now())) {
-                ALPACA_LOG_ERROR("Astroasis", "Focuser communications compromised: " + health_.fault());
-            } else {
-                ALPACA_LOG_DEBUG("Astroasis", "Focuser state poll failed; the frame keeps its age");
-            }
-            lost = health_.fault_stale(clock_.now());
-        }
-        if (!lost) {
-            const auto reading = snapshot_.read();
-            lost = reading.has_value() && clock_.now() - reading->measured_at >= util::kLinkStalenessBound;
-        }
-        if (lost && !link_lost_.exchange(true)) {
-            ALPACA_LOG_ERROR(
-                "Astroasis",
-                "Focuser link lost: no answer to the state poll for " +
-                    std::to_string(
-                        std::chrono::duration_cast<std::chrono::seconds>(util::kLinkStalenessBound).count()) +
-                    " s; set Connected false then true to reconnect");
-        }
-    }
-
-    void run_state_poll(util::OperationContext& ctx) {
-        if (!ctx.wait_for(kStatePollPeriod)) {
-            return;
-        }
-        for (;;) {
-            const auto started = clock_.now();
-            poll_state_once();
-            if (link_lost_.load()) {
-                // Lost: release the transport (decision 0009, point 3) and end;
-                // no autonomous reconnect (point 4).
-                protocol_.disconnect();
-                return;
-            }
-            // Start to start: skip any tick a slow poll ran over (no catch-up).
-            const auto spent = clock_.now() - started;
-            const auto ticks = spent / kStatePollPeriod + 1;
-            if (!ctx.wait_for(ticks * kStatePollPeriod - spent)) {
-                return;
-            }
-        }
-    }
-
-    // After the store(true), with no driver lock held (AsyncOperation rule 10).
-    void start_state_poll() {
-        try {
-            state_poll_.start([this](util::OperationContext& ctx) { run_state_poll(ctx); });
-        } catch (const std::exception&) {
-            ALPACA_LOG_ERROR("Astroasis", "Focuser state poll did not start");
-        }
-    }
-
-    // At connect and disconnect: drop the frame and the fault.
-    void reset_state() {
-        snapshot_.reset();
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        health_.reset();
+        frame.position = status.position;
+        frame.moving = status.moving;
+        frame.temperature =
+            status.temperature_external_valid ? status.temperature_external : status.temperature_internal;
+        return frame;
     }
 
     util::TaskClock& clock_;
@@ -498,21 +381,13 @@ private:
     util::ConnectionResolver<std::string> connection_resolver_;
     bool connection_resolved_ = false;
     std::atomic<bool> connected_;
-    // Latched when the state poll has gone unanswered past
-    // util::kLinkStalenessBound (decision 0009); cleared at connect and disconnect.
-    mutable std::atomic<bool> link_lost_{false};
     AstroasisProtocolWrapper protocol_;
     std::atomic<int> max_step_{0};  // read at connect, cleared at disconnect
-    // Position, motion and temperature served to the getters (open-astro#1327).
-    // Declared after clock_ and protocol_: state_poll_ is destroyed first and
-    // joins its body while both are still alive.
-    mutable util::StateSnapshot<StateFrame> snapshot_{clock_, kSnapshotMaxAge};
-    // Link health of the poll (issue #237). health_mutex_ is narrow: held for a
-    // counter or a string, never across an exchange.
-    mutable std::mutex health_mutex_;
-    util::PolledLinkHealth health_;
     util::OperationGeneration state_poll_generation_;
-    util::AsyncOperation state_poll_{"Astroasis focuser state poll", state_poll_generation_, clock_};
+    // Position, motion and temperature served to the getters (open-astro#1327).
+    // Declared after clock_ and protocol_: it is destroyed first and joins its
+    // poll body while both are still alive.
+    util::PolledState<StateFrame> state_;
     // Serializes whole connect/disconnect transitions; see set_connected().
     std::mutex transition_mutex_;
 };

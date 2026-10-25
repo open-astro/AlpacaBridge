@@ -3804,6 +3804,15 @@ def self_test():
           _adoption_findings("rec", mixed, mixed_files) == [])
     f = _adoption_findings("rec", mixed, dict(mixed_files, **{"src/a_driver.cpp": "Other o;"}))
     check("adoption: a blank Symbol cell is checked against the Symbol line", any("row A is adopted" in x for x in f))
+    polled = ("\nScan: `src/*_driver.cpp`\nSymbol: `StateSnapshot`\n\n| Driver | Symbol | Source | State | Issue |\n"
+              "| --- | --- | --- | --- | --- |\n| P | `PolledState` | `src/p_driver.cpp` | adopted | #1 |\n"
+              "| S | `StateSnapshot` | `src/s_driver.cpp` | adopted | #2 |\n")
+    polled_files = {"src/p_driver.cpp": "util::PolledState<F> state_;", "src/s_driver.cpp": "util::StateSnapshot<F> snap_;"}
+    check("adoption: a PolledState row and a StateSnapshot row each hold to their own symbol",
+          _adoption_findings("rec", polled, polled_files) == [])
+    f = _adoption_findings("rec", polled, dict(polled_files, **{"src/p_driver.cpp": "util::StateSnapshot<F> snap_;"}))
+    check("adoption: a PolledState row whose source names only StateSnapshot is reported",
+          any("row P is adopted but no source names `PolledState`" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/a_driver.cpp": "// Clock is not used here\nint x;"}))
     check("adoption: a symbol named only in a comment does not count as adoption", any("row A is adopted" in x for x in f))
     f = adoption(files=dict(adoption_files, **{"src/c_driver.cpp": "/* Clock, one day */ int x;"}))
