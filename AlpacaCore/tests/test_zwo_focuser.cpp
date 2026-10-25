@@ -400,7 +400,7 @@ TEST_CASE("ZWO EAF Focuser Driver - An unavailable step range does not refuse a 
 }
 
 // Decision 0016: Name and UniqueID need no device access, so a connect that holds the SDK open must not park them.
-// Falsified by: zwo_focuser_driver.cpp set_connected(true) holding mutex_ across open_focuser() (get_name() then
+// Falsified by: zwo_focuser_driver.cpp set_connected(true) holding mutex_ across open_focuser_link() (get_name() then
 // waits the whole 300 ms open).
 TEST_CASE("ZWO EAF Focuser Driver - Name and UniqueID answer while a connect holds the SDK open",
           "[zwo][focuser][unit][fake-sdk][getter-stall]") {
@@ -451,7 +451,7 @@ TEST_CASE("ZWO EAF Focuser Driver - Identity and limits answer while a status re
 }
 
 // A disconnect must wait for the exchange in flight, never close the handle under it (the I/O lock).
-// Falsified by: zwo_focuser_driver.cpp set_connected(false) calling close_focuser() without io_mutex_, or move()
+// Falsified by: zwo_focuser_driver.cpp set_connected(false) calling close_focuser_link() without io_mutex_, or move()
 // reading the id and then calling the SDK without it (closed_while_busy is set).
 TEST_CASE("ZWO EAF Focuser Driver - A disconnect waits for the exchange in flight instead of closing under it",
           "[zwo][focuser][unit][fake-sdk][getter-stall]") {
