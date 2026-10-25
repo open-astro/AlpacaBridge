@@ -1007,8 +1007,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        util::validate_ra(ra, "RightAscension");
-        util::validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         double longitude = 0.0;
         bool has_longitude = false;
         {
@@ -1670,8 +1669,7 @@ public:
         // slew_to_target() -> slew_to_target_async() handles ensure_not_parked and
         // reset_position_offsets; avoid redundant mount queries here. The Tracking
         // gate runs first, though: the target setters below write to the mount.
-        util::validate_ra(ra, "RightAscension");
-        util::validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
         check_equatorial_slew_allowed("SlewToCoordinates");
         set_target_right_ascension(ra);
         set_target_declination(dec);
@@ -1683,8 +1681,7 @@ public:
         // checks. The parked and Tracking gate runs here too, before the target
         // is replaced: both read cached state, and Tracking reads the mount (":GAT")
         // only when its 2 s cache has aged out.
-        util::validate_ra(ra, "RightAscension");
-        util::validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         check_equatorial_slew_allowed("SlewToCoordinatesAsync");
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1736,8 +1733,7 @@ public:
                 target_ra = target_ra_hours_;
                 target_dec = target_dec_degrees_;
             }
-            util::validate_ra(target_ra, "RightAscension");
-            util::validate_dec(target_dec, "Declination");
+            util::validate_ra_dec(target_ra, target_dec, "SlewToTargetAsync");
             // ITelescopeV4: an equatorial slew with Tracking false is
             // InvalidOperation (open-astro#1274; see require_tracking_for_slew),
             // checked before reset_position_offsets() cancels a pulse in
@@ -1930,8 +1926,7 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         // sync_to_target() handles ensure_not_parked and reset_position_offsets.
-        util::validate_ra(ra, "RightAscension");
-        util::validate_dec(dec, "Declination");
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         check_connected();
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1959,8 +1954,7 @@ public:
             target_dec = target_dec_degrees_;
         }
 
-        util::validate_ra(target_ra, "RightAscension");
-        util::validate_dec(target_dec, "Declination");
+        util::validate_ra_dec(target_ra, target_dec, "SyncToTarget");
 
         auto& protocol = protocol_;
 

@@ -721,10 +721,7 @@ public:
 
     int get_destination_side_of_pier(double ra, double dec) const override {
         // Arguments first, even while disconnected (#1478).
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0 || !std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("DestinationSideOfPier needs RA 0 to <24 hours and Dec -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_site_info_cached_locked();

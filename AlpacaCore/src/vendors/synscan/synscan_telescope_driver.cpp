@@ -218,15 +218,7 @@ std::string synscan_model_id_to_name(int model_id) {
 } // namespace
 
 double park_ra_from_hour_angle(double lst_hours, double hour_angle_hours) {
-    double ra = std::fmod(lst_hours - hour_angle_hours, 24.0);
-    if (ra < 0.0) {
-        ra += 24.0;
-    }
-    // A tiny negative remainder plus 24.0 rounds to exactly 24.0.
-    if (ra >= 24.0) {
-        ra -= 24.0;
-    }
-    return ra;
+    return util::wrap_hours(lst_hours - hour_angle_hours);
 }
 
 class SynScanTelescopeDriver : public TelescopeDriver, protected alpacacore::AsyncConnectable {

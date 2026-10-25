@@ -521,7 +521,7 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_);
@@ -840,7 +840,7 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SlewToCoordinates");
         // Initiator lock: the gate, the command and the state write happen in the order of the commands on the
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
@@ -869,7 +869,7 @@ public:
 
     void slew_to_coordinates_async(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
@@ -916,7 +916,7 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SyncToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();

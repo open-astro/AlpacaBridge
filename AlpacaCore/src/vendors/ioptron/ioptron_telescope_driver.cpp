@@ -864,7 +864,7 @@ public:
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
-        return (hour_angle >= 0.0) ? 0 : 1;
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
@@ -885,7 +885,7 @@ public:
         const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
 
-        return (hour_angle >= 0.0) ? 0 : 1;
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -959,12 +959,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException(
-                "Site latitude must be between -90 and 90 degrees",
-                AlpacaError::InvalidValue
-            );
-        }
+        util::validate_latitude(latitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -985,12 +980,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException(
-                "Site longitude must be between -180 and 180 degrees",
-                AlpacaError::InvalidValue
-            );
-        }
+        util::validate_longitude(longitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();

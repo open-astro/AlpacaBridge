@@ -28,7 +28,9 @@ namespace detail {
 // MoveAxis run before the connection check and any TheSkyX call. Free
 // functions so a test can call them without constructing a driver.
 // Throws InvalidValue for a non-finite or out-of-range RA (checked first) or Dec.
-inline void validate_ra_dec(double ra, double dec) { util::validate_ra_dec(ra, dec, "Bisque"); }
+inline void validate_ra_dec(double ra, double dec, const char* operation = "SlewToCoordinates") {
+    util::validate_ra_dec(ra, dec, operation);
+}
 // Throws InvalidValue for a non-finite MoveAxis rate.
 void validate_move_axis_rate(double rate);
 }  // namespace detail

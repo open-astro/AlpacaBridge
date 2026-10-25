@@ -110,7 +110,7 @@ TEST_CASE("pointing - local_sidereal_hours adds the east longitude and wraps int
     }
 }
 
-// Falsified by: wrap_hours() using a single fmod without the negative branch,
+// Falsified by: wrap_hours() using a single fmod without the negative branch, or without the >= 24 guard,
 // or returning 24.0 for an input of 24.
 TEST_CASE("pointing - wrap_hours lands in [0, 24)", "[util][pointing]") {
     CHECK(pointing::wrap_hours(0.0) == 0.0);
@@ -118,15 +118,18 @@ TEST_CASE("pointing - wrap_hours lands in [0, 24)", "[util][pointing]") {
     CHECK(pointing::wrap_hours(-0.5) == Approx(23.5));
     CHECK(pointing::wrap_hours(25.5) == Approx(1.5));
     CHECK(pointing::wrap_hours(-24.0) == 0.0);
+    // A tiny negative remainder plus 24.0 rounds to exactly 24.0; the guard folds it back to 0.
+    CHECK(pointing::wrap_hours(-1e-18) == 0.0);
 }
 
-// Falsified by: wrap_degrees() using a single fmod without the negative branch.
+// Falsified by: wrap_degrees() using a single fmod without the negative branch, or without the >= 360 guard.
 TEST_CASE("pointing - wrap_degrees lands in [0, 360)", "[util][pointing]") {
     CHECK(pointing::wrap_degrees(0.0) == 0.0);
     CHECK(pointing::wrap_degrees(360.0) == 0.0);
     CHECK(pointing::wrap_degrees(-90.0) == Approx(270.0));
     CHECK(pointing::wrap_degrees(450.0) == Approx(90.0));
     CHECK(pointing::wrap_degrees(-180.0) == Approx(180.0));
+    CHECK(pointing::wrap_degrees(-1e-15) == 0.0);
 }
 
 // Falsified by: wrap_hour_angle() closing the interval on the positive side

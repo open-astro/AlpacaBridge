@@ -45,6 +45,10 @@ inline double wrap_hours(double hours) {
     if (wrapped < 0.0) {
         wrapped += 24.0;
     }
+    // A tiny negative remainder plus 24.0 rounds to exactly 24.0.
+    if (wrapped >= 24.0) {
+        wrapped -= 24.0;
+    }
     return wrapped;
 }
 
@@ -53,6 +57,10 @@ inline double wrap_degrees(double degrees) {
     double wrapped = std::fmod(degrees, 360.0);
     if (wrapped < 0.0) {
         wrapped += 360.0;
+    }
+    // A tiny negative remainder plus 360.0 rounds to exactly 360.0.
+    if (wrapped >= 360.0) {
+        wrapped -= 360.0;
     }
     return wrapped;
 }

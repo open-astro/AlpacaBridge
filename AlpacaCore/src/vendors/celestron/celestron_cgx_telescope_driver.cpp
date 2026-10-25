@@ -305,7 +305,7 @@ private:
     double current_utc_locked() const;
     std::chrono::system_clock::time_point client_utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
-    void validate_site_and_coordinates(double ra, double dec) const;
+    void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
     void run_home_operation(util::OperationContext& context, bool park_after);
     void start_slew_operation(double ra, double dec);
@@ -505,11 +505,8 @@ bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
 
 CgxHemisphere CelestronCgxTelescopeDriver::hemisphere_locked() const { return mechanical_hemisphere_; }
 
-void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec) const {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0 || !std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-        throw AlpacaException("Celestron CGX coordinates must use RA [0,24) hours and Dec [-90,90] degrees",
-                              AlpacaError::InvalidValue);
-    }
+void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec, const char* operation) const {
+    util::validate_ra_dec(ra, dec, operation);
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32_t* ra_encoder,
@@ -986,7 +983,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "DestinationSideOfPier");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     const auto utc =
@@ -1400,7 +1397,7 @@ void CelestronCgxTelescopeDriver::slew_to_target_async() {
     start_slew_operation(ra, dec);
 }
 void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "SyncToCoordinates");
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1804,7 +1801,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 }
 
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
     require_connected();
     MotionTransition transition(*this);
     bool sync_correction_active;
