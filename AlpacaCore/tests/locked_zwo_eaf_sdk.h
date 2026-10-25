@@ -14,7 +14,10 @@
 
 #include <alpacacore/vendor/zwo/zwo_eaf_sdk.h>
 
+#include <cstdint>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -26,7 +29,9 @@ namespace alpacacore::test {
  * serialises its entry points. Same shape as LockedZWOSDK; a per-SDK class
  * rather than a shared template, because the interfaces share no signatures.
  *
- * Wraps all 16 entry points; the mutex is a leaf (the inner SDK never calls back into
+ * Wraps all 18 entry points. with_link() forwards without taking the mutex: its body calls back
+ * into this decorator's per-device methods (issue #1500). Every other entry point holds the
+ * mutex across the inner call only, so it is a leaf there (the inner SDK never calls back into
  * this interface). No EAF call blocks, so there is no blocking-mode caveat (the fake's opt-in
  * delays are not used behind this decorator).
  */
@@ -45,11 +50,17 @@ public:
     bool get_focuser_info_by_index(int focuser_index, Info& info) override {
         return locked([&] { return inner_.get_focuser_info_by_index(focuser_index, info); });
     }
-    void open_focuser(int focuser_id) override {
-        locked([&] { inner_.open_focuser(focuser_id); });
+    vendor::zwo::SharedOpenTable::Opened open_focuser_link(int focuser_id) override {
+        return locked([&] { return inner_.open_focuser_link(focuser_id); });
     }
-    void close_focuser(int focuser_id) override {
-        locked([&] { inner_.close_focuser(focuser_id); });
+    std::optional<vendor::zwo::SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override {
+        return locked([&] { return inner_.open_focuser_candidate(focuser_id); });
+    }
+    void close_focuser_link(int focuser_id, std::uint64_t link) override {
+        locked([&] { inner_.close_focuser_link(focuser_id, link); });
+    }
+    void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) override {
+        inner_.with_link(focuser_id, link, fn);
     }
     bool is_moving(int focuser_id) override {
         return locked([&] { return inner_.is_moving(focuser_id); });

@@ -28,8 +28,10 @@ public:
     bool get_focuser_info_by_id(int focuser_id, ZWOEAFFocuserInfo& info) override;
     bool get_focuser_info_by_index(int focuser_index, ZWOEAFFocuserInfo& info) override;
 
-    void open_focuser(int focuser_id) override;
-    void close_focuser(int focuser_id) override;
+    SharedOpenTable::Opened open_focuser_link(int focuser_id) override;
+    std::optional<SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override;
+    void close_focuser_link(int focuser_id, std::uint64_t link) override;
+    void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) override;
 
     bool is_moving(int focuser_id) override;
     int get_position(int focuser_id) override;

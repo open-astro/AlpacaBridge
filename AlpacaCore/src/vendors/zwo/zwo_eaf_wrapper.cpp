@@ -10,13 +10,12 @@
 // license text and the vendor-SDK linking exception, or the license online at:
 // https://www.gnu.org/licenses/agpl-3.0.html
 
-#include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
-#include <alpacacore/util/error_handling.h>
 #include <EAF_focuser.h>
-#include <mutex>
-#include <sstream>
+#include <alpacacore/util/error_handling.h>
+#include <alpacacore/vendor/zwo/zwo_eaf_wrapper.h>
+
 #include <iomanip>
-#include <unordered_map>
+#include <sstream>
 
 namespace alpacacore::vendor::zwo {
 
@@ -99,11 +98,25 @@ int map_error_code(EAF_ERROR_CODE code) {
     }
 }
 
-void throw_on_error(EAF_ERROR_CODE code, const std::string& context) {
+// Issue #1500, decision 7: the bridge passes only enumerated ids, so EAF_ERROR_INVALID_ID on a per-device call means
+// the id is gone (NotConnected, a lost link). EAFOpen and EAFGetID keep InvalidValue for an id or index not found.
+// TODO(#1500): confirm on the rig that a call on an old id after a replug returns CLOSED or INVALID_ID.
+void throw_on_error(EAF_ERROR_CODE code, const std::string& context, int invalid_id_code = AlpacaError::NotConnected) {
     if (code == EAF_SUCCESS) {
         return;
     }
-    throw AlpacaException(context + ": " + error_code_to_string(code), map_error_code(code));
+    const int mapped = code == EAF_ERROR_INVALID_ID ? invalid_id_code : map_error_code(code);
+    throw AlpacaException(context + ": " + error_code_to_string(code), mapped);
+}
+
+std::string read_serial_number(int focuser_id) {
+    EAF_SN sn{};
+    throw_on_error(EAFGetSerialNumber(focuser_id, &sn), "EAFGetSerialNumber");
+    std::ostringstream oss;
+    for (unsigned char byte : sn.id) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    }
+    return oss.str();
 }
 
 ZWOEAFFocuserInfo convert_focuser_info(const EAF_INFO& info) {
@@ -116,13 +129,15 @@ ZWOEAFFocuserInfo convert_focuser_info(const EAF_INFO& info) {
 
 } // namespace
 
+// Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info in
+// table_.unchecked(). EAFGetSDKVersion returns a static string and takes no lock.
 class ZWOEAFSDKWrapper::Impl {
 public:
-    std::mutex mutex_;
-    struct FocuserUsage {
-        int open_count = 0;
-    };
-    std::unordered_map<int, FocuserUsage> usage_;
+    SharedOpenTable table_{SharedOpenTable::Ops{
+        [](int id) { throw_on_error(EAFOpen(id), "EAFOpen", AlpacaError::InvalidValue); },
+        [](int id) { throw_on_error(EAFClose(id), "EAFClose"); },
+        [](int id) { return read_serial_number(id); },
+    }};
 };
 
 ZWOEAFSDKWrapper::ZWOEAFSDKWrapper()
@@ -136,164 +151,142 @@ ZWOEAFSDKWrapper& ZWOEAFSDKWrapper::instance() {
 }
 
 std::vector<ZWOEAFFocuserInfo> ZWOEAFSDKWrapper::enumerate_focusers() {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int count = EAFGetNum();
-    std::vector<ZWOEAFFocuserInfo> result;
-    if (count <= 0) {
-        return result;
-    }
-    result.reserve(static_cast<std::size_t>(count));
-    for (int i = 0; i < count; ++i) {
-        int id = 0;
-        throw_on_error(EAFGetID(i, &id), "EAFGetID");
-        EAF_INFO info{};
-        EAF_ERROR_CODE code = EAFGetProperty(id, &info);
-        if (code == EAF_SUCCESS) {
-            result.push_back(convert_focuser_info(info));
-        } else {
-            ZWOEAFFocuserInfo fallback;
-            fallback.focuser_id = id;
-            fallback.max_step = 0;
-            result.push_back(std::move(fallback));
+    return pimpl_->table_.unchecked([] {
+        int count = EAFGetNum();
+        std::vector<ZWOEAFFocuserInfo> result;
+        if (count <= 0) {
+            return result;
         }
-    }
-    return result;
+        result.reserve(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i) {
+            int id = 0;
+            throw_on_error(EAFGetID(i, &id), "EAFGetID", AlpacaError::InvalidValue);
+            EAF_INFO info{};
+            EAF_ERROR_CODE code = EAFGetProperty(id, &info);
+            if (code == EAF_SUCCESS) {
+                result.push_back(convert_focuser_info(info));
+            } else {
+                ZWOEAFFocuserInfo fallback;
+                fallback.focuser_id = id;
+                fallback.max_step = 0;
+                result.push_back(std::move(fallback));
+            }
+        }
+        return result;
+    });
 }
 
 bool ZWOEAFSDKWrapper::get_focuser_info_by_id(int focuser_id, ZWOEAFFocuserInfo& info) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    EAF_INFO sdk_info{};
-    EAF_ERROR_CODE code = EAFGetProperty(focuser_id, &sdk_info);
-    if (code != EAF_SUCCESS) {
-        return false;
-    }
-    info = convert_focuser_info(sdk_info);
-    return true;
+    return pimpl_->table_.unchecked([&] {
+        EAF_INFO sdk_info{};
+        EAF_ERROR_CODE code = EAFGetProperty(focuser_id, &sdk_info);
+        if (code != EAF_SUCCESS) {
+            return false;
+        }
+        info = convert_focuser_info(sdk_info);
+        return true;
+    });
 }
 
 bool ZWOEAFSDKWrapper::get_focuser_info_by_index(int focuser_index, ZWOEAFFocuserInfo& info) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int focuser_id = 0;
-    EAF_ERROR_CODE code = EAFGetID(focuser_index, &focuser_id);
-    if (code != EAF_SUCCESS) {
-        return false;
-    }
-    EAF_INFO sdk_info{};
-    code = EAFGetProperty(focuser_id, &sdk_info);
-    if (code != EAF_SUCCESS) {
-        info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0};
-        return true;
-    }
-    info = convert_focuser_info(sdk_info);
-    return true;
-}
-
-void ZWOEAFSDKWrapper::open_focuser(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto& usage = pimpl_->usage_[focuser_id];
-    if (usage.open_count == 0) {
-        try {
-            throw_on_error(EAFOpen(focuser_id), "EAFOpen");
-        } catch (...) {
-            // Nothing was opened — drop the zero-count entry inserted by
-            // operator[] above rather than leaving a stale map node.
-            pimpl_->usage_.erase(focuser_id);
-            throw;
+    return pimpl_->table_.unchecked([&] {
+        int focuser_id = 0;
+        EAF_ERROR_CODE code = EAFGetID(focuser_index, &focuser_id);
+        if (code != EAF_SUCCESS) {
+            return false;
         }
-    }
-    ++usage.open_count;
+        EAF_INFO sdk_info{};
+        code = EAFGetProperty(focuser_id, &sdk_info);
+        if (code != EAF_SUCCESS) {
+            info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0};
+            return true;
+        }
+        info = convert_focuser_info(sdk_info);
+        return true;
+    });
 }
 
-void ZWOEAFSDKWrapper::close_focuser(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    auto it = pimpl_->usage_.find(focuser_id);
-    if (it == pimpl_->usage_.end() || it->second.open_count <= 0) {
-        return;
-    }
-    --it->second.open_count;
-    if (it->second.open_count == 0) {
-        // Erase the bookkeeping first: a failing SDK close (e.g. device
-        // unplugged) must not leave a zero-count entry that turns every
-        // later close into a no-op and leaks the handle. This assumes an
-        // SDK close error means the handle is unusable on the SDK side —
-        // a later open performs a fresh SDK open instead of reusing
-        // half-closed state.
-        pimpl_->usage_.erase(it);
-        throw_on_error(EAFClose(focuser_id), "EAFClose");
-    }
+SharedOpenTable::Opened ZWOEAFSDKWrapper::open_focuser_link(int focuser_id) { return pimpl_->table_.open(focuser_id); }
+
+std::optional<SharedOpenTable::Opened> ZWOEAFSDKWrapper::open_focuser_candidate(int focuser_id) {
+    return pimpl_->table_.open_candidate(focuser_id);
+}
+
+void ZWOEAFSDKWrapper::close_focuser_link(int focuser_id, std::uint64_t link) {
+    pimpl_->table_.close(focuser_id, link);
+}
+
+void ZWOEAFSDKWrapper::with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) {
+    pimpl_->table_.with_link(focuser_id, link, fn);
 }
 
 bool ZWOEAFSDKWrapper::is_moving(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    bool moving = false;
-    bool hand_control = false;
-    throw_on_error(EAFIsMoving(focuser_id, &moving, &hand_control), "EAFIsMoving");
-    return moving;
+    return pimpl_->table_.call(focuser_id, [&] {
+        bool moving = false;
+        bool hand_control = false;
+        throw_on_error(EAFIsMoving(focuser_id, &moving, &hand_control), "EAFIsMoving");
+        return moving;
+    });
 }
 
 int ZWOEAFSDKWrapper::get_position(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int position = 0;
-    throw_on_error(EAFGetPosition(focuser_id, &position), "EAFGetPosition");
-    return position;
+    return pimpl_->table_.call(focuser_id, [&] {
+        int position = 0;
+        throw_on_error(EAFGetPosition(focuser_id, &position), "EAFGetPosition");
+        return position;
+    });
 }
 
 void ZWOEAFSDKWrapper::move(int focuser_id, int position) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EAFMove(focuser_id, position), "EAFMove");
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFMove(focuser_id, position), "EAFMove"); });
 }
 
 void ZWOEAFSDKWrapper::stop(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EAFStop(focuser_id), "EAFStop");
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFStop(focuser_id), "EAFStop"); });
 }
 
 int ZWOEAFSDKWrapper::get_max_step(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int max_step = 0;
-    throw_on_error(EAFGetMaxStep(focuser_id, &max_step), "EAFGetMaxStep");
-    return max_step;
+    return pimpl_->table_.call(focuser_id, [&] {
+        int max_step = 0;
+        throw_on_error(EAFGetMaxStep(focuser_id, &max_step), "EAFGetMaxStep");
+        return max_step;
+    });
 }
 
 void ZWOEAFSDKWrapper::set_max_step(int focuser_id, int max_step) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    throw_on_error(EAFSetMaxStep(focuser_id, max_step), "EAFSetMaxStep");
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFSetMaxStep(focuser_id, max_step), "EAFSetMaxStep"); });
 }
 
 int ZWOEAFSDKWrapper::get_step_range(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    int range = 0;
-    throw_on_error(EAFStepRange(focuser_id, &range), "EAFStepRange");
-    return range;
+    return pimpl_->table_.call(focuser_id, [&] {
+        int range = 0;
+        throw_on_error(EAFStepRange(focuser_id, &range), "EAFStepRange");
+        return range;
+    });
 }
 
 double ZWOEAFSDKWrapper::get_temperature(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    float temp = 0.0f;
-    throw_on_error(EAFGetTemp(focuser_id, &temp), "EAFGetTemp");
-    return static_cast<double>(temp);
+    return pimpl_->table_.call(focuser_id, [&] {
+        float temp = 0.0f;
+        throw_on_error(EAFGetTemp(focuser_id, &temp), "EAFGetTemp");
+        return static_cast<double>(temp);
+    });
 }
 
 std::string ZWOEAFSDKWrapper::get_serial_number(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    EAF_SN sn{};
-    throw_on_error(EAFGetSerialNumber(focuser_id, &sn), "EAFGetSerialNumber");
-    std::ostringstream oss;
-    for (unsigned char byte : sn.id) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-    }
-    return oss.str();
+    return pimpl_->table_.call(focuser_id, [&] { return read_serial_number(focuser_id); });
 }
 
 std::string ZWOEAFSDKWrapper::get_firmware_version(int focuser_id) {
-    std::lock_guard<std::mutex> lock(pimpl_->mutex_);
-    unsigned char major = 0;
-    unsigned char minor = 0;
-    unsigned char build = 0;
-    throw_on_error(EAFGetFirmwareVersion(focuser_id, &major, &minor, &build), "EAFGetFirmwareVersion");
-    std::ostringstream oss;
-    oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
-    return oss.str();
+    return pimpl_->table_.call(focuser_id, [&] {
+        unsigned char major = 0;
+        unsigned char minor = 0;
+        unsigned char build = 0;
+        throw_on_error(EAFGetFirmwareVersion(focuser_id, &major, &minor, &build), "EAFGetFirmwareVersion");
+        std::ostringstream oss;
+        oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
+        return oss.str();
+    });
 }
 
 std::string ZWOEAFSDKWrapper::get_sdk_version() {
