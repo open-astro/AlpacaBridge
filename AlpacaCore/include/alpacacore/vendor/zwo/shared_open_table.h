@@ -64,13 +64,17 @@ public:
     /// Opens @p id, or shares a held open of the same unit; returns the link and the serial read.
     Opened open(int id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        return *open_locked(id, false);
+        return open_locked(id);
     }
 
     /// As open(), but never shares a held open whose unit reported no serial (nullopt then).
     std::optional<Opened> open_candidate(int id) {
         std::lock_guard<std::mutex> lock(mutex_);
-        return open_locked(id, true);
+        const auto it = entries_.find(id);
+        if (it != entries_.end() && it->second.serial_at_open.empty()) {
+            return std::nullopt;
+        }
+        return open_locked(id);
     }
 
     /// Drops one holder of @p link; the last one really closes (its error propagates). A retired or
@@ -171,15 +175,12 @@ private:
         return std::nullopt;
     }
 
-    // Caller holds mutex_. nullopt only for a candidate open of a held unit with no serial.
-    std::optional<Opened> open_locked(int id, bool candidate) {
+    // Caller holds mutex_.
+    Opened open_locked(int id) {
         const auto it = entries_.find(id);
         if (it != entries_.end()) {
             Entry& held = it->second;
             if (held.serial_at_open.empty()) {
-                if (candidate) {
-                    return std::nullopt;
-                }
                 ++held.open_count;
                 return Opened{held.link, {}};
             }
@@ -222,8 +223,8 @@ private:
     void close_best_effort(int id) {
         try {
             ops_.real_close(id);
-        } catch (const std::exception&) {
-            // The unit is gone; the SDK may refuse to close what it already dropped.
+        } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch): the unit is gone
+            // The SDK may refuse to close what it already dropped.
         }
     }
 
