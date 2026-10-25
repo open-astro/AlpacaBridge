@@ -16,6 +16,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/vendor/bisque/bisque_protocol_wrapper.h>
 #include <alpacacore/vendor/bisque/bisque_telescope_driver.h>
@@ -38,8 +39,6 @@
 namespace alpacacore::vendor::bisque {
 
 namespace {
-
-constexpr double kHoursToDegrees = 15.0;
 
 // Decision 0010, Bisque adoption. A poll body samples TheSkyX every kStatusPollPeriod (start to start; ticks missed
 // behind a slow link are skipped, never made up) and publishes one frame; the getters and DeviceState serve it from
@@ -100,41 +99,9 @@ int rate_to_speed_index(double rate_deg_per_sec) {
     return best;
 }
 
-double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
-                                         double longitude_degrees) {
-    using namespace std::chrono;
-    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
-    double jd = 2440587.5 + days_since_epoch;
-    double t = (jd - 2451545.0) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0)
-                  + 0.000387933 * t * t - (t * t * t) / 38710000.0;
-    double lst = gmst + longitude_degrees;
-    lst = std::fmod(lst, 360.0);
-    if (lst < 0.0) {
-        lst += 360.0;
-    }
-    return lst / kHoursToDegrees;
-}
-
-double shortest_ra_delta_hours(double a, double b) {
-    double delta = a - b;
-    while (delta > 12.0) delta -= 24.0;
-    while (delta < -12.0) delta += 24.0;
-    return delta;
-}
-
 } // namespace
 
 namespace detail {
-
-void validate_ra_dec(double ra, double dec) {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-        throw AlpacaException("RA out of range [0, 24)", AlpacaError::InvalidValue);
-    }
-    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-        throw AlpacaException("Dec out of range [-90, 90]", AlpacaError::InvalidValue);
-    }
-}
 
 void validate_move_axis_rate(double rate) {
     // A NaN rate fails the |rate| < 1e-9 stop test and would reach
@@ -554,14 +521,13 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
-        double lst_hours = compute_local_sidereal_time_hours(
-            std::chrono::system_clock::now(), site_longitude_);
-        double hour_angle = shortest_ra_delta_hours(lst_hours, ra);
+        double lst_hours = util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_);
+        double hour_angle = util::shortest_ra_delta_hours(lst_hours, ra);
         // Positive HA → west of meridian → pier east (0).
-        return hour_angle >= 0.0 ? 0 : 1;
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -590,7 +556,7 @@ public:
 
     double get_sidereal_time() const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        return compute_local_sidereal_time_hours(std::chrono::system_clock::now(), site_longitude_);
+        return util::local_sidereal_hours(std::chrono::system_clock::now(), site_longitude_);
     }
 
     double get_site_elevation() const override {
@@ -615,10 +581,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_latitude(latitude);
         site_latitude_ = latitude;
         site_info_valid_ = true;
     }
@@ -628,10 +591,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_longitude(longitude);
         site_longitude_ = longitude;
         site_info_valid_ = true;
     }
@@ -653,10 +613,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -671,10 +628,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -886,7 +840,7 @@ public:
 
     void slew_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SlewToCoordinates");
         // Initiator lock: the gate, the command and the state write happen in the order of the commands on the
         // wire, so an AbortSlew cannot slip between them. Released before the wait loop.
         std::unique_lock<std::mutex> ilock(initiator_mutex_);
@@ -915,7 +869,7 @@ public:
 
     void slew_to_coordinates_async(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         std::lock_guard<std::mutex> ilock(initiator_mutex_);  // see slew_to_coordinates()
         std::unique_lock<std::mutex> lock(mutex_);
         check_connected();
@@ -962,7 +916,7 @@ public:
 
     void sync_to_coordinates(double ra, double dec) override {
         // #627: argument validation precedes the connection check.
-        detail::validate_ra_dec(ra, dec);
+        detail::validate_ra_dec(ra, dec, "SyncToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
             check_connected();

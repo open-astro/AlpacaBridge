@@ -14,7 +14,7 @@ name: Scheduled run failures
 
 on:
   workflow_run:  # zizmor: ignore[dangerous-triggers] -- no checkout of the run's head, no artifacts; run fields via env only
-    workflows: ["Nightly Build", "CodeQL", "OSV scan", "Dependency updates", "Link check", "APT install check"]
+    workflows: ["Nightly Build", "CodeQL", "OSV scan", "Dependency updates", "Link check", "APT install check", "ConformU fake Sky-Watcher"]
     types: [completed]
     branches: [main]
 

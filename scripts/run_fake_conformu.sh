@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Hardware-free ConformU run (CI job conformu-fake): starts the test-only
+# Hardware-free ConformU run (workflow conformu-fake.yml: PRs that touch its
+# paths, nightly on main, on demand): starts the test-only
 # fake_skywatcher_server (a Sky-Watcher telescope over FakeSkyWatcherMount),
 # runs ConformU against it and writes a report that says it is fake evidence.
 #
