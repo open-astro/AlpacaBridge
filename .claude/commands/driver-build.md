@@ -568,7 +568,9 @@ All 9 steps required for end-to-end functionality:
    - **Catalog keys**: put each field inside a `data-vendor` / `data-device-type` scope
      `<div>` and give it `data-config-key="<catalog key>"`; `catalog_form_drift.test.js`
      fails on a named field without one, on a catalog field no form field names, and on a
-     control that does not fit the field type or role.
+     control that does not fit the field type or role. Editing fills a mapped field from
+     the saved config with no `app.js` code; a field that needs a conversion carries
+     `data-config-fill="manual"` and its fill goes in `startEditDevice`.
 6. Web UI index auto-numbering — for any SDK-enumeration index field (camera/focuser/
    filterwheel/rotator), make it a `type="number"` input whose `data-config-key` names an
    `EnumerationIndex` catalog field. `app.js` derives the index fields from the catalog
