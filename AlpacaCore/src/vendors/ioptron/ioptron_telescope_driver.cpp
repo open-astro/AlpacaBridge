@@ -20,6 +20,7 @@
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/gps_status.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
@@ -799,14 +800,13 @@ public:
         if (pulse_guiding_ra_correction_valid_) {
             const auto now = clock_.now();
             if (now < pulse_guiding_ra_correction_until_) {
-                ra_value = normalize_ra_hours(pulse_guiding_ra_baseline_hours_ +
-                                              pulse_guiding_ra_expected_delta_hours_);
+                ra_value = util::wrap_hours(pulse_guiding_ra_baseline_hours_ + pulse_guiding_ra_expected_delta_hours_);
             }
             pulse_guiding_ra_correction_valid_ = false;
         }
         last_ra_read_hours_ = ra_value;
         last_ra_read_valid_ = true;
-        return normalize_ra_hours(ra_value + sync_offset_ra_hours_);
+        return util::wrap_hours(ra_value + sync_offset_ra_hours_);
     }
 
     double get_right_ascension_rate() const override {
@@ -861,15 +861,14 @@ public:
             }
         }
 
-        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(),
-                                                             site_longitude_cached_);
-        const double synced_ra = normalize_ra_hours(cached_ra_hours_ + sync_offset_ra_hours_);
-        const double hour_angle = shortest_ra_delta_hours(lst, synced_ra);
-        return (hour_angle >= 0.0) ? 0 : 1;
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double synced_ra = util::wrap_hours(cached_ra_hours_ + sync_offset_ra_hours_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, synced_ra);
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
@@ -883,11 +882,10 @@ public:
             }
         }
 
-        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(),
-                                                             site_longitude_cached_);
-        const double hour_angle = shortest_ra_delta_hours(lst, ra);
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
 
-        return (hour_angle >= 0.0) ? 0 : 1;
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -930,7 +928,7 @@ public:
         check_connected();
         ensure_site_info_cached_locked();
         auto utc_now = current_utc_time_locked();
-        return compute_local_sidereal_time_hours(utc_now, site_longitude_cached_);
+        return util::local_sidereal_hours(utc_now, site_longitude_cached_);
     }
     
     double get_site_elevation() const override {
@@ -961,12 +959,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException(
-                "Site latitude must be between -90 and 90 degrees",
-                AlpacaError::InvalidValue
-            );
-        }
+        util::validate_latitude(latitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -987,12 +980,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException(
-                "Site longitude must be between -180 and 180 degrees",
-                AlpacaError::InvalidValue
-            );
-        }
+        util::validate_longitude(longitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         auto& protocol = iOptronProtocolWrapper::instance();
@@ -1220,7 +1208,7 @@ public:
     }
     
     void set_target_declination(double dec) override {
-        validate_dec(dec, "TargetDeclination");
+        util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
@@ -1239,7 +1227,7 @@ public:
     }
     
     void set_target_right_ascension(double ra) override {
-        validate_ra(ra, "TargetRightAscension");
+        util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
@@ -1548,10 +1536,10 @@ public:
     }
     
     void slew_to_coordinates(double ra, double dec) override {
-        validate_ra_dec(ra, dec, "SlewToCoordinates");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinates");
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            double phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
+            double phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             double phys_dec = dec - sync_offset_dec_degrees_;
             check_equatorial_slew_allowed_locked("SlewToCoordinates");
             prepare_slew_state_locked(ra, dec, phys_ra, phys_dec, "SlewToCoordinates");
@@ -1561,7 +1549,7 @@ public:
     }
 
     void slew_to_coordinates_async(double ra, double dec) override {
-        validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
+        util::validate_ra_dec(ra, dec, "SlewToCoordinatesAsync");
         if (before_handoff_lock_) before_handoff_lock_();
         std::lock_guard<std::mutex> handoff_lock(slew_handoff_mutex_);
         double phys_ra = 0.0;
@@ -1570,7 +1558,7 @@ public:
         std::string previous_slew_error;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            phys_ra = normalize_ra_hours(ra - sync_offset_ra_hours_);
+            phys_ra = util::wrap_hours(ra - sync_offset_ra_hours_);
             phys_dec = dec - sync_offset_dec_degrees_;
             previous_slew_error = last_slew_error_;
             check_equatorial_slew_allowed_locked("SlewToCoordinatesAsync");
@@ -1616,7 +1604,7 @@ public:
     }
     
     void sync_to_coordinates(double ra, double dec) override {
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_not_parked_locked("SyncToCoordinates");
@@ -2055,7 +2043,7 @@ private:
                 }
 
                 if (!std::isnan(prev_ra_hours)) {
-                    double ra_delta = std::abs(shortest_ra_delta_hours(cur_ra, prev_ra_hours)) * 15.0 * 3600.0;
+                    double ra_delta = std::abs(util::shortest_ra_delta_hours(cur_ra, prev_ra_hours)) * 15.0 * 3600.0;
                     double dec_delta = std::abs(cur_dec - prev_dec_degrees) * 3600.0;
                     if (ra_delta < kStableThresholdArcsec && dec_delta < kStableThresholdArcsec) {
                         ++stable_count;
@@ -2365,15 +2353,14 @@ private:
             clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position baseline_end = read_position_stable();
             const double baseline_delta_hours =
-                shortest_ra_delta_hours(baseline_end.ra_hours, baseline_start.ra_hours);
+                util::shortest_ra_delta_hours(baseline_end.ra_hours, baseline_start.ra_hours);
 
             const Position pulse_start = protocol.get_position();
             protocol.pulse_guide(2, sample_duration);
             clock_.sleep_for(std::chrono::milliseconds(sample_duration) + settle_delay);
             const Position pulse_end = read_position_stable();
 
-            const double pulse_delta_hours =
-                shortest_ra_delta_hours(pulse_end.ra_hours, pulse_start.ra_hours);
+            const double pulse_delta_hours = util::shortest_ra_delta_hours(pulse_end.ra_hours, pulse_start.ra_hours);
             const double guide_delta_hours = pulse_delta_hours - baseline_delta_hours;
             const double ra_delta_deg = std::abs(guide_delta_hours) * 15.0;
             const double duration_sec = sample_duration / 1000.0;
@@ -2398,55 +2385,18 @@ private:
         calibrate_dec_guide_locked(sample_duration);
     }
 
-    static double normalize_ra_hours(double ra_hours) {
-        ra_hours = std::fmod(ra_hours, 24.0);
-        if (ra_hours < 0.0) {
-            ra_hours += 24.0;
-        }
-        return ra_hours;
-    }
-
-    static double shortest_ra_delta_hours(double target_hours, double current_hours) {
-        double delta = target_hours - current_hours;
-        while (delta > 12.0) {
-            delta -= 24.0;
-        }
-        while (delta < -12.0) {
-            delta += 24.0;
-        }
-        return delta;
-    }
-
     bool slew_target_reached_locked() const {
         try {
             refresh_position_cache_locked(true);
         } catch (const std::exception&) {
             return false;
         }
-        const double ra_delta_hours =
-            std::abs(shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
+        const double ra_delta_hours = std::abs(util::shortest_ra_delta_hours(slew_target_ra_hours_, cached_ra_hours_));
         const double dec_delta_degrees = std::abs(slew_target_dec_degrees_ - cached_dec_degrees_);
         const double ra_arcsec = ra_delta_hours * 15.0 * 3600.0;
         const double dec_arcsec = dec_delta_degrees * 3600.0;
         return ra_arcsec <= kSlewCompletionToleranceArcsec &&
                dec_arcsec <= kSlewCompletionToleranceArcsec;
-    }
-
-    static void validate_ra(double ra_hours, const char* label) {
-        if (!std::isfinite(ra_hours) || ra_hours < 0.0 || ra_hours >= 24.0) {
-            throw AlpacaException(std::string(label) + " must be in [0, 24) hours", AlpacaError::InvalidValue);
-        }
-    }
-
-    static void validate_dec(double dec_degrees, const char* label) {
-        if (!std::isfinite(dec_degrees) || dec_degrees < -90.0 || dec_degrees > 90.0) {
-            throw AlpacaException(std::string(label) + " must be in [-90, 90] degrees", AlpacaError::InvalidValue);
-        }
-    }
-
-    static void validate_ra_dec(double ra_hours, double dec_degrees, const char* label) {
-        validate_ra(ra_hours, label);
-        validate_dec(dec_degrees, label);
     }
 
     static void validate_alt_az(double altitude_degrees, double azimuth_degrees, const char* label) {
@@ -2720,27 +2670,6 @@ private:
         auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
         return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
     }
-    
-    static double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time,
-                                                    double longitude_degrees) {
-        using namespace std::chrono;
-        const double unix_epoch_jd = 2440587.5;
-        double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
-        double jd = unix_epoch_jd + days_since_epoch;
-        double T = (jd - 2451545.0) / 36525.0;
-        double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) +
-                      0.000387933 * T * T - (T * T * T) / 38710000.0;
-        gmst = std::fmod(gmst, 360.0);
-        if (gmst < 0.0) {
-            gmst += 360.0;
-        }
-        double lst = gmst + longitude_degrees;
-        lst = std::fmod(lst, 360.0);
-        if (lst < 0.0) {
-            lst += 360.0;
-        }
-        return lst / 15.0;
-    }
 
     static std::pair<double, double> alt_az_to_ra_dec(double altitude_degrees,
                                                       double azimuth_degrees,
@@ -2771,8 +2700,8 @@ private:
         }
 
         const double ha_hours = ha_rad * 12.0 / std::numbers::pi;
-        const double lst_hours = compute_local_sidereal_time_hours(utc_time, longitude_degrees);
-        const double ra_hours = normalize_ra_hours(lst_hours - ha_hours);
+        const double lst_hours = util::local_sidereal_hours(utc_time, longitude_degrees);
+        const double ra_hours = util::wrap_hours(lst_hours - ha_hours);
         const double dec_degrees = dec_rad * rad_to_deg;
         return {ra_hours, dec_degrees};
     }

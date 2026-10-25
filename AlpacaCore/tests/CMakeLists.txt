@@ -41,6 +41,7 @@ set(TEST_SOURCES
     test_state_snapshot.cpp
     test_task_clock.cpp
     test_utc_offset.cpp
+    test_pointing_math.cpp
     test_thermal_camera_choice.cpp
     test_async_operation.cpp
     test_capture_session.cpp
