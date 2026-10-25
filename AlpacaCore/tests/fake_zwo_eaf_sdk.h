@@ -110,21 +110,24 @@ public:
     }
 
     std::vector<Info> enumerate_focusers() override {
-        return table_.unchecked([&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (removed) return std::vector<Info>{};
-            std::vector<Info> focusers{Info{id, "EAF", max_step}};
-            if (second_id >= 0)
-                focusers.insert(second_id < id ? focusers.begin() : focusers.end(), Info{second_id, "EAF", max_step});
-            return focusers;
-        });
+        const auto unchecked = table_.lock_unchecked();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (removed) return {};
+        std::vector<Info> focusers{Info{id, "EAF", max_step}};
+        if (second_id >= 0)
+            focusers.insert(second_id < id ? focusers.begin() : focusers.end(), Info{second_id, "EAF", max_step});
+        return focusers;
     }
     bool get_focuser_info_by_id(int focuser_id, Info& info) override {
-        return table_.unchecked([&] { return info_by_id(focuser_id, info); });
+        const auto unchecked = table_.lock_unchecked();
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (removed || (focuser_id != id && focuser_id != second_id)) {
+            return false;
+        }
+        info = Info{focuser_id, "EAF", max_step};
+        return true;
     }
-    bool get_focuser_info_by_index(int, Info& info) override {
-        return table_.unchecked([&] { return info_by_id(id, info); });
-    }
+    bool get_focuser_info_by_index(int, Info& info) override { return get_focuser_info_by_id(id, info); }
     vendor::zwo::SharedOpenTable::Opened open_focuser_link(int focuser_id) override { return table_.open(focuser_id); }
     std::optional<vendor::zwo::SharedOpenTable::Opened> open_focuser_candidate(int focuser_id) override {
         return table_.open_candidate(focuser_id);
@@ -133,126 +136,41 @@ public:
     void with_link(int focuser_id, std::uint64_t link, const std::function<void()>& fn) override {
         table_.with_link(focuser_id, link, fn);
     }
+    // Per-device calls: the table checks the caller's link, then the raw unit answers in the same hold.
     bool is_moving(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            const InFlight in_flight(*this, read_delay, read_entered);
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++moving_calls;
-            check_unit(focuser_id);
-            if (fail_reads) {
-                throw std::runtime_error("link down");
-            }
-            return moving;
-        });
+        return table_.call(focuser_id, [&] { return raw_is_moving(focuser_id); });
     }
     int get_position(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++position_calls;
-            last_read_id = focuser_id;
-            check_unit(focuser_id);
-            if (fail_reads) {
-                throw std::runtime_error("link down");
-            }
-            return position;
-        });
+        return table_.call(focuser_id, [&] { return raw_position(focuser_id); });
     }
     void move(int focuser_id, int target) override {
-        table_.call(focuser_id, [&] {
-            const InFlight in_flight(*this, move_delay, move_entered);
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_unit(focuser_id);
-            last_move_id = focuser_id;
-            position = target;
-        });
+        table_.call(focuser_id, [&] { raw_move(focuser_id, target); });
     }
     void stop(int focuser_id) override {
-        table_.call(focuser_id, [&] {
-            const InFlight in_flight(*this, move_delay, move_entered);
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_unit(focuser_id);
-            moving = false;
-        });
+        table_.call(focuser_id, [&] { raw_stop(focuser_id); });
     }
     int get_max_step(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++max_step_calls;
-            check_unit(focuser_id);
-            return max_step;
-        });
+        return table_.call(focuser_id, [&] { return raw_max_step(focuser_id); });
     }
     void set_max_step(int focuser_id, int value) override {
-        table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++set_max_step_calls;
-            check_unit(focuser_id);
-            last_set_max_step = value;
-            max_step = value;  // the unit stores what it is given
-        });
+        table_.call(focuser_id, [&] { raw_set_max_step(focuser_id, value); });
     }
     int get_step_range(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++step_range_calls;
-            check_unit(focuser_id);
-            if (step_range_removed) throw AlpacaException("EAFStepRange: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
-            if (step_range_fails) {
-                throw std::runtime_error("step range unavailable");
-            }
-            return step_range;
-        });
+        return table_.call(focuser_id, [&] { return raw_step_range(focuser_id); });
     }
     double get_temperature(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++temperature_calls;
-            check_unit(focuser_id);
-            if (temperature_removed) throw AlpacaException("EAFGetTemp: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
-            if (temperature_not_supported) {
-                throw AlpacaException("EAF temperature not supported", AlpacaError::NotImplemented);
-            }
-            if (fail_temperature) {
-                throw std::runtime_error("temp sensor down");
-            }
-            return temperature;
-        });
+        return table_.call(focuser_id, [&] { return raw_temperature(focuser_id); });
     }
     std::string get_serial_number(int focuser_id) override {
         return table_.call(focuser_id, [&] { return raw_serial(focuser_id); });
     }
     std::string get_firmware_version(int focuser_id) override {
-        return table_.call(focuser_id, [&] {
-            std::lock_guard<std::mutex> lock(mutex_);
-            check_unit(focuser_id);
-            return std::string("1.0");
-        });
+        return table_.call(focuser_id, [&] { return raw_firmware(focuser_id); });
     }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
-    void throw_if_removed() const {
-        if (removed) throw AlpacaException("EAF_ERROR_REMOVED", AlpacaError::NotConnected);
-    }
-    // A per-device call on an id the library does not hold: EAF_ERROR_INVALID_ID, which the wrapper maps to
-    // NotConnected on a per-device call (issue #1500 decision 7: the bridge passes only enumerated ids).
-    void check_unit(int focuser_id) const {
-        throw_if_removed();
-        if (focuser_id != id && focuser_id != second_id) {
-            throw AlpacaException("EAF_ERROR_INVALID_ID", AlpacaError::NotConnected);
-        }
-    }
-
-    bool info_by_id(int focuser_id, Info& info) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (removed || (focuser_id != id && focuser_id != second_id)) {
-            return false;
-        }
-        info = Info{focuser_id, "EAF", max_step};
-        return true;
-    }
-
-    // The library under the table: EAFOpen, EAFClose and EAFGetSerialNumber on the raw units.
+    // The library under the table: EAFOpen, EAFClose and the per-device calls on the raw units.
     void raw_open(int focuser_id) {
         const InFlight in_flight(*this, open_delay, open_entered);
         std::lock_guard<std::mutex> lock(mutex_);
@@ -265,7 +183,77 @@ private:
         if (busy.load() > 0) closed_while_busy = true;
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls;
-        check_unit(focuser_id);  // EAFClose fails on a removed unit or a vanished id
+        // The table erases its bookkeeping, then EAFClose fails on a removed unit or a vanished id.
+        check_unit(focuser_id);
+    }
+    bool raw_is_moving(int focuser_id) {
+        const InFlight in_flight(*this, read_delay, read_entered);
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++moving_calls;
+        check_unit(focuser_id);
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return moving;
+    }
+    int raw_position(int focuser_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++position_calls;
+        last_read_id = focuser_id;
+        check_unit(focuser_id);
+        if (fail_reads) {
+            throw std::runtime_error("link down");
+        }
+        return position;
+    }
+    void raw_move(int focuser_id, int target) {
+        const InFlight in_flight(*this, move_delay, move_entered);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_unit(focuser_id);
+        last_move_id = focuser_id;
+        position = target;
+    }
+    void raw_stop(int focuser_id) {
+        const InFlight in_flight(*this, move_delay, move_entered);
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_unit(focuser_id);
+        moving = false;
+    }
+    int raw_max_step(int focuser_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++max_step_calls;
+        check_unit(focuser_id);
+        return max_step;
+    }
+    void raw_set_max_step(int focuser_id, int value) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++set_max_step_calls;
+        check_unit(focuser_id);
+        last_set_max_step = value;
+        max_step = value;  // the unit stores what it is given
+    }
+    int raw_step_range(int focuser_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++step_range_calls;
+        check_unit(focuser_id);
+        if (step_range_removed) throw AlpacaException("EAFStepRange: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
+        if (step_range_fails) {
+            throw std::runtime_error("step range unavailable");
+        }
+        return step_range;
+    }
+    double raw_temperature(int focuser_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++temperature_calls;
+        check_unit(focuser_id);
+        if (temperature_removed) throw AlpacaException("EAFGetTemp: EAF_ERROR_REMOVED", AlpacaError::NotConnected);
+        if (temperature_not_supported) {
+            throw AlpacaException("EAF temperature not supported", AlpacaError::NotImplemented);
+        }
+        if (fail_temperature) {
+            throw std::runtime_error("temp sensor down");
+        }
+        return temperature;
     }
     std::string raw_serial(int focuser_id) {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -277,6 +265,23 @@ private:
             throw AlpacaException("EAFGetSerialNumber: EAF_ERROR_NOT_SUPPORTED", AlpacaError::NotImplemented);
         }
         return unit_serial;
+    }
+    std::string raw_firmware(int focuser_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        check_unit(focuser_id);
+        return "1.0";
+    }
+
+    void throw_if_removed() const {
+        if (removed) throw AlpacaException("EAF_ERROR_REMOVED", AlpacaError::NotConnected);
+    }
+    // A per-device call on an id the library does not hold: EAF_ERROR_INVALID_ID, which the wrapper maps to
+    // NotConnected on a per-device call (issue #1500 decision 7: the bridge passes only enumerated ids).
+    void check_unit(int focuser_id) const {
+        throw_if_removed();
+        if (focuser_id != id && focuser_id != second_id) {
+            throw AlpacaException("EAF_ERROR_INVALID_ID", AlpacaError::NotConnected);
+        }
     }
 
     // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.

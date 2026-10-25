@@ -129,8 +129,8 @@ ZWOEAFFocuserInfo convert_focuser_info(const EAF_INFO& info) {
 
 } // namespace
 
-// Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info in
-// table_.unchecked(). EAFGetSDKVersion returns a static string and takes no lock.
+// Every SDK call runs under the table's one mutex: per-device calls in table_.call(), enumeration and info under
+// table_.lock_unchecked(). EAFGetSDKVersion returns a static string and takes no lock.
 class ZWOEAFSDKWrapper::Impl {
 public:
     SharedOpenTable table_{SharedOpenTable::Ops{
@@ -151,59 +151,56 @@ ZWOEAFSDKWrapper& ZWOEAFSDKWrapper::instance() {
 }
 
 std::vector<ZWOEAFFocuserInfo> ZWOEAFSDKWrapper::enumerate_focusers() {
-    return pimpl_->table_.unchecked([] {
-        int count = EAFGetNum();
-        std::vector<ZWOEAFFocuserInfo> result;
-        if (count <= 0) {
-            return result;
-        }
-        result.reserve(static_cast<std::size_t>(count));
-        for (int i = 0; i < count; ++i) {
-            int id = 0;
-            throw_on_error(EAFGetID(i, &id), "EAFGetID", AlpacaError::InvalidValue);
-            EAF_INFO info{};
-            EAF_ERROR_CODE code = EAFGetProperty(id, &info);
-            if (code == EAF_SUCCESS) {
-                result.push_back(convert_focuser_info(info));
-            } else {
-                ZWOEAFFocuserInfo fallback;
-                fallback.focuser_id = id;
-                fallback.max_step = 0;
-                result.push_back(std::move(fallback));
-            }
-        }
+    const auto lock = pimpl_->table_.lock_unchecked();
+    int count = EAFGetNum();
+    std::vector<ZWOEAFFocuserInfo> result;
+    if (count <= 0) {
         return result;
-    });
+    }
+    result.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        int id = 0;
+        throw_on_error(EAFGetID(i, &id), "EAFGetID", AlpacaError::InvalidValue);
+        EAF_INFO info{};
+        EAF_ERROR_CODE code = EAFGetProperty(id, &info);
+        if (code == EAF_SUCCESS) {
+            result.push_back(convert_focuser_info(info));
+        } else {
+            ZWOEAFFocuserInfo fallback;
+            fallback.focuser_id = id;
+            fallback.max_step = 0;
+            result.push_back(std::move(fallback));
+        }
+    }
+    return result;
 }
 
 bool ZWOEAFSDKWrapper::get_focuser_info_by_id(int focuser_id, ZWOEAFFocuserInfo& info) {
-    return pimpl_->table_.unchecked([&] {
-        EAF_INFO sdk_info{};
-        EAF_ERROR_CODE code = EAFGetProperty(focuser_id, &sdk_info);
-        if (code != EAF_SUCCESS) {
-            return false;
-        }
-        info = convert_focuser_info(sdk_info);
-        return true;
-    });
+    const auto lock = pimpl_->table_.lock_unchecked();
+    EAF_INFO sdk_info{};
+    EAF_ERROR_CODE code = EAFGetProperty(focuser_id, &sdk_info);
+    if (code != EAF_SUCCESS) {
+        return false;
+    }
+    info = convert_focuser_info(sdk_info);
+    return true;
 }
 
 bool ZWOEAFSDKWrapper::get_focuser_info_by_index(int focuser_index, ZWOEAFFocuserInfo& info) {
-    return pimpl_->table_.unchecked([&] {
-        int focuser_id = 0;
-        EAF_ERROR_CODE code = EAFGetID(focuser_index, &focuser_id);
-        if (code != EAF_SUCCESS) {
-            return false;
-        }
-        EAF_INFO sdk_info{};
-        code = EAFGetProperty(focuser_id, &sdk_info);
-        if (code != EAF_SUCCESS) {
-            info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0};
-            return true;
-        }
-        info = convert_focuser_info(sdk_info);
+    const auto lock = pimpl_->table_.lock_unchecked();
+    int focuser_id = 0;
+    EAF_ERROR_CODE code = EAFGetID(focuser_index, &focuser_id);
+    if (code != EAF_SUCCESS) {
+        return false;
+    }
+    EAF_INFO sdk_info{};
+    code = EAFGetProperty(focuser_id, &sdk_info);
+    if (code != EAF_SUCCESS) {
+        info = ZWOEAFFocuserInfo{focuser_id, std::string(), 0};
         return true;
-    });
+    }
+    info = convert_focuser_info(sdk_info);
+    return true;
 }
 
 SharedOpenTable::Opened ZWOEAFSDKWrapper::open_focuser_link(int focuser_id) { return pimpl_->table_.open(focuser_id); }
@@ -221,20 +218,17 @@ void ZWOEAFSDKWrapper::with_link(int focuser_id, std::uint64_t link, const std::
 }
 
 bool ZWOEAFSDKWrapper::is_moving(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        bool moving = false;
-        bool hand_control = false;
-        throw_on_error(EAFIsMoving(focuser_id, &moving, &hand_control), "EAFIsMoving");
-        return moving;
-    });
+    bool moving = false;
+    bool hand_control = false;
+    pimpl_->table_.call(focuser_id,
+                        [&] { throw_on_error(EAFIsMoving(focuser_id, &moving, &hand_control), "EAFIsMoving"); });
+    return moving;
 }
 
 int ZWOEAFSDKWrapper::get_position(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        int position = 0;
-        throw_on_error(EAFGetPosition(focuser_id, &position), "EAFGetPosition");
-        return position;
-    });
+    int position = 0;
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFGetPosition(focuser_id, &position), "EAFGetPosition"); });
+    return position;
 }
 
 void ZWOEAFSDKWrapper::move(int focuser_id, int position) {
@@ -246,11 +240,9 @@ void ZWOEAFSDKWrapper::stop(int focuser_id) {
 }
 
 int ZWOEAFSDKWrapper::get_max_step(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        int max_step = 0;
-        throw_on_error(EAFGetMaxStep(focuser_id, &max_step), "EAFGetMaxStep");
-        return max_step;
-    });
+    int max_step = 0;
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFGetMaxStep(focuser_id, &max_step), "EAFGetMaxStep"); });
+    return max_step;
 }
 
 void ZWOEAFSDKWrapper::set_max_step(int focuser_id, int max_step) {
@@ -258,19 +250,15 @@ void ZWOEAFSDKWrapper::set_max_step(int focuser_id, int max_step) {
 }
 
 int ZWOEAFSDKWrapper::get_step_range(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        int range = 0;
-        throw_on_error(EAFStepRange(focuser_id, &range), "EAFStepRange");
-        return range;
-    });
+    int range = 0;
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFStepRange(focuser_id, &range), "EAFStepRange"); });
+    return range;
 }
 
 double ZWOEAFSDKWrapper::get_temperature(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        float temp = 0.0f;
-        throw_on_error(EAFGetTemp(focuser_id, &temp), "EAFGetTemp");
-        return static_cast<double>(temp);
-    });
+    float temp = 0.0f;
+    pimpl_->table_.call(focuser_id, [&] { throw_on_error(EAFGetTemp(focuser_id, &temp), "EAFGetTemp"); });
+    return static_cast<double>(temp);
 }
 
 std::string ZWOEAFSDKWrapper::get_serial_number(int focuser_id) {
@@ -278,15 +266,15 @@ std::string ZWOEAFSDKWrapper::get_serial_number(int focuser_id) {
 }
 
 std::string ZWOEAFSDKWrapper::get_firmware_version(int focuser_id) {
-    return pimpl_->table_.call(focuser_id, [&] {
-        unsigned char major = 0;
-        unsigned char minor = 0;
-        unsigned char build = 0;
+    unsigned char major = 0;
+    unsigned char minor = 0;
+    unsigned char build = 0;
+    pimpl_->table_.call(focuser_id, [&] {
         throw_on_error(EAFGetFirmwareVersion(focuser_id, &major, &minor, &build), "EAFGetFirmwareVersion");
-        std::ostringstream oss;
-        oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
-        return oss.str();
     });
+    std::ostringstream oss;
+    oss << static_cast<int>(major) << "." << static_cast<int>(minor) << "." << static_cast<int>(build);
+    return oss.str();
 }
 
 std::string ZWOEAFSDKWrapper::get_sdk_version() {

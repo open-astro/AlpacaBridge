@@ -111,10 +111,12 @@ public:
         }
     }
 
-    /// Enumeration and info lookups: serialised, no link needed.
+    /// Enumeration and info lookups: serialised, no link needed. Never a per-device call: that goes through call().
+    [[nodiscard]] std::unique_lock<std::mutex> lock_unchecked() { return std::unique_lock<std::mutex>(mutex_); }
+
     template <class Fn>
     decltype(auto) unchecked(Fn&& fn) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        const auto lock = lock_unchecked();
         return std::forward<Fn>(fn)();
     }
 

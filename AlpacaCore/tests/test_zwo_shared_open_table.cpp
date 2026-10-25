@@ -47,14 +47,14 @@ struct RawUnits {
     int read_failures{0};  // the next N serial reads fail with a generic error
     bool close_fails{false};
 
+    static bool take(int& next_n) { return next_n > 0 && next_n-- > 0; }
+
     SharedOpenTable::Ops ops() {
         SharedOpenTable::Ops ops;
         ops.real_open = [this](int) {
             ++opens;
-            if (open_failures > 0) {
-                --open_failures;
+            if (take(open_failures))
                 throw AlpacaException("EAFOpen: EAF_ERROR_ERROR_STATE", AlpacaError::DriverException);
-            }
         };
         ops.real_close = [this](int) {
             ++closes;
@@ -62,14 +62,10 @@ struct RawUnits {
         };
         ops.read_serial = [this](int id) -> std::string {
             ++reads;
-            if (read_losses > 0) {
-                --read_losses;
+            if (take(read_losses))
                 throw AlpacaException("EAFGetSerialNumber: EAF_ERROR_CLOSED", AlpacaError::NotConnected);
-            }
-            if (read_failures > 0) {
-                --read_failures;
+            if (take(read_failures))
                 throw AlpacaException("EAFGetSerialNumber: EAF_ERROR_GENERAL_ERROR", AlpacaError::DriverException);
-            }
             const auto& serial = serial_at.at(id);
             if (serial.empty())
                 throw AlpacaException("EAFGetSerialNumber: EAF_ERROR_NOT_SUPPORTED", AlpacaError::NotImplemented);
