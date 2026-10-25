@@ -16,6 +16,7 @@
 #include <alpacacore/util/client_utc_warning.h>
 #include <alpacacore/util/error_handling.h>
 #include <alpacacore/util/logging.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/poll_settle.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_geometry.h>
 #include <alpacacore/vendor/celestron/celestron_cgx_protocol_wrapper.h>
@@ -304,7 +305,7 @@ private:
     double current_utc_locked() const;
     std::chrono::system_clock::time_point client_utc_now_locked() const;
     bool client_utc_offset_survives_locked(std::chrono::system_clock::time_point system_now) const;
-    void validate_site_and_coordinates(double ra, double dec) const;
+    void validate_site_and_coordinates(double ra, double dec, const char* operation) const;
     void start_home_operation(bool park_after);
     void run_home_operation(util::OperationContext& context, bool park_after);
     void start_slew_operation(double ra, double dec);
@@ -504,11 +505,8 @@ bool CelestronCgxTelescopeDriver::client_utc_offset_survives_locked(
 
 CgxHemisphere CelestronCgxTelescopeDriver::hemisphere_locked() const { return mechanical_hemisphere_; }
 
-void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec) const {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0 || !std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-        throw AlpacaException("Celestron CGX coordinates must use RA [0,24) hours and Dec [-90,90] degrees",
-                              AlpacaError::InvalidValue);
-    }
+void CelestronCgxTelescopeDriver::validate_site_and_coordinates(double ra, double dec, const char* operation) const {
+    util::validate_ra_dec(ra, dec, operation);
 }
 
 CgxSkyPosition CelestronCgxTelescopeDriver::read_sky_position_locked(std::uint32_t* ra_encoder,
@@ -985,7 +983,7 @@ void CelestronCgxTelescopeDriver::set_side_of_pier(int side) {
     not_implemented("SideOfPier writes", true);
 }
 int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double dec) const {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "DestinationSideOfPier");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     const auto utc =
@@ -993,10 +991,8 @@ int CelestronCgxTelescopeDriver::get_destination_side_of_pier(double ra, double 
             std::chrono::duration<double>(current_utc_locked()))};
     const double lst =
         cgx_local_sidereal_time_hours(utc, configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
-    double ha = std::fmod(lst - ra + 12.0, 24.0);
-    if (ha < 0.0) ha += 24.0;
-    ha -= 12.0;
-    return ha >= 0.0 ? 0 : 1;
+    const double ha = util::wrap_hour_angle(lst - ra);
+    return util::pier_side_for_hour_angle(ha);
 }
 EquatorialSystem CelestronCgxTelescopeDriver::get_equatorial_system() const {
     require_connected();
@@ -1201,8 +1197,7 @@ void CelestronCgxTelescopeDriver::require_site_change_allowed_locked() const {
 }
 
 void CelestronCgxTelescopeDriver::set_site_latitude(double latitude) {
-    if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0)
-        throw AlpacaException("SiteLatitude must be in [-90, 90] degrees", AlpacaError::InvalidValue);
+    util::validate_latitude(latitude);
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
@@ -1211,8 +1206,7 @@ void CelestronCgxTelescopeDriver::set_site_latitude(double latitude) {
     info_.site_latitude_degrees = latitude;
 }
 void CelestronCgxTelescopeDriver::set_site_longitude(double longitude) {
-    if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0)
-        throw AlpacaException("SiteLongitude must be in [-180, 180] degrees", AlpacaError::InvalidValue);
+    util::validate_longitude(longitude);
     std::lock_guard<std::mutex> start_lock(motion_start_mutex_);
     std::lock_guard<std::mutex> lock(mutex_);
     require_connected();
@@ -1247,8 +1241,7 @@ double CelestronCgxTelescopeDriver::get_target_declination() const {
     return target_dec_degrees_;
 }
 void CelestronCgxTelescopeDriver::set_target_declination(double dec) {
-    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0)
-        throw AlpacaException("TargetDeclination must be in [-90, 90] degrees", AlpacaError::InvalidValue);
+    util::validate_dec(dec, "TargetDeclination");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {
@@ -1269,8 +1262,7 @@ double CelestronCgxTelescopeDriver::get_target_right_ascension() const {
     return target_ra_hours_;
 }
 void CelestronCgxTelescopeDriver::set_target_right_ascension(double ra) {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0)
-        throw AlpacaException("TargetRightAscension must be in [0, 24) hours", AlpacaError::InvalidValue);
+    util::validate_ra(ra, "TargetRightAscension");
     require_connected();
     std::lock_guard<std::mutex> lock(mutex_);
     if (parked_) {
@@ -1405,7 +1397,7 @@ void CelestronCgxTelescopeDriver::slew_to_target_async() {
     start_slew_operation(ra, dec);
 }
 void CelestronCgxTelescopeDriver::sync_to_coordinates(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "SyncToCoordinates");
     require_connected();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1809,7 +1801,7 @@ void CelestronCgxTelescopeDriver::run_home_operation(util::OperationContext& con
 }
 
 void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
-    validate_site_and_coordinates(ra, dec);
+    validate_site_and_coordinates(ra, dec, "SlewToCoordinates");
     require_connected();
     MotionTransition transition(*this);
     bool sync_correction_active;
@@ -1834,9 +1826,7 @@ void CelestronCgxTelescopeDriver::start_slew_operation(double ra, double dec) {
                 std::chrono::duration<double>(current_utc_locked()))};
         lst = cgx_local_sidereal_time_hours(utc,
                                             configured_site_coordinate(info_.site_longitude_degrees, "SiteLongitude"));
-        double hour_angle = std::fmod(lst - ra + 12.0, 24.0);
-        if (hour_angle < 0.0) hour_angle += 24.0;
-        hour_angle -= 12.0;
+        const double hour_angle = util::wrap_hour_angle(lst - ra);
         side = hour_angle >= 0.0 ? CgxPointingSide::Normal : CgxPointingSide::BeyondPole;
         needs_home_route = side != current.pointing_side;
         hemisphere = hemisphere_locked();
@@ -2070,8 +2060,8 @@ std::unique_ptr<TelescopeDriver> create_celestron_cgx_telescope(int device_numbe
             throw AlpacaException(message, AlpacaError::InvalidValue);
         }
     };
-    require_range(info.site_latitude_degrees, -90.0, 90.0, "SiteLatitude must be in [-90, 90] degrees");
-    require_range(info.site_longitude_degrees, -180.0, 180.0, "SiteLongitude must be in [-180, 180] degrees");
+    if (info.site_latitude_degrees) util::validate_latitude(*info.site_latitude_degrees);
+    if (info.site_longitude_degrees) util::validate_longitude(*info.site_longitude_degrees);
     require_range(info.site_elevation_meters, -300.0, 10000.0, "SiteElevation must be in [-300, 10000] m");
     if (!std::isfinite(info.aperture_diameter_meters) || info.aperture_diameter_meters < 0.0) {
         throw AlpacaException("Aperture diameter must be non-negative", AlpacaError::InvalidValue);

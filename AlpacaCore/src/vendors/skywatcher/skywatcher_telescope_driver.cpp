@@ -20,6 +20,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/state_snapshot.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_protocol_wrapper.h>
 #include <alpacacore/vendor/skywatcher/skywatcher_telescope_driver.h>
@@ -216,50 +217,6 @@ constexpr uint32_t kIndexerAbove = 0xFFFFFF;
 // Hunt speeds (EQMod uses 800x for the coarse pass, 400x for the detect pass).
 constexpr double kAutoHomeCoarseRateDegPerSec = 800.0 * kSiderealDegPerSec;
 constexpr double kAutoHomeDetectRateDegPerSec = 400.0 * kSiderealDegPerSec;
-
-double wrap_degrees(double deg) {
-    double wrapped = std::fmod(deg, 360.0);
-    if (wrapped < 0.0) {
-        wrapped += 360.0;
-    }
-    return wrapped;
-}
-
-double wrap_hours(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-    return wrapped;
-}
-
-// Wrap an hour angle into [-12, +12).
-double wrap_hour_angle(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < -12.0) {
-        wrapped += 24.0;
-    }
-    if (wrapped >= 12.0) {
-        wrapped -= 24.0;
-    }
-    return wrapped;
-}
-
-double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time, double longitude_degrees) {
-    using namespace std::chrono;
-    // Sub-second resolution matters: whole-second truncation stepped LST (and
-    // so RA) in 15 arcsec jumps, +-0.1 RA-s/s of jitter over a 10 s window.
-    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
-    double jd = 2440587.5 + days_since_epoch;
-    double t = (jd - 2451545.0) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - (t * t * t) / 38710000.0;
-    double lst = gmst + longitude_degrees;
-    lst = std::fmod(lst, 360.0);
-    if (lst < 0.0) {
-        lst += 360.0;
-    }
-    return lst / kHoursToDegrees;
-}
 
 // Signed axis angle in degrees from the raw 24-bit counter.
 double counts_to_degrees(uint32_t counts, uint32_t cpr) {
@@ -1304,13 +1261,13 @@ public:
     }
 
     int get_destination_side_of_pier(double ra, double dec) const override {
-        validate_ra_dec(ra, dec, "DestinationSideOfPier");
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         StateLock lock(*this, StateLock::Mode::State);
         check_connected();
         require_site_locked();
         double lst = local_sidereal_hours();
-        double ha = wrap_hour_angle(lst - ra);
-        return ha >= 0.0 ? 0 : 1;
+        double ha = util::wrap_hour_angle(lst - ra);
+        return util::pier_side_for_hour_angle(ha);
     }
 
     EquatorialSystem get_equatorial_system() const override {
@@ -1374,9 +1331,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_latitude(latitude);
         // A latitude write that crosses the equator reverses the RA drive and
         // flips the Dec offset's sign (effective_ra_rate_locked() and
         // apply_dec_rate_offset_locked() both read hemisphere_south_locked()),
@@ -1478,9 +1433,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_longitude(longitude);
         // Io mode: a command in flight reads the longitude between its exchanges and must see one value.
         StateLock lock(*this);
         std::lock_guard<std::mutex> clock_lock(client_clock_mutex_);
@@ -1517,9 +1470,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_dec(dec, "TargetDeclination");
         StateLock lock(*this);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -1535,9 +1486,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
-        }
+        util::validate_ra(ra, "TargetRightAscension");
         StateLock lock(*this);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -2540,7 +2489,7 @@ public:
             StateLock gate(*this);
             check_writable_locked();
             check_not_parked_locked("SyncToCoordinates");
-            validate_ra_dec(ra, dec, "SyncToCoordinates");
+            util::validate_ra_dec(ra, dec, "SyncToCoordinates");
             require_site_locked();
             refuse_sync_during_move_axis_locked();
         }
@@ -2548,7 +2497,7 @@ public:
         StateLock lock(*this);
         check_writable_locked();
         check_not_parked_locked("SyncToCoordinates");
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         refuse_sync_during_move_axis_locked();
 
         const Wire protocol = wire();
@@ -3047,15 +2996,6 @@ private:
         }
     }
 
-    static void validate_ra_dec(double ra, double dec, const char* context) {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
-        }
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
-        }
-    }
-
     // open-astro#521: a Sky-Watcher axis keeps running until something tells it
     // to stop, so motion outlives the link that started it. On the way back in,
     // decide from the LENGTH of the outage rather than by a flat rule: a USB
@@ -3442,7 +3382,7 @@ private:
     double local_sidereal_hours() const {
         std::lock_guard<std::mutex> lock(client_clock_mutex_);
         const auto utc = utc_now_in_clock();
-        return compute_local_sidereal_time_hours(utc, client_clock_.site_longitude);
+        return util::local_sidereal_hours(utc, client_clock_.site_longitude);
     }
 
     // open-astro#405: a host that was undisciplined at the write and acquires
@@ -3592,10 +3532,10 @@ private:
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec = sky_sign * dec_mech;
         const double ha_hours =
-            wrap_hour_angle(sky_sign * ha_mech_hours +
-                            home_term_sign_locked() * kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
+            util::wrap_hour_angle(sky_sign * ha_mech_hours +
+                                  home_term_sign_locked() * kHomeHourAngleOffsetHours * branch_from_axis_locked(a2));
         double lst = local_sidereal_hours();
-        double ra = wrap_hours(lst - ha_hours);
+        double ra = util::wrap_hours(lst - ha_hours);
         return {ra, std::clamp(dec, -90.0, 90.0)};
     }
 
@@ -3607,7 +3547,7 @@ private:
     std::pair<double, double> ra_dec_to_axis_degrees_locked(double ra, double dec, double lst_advance_hours = 0.0,
                                                             int forced_branch = 0) const {
         double lst = local_sidereal_hours() + lst_advance_hours;
-        double ha = wrap_hour_angle(lst - ra);
+        double ha = util::wrap_hour_angle(lst - ra);
         const double sky_sign = hemisphere_south_locked() ? -1.0 : 1.0;
         const double dec_mech = sky_sign * dec;
         // The side is chosen from the SKY hour angle in both hemispheres:
@@ -3663,7 +3603,7 @@ private:
     // Pure RA/Dec to Alt/Az for a site and sidereal time; shared by the position
     // getters and the goto target check.
     static std::pair<double, double> alt_az_from_ra_dec(double ra, double dec, double lst, double latitude_deg) {
-        double ha_rad = wrap_hour_angle(lst - ra) * kHoursToDegrees * std::numbers::pi / 180.0;
+        double ha_rad = util::wrap_hour_angle(lst - ra) * kHoursToDegrees * std::numbers::pi / 180.0;
         double dec_rad = dec * std::numbers::pi / 180.0;
         double lat_rad = latitude_deg * std::numbers::pi / 180.0;
         double sin_alt =
@@ -3677,7 +3617,7 @@ private:
         if (std::sin(ha_rad) > 0.0) {
             az_deg = 360.0 - az_deg;
         }
-        return {alt_rad * 180.0 / std::numbers::pi, wrap_degrees(az_deg)};
+        return {alt_rad * 180.0 / std::numbers::pi, util::wrap_degrees(az_deg)};
     }
 
     std::pair<double, double> compute_alt_az_locked() const {
@@ -6323,7 +6263,7 @@ private:
         const auto check_request_locked = [&] {
             check_writable_locked();
             check_not_parked_locked(who);
-            validate_ra_dec(ra, dec, who);
+            util::validate_ra_dec(ra, dec, who);
             require_site_locked();
             check_target_altitude_locked(ra, dec, who);
             // ITelescopeV4: an equatorial slew with Tracking false is InvalidOperation

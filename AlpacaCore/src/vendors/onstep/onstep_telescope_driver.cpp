@@ -20,6 +20,7 @@
 #include <alpacacore/util/link_health.h>
 #include <alpacacore/util/logging.h>
 #include <alpacacore/util/motion_policy.h>
+#include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/onstep/onstep_protocol_wrapper.h>
@@ -131,35 +132,6 @@ bool is_onstepx_version(const std::string& version) {
 
 constexpr double kInformationalGuideRateDegPerSec = (15.0411 / 3600.0) * 0.5;
 
-double wrap_hours(double hours) {
-    double wrapped = std::fmod(hours, 24.0);
-    if (wrapped < 0.0) {
-        wrapped += 24.0;
-    }
-    return wrapped;
-}
-
-double compute_local_sidereal_time_hours(std::chrono::system_clock::time_point utc_time, double longitude_degrees) {
-    using namespace std::chrono;
-    double days_since_epoch = duration<double>(utc_time.time_since_epoch()).count() / 86400.0;
-    double jd = 2440587.5 + days_since_epoch;
-    double t = (jd - 2451545.0) / 36525.0;
-    double gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * t * t - (t * t * t) / 38710000.0;
-    double lst_degrees = gmst + longitude_degrees;
-    lst_degrees = std::fmod(lst_degrees, 360.0);
-    if (lst_degrees < 0.0) {
-        lst_degrees += 360.0;
-    }
-    return lst_degrees / 15.0;
-}
-
-double shortest_ra_delta_hours(double a, double b) {
-    double delta = a - b;
-    while (delta > 12.0) delta -= 24.0;
-    while (delta < -12.0) delta += 24.0;
-    return delta;
-}
-
 // Standard spherical-trig horizontal-to-equatorial transform (azimuth
 // measured from North through East). Used to implement SlewToAltAz/
 // SlewToAltAzAsync via an ordinary equatorial slew — OnStep/LX200 has no
@@ -182,17 +154,8 @@ void alt_az_to_ra_dec(double alt_deg, double az_deg, double lat_deg, double lst_
         ha_hours = 24.0 - ha_hours;
     }
 
-    ra_hours_out = wrap_hours(lst_hours - ha_hours);
+    ra_hours_out = util::wrap_hours(lst_hours - ha_hours);
     dec_deg_out = dec_rad * 180.0 / std::numbers::pi;
-}
-
-void validate_ra_dec(double ra, double dec, const char* context) {
-    if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-        throw AlpacaException(std::string(context) + ": RA out of range", AlpacaError::InvalidValue);
-    }
-    if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-        throw AlpacaException(std::string(context) + ": Dec out of range", AlpacaError::InvalidValue);
-    }
 }
 
 }  // namespace
@@ -746,9 +709,9 @@ public:
         if (!equatorial_cache_valid_ || link_health_.faulted()) {
             refresh_equatorial_cache_locked();  // faulted: never the cache (decision 0009 rule 1, #1414)
         }
-        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
-        const double hour_angle = shortest_ra_delta_hours(lst, cached_ra_hours_);
-        return hour_angle >= 0.0 ? 0 : 1;
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, cached_ra_hours_);
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     void set_side_of_pier(int side) override {
@@ -758,16 +721,13 @@ public:
 
     int get_destination_side_of_pier(double ra, double dec) const override {
         // Arguments first, even while disconnected (#1478).
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0 || !std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("DestinationSideOfPier needs RA 0 to <24 hours and Dec -90 to 90 degrees",
-                                  AlpacaError::InvalidValue);
-        }
+        util::validate_ra_dec(ra, dec, "DestinationSideOfPier");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_site_info_cached_locked();
-        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
-        const double hour_angle = shortest_ra_delta_hours(lst, ra);
-        return hour_angle >= 0.0 ? 0 : 1;
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double hour_angle = util::shortest_ra_delta_hours(lst, ra);
+        return util::pier_side_for_hour_angle(hour_angle);
     }
 
     EquatorialSystem get_equatorial_system() const override { return EquatorialSystem::Topocentric; }
@@ -809,7 +769,7 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         ensure_site_info_cached_locked();
-        return compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
+        return util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
     }
 
     // Unset (NaN) until the device config or a client sets it: 0 m is a real
@@ -839,9 +799,7 @@ public:
     }
 
     void set_site_latitude(double latitude) override {
-        if (!std::isfinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw AlpacaException("SiteLatitude must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_latitude(latitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         // Populate longitude (and mark the pair valid) from the mount BEFORE
@@ -863,9 +821,7 @@ public:
     }
 
     void set_site_longitude(double longitude) override {
-        if (!std::isfinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw AlpacaException("SiteLongitude must be in range -180 to 180 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_longitude(longitude);
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         // See set_site_latitude(): populate latitude from the mount first so
@@ -895,9 +851,7 @@ public:
     }
 
     void set_target_declination(double dec) override {
-        if (!std::isfinite(dec) || dec < -90.0 || dec > 90.0) {
-            throw AlpacaException("TargetDeclination must be in range -90 to 90 degrees", AlpacaError::InvalidValue);
-        }
+        util::validate_dec(dec, "TargetDeclination");
         std::lock_guard<std::mutex> lock(mutex_);
         target_dec_degrees_ = dec;
         target_dec_set_ = true;
@@ -912,9 +866,7 @@ public:
     }
 
     void set_target_right_ascension(double ra) override {
-        if (!std::isfinite(ra) || ra < 0.0 || ra >= 24.0) {
-            throw AlpacaException("TargetRightAscension must be in range 0 to <24 hours", AlpacaError::InvalidValue);
-        }
+        util::validate_ra(ra, "TargetRightAscension");
         std::lock_guard<std::mutex> lock(mutex_);
         target_ra_hours_ = ra;
         target_ra_set_ = true;
@@ -1082,7 +1034,7 @@ public:
     void sync_to_coordinates(double ra, double dec) override {
         // Arguments before the connected, fault and parked checks, as the
         // slews do (#1478).
-        validate_ra_dec(ra, dec, "SyncToCoordinates");
+        util::validate_ra_dec(ra, dec, "SyncToCoordinates");
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
         refuse_while_faulted_locked("SyncToCoordinates");
@@ -1930,7 +1882,7 @@ private:
     void check_equatorial_slew_locked(double ra, double dec, const char* who) const {
         check_connected();
         check_not_parked_locked(who);
-        validate_ra_dec(ra, dec, who);
+        util::validate_ra_dec(ra, dec, who);
         refresh_status_cache_locked(false);
         if (!cached_status_.is_tracking) {
             throw AlpacaException(std::string(who) + " requires Tracking to be true", AlpacaError::InvalidOperation);
@@ -1952,12 +1904,12 @@ private:
             throw AlpacaException("Azimuth out of range", AlpacaError::InvalidValue);
         }
         ensure_site_info_cached_locked();
-        const double lst = compute_local_sidereal_time_hours(current_utc_time_locked(), site_longitude_cached_);
+        const double lst = util::local_sidereal_hours(current_utc_time_locked(), site_longitude_cached_);
         alt_az_to_ra_dec(altitude, azimuth, site_latitude_cached_, lst, ra_out, dec_out);
     }
 
     void start_slew_locked(double ra, double dec, const char* context) {
-        validate_ra_dec(ra, dec, context);
+        util::validate_ra_dec(ra, dec, context);
         refuse_while_faulted_locked(context);
         supersede_park_or_home_locked();  // a newer motion command wins (#1430)
         auto& protocol = OnStepProtocolWrapper::instance();
