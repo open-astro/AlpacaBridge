@@ -257,7 +257,8 @@ TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - an inner throw reaches the dri
 
 // Falsified by: locked_zwo_eaf_sdk.h with_link() forwarding without its mutex (decision 0015 rule 2):
 // another thread's call then runs while the link body is still inside the decorator.
-TEST_CASE("LockedZWOEAFSDK - with_link holds the decorator mutex across its body", "[zwo][unit][fake-sdk]") {
+TEST_CASE("FakeZWOEAFSDK behind LockedZWOEAFSDK - with_link holds the decorator mutex across its body",
+          "[zwo][unit][fake-sdk]") {
     FakeZWOEAFSDK eaf;
     LockedZWOEAFSDK locked_eaf(eaf);
     const auto opened = locked_eaf.open_focuser_link(eaf.id);
