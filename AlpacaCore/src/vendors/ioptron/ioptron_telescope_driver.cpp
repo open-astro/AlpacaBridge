@@ -23,6 +23,7 @@
 #include <alpacacore/util/pointing.h>
 #include <alpacacore/util/task_clock.h>
 #include <alpacacore/util/units.h>
+#include <alpacacore/util/utc_offset.h>
 #include <alpacacore/vendor/ioptron/ioptron_protocol_wrapper.h>
 #include <alpacacore/vendor/ioptron/ioptron_telescope_driver.h>
 #include <alpacacore/version.h>
@@ -105,9 +106,6 @@ public:
           cached_status_(),
           status_cache_valid_(false),
           last_status_update_(clock_.now()),
-          last_utc_set_{},
-          last_utc_set_monotonic_(std::chrono::steady_clock::now()),
-          last_utc_valid_(false),
           utc_query_supported_(true),
           fast_cache_until_(std::chrono::steady_clock::time_point{}),
           pending_site_latitude_(site_latitude_deg),
@@ -304,7 +302,7 @@ public:
                 altaz_cache_valid_ = false;
                 status_cache_valid_ = false;
                 guide_rate_valid_ = false;
-                last_utc_valid_ = false;
+                utc_offset_.clear();
                 client_disagreement_warned_ = false;
                 device_faulted_ = false;
                 device_fault_count_ = 0;
@@ -382,7 +380,7 @@ public:
             altaz_cache_valid_ = false;
             status_cache_valid_ = false;
             guide_rate_valid_ = false;
-            last_utc_valid_ = false;
+            utc_offset_.clear();
             device_faulted_ = false;
             device_fault_count_ = 0;
             last_device_error_.clear();
@@ -1281,10 +1279,8 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         check_connected();
 
-        if (!last_utc_valid_) {
-            last_utc_set_ = std::chrono::system_clock::now();
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+        if (!utc_offset_.valid()) {
+            utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
         }
         return current_utc_time_locked();
     }
@@ -1296,9 +1292,7 @@ public:
         auto& protocol = iOptronProtocolWrapper::instance();
         const auto client_minus_host = utc - std::chrono::system_clock::now();  // before the write (#409)
         protocol.set_utc_time(utc);
-        last_utc_set_ = utc;
-        last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-        last_utc_valid_ = true;
+        utc_offset_.set(utc, clock_.now());
         // The mount now runs on the client's clock and so does the cached
         // pointing time; on a disciplined host say so once (open-astro#409).
         alpacacore::util::ClientUtcWarning::warn_once("iOptron", client_minus_host, client_disagreement_warned_);
@@ -2455,9 +2449,7 @@ private:
         }
 
         if (retry_mount_command("UTC clock", [&]() { protocol.set_utc_time(now_utc); })) {
-            last_utc_set_ = now_utc;
-            last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-            last_utc_valid_ = true;
+            utc_offset_.set(now_utc, clock_.now());
         }
     }
     
@@ -2570,9 +2562,7 @@ private:
                 timezone_offset_minutes_ = tz_info.offset_minutes;
                 timezone_offset_valid_ = true;
                 dst_observed_ = tz_info.dst_active;
-                last_utc_set_ = std::chrono::system_clock::now();
-                last_utc_set_monotonic_ = std::chrono::steady_clock::now();
-                last_utc_valid_ = true;
+                utc_offset_.set(std::chrono::system_clock::now(), clock_.now());
             }
         }
     }
@@ -2664,11 +2654,10 @@ public:
 
 private:
     std::chrono::system_clock::time_point current_utc_time_locked() const {
-        if (!last_utc_valid_) {
-            return std::chrono::system_clock::now();
+        if (const auto utc = utc_offset_.current(clock_.now())) {
+            return *utc;
         }
-        auto elapsed = std::chrono::steady_clock::now() - last_utc_set_monotonic_;
-        return last_utc_set_ + std::chrono::duration_cast<std::chrono::system_clock::duration>(elapsed);
+        return std::chrono::system_clock::now();
     }
 
     static std::pair<double, double> alt_az_to_ra_dec(double altitude_degrees,
@@ -2870,9 +2859,7 @@ private:
     mutable bool park_target_valid_ = false;
     mutable AltAz park_target_{};
 
-    mutable std::chrono::system_clock::time_point last_utc_set_;
-    mutable std::chrono::steady_clock::time_point last_utc_set_monotonic_;
-    mutable bool last_utc_valid_;
+    mutable util::UtcOffset utc_offset_;
     mutable bool slew_in_progress_ = false;
     // Firmware motion from a Park or FindHome the driver started (no slew_in_progress_ for those), or
     // from a GOTO whose dispatch a MoveAxis superseded: keeps get_slewing() true when a PulseGuide

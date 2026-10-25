@@ -596,6 +596,49 @@ TEST_CASE("ToupTek camera - malformed frame fails ImageReady and a later valid f
     driver->set_connected(false);
 }
 
+TEST_CASE("ToupTek camera - completed exposures reuse the pull-mode stream", "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+
+    REQUIRE(fake.call_count("start_pull_mode") == 1);
+    REQUIRE(fake.call_count("stop") == 0);
+
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+
+    // PHD2 sends AbortExposure when Loop stops, after the last frame completed.
+    // Reaping either completed worker must not stop or restart pull mode.
+    driver->abort_exposure();
+    CHECK(fake.call_count("stop") == 0);
+    CHECK(fake.call_count("start_pull_mode") == 1);
+
+    driver->set_connected(false);
+}
+
+TEST_CASE("ToupTek camera - AbortExposure right after connect keeps the pull-mode stream",
+          "[touptek][camera][unit][fakesdk]") {
+    auto fake = make_fake_with_camera();
+    fake.deliver_frame = true;
+    auto driver = alpacacore::vendor::touptek::create_touptek_camera(0, 0, fake);
+    driver->set_connected(true);
+    REQUIRE(fake.call_count("start_pull_mode") == 1);
+
+    // Idle AbortExposure straight after connect (PHD2 on Loop stop): no worker
+    // ran, so connect itself must have marked the stream reusable.
+    driver->abort_exposure();
+    CHECK(fake.call_count("stop") == 0);
+
+    driver->start_exposure(0.01, true);
+    REQUIRE(eventually([&] { return driver->get_image_ready(); }));
+    CHECK(fake.call_count("start_pull_mode") == 1);
+
+    driver->set_connected(false);
+}
+
 namespace {
 
 // Little-endian 16-bit frame of `height` rows at `stride` pixels per row,
