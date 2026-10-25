@@ -135,7 +135,6 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     const int fd = probe.fd();
     tcflush(fd, TCIOFLUSH);
 
-    std::string buffer;
     WandererStatus status;
     bool found = false;
     // One read_until per line: a CR or LF ends it (and is not part of it). A
