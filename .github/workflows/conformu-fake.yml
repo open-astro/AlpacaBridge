@@ -1,11 +1,15 @@
 # Hardware-free ConformU against the fake Sky-Watcher mount (issue #1637).
 #
-# This used to be a job in ci.yml that ran on every PR (about 45 minutes on the
-# arm64 runner). It now runs only when a PR touches a file that can change the
-# fake telescope's Alpaca answers (the `paths:` list below), nightly on main,
-# and on demand. The paths list is the fake_skywatcher_server target's own
-# sources and the headers they include, plus the shared telescope and HTTP
-# layers its answers pass through. It stays out of nightly-build.yml on
+# This used to be a job in ci.yml that ran on every PR (20 to 21 minutes on
+# the arm64 runner, measured over 15 CI runs). It now runs only when a PR
+# touches a file that can change the fake telescope's Alpaca answers (the
+# `paths:` list below), nightly on main, and on demand. The paths list is the
+# fake_skywatcher_server target's own sources and the headers they include
+# (found by a depfile sweep of the built target), plus the shared telescope
+# and HTTP layers its answers pass through. It leaves out on purpose the other
+# device types, the other vendors' *_schema.cpp and *_fields.h files and
+# AlpacaHTTP/src/discovery/**: they are compiled into the server but cannot
+# change the telescope's answers. It stays out of nightly-build.yml on
 # purpose: a ConformU flake must not stop the nightly .deb. A red nightly run
 # opens an issue through scheduled-failure.yml.
 #
@@ -40,6 +44,10 @@ on:
       - "AlpacaCore/include/alpacacore/device_capabilities.h"
       - "AlpacaCore/include/alpacacore/device_registry.h"
       - "AlpacaCore/src/core/**"
+      - "AlpacaCore/src/management/**"
+      - "AlpacaCore/include/alpacacore/managementdriver.h"
+      - "AlpacaCore/include/alpacacore/alpaca_json.h"
+      - "AlpacaCore/include/alpacacore/version.h"
       # Shared helpers the driver includes (link health, serial I/O, motion
       # limits, state snapshot, task clock) and the catalog it registers in.
       - "AlpacaCore/include/alpacacore/util/**"
