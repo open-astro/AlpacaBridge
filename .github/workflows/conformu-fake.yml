@@ -6,7 +6,8 @@
 # `paths:` list below), nightly on main, and on demand. The paths list is the
 # fake_skywatcher_server target's own sources and the headers they include
 # (found by a depfile sweep of the built target), plus the shared telescope
-# and HTTP layers its answers pass through. It leaves out on purpose the other
+# and HTTP layers its answers pass through, and the run script with the
+# report checker that decides whether the run passes. It leaves out on purpose the other
 # device types, the other vendors' *_schema.cpp and *_fields.h files and
 # AlpacaHTTP/src/discovery/**: they are compiled into the server but cannot
 # change the telescope's answers. It stays out of nightly-build.yml on
@@ -58,8 +59,10 @@ on:
       - "AlpacaHTTP/src/core/**"
       - "AlpacaHTTP/src/util/**"
       - "AlpacaHTTP/include/alpacahttp/**"
-      # The run script, the committed fake report and this workflow.
+      # The run script, the report checker whose check_text() decides whether
+      # the run passes, the committed fake report and this workflow.
       - "scripts/run_fake_conformu.sh"
+      - "scripts/check_conformu_reports.py"
       - "AlpacaCore/conformu/SkyWatcher/Fake/**"
       - ".github/workflows/conformu-fake.yml"
   schedule:
