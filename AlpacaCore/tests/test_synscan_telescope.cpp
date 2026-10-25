@@ -235,10 +235,12 @@ TEST_CASE("SynScan Telescope Driver - out of range arguments report the shared m
           std::string::npos);
     CHECK(message_of([&] { driver->set_site_latitude(90.1); }).find("SiteLatitude must be in range") !=
           std::string::npos);
-    CHECK(message_of([&] { driver->get_destination_side_of_pier(24.0, 0.0); })
-              .find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
-    CHECK(message_of([&] { driver->get_destination_side_of_pier(0.0, 90.1); })
-              .find("DestinationSideOfPier: Declination must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(24.0, 0.0);
+          }).find("DestinationSideOfPier: RightAscension must be in range") != std::string::npos);
+    CHECK(message_of([&] {
+              driver->get_destination_side_of_pier(0.0, 90.1);
+          }).find("DestinationSideOfPier: Declination must be in range") != std::string::npos);
 }
 
 TEST_CASE("SynScan Telescope Driver - Site Property Validation", "[synscan][telescope][unit]") {
