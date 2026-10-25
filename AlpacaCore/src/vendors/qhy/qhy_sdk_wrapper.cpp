@@ -103,7 +103,12 @@ public:
     std::unordered_map<std::string, std::shared_ptr<std::atomic<bool>>> exposure_worker_flags;
     mutable bool resource_initialized{false};
     mutable bool resource_init_attempted{false};
-    mutable std::string sdk_version_cache;  // filled on successful init
+    // Filled on successful init. Guarded by its own leaf mutex, not `mutex`:
+    // open_camera() holds `mutex` across the whole USB open, and the SDK
+    // version hook must not wait behind a connect (open-astro#1646). Never
+    // held while taking `mutex` or a call_mutex.
+    mutable std::mutex sdk_version_mutex;
+    mutable std::string sdk_version_cache;
 
     Impl() {
         // Deliberately NO libqhyccd call here — not even the debug-output
@@ -181,6 +186,7 @@ public:
                     std::ostringstream oss;
                     oss << year << "." << std::setw(2) << std::setfill('0') << month << "." << std::setw(2)
                         << std::setfill('0') << day << "." << subday;
+                    std::lock_guard<std::mutex> version_lock(sdk_version_mutex);
                     sdk_version_cache = oss.str();
                 }
             } else {
@@ -688,8 +694,10 @@ std::string QHYSDKWrapper::get_sdk_version() {
     // DriverInfo) where touching libqhyccd at all is unsafe pre-init — the
     // library's first entry point spawns its PnP listener thread, which
     // segfaults on hosts without a working USB stack. Empty until the first
-    // real camera operation initializes the SDK.
-    std::lock_guard<std::mutex> lock(pimpl_->mutex);
+    // real camera operation initializes the SDK. Takes only the leaf
+    // sdk_version_mutex, never `mutex`, so it returns while open_camera() holds
+    // `mutex` across a USB open (open-astro#1646).
+    std::lock_guard<std::mutex> lock(pimpl_->sdk_version_mutex);
     return pimpl_->sdk_version_cache;
 }
 

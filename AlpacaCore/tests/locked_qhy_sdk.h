@@ -29,8 +29,8 @@ namespace alpacacore::test {
 
 /**
  * Thread-safe decorator over any QHYSDK — every call forwards to the inner
- * implementation under one mutex, except cancel_exposure(), which has its
- * own (see below).
+ * implementation under one mutex, except cancel_exposure() and
+ * get_sdk_version(), which have their own (see below).
  *
  * Exists for the concurrency stress harness (issue #101): FakeQHYSDK is
  * deliberately NOT thread-hardened (single-connect-path tests don't need it),
@@ -195,13 +195,21 @@ public:
     }
 
     std::string get_sdk_version() override {
-        return locked([&] { return inner_.get_sdk_version(); });
+        // open-astro#1646: its own mutex, like the real wrapper's leaf
+        // sdk_version_mutex, so the hook never queues behind an in-flight
+        // open_camera() (the "cheap and non-blocking" hook contract).
+        return locked(version_mutex_, [&] { return inner_.get_sdk_version(); });
     }
 
 private:
     template <typename Fn>
     auto locked(Fn&& fn) -> decltype(fn()) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        return locked(mutex_, std::forward<Fn>(fn));
+    }
+
+    template <typename Fn>
+    auto locked(std::mutex& mutex, Fn&& fn) -> decltype(fn()) {
+        std::lock_guard<std::mutex> lock(mutex);
         const auto started = std::chrono::steady_clock::now();
         Guard guard{started, slowest_call_ms_};
         return fn();
@@ -237,6 +245,10 @@ private:
     // open-astro#339: cancel-only, so a cancel never queues behind the call
     // it exists to interrupt. See cancel_exposure().
     std::mutex cancel_mutex_;
+    // open-astro#1646: get_sdk_version() only, so the hook never queues behind
+    // an in-flight open_camera(). Serialises SDK-version reads against each
+    // other; the fake's version string is not written after construction.
+    std::mutex version_mutex_;
     std::atomic<long long> slowest_call_ms_{0};
 };
 
