@@ -24,7 +24,9 @@
 // settles the reply, as it did when the byte-at-a-time loop checked the timeout
 // after each 200 ms recv() and never after a '#': a late '#' still ends its own
 // reply (left in the line it would answer the next command), and a whole reply
-// that starts after the timeout is still a timeout.
+// that starts after the timeout is still a timeout. A binary payload is the
+// exception: the loop read on after each payload byte without checking the
+// timeout, so a payload that starts after the timeout is still read whole.
 #ifndef _WIN32
 
 #include <alpacacore/util/error_handling.h>
@@ -310,8 +312,10 @@ TEST_CASE("ZWO mount - a read that does not require the '#' ends at the '#'", "[
 #endif
 
 // A TCP "mount" that answers "Late" with "#" and "Slow" with "1#", both kLateReply after the command arrives: past the
-// kLateTimeoutMs the case gives the read but inside the 200 ms read slice that follows it. It answers "Next" with "1#"
-// at once. ZWO sends ":Late#"; the other wrappers send the command as given.
+// kLateTimeoutMs the case gives the read but inside the 200 ms read slice that follows it. It answers the binary
+// queries the same way, in one write: NexStar "V" with firmware 5.16 (0x05 0x10 '#'), SynScan "h" with 12:34:56 on
+// 10/25/26 (eight bytes, one of them a 0x0A, then '#'). It answers "Next" with "1#" at once. ZWO sends ":Late#"; the
+// other wrappers send the command as given.
 constexpr int kLateTimeoutMs = 300;
 constexpr auto kLateReply = std::chrono::milliseconds(350);
 
@@ -320,6 +324,10 @@ std::string late_hash_reply(const std::string& chunk) {
     if (cmd.rfind("Late", 0) == 0 || cmd.rfind("Slow", 0) == 0) {
         std::this_thread::sleep_for(kLateReply);
         return cmd.rfind("Late", 0) == 0 ? "#" : "1#";
+    }
+    if (cmd == "V" || cmd == "h") {
+        std::this_thread::sleep_for(kLateReply);
+        return cmd == "V" ? std::string("\x05\x10#") : std::string("\x0c\x22\x38\x0a\x19\x1a\x00\x00#", 9);
     }
     if (cmd.rfind("Next", 0) == 0) return "1#";
     return alpacacore::test::answer_handset_echo(chunk);
@@ -422,6 +430,38 @@ TEST_CASE("Celestron mount - a reply that starts after the timeout is still a ti
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
 }
+// Falsified by: celestron_protocol_wrapper.cpp read_response() taking one late_byte() in the binary phase (the second
+// payload byte is left in the line, the read times out and "Next" reads the 0x10)
+TEST_CASE("Celestron mount - a binary reply that starts after the timeout is read whole",
+          "[celestron][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::celestron::CelestronProtocolWrapper::instance();
+    alpacacore::vendor::celestron::ConnectionInfo info;
+    info.type = alpacacore::vendor::celestron::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = kLateTimeoutMs;
+    REQUIRE(wrapper.connect(info));
+    std::string version;
+    std::string error;
+    try {
+        version = wrapper.get_handset_firmware_version();
+    } catch (const alpacacore::AlpacaException& e) {
+        error = e.what();
+    }
+    std::string next;
+    try {
+        next = wrapper.send_command("Next", true, 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(version == "5.16");
+    CHECK(next == "1");
+}
 #endif
 
 #ifdef ALPACACORE_ENABLE_SYNSCAN
@@ -461,6 +501,43 @@ TEST_CASE("SynScan mount - a reply that starts after the timeout is still a time
         [&](const std::string& c, int timeout) { return wrapper.send_command(c, true, timeout); }, "Slow");
     wrapper.disconnect();
     CHECK(result.first.find("Timeout") != std::string::npos);
+}
+// Falsified by: synscan_protocol_wrapper.cpp read_response() taking one late_byte() in the binary phase (seven payload
+// bytes are left in the line, the read times out and "Next" reads them)
+TEST_CASE("SynScan mount - a binary reply that starts after the timeout is read whole",
+          "[synscan][network][serial_read][issue1644]") {
+    alpacacore::test::FakeMountServer server(late_hash_reply);
+    REQUIRE(server.ok());
+    auto& wrapper = alpacacore::vendor::synscan::SynScanProtocolWrapper::instance();
+    alpacacore::vendor::synscan::ConnectionInfo info;
+    info.type = alpacacore::vendor::synscan::ConnectionType::Network;
+    info.host = "127.0.0.1";
+    info.tcp_port = server.port();
+    info.response_timeout_ms = kLateTimeoutMs;
+    REQUIRE(wrapper.connect(info));
+    alpacacore::vendor::synscan::TimeInfo time;
+    std::string error;
+    try {
+        time = wrapper.get_time();
+    } catch (const alpacacore::AlpacaException& e) {
+        error = e.what();
+    }
+    std::string next;
+    try {
+        next = wrapper.send_command("Next", true, 1000);
+    } catch (const alpacacore::AlpacaException& e) {
+        next = std::string("threw: ") + e.what();
+    }
+    wrapper.disconnect();
+    INFO("error: " << error);
+    CHECK(error.empty());
+    CHECK(time.hour == 12);
+    CHECK(time.minute == 34);
+    CHECK(time.second == 56);
+    CHECK(time.month == 10);
+    CHECK(time.day == 25);
+    CHECK(time.year == 26);
+    CHECK(next == "1");
 }
 #endif
 

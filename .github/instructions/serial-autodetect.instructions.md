@@ -48,7 +48,8 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   serial blind-command ack drain too). A read there that does not require the `#` still ends at the `#`
   (`TerminatorOrIdleGap`). When their timeout runs out, the next byte within one read slice (100 ms over serial,
   200 ms over TCP) settles the reply, as the old loop's last read did: a late `#` ends its own reply, any other byte
-  is a timeout. On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
+  is a timeout. The Celestron and SynScan binary payloads are the exception: each payload byte within one read slice
+  of the last is still payload, so a payload that starts after the timeout is read whole. On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw
   a `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount feeds
   it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so `closing_`
   is noticed. Each probe judges the bytes it got, as its old loop did, and a hangup means "not this device", except

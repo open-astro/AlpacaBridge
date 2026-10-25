@@ -1187,8 +1187,8 @@ private:
     // The byte the line sends in the read slice after a reply's timeout ran
     // out, or "" when it stays quiet. The byte-at-a-time loop checked the
     // timeout after each byte and never after a '#', so the byte in flight when
-    // the timeout ran out settled the reply: a '#' still ended it, any other
-    // byte was kept and the reply had timed out. A strict deadline would leave
+    // the timeout ran out settled a text reply: a '#' still ended it, any
+    // other byte was kept and the reply had timed out. A strict deadline would leave
     // a late '#' to answer the next command; a deadline one slice later would
     // take a whole late reply.
     std::string late_byte(const std::string& skip) {
@@ -1224,8 +1224,15 @@ private:
             auto r = read_reply(spec, deadline);
             if (r.outcome == util::ReadOutcome::LinkDead) throw_link_lost(r.err);
             if (r.outcome != util::ReadOutcome::Length) {
-                // The byte in flight when the timeout ran out is still payload.
-                r.bytes += late_byte(spec.skip);
+                // The byte-at-a-time loop read on after each payload byte
+                // without checking the timeout, so a payload byte that comes
+                // within one read slice of the last (or of the timeout) is
+                // still payload.
+                while (r.bytes.size() < spec.length) {
+                    const std::string late = late_byte(spec.skip);
+                    if (late.empty()) break;
+                    r.bytes += late;
+                }
                 if (r.bytes.size() < spec.length) {
                     if (!require_hash_terminator) return r.bytes;
                     throw AlpacaException("Timeout waiting for SynScan response");
