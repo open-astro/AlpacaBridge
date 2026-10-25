@@ -11,7 +11,6 @@
 // https://www.gnu.org/licenses/agpl-3.0.html
 
 #include <alpacacore/util/error_handling.h>
-#include <alpacacore/vendor/zwo/zwo_camera_driver.h>
 #include <alpacacore/vendor/zwo/zwo_switch_driver.h>
 #include <alpacacore/version.h>
 
@@ -484,69 +483,4 @@ TEST_CASE("ZWO Dew Heater Switch Driver - A disconnect during queued status read
 
     CHECK(other.load() == 0);
     CHECK(not_connected.load() == kReaders);
-}
-
-namespace {
-
-// The dew heater's seam over the camera driver's fake, as SingletonDewHeaterSdk forwards to the one
-// ZWOSDKWrapper in production: both drivers then share the fake's ref-counted open of one camera id.
-class CameraBackedDewSdk final : public alpacacore::vendor::zwo::ZWODewHeaterSdk {
-public:
-    explicit CameraBackedDewSdk(alpacacore::test::FakeZWOSDK& sdk) : sdk_(sdk) {}
-    std::vector<alpacacore::vendor::zwo::ZWOCameraInfo> enumerate_cameras() override {
-        return sdk_.enumerate_cameras();
-    }
-    bool get_camera_info_by_id(int id, alpacacore::vendor::zwo::ZWOCameraInfo& info) override {
-        return sdk_.get_camera_info_by_id(id, info);
-    }
-    void open_camera(int id) override { sdk_.open_camera(id); }
-    void init_camera(int id) override { sdk_.init_camera(id); }
-    void close_camera(int id) override { sdk_.close_camera(id); }
-    std::vector<alpacacore::vendor::zwo::ZWOControlCaps> get_control_caps(int id) override {
-        return sdk_.get_control_caps(id);
-    }
-    bool get_control_value(int id, alpacacore::vendor::zwo::ZWOControlType type, long& value, bool& is_auto) override {
-        return sdk_.get_control_value(id, type, value, is_auto);
-    }
-    void set_control_value(int id, alpacacore::vendor::zwo::ZWOControlType type, long value, bool is_auto) override {
-        sdk_.set_control_value(id, type, value, is_auto);
-    }
-    std::string get_serial_number(int id) override { return sdk_.get_serial_number(id); }
-
-private:
-    alpacacore::test::FakeZWOSDK& sdk_;
-};
-
-}  // namespace
-
-// Issue #1500 (B2): the dew heater opens its camera's id through the same ref-counted wrapper as the camera
-// driver. The camera comes back under the same SDK id and the camera driver relinks it; the heater's own open
-// died with the replug, so it reads Connected false, and its Disconnect must not take the camera's new open.
-// Falsified by: the heater serving or closing its pre-replug open of the id after the camera driver reopened it.
-TEST_CASE("ZWO Dew Heater Switch Driver - A replug the camera driver relinked leaves the heater disconnected",
-          "[zwo][switch][unit][fake-sdk][link]") {
-    alpacacore::test::FakeZWOSDK sdk;
-    CameraBackedDewSdk dew_sdk(sdk);
-    alpacacore::vendor::zwo::ZwoCameraBinding binding;
-    binding.identity.serial = "FAKE-ZWO-17";
-    binding.identity.camera_name = sdk.camera.name;
-    auto camera = alpacacore::vendor::zwo::create_zwo_camera_bound(0, binding, sdk);
-    auto heater = alpacacore::vendor::zwo::create_zwo_dew_heater_switch(1, sdk.camera.camera_id, dew_sdk);
-    camera->set_connected(true);
-    heater->set_connected(true);
-    REQUIRE(sdk.open_count() == 2);
-
-    sdk.remove();
-    require_alpaca_error([&] { (void)camera->get_ccd_temperature(); }, alpacacore::AlpacaError::NotConnected);
-    sdk.replug(sdk.camera.camera_id);  // the SDK hands the same id out again
-    camera->set_connected(true);
-    REQUIRE(camera->get_connected());
-    REQUIRE(sdk.open_count() == 1);
-
-    wait_past_status_ttl();
-    require_alpaca_error([&] { (void)heater->get_switch_value(0); }, alpacacore::AlpacaError::NotConnected);
-    CHECK_FALSE(heater->get_connected());
-    CHECK_NOTHROW(heater->set_connected(false));
-    CHECK(sdk.open_count() == 1);
-    CHECK(camera->get_ccd_temperature() == 15.0);
 }

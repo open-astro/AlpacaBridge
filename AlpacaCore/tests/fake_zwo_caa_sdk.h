@@ -26,8 +26,7 @@
 namespace alpacacore::test {
 
 // Scripted ZWO CAA SDK: one rotator (id 7), shared by the rotator unit tests, the
-// connected stress case and the contract sweep. second_id >= 0 adds a second rotator
-// (serial second_serial) to enumeration, open and the serial read.
+// connected stress case and the contract sweep.
 // Every override runs under one internal mutex, so the fake is race-free under a
 // concurrent storm (the ZWO driver tests run it through lifecycle stress and TSan);
 // the public knobs and counters are plain fields for single-threaded tests, set before
@@ -46,19 +45,12 @@ public:
 
     int id{7};
     std::string serial{"CAA-SN-1"};
-    // A second rotator on the same SDK (issue #1500 id swap); -1 = none.
-    int second_id{-1};
-    std::string second_serial{"CAA-SN-2"};
     // The logical (reverse-applied) angle CAAGetDegree() reports, as in the driver.
     double degree{0.0};
     double max_degree{360.0};
     bool reverse{false};
     bool fail_info{false};
     int open_calls{0};
-    int last_open_id{-1};
-    // The SDK id of the last angle read and of the last move (issue #1500: which unit a driver talks to).
-    int last_read_id{-1};
-    int last_move_id{-1};
     int close_calls{0};
     double last_move_absolute{-1.0};
     double last_move_mechanical{-1.0};
@@ -81,88 +73,60 @@ public:
     std::atomic<int> busy{0};
     std::atomic<bool> closed_while_busy{false};
 
-    // Issue #1500: a USB drop. remove() makes open/close/read/serial throw what the wrapper throws for
-    // CAA_ERROR_REMOVED (NotConnected) and the rotators vanish from enumeration; replug(id) brings this one
-    // back under a new SDK id.
-    bool removed{false};
-    void remove() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        removed = true;
-    }
-    void replug(int new_id) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        removed = false;
-        id = new_id;
-    }
-
     std::vector<Info> enumerate_rotators() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (removed) return {};
-        std::vector<Info> rotators{Info{id, "CAA", max_degree}};
-        if (second_id >= 0)
-            rotators.insert(second_id < id ? rotators.begin() : rotators.end(), Info{second_id, "CAA", max_degree});
-        return rotators;
+        return {Info{id, "CAA", max_degree}};
     }
     bool get_rotator_info_by_id(int rotator_id, Info& info) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (fail_info || removed || (rotator_id != id && rotator_id != second_id)) {
+        if (fail_info || rotator_id != id) {
             return false;
         }
-        info = Info{rotator_id, "CAA", max_degree};
+        info = Info{id, "CAA", max_degree};
         return true;
     }
     bool get_rotator_info_by_index(int, Info& info) override { return get_rotator_info_by_id(id, info); }
-    void open_rotator(int rotator_id) override {
+    void open_rotator(int) override {
         const InFlight in_flight(*this, open_delay, open_entered);
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_removed();
         if (fail_open) throw AlpacaException("scripted open failure", AlpacaError::DriverException);
         ++open_calls;
-        last_open_id = rotator_id;
     }
     void close_rotator(int) override {
         if (busy.load() > 0) closed_while_busy = true;
         std::lock_guard<std::mutex> lock(mutex_);
         ++close_calls;
-        // The wrapper erases its bookkeeping, then CAAClose fails on the removed unit.
-        throw_if_removed();
     }
     vendor::zwo::ZWOCAAMotionStatus get_motion_status(int) override {
         const InFlight in_flight(*this, read_delay, read_entered);
         std::lock_guard<std::mutex> lock(mutex_);
         ++motion_calls;
-        throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
         return {moving, false};
     }
-    double get_degree(int rotator_id) override {
+    double get_degree(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
         ++degree_calls;
-        last_read_id = rotator_id;
-        throw_if_removed();
         if (fail_reads) {
             throw std::runtime_error("link down");
         }
         return degree;
     }
-    void move_relative(int rotator_id, double angle) override {
+    void move_relative(int, double angle) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_move_id = rotator_id;
         degree += angle;
     }
-    void move_absolute(int rotator_id, double angle) override {
+    void move_absolute(int, double angle) override {
         const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
-        last_move_id = rotator_id;
         last_move_absolute = angle;
         degree = angle;
     }
-    void move_mechanical(int rotator_id, double angle) override {
+    void move_mechanical(int, double angle) override {
         const InFlight in_flight(*this, move_delay, move_entered);
         std::lock_guard<std::mutex> lock(mutex_);
-        last_move_id = rotator_id;
         last_move_mechanical = angle;
         degree = reverse ? 360.0 - angle : angle;
     }
@@ -190,20 +154,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         reverse = value;
     }
-    std::string get_serial_number(int rotator_id) override {
+    std::string get_serial_number(int) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        throw_if_removed();
-        return rotator_id == second_id ? second_serial : serial;
+        return serial;
     }
     std::string get_firmware_version(int) override { return "1.0"; }
     std::string get_rotator_type(int) override { return "CAA"; }
     std::string get_sdk_version() override { return "1, 7, 0, 0"; }
 
 private:
-    void throw_if_removed() const {
-        if (removed) throw AlpacaException("CAA_ERROR_REMOVED", AlpacaError::NotConnected);
-    }
-
     // Marks a call in flight for its whole duration, sleeping `delay` first, outside mutex_.
     struct InFlight {
         InFlight(FakeZWOCAASDK& fake, std::chrono::milliseconds delay, std::atomic<bool>& entered) : fake_(fake) {
