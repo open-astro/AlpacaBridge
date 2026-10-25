@@ -96,6 +96,7 @@ public:
           image_ready_(false),
           image_cached_(false),
           last_image_(),
+          stream_clean_(false),
           exposure_active_(false),
           pulse_guiding_(false) {
         preload_camera_info();
@@ -323,6 +324,10 @@ public:
                 // caller consistent means the invariant holds by construction.
                 std::lock_guard<std::mutex> rlock(readout_mutex_);
                 reset_exposure_state_locked();
+                // start_pull_mode above established a reusable stream. A client
+                // may send AbortExposure while no exposure is active (PHD2 does
+                // this when Loop stops); that must not tear this stream down.
+                stream_clean_ = true;
             }
             connected_.store(true);
             // Spawned with mutex_ still held (never joined here -- see the top
@@ -1221,6 +1226,11 @@ public:
             exposure_failure_.clear();
             image_ready_ = false;
             image_cached_ = false;
+            // From this point until a frame is published successfully, an abort,
+            // timeout or failure must stop and re-initialise the stream before it
+            // is reused. The worker marks it clean only in the generation-checked
+            // publication block at the end.
+            stream_clean_ = false;
             exposure_deadline_ = clock_.now() + std::chrono::microseconds(exposure_us) + std::chrono::seconds(15);
             exposure_deadline_valid_ = true;
         }
@@ -1408,6 +1418,7 @@ public:
                     clock_.now() < exposure_deadline_) {
                     last_exposure_.commit(exposure_us / 1'000'000.0, candidate_start);
                     image_ready_ = true;
+                    stream_clean_ = true;
                 } else {
                     image_cached_ = false;
                     last_image_ = {};
@@ -1425,23 +1436,16 @@ public:
         // thread-assignment is UB on std::thread) and against the disconnect's
         // join+close. Taken before mutex_, preserving lock order.
         std::lock_guard<std::mutex> lifecycle_lock(exposure_lifecycle_mutex_);
-        // Unblock a thread parked in Toupcam_WaitImageV4 so abort returns promptly
-        // (a 10-min frame would otherwise take ~10 min to abort). Hold mutex_ across
-        // stop() so a concurrent disconnect can't Toupcam_Close the handle in the gap
-        // (use-after-close). Do NOT pre-clear exposure_active_: the thread exits on
-        // the stopped stream (wait_image returns got=false) and clears it itself, so
-        // clearing it here before the join would let a concurrent set_readout_mode /
-        // set_gain (which check the flag under readout_mutex_) write registers while
-        // the frame is still live.
+        // A completed exposure leaves a joinable thread but a reusable pull-mode
+        // stream. Join that thread without stopping the stream. For an active,
+        // failed or timed-out exposure, stop() still wakes WaitImageV4 promptly
+        // (a 10-min frame would otherwise take ~10 min to abort). Hold mutex_
+        // across stop() so a concurrent disconnect can't close the handle in the
+        // gap. Do NOT pre-clear exposure_active_: the worker owns that transition.
+        bool stream_stopped = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            abort_generation_.fetch_add(1);
-            if (handle_) {
-                try {
-                    sdk_.stop(handle_);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                }
-            }
+            stream_stopped = stop_unclean_stream_locked();
         }
         if (exposure_thread_.joinable()) {
             exposure_thread_.join();
@@ -1451,13 +1455,13 @@ public:
         exposure_failure_.clear();  // a failure from an already completed exposure
         image_cached_ = false;
         exposure_deadline_valid_ = false;
-        // Stream was stopped; force the next exposure to re-init it. Mark the ROI
-        // dirty too as a defensive safety net: the SDK preserves ROI across a
-        // StartPullMode restart today, but re-applying it costs one put_roi and
-        // avoids silently capturing full-frame data into a sub-frame buffer if a
-        // future SDK version resets ROI on restart.
-        format_dirty_ = true;
-        roi_dirty_ = true;
+        if (stream_stopped) {
+            // Stream was stopped; force the next exposure to re-init it. Mark the
+            // ROI dirty too as a defensive safety net in case a future SDK resets
+            // ROI on restart.
+            format_dirty_ = true;
+            roi_dirty_ = true;
+        }
     }
 
 private:
@@ -1514,6 +1518,11 @@ private:
     util::TaskClock::clock::time_point exposure_start_steady_{};
     bool exposure_triggered_{false};
     std::string exposure_failure_;
+    // Guarded by mutex_. True only when pull mode is running and the last
+    // exposure (if any) published a frame without an abort/failure/timeout.
+    // A joinable std::thread does not imply a live exposure: completed threads
+    // remain joinable until the next request reaps them.
+    bool stream_clean_;
 
     mutable std::atomic<bool> exposure_active_;
     std::thread exposure_thread_;
@@ -1706,8 +1715,24 @@ private:
         last_exposure_.clear();
         pending_exposure_duration_ = 0.0;
         exposure_triggered_ = false;
+        stream_clean_ = false;
         exposure_active_.store(false);
         exposure_deadline_valid_ = false;
+    }
+
+    // Assumes mutex_ is held. Returns true when the pull-mode stream was not
+    // reusable and therefore had to be stopped (or treated as stopped if the
+    // best-effort SDK call failed).
+    bool stop_unclean_stream_locked() {
+        if (stream_clean_) return false;
+        abort_generation_.fetch_add(1);
+        if (handle_) {
+            try {
+                sdk_.stop(handle_);
+            } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
+            }
+        }
+        return true;
     }
 
     // Callers must hold exposure_lifecycle_mutex_ (start_exposure, stop_exposure,
@@ -1716,29 +1741,24 @@ private:
     // connection thread is joined and no client calls can be in flight.
     void stop_exposure_thread() {
         if (!exposure_thread_.joinable()) return;
-        // Unblock a thread parked in Toupcam_WaitImageV4 (the wrapper releases the
-        // SDK lock across the wait for exactly this) so the join returns promptly
-        // instead of waiting out the full wait_image timeout. Hold mutex_ across
-        // stop() so a concurrent disconnect can't close the handle in the gap; the
-        // thread exits on the stopped stream (got=false) and clears exposure_active_
-        // itself, so we don't pre-clear it. Stopping the stream means the next
-        // exposure must restart it, so mark format/ROI dirty.
+        // A successfully completed worker leaves the pull-mode stream reusable;
+        // join it without Toupcam_Stop. Any other joinable worker is active,
+        // failed, timed out or aborted, so stop the stream to wake WaitImageV4 and
+        // force a clean restart. stream_clean_ and abort_generation_ are checked
+        // and changed under the same mutex used by the worker's publication tail.
+        bool stream_stopped = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            abort_generation_.fetch_add(1);
-            if (handle_) {
-                try {
-                    sdk_.stop(handle_);
-                } catch (const std::exception&) {  // NOLINT(bugprone-empty-catch)
-                }
-            }
+            stream_stopped = stop_unclean_stream_locked();
         }
         exposure_thread_.join();
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Stream was stopped; re-init format + ROI on the next exposure (ROI is a
-        // defensive safety net — see stop_exposure).
-        format_dirty_ = true;
-        roi_dirty_ = true;
+        if (stream_stopped) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Stream was stopped; re-init format + ROI on the next exposure (ROI
+            // is a defensive safety net — see stop_exposure).
+            format_dirty_ = true;
+            roi_dirty_ = true;
+        }
     }
 
     void preload_camera_info() {
