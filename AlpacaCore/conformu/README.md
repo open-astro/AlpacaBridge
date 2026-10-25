@@ -13,7 +13,7 @@ Test results are organized by vendor/driver:
 - Each subdirectory contains ConformU test output files for a specific driver
 - Files are named `Linux-arm64.txt` (or `Linux-arm64-<transport>.txt` for drivers tested over multiple connection types, e.g. USB vs Wi-Fi)
 - AlpacaBridge is arm64-only; amd64/x64 ConformU reports are no longer produced or retained
-- A report against a test double belongs under a `Fake` folder (`SkyWatcher/Fake/Fake-Linux-arm64.txt`) and its first line starts `FAKE REPORT:`; `scripts/check_conformu_reports.py` requires both. The `conformu-fake` CI job (`scripts/run_fake_conformu.sh`) makes it as a CI artifact, and a copy is committed there. It is never hardware validation
+- A report against a test double belongs under a `Fake` folder (`SkyWatcher/Fake/Fake-Linux-arm64.txt`) and its first line starts `FAKE REPORT:`; `scripts/check_conformu_reports.py` requires both. The `ConformU fake Sky-Watcher` workflow (`.github/workflows/conformu-fake.yml`, `scripts/run_fake_conformu.sh`; it runs on PRs that touch its `paths:`, nightly and on demand) makes it as a CI artifact, and a copy is committed there. It is never hardware validation
 
 ## Current Test Results
 
