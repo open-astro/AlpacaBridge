@@ -43,15 +43,18 @@ Rules ([decision 0017](../../docs/decisions/0017-serial-port-ownership.md)):
   panel and the iOptron iEAF and iEFW `read_response()` and ack drains (an ack drain that hears a hangup logs "no
   ack" and does not report a lost link), the serial auto-detect probe and handshake loops (Gemini, iEAF/iEFW, iOptron,
   Celestron, SynScan, ZWO mount, Sky-Watcher probe, the four Wanderer handshakes), the SynScan handset probe and
-  the QHY CFW3 `read_reply`. Each probe judges the bytes it got, as its old loop did, and a hangup means
+  the QHY CFW3 `read_reply`, and the connected-path `read_response()` of the iOptron mount, Celestron NexStar,
+  SynScan and ZWO mount, over serial and TCP (`read_until()` / `read_until_socket()`; the iOptron blind-command ack
+  drain too). On those four a hangup is not a timeout: the iOptron, Celestron and SynScan wrappers throw a
+  `DriverException` "<mount> serial link lost (hangup): <errno text>" ("network" over TCP), and the ZWO mount
+  feeds it to `note_transport_error()` so `link_lost()` latches; the ZWO wrapper still reads in 100 ms slices so
+  `closing_` is noticed. Each probe judges the bytes it got, as its old loop did, and a hangup means
   "not this device", except the Wanderer cover and filter wheel probes, which back off 50 ms and keep listening
   until their deadline as before. The Gemini focuser, iEAF, iEFW, Sky-Watcher and ZWO mount probes parse a partial
   or overflowed reply as it stands; the Wanderer probes drop an overflowed token and keep listening. Still on their
-  own loops, moving in later slices (upstream issue #1604): the connected-path `read_serial_char` readers of the
-  iOptron mount, Celestron NexStar, SynScan and ZWO mount, the Q-Focuser JSON reader, the OnStep probe and
-  connected reader, the ZWO owed-reply drain and pre-flush peek, the iOptron and ZWO mount TCP probes
-  (`probe_ioptron_network`, `probe_network_mount`), and the `read_network_char` readers of the iOptron mount,
-  Celestron NexStar, SynScan, ZWO mount and OnStep (no caller uses `read_until_socket()` yet). The Sky-Watcher
+  own loops, moving in later slices (upstream issue #1604): the Q-Focuser JSON reader, the OnStep probe and
+  connected reader (and its `read_network_char`), the ZWO owed-reply drain and pre-flush peek, and the iOptron
+  and ZWO mount TCP probes (`probe_ioptron_network`, `probe_network_mount`). The Sky-Watcher
   connected path and the Celestron CGX loops (decision 0017 rule 9) and the stream readers (Wanderer, Gemini PDH)
   keep their own shape.
 - `scripts/check_serial_port_ownership.py` (the `serial-port-ownership` CI job and pre-flight gate 2e2)

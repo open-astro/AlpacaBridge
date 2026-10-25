@@ -55,6 +55,9 @@ namespace {
 
 constexpr auto kReadPollDelay = std::chrono::milliseconds(10);
 constexpr int kIdleBreakMs = 100;
+constexpr auto kReadSlice = std::chrono::milliseconds(100);
+// A mount reply never nears this; it caps a runaway line instead of growing a string forever.
+constexpr std::size_t kMaxReplyLen = 65536;
 // After a query times out its reply is "owed": the next exchange waits up to this long after the timeout for it
 // before writing, so the late reply is discarded instead of read as the next command's reply (issue #1527).
 constexpr int kOwedReplyBoundMs = 600;
@@ -1283,88 +1286,80 @@ private:
 #endif
     }
 
+    // One reply read for both transports: util::read_until on the tty or
+    // util::read_until_socket on the TCP fd, poll()-bounded (no pacing sleep).
+    util::ReadResult read_reply(const util::ReadSpec& spec, std::chrono::steady_clock::time_point deadline) {
+#ifndef _WIN32
+        if (connection_type_ == ConnectionType::Serial) {
+            return util::read_until(serial_fd_, spec, deadline);
+        }
+        return util::read_until_socket(socket_fd_, spec, deadline);
+#else
+        (void)spec;
+        (void)deadline;
+        throw AlpacaException("ZWO mount reads are Linux-only");
+#endif
+    }
+
     std::string read_response(bool require_hash_terminator, int timeout_ms, bool reply_expected,
                               bool* saw_hash = nullptr, bool preserve_whitespace = false) {
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
         std::string response;
-        const auto start = std::chrono::steady_clock::now();
-        auto last_char_time = start;
+
+        // The terminator ends the reply; without one the reply ends when the line goes quiet for kIdleBreakMs
+        // after its first byte. The read runs in kReadSlice slices so a disconnect (closing_) is noticed within
+        // one slice, as the byte-at-a-time loop did.
+        util::ReadSpec spec;
+        spec.max_len = kMaxReplyLen;
+        if (preserve_whitespace) spec.skip.clear();
+        if (!require_hash_terminator) {
+            spec.stop = util::ReadSpec::Stop::IdleGap;
+            spec.idle_gap = std::chrono::milliseconds(kIdleBreakMs);
+        }
+
+        // A reply read in idle-gap mode may hold bytes after the '#', which the old loop never read: the reply
+        // is what precedes the first '#', and finding one tells a blind command its own reply is gone.
+        const auto finish = [&]() {
+            const auto hash = response.find('#');
+            if (hash != std::string::npos) {
+                if (saw_hash != nullptr) *saw_hash = true;
+                response.resize(hash);
+            }
+            return response;
+        };
 
         while (true) {
             if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
-            char ch = '\0';
-            bool got_char = false;
-            if (connection_type_ == ConnectionType::Serial) {
-                got_char = read_serial_char(ch);
-            } else {
-                got_char = read_network_char(ch);
+            const auto now = std::chrono::steady_clock::now();
+            const auto r = read_reply(spec, std::min(end, now + kReadSlice));
+            if (closing_.load()) throw AlpacaException("ZWO mount connection is closing", AlpacaError::NotConnected);
+            if (r.outcome == util::ReadOutcome::LinkDead) {
+                errno = r.err;
+                note_transport_error();
+                link_lost_.store(true);
             }
             if (link_lost_.load()) throw AlpacaException("ZWO mount transport lost", AlpacaError::NotConnected);
-
-            if (got_char) {
-                last_char_time = std::chrono::steady_clock::now();
-                if (!preserve_whitespace && (ch == '\r' || ch == '\n')) {
-                    continue;
-                }
-                if (ch == '#') {
-                    if (saw_hash != nullptr) *saw_hash = true;
-                    break;
-                }
-                response.push_back(ch);
+            response += r.bytes;
+            if (response.size() >= kMaxReplyLen) {
+                throw AlpacaException("ZWO mount response too long", AlpacaError::DriverException);
             }
 
-            const auto now = std::chrono::steady_clock::now();
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start);
-            if (elapsed.count() > timeout_ms) {
+            if (r.outcome == util::ReadOutcome::Terminator || r.outcome == util::ReadOutcome::Idle ||
+                (r.outcome == util::ReadOutcome::Timeout && !require_hash_terminator && r.bytes.empty() &&
+                 !response.empty() && std::chrono::steady_clock::now() < end)) {
+                return finish();
+            }
+
+            const auto after = std::chrono::steady_clock::now();
+            if (after >= end) {
                 if (reply_expected) {
                     reply_owed_ = true;
-                    owed_until_ = now + std::chrono::milliseconds(kOwedReplyBoundMs);
+                    owed_until_ = after + std::chrono::milliseconds(kOwedReplyBoundMs);
                 }
-                if (!require_hash_terminator) {
-                    return response;
-                }
+                if (!require_hash_terminator) return finish();
                 throw AlpacaException("Timeout waiting for ZWO mount response", AlpacaError::DriverException);
             }
-
-            if (!require_hash_terminator && !got_char && !response.empty()) {
-                const auto idle = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_char_time);
-                if (idle.count() > kIdleBreakMs) {
-                    break;
-                }
-            }
-
-            std::this_thread::sleep_for(kReadPollDelay);
         }
-
-        return response;
-    }
-
-    bool read_serial_char(char& ch) {
-#ifdef _WIN32
-        DWORD bytes_read = 0;
-        if (ReadFile(serial_handle_, &ch, 1, &bytes_read, nullptr) && bytes_read == 1) {
-            return true;
-        }
-        return false;
-#else
-        // Up to 100 ms for a character, the read window this link always had.
-        const auto count = util::tty_read(serial_fd_, &ch, 1, 100);
-        if (count < 0) note_transport_error();
-        return count == 1;
-#endif
-    }
-
-    bool read_network_char(char& ch) {
-#ifdef _WIN32
-        const int bytes_received = recv(socket_handle_, &ch, 1, 0);
-        return bytes_received == 1;
-#else
-        // The protocol I/O lock owns the exchange; SO_RCVTIMEO bounds each receive to 200 ms.
-        // NOLINTNEXTLINE(clang-analyzer-unix.BlockInCriticalSection)
-        const ssize_t bytes_received = recv(socket_fd_, &ch, 1, 0);
-        if (bytes_received == 0) link_lost_.store(true);
-        if (bytes_received < 0) note_transport_error();
-        return bytes_received == 1;
-#endif
     }
 
     void configure_network_timeouts() {

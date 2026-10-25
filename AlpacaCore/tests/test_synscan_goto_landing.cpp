@@ -848,6 +848,7 @@ TEST_CASE(
     "[synscan][telescope][goto-landing]") {
     alpacacore::test::FakeTaskClock clock;
     auto st = std::make_shared<LandingOffsetHandset>();
+    st->attach(clock);  // the handset's GOTO timer runs on the same virtual clock the driver waits on
     alpacacore::test::FakeMountServer server(responder(st));
     REQUIRE(server.ok());
     auto driver = alpacacore::vendor::synscan::create_synscan_telescope_with_site(
