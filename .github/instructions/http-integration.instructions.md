@@ -16,7 +16,7 @@ When adding a new vendor/device type in AlpacaCore, also update AlpacaHTTP:
 2. **No vendor include in `router.cpp`** — the router includes no `<alpacacore/vendor/...>` header (`scripts/check_layering.py` baseline 0); the factory file is the only place the driver header is included.
 3. **Config sanitization fields** — a declared, non-secret field is preserved by the catalog's sanitize; an undeclared key is dropped, so declare every persisted field.
 4. **Web UI vendor dropdown** — add the vendor's `<option>` to `#vendor` in `AlpacaHTTP/web/index.html`. Which device types offer it comes from the descriptor's `available` flag in the device catalog (`catalog_schema.js`); `app.js` keeps no per-vendor availability list.
-5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form. Put each field inside a `data-vendor` / `data-device-type` scope `<div>` and give it `data-config-key="<catalog field key>"`; `AlpacaHTTP/tests/web/catalog_form_drift.test.js` fails on a form field the catalog does not declare, on a catalog field no form field names, and on a control that does not fit the field's type or role.
+5. **Web UI vendor-specific form fields** — add any vendor-specific configuration fields (e.g. serial port, camera index, connection type) to the frontend form. Put each field inside a `data-vendor` / `data-device-type` scope `<div>` and give it `data-config-key="<catalog field key>"`; `AlpacaHTTP/tests/web/catalog_form_drift.test.js` fails on a form field the catalog does not declare, on a catalog field no form field names, and on a control that does not fit the field's type or role. Editing a device fills every mapped field from the saved config with no `app.js` code (`editAssignments()` in `catalog_schema.js`), and hides a field whose `appliesWhen` discriminator holds another value (`updateFieldApplicability()`). A field that needs a conversion (a unit, a forced value) carries `data-config-fill="manual"` and its fill goes in `startEditDevice`; `catalog_edit_fill.test.js` fails on a hand-written fill of an unmarked field anywhere in `app.js`.
 6. **Web UI index fields** — if the vendor connects by an SDK enumeration index, give each index input a **unique vendor-prefixed `name`** and make it a `type="number"` input whose `data-config-key` names an `EnumerationIndex` catalog field, so auto-numbering and manual-edit tracking work. Both are mandatory and easy to miss — see "Enumeration index fields" below for the full rationale (a generic `name` silently saves 0; an index input the catalog does not mark reuses index 0 on the next device).
 7. **Frontend validation** — add any related validation logic in frontend JS.
 8. **Build-flag propagation** — ensure `ALPACACORE_ENABLE_<VENDOR>` compile definitions propagate from AlpacaCore to AlpacaHTTP.
@@ -50,8 +50,8 @@ the JS and C++ conditions in step (both layers run the same rule).
   `playerOneFilterNames`) — the
   [Enumeration index fields](#enumeration-index-fields--unique-names--auto-numbering-all-vendors)
   FormData-collision rule.
-- When editing an existing device, populate the textarea from `config.filterNames` and
-  call the instance's `syncSlotsFromTextarea()` so the dropdowns reflect the saved names.
+- When editing an existing device, the edit fill sets the textarea from `config.filterNames`
+  through its `data-config-key`; `startEditDevice` then calls the instance's `syncSlotsFromTextarea()` so the dropdowns reflect the saved names.
 
 ### Enumeration index fields — unique names + auto-numbering (all vendors)
 
@@ -69,7 +69,7 @@ vendor that ignores either ships a silently broken form:
   Player One/QHY/SVBONY/ToupTek camera index could not be changed from 0. ZWO keeps the
   bare `cameraIndex`/`focuserIndex`/`filterwheelIndex`/`rotatorIndex` names (it's the
   canonical first block); **every other vendor must prefix**. Element `id`s can stay
-  descriptive (`playerone-camera-index`) — `setFormValue`/auto-fill key off `id`, the
+  descriptive (`playerone-camera-index`) — the edit fill and auto-fill key off `id`, the
   collision is purely about the `name` used in `FormData`. **This applies to EVERY shared
   field name, not just the `*Index` ones** — the `*Id` binding fields
   (`cameraId`/`focuserId`/`filterwheelId`/`rotatorId`) and discriminator selects
