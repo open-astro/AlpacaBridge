@@ -46,6 +46,7 @@
 #ifndef _WIN32
 #include <alpacacore/util/serial_link.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 
 #include <filesystem>
 #endif
@@ -91,38 +92,19 @@ std::string probe_ioptron_port(const std::string& port_path) {
     }
 
     // iOptron :MountInfo# returns exactly 4 ASCII digit bytes, no terminator.
-    char resp[4] = {};
-    int total = 0;
-    auto start = std::chrono::steady_clock::now();
-    while (total < 4) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > 3) {
-            break;
-        }
-        char ch = 0;
-        ssize_t r = util::tty_read(fd, &ch, 1, 2000);  // the old VTIME=20 window
-        if (r == 1) {
-            resp[total++] = ch;
-        } else if (r == 0) {
-            continue;
-        } else {
-            break;
-        }
-    }
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Length;
+    spec.length = 4;
+    spec.skip.clear();  // all four bytes count, CR/LF included
+    const auto reply = util::read_until(fd, spec, std::chrono::steady_clock::now() + std::chrono::seconds(3));
 
     link.close();
 
-    if (total == 4) {
-        bool all_digit = true;
-        for (int i = 0; i < 4; ++i) {
-            if (!std::isdigit(static_cast<unsigned char>(resp[i]))) {
-                all_digit = false;
-                break;
-            }
-        }
+    if (reply.outcome == util::ReadOutcome::Length) {
+        const bool all_digit = std::all_of(reply.bytes.begin(), reply.bytes.end(),
+                                           [](char c) { return std::isdigit(static_cast<unsigned char>(c)) != 0; });
         if (all_digit) {
-            return std::string(resp, 4);
+            return reply.bytes;
         }
     }
 

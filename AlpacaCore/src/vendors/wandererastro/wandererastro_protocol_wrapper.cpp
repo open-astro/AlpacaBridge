@@ -16,6 +16,7 @@
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_protocol_wrapper.h>
 
 #include <atomic>
@@ -134,30 +135,31 @@ bool probe_port(const std::string& port_path, WandererPortInfo& info) {
     const int fd = probe.fd();
     tcflush(fd, TCIOFLUSH);
 
-    std::string buffer;
     WandererStatus status;
     bool found = false;
-    auto start = std::chrono::steady_clock::now();
-    while (std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count() <
-           2500) {
-        char ch = 0;
-        ssize_t r = util::tty_read(fd, &ch, 1, kReadWindowMs);
-        if (r == 1) {
-            if (ch == '\n' || ch == '\r') {
-                if (parse_status_line(buffer, status)) {
-                    found = true;
-                    break;
-                }
-                buffer.clear();
-            } else {
-                buffer += ch;
-                if (buffer.size() > MAX_LINE_LEN) buffer.clear();
+    // One read_until per line: a CR or LF ends it (and is not part of it). A
+    // line of MAX_LINE_LEN + 1 bytes without one is Overflow and is dropped.
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "\r\n";
+    spec.skip.clear();
+    spec.max_len = MAX_LINE_LEN + 1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
+    for (;;) {
+        const util::ReadResult line = util::read_until(fd, spec, deadline);
+        if (line.outcome == util::ReadOutcome::Terminator) {
+            if (parse_status_line(line.bytes.substr(0, line.bytes.size() - 1), status)) {
+                found = true;
+                break;
             }
-        } else if (r < 0) {
+        } else if (line.outcome == util::ReadOutcome::LinkDead ||
+                   (line.outcome == util::ReadOutcome::Timeout && line.err != 0)) {
             // Persistent read error (e.g. the device was unplugged mid-probe):
-            // the read window bounds only the no-data path, not errors, so back
-            // off to avoid spinning a CPU core for the rest of the probe window.
+            // back off to avoid spinning a CPU core for the rest of the probe window.
+            if (std::chrono::steady_clock::now() >= deadline) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        } else if (line.outcome == util::ReadOutcome::Timeout) {
+            break;  // silent until the deadline: not this device
         }
     }
 

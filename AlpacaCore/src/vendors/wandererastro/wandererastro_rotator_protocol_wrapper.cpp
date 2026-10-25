@@ -15,6 +15,7 @@
 #include <alpacacore/util/serial_by_id_scan.h>
 #include <alpacacore/util/serial_io.h>
 #include <alpacacore/util/serial_port_registry.h>
+#include <alpacacore/util/serial_read.h>
 #include <alpacacore/vendor/wandererastro/wandererastro_rotator_protocol_wrapper.h>
 
 #include <atomic>
@@ -113,6 +114,28 @@ std::optional<std::string> read_section(int fd, int timeout_ms, std::string& car
     return std::nullopt;
 }
 
+// One 'A'-terminated field of the identity handshake, CR/LF skipped, within
+// timeout_ms. A field of MAX_TOKEN_LEN + 1 bytes without its 'A' is Overflow:
+// garbage, dropped and read past. Returns std::nullopt on timeout or hangup.
+// The connected reader keeps read_section() for its carry across windows.
+std::optional<std::string> read_handshake_section(int fd, int timeout_ms) {
+    util::ReadSpec spec;
+    spec.stop = util::ReadSpec::Stop::Terminator;
+    spec.terminators = "A";
+    spec.max_len = MAX_TOKEN_LEN + 1;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        util::ReadResult reply = util::read_until(fd, spec, deadline);
+        if (reply.outcome == util::ReadOutcome::Terminator) {
+            reply.bytes.pop_back();
+            return std::move(reply.bytes);
+        }
+        if (reply.outcome != util::ReadOutcome::Overflow) {
+            return std::nullopt;
+        }
+    }
+}
+
 struct HandshakeResult {
     std::string model;
     int firmware = 0;
@@ -137,17 +160,15 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
     if (!util::tty_write_all(fd, std::string("1500001"))) {
         return std::nullopt;
     }
-    std::string carry;
-    auto name = read_section(fd, timeout_ms, carry);
+    auto name = read_handshake_section(fd, timeout_ms);
     if (!name.has_value() || name->empty()) {
         // One retry: the first write can race leftover garbage in the MCU's
         // command buffer (same retry the INDI reference performs).
         tcflush(fd, TCIOFLUSH);
-        carry.clear();  // flushed the wire — a held partial token is stale too
         if (!util::tty_write_all(fd, std::string("1500001"))) {
             return std::nullopt;
         }
-        name = read_section(fd, timeout_ms, carry);
+        name = read_handshake_section(fd, timeout_ms);
         if (!name.has_value() || name->empty()) {
             return std::nullopt;
         }
@@ -156,10 +177,10 @@ std::optional<HandshakeResult> do_handshake(int fd, int timeout_ms, int resets_l
     HandshakeResult result;
     result.model = *name;
     try {
-        auto firmware = read_section(fd, timeout_ms, carry);
-        auto angle = read_section(fd, timeout_ms, carry);
-        auto backlash = read_section(fd, timeout_ms, carry);
-        auto reverse = read_section(fd, timeout_ms, carry);
+        auto firmware = read_handshake_section(fd, timeout_ms);
+        auto angle = read_handshake_section(fd, timeout_ms);
+        auto backlash = read_handshake_section(fd, timeout_ms);
+        auto reverse = read_handshake_section(fd, timeout_ms);
         if (!firmware || !angle || !backlash || !reverse) {
             return std::nullopt;
         }
